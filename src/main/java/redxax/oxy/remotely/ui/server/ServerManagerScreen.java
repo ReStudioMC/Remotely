@@ -1,5 +1,6 @@
 package redxax.oxy.remotely.ui.server;
 
+import redxax.oxy.remotely.network.NetworkAdoptionReport;
 import redxax.oxy.remotely.RemotelyClient;
 import redxax.oxy.remotely.RemotelyComposition;
 import redxax.oxy.remotely.config.RemotelyConfigStore;
@@ -1462,6 +1463,8 @@ public class ServerManagerScreen extends DesktopShellScreen {
             addManagedNetworkActions(builder, network);
         } else if (remotelyClient.getNetworkManager() != null && isVelocityProxy(server)) {
             builder.addIconItem("Import Network", "merge.png", () -> scanNetworkForAdoption(server), "Scan Velocity Without Changes");
+        } else if (remotelyClient.getNetworkManager() != null && isLegacyProxy(server)) {
+            builder.addIconItem("Migrate To Velocity", "merge.png", () -> scanLegacyMigration(server), "Review Existing Routes Before Migration");
         }
         if (canDuplicate) {
             builder.addHeaderButton("copy.png", () -> {
@@ -1783,11 +1786,40 @@ public class ServerManagerScreen extends DesktopShellScreen {
     }
 
     private void scanNetworkForAdoption(ServerModels.ClientServerView proxy) {
-        new Notification("Network Scan", "Network Adoption Is Managed By The Host", Notification.Type.INFO);
+        scanNetwork(proxy, false);
     }
 
     private void scanLegacyMigration(ServerModels.ClientServerView proxy) {
-        new Notification("Network Migration", "Network Migration Is Managed By The Host", Notification.Type.INFO);
+        scanNetwork(proxy, true);
+    }
+
+    private void scanNetwork(ServerModels.ClientServerView proxy, boolean migrate) {
+        if (networkOperationInFlight || !ensureServerManagerAction(proxy, ServerScreenHost.Action.NETWORK_IMPORT, "network.import")) return;
+        networkOperationInFlight = true;
+        Notification notification = new Notification.Builder().message("Scanning Network").description(serverName(proxy))
+                .type(Notification.Type.INFO).loading(true).autoSlideOut(false).build();
+        long generation = callbackGeneration;
+        Async<NetworkAdoptionReport> request;
+        try {
+            request = serverHost().scanNetwork(proxy, migrate);
+        } catch (RuntimeException error) {
+            request = Async.failed(error);
+        }
+        request.whenComplete((report, failure) -> ScreenManager.getInstance().execute(() -> {
+            if (failure != null) {
+                notification.update().message("Network Scan Failed").description(rootMessage(failure)).type(Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
+            } else {
+                notification.update().message("Network Scanned").description("Review Routes And Findings Before Importing").type(Notification.Type.SUCCESS).loading(false).autoSlideOut(true).commit();
+            }
+            if (!isCurrentCallback(generation)) return;
+            networkOperationInFlight = false;
+            if (failure != null) return;
+            try {
+                serverHost().openNetworkImport(this, proxy, report, migrate);
+            } catch (RuntimeException error) {
+                new Notification("Network Import Unavailable", rootMessage(error), Notification.Type.ERROR);
+            }
+        }));
     }
 
     private boolean isVelocityProxy(ServerModels.ClientServerView instance) {
@@ -2560,7 +2592,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
         builder.addRow(ROW_REMOTE_HOST_PASSWORD, "Password", remoteHostPasswordInput);
 
         remoteHostSftpPasswordInput = new TextInputWidget.Builder().size(18, 18).build();
-        builder.addRow(ROW_REMOTE_HOST_SFTP_PASSWORD, "Panel Password", remoteHostSftpPasswordInput);
+        builder.addRow(ROW_REMOTE_HOST_SFTP_PASSWORD, "Panel Password (Optional, Required For SFTP)", remoteHostSftpPasswordInput);
 
         remoteHostAuthModeSwitch = new TabSwitchWidget.Builder().options(List.of("Password", "SSH Key")).currentIndex(0).build();
         builder.addRow(ROW_REMOTE_HOST_AUTH_MODE, "Auth Mode", remoteHostAuthModeSwitch);

@@ -12,6 +12,7 @@ import redxax.oxy.remotely.data.flow.ReSyncNotificationLevel;
 import redxax.oxy.remotely.session.StreamDataParser;
 import redxax.oxy.remotely.session.TerminalSession;
 import redxax.oxy.remotely.network.NetworkDefinition;
+import redxax.oxy.remotely.network.NetworkAdoptionReport;
 import redxax.oxy.remotely.network.NetworkCreationMember;
 import redxax.oxy.remotely.network.NetworkCreationRequest;
 import redxax.oxy.remotely.network.NetworkHostScope;
@@ -28,6 +29,8 @@ import redxax.oxy.remotely.network.DesktopNetworkAccess;
 import redxax.oxy.remotely.network.DesktopNetworkManager;
 import redxax.oxy.remotely.servers.QuickServerSyncManager;
 import redxax.oxy.remotely.servers.ReProxyManager;
+import redxax.oxy.remotely.ui.server.NetworkAdoptionScreen;
+import redxax.oxy.remotely.ui.server.NetworkMigrationScreen;
 import redxax.oxy.remotely.ui.server.NetworkOverviewScreen;
 import redxax.oxy.remotely.ui.server.NetworkCreationPlan;
 import redxax.oxy.remotely.ui.server.ServerDetailsScreen;
@@ -699,7 +702,14 @@ public final class DesktopServerHost implements ServerScreenHost {
 
     @Override
     public ServerConfigurationTarget createConfigurationTarget() {
-        return new DesktopServerConfigurationTarget(new Instance("New Server", client.getHost().getGameVersion(), ""));
+        Instance instance = new Instance("New Server", client.getHost().getGameVersion(), "");
+        instance.setServer(true);
+        return new DesktopServerConfigurationTarget(instance);
+    }
+
+    @Override
+    public void applyTargetPreset(ServerConfigurationTarget target, Object preset) {
+        ServerScreenHost.super.applyTargetPreset(target, preset instanceof String value ? creationPreset(value) : preset);
     }
 
     @Override
@@ -1465,9 +1475,30 @@ public final class DesktopServerHost implements ServerScreenHost {
     }
 
     @Override
-    public NetworkOverviewProvider networkOverviewProvider(RemotelyClient client) {
+    public NetworkOverviewProvider networkOverviewProvider() {
+        DesktopNetworkManager manager = DesktopNetworkAccess.manager(this.client);
+        return manager == null ? NetworkOverviewProvider.unavailableProvider() : new DesktopNetworkOverviewProvider(this.client, manager);
+    }
+
+    @Override
+    public Async<NetworkAdoptionReport> scanNetwork(ServerModels.ClientServerView server, boolean migrate) {
+        Instance proxy = resolve(server);
         DesktopNetworkManager manager = DesktopNetworkAccess.manager(client);
-        return manager == null ? NetworkOverviewProvider.unavailableProvider() : new DesktopNetworkOverviewProvider(client, manager);
+        if (proxy == null) return Async.failed(new IllegalArgumentException("Proxy Server Is Unavailable"));
+        if (manager == null) return Async.failed(new IllegalStateException("Network Manager Is Unavailable"));
+        List<Instance> instances = List.copyOf(Rebase.get().getInstanceManager().getAllInstances());
+        return migrate ? manager.scanLegacyMigration(proxy, instances) : manager.scanForAdoption(proxy, instances);
+    }
+
+    @Override
+    public void openNetworkImport(Screen parent, ServerModels.ClientServerView server, NetworkAdoptionReport report, boolean migrate) {
+        Instance proxy = resolve(server);
+        if (proxy == null || report == null || !proxy.getInstanceId().equals(report.proxyInstanceId())) {
+            throw new IllegalArgumentException("Proxy Server Is No Longer Available");
+        }
+        application().setScreen(migrate
+                ? new NetworkMigrationScreen(parent, client, proxy, report)
+                : new NetworkAdoptionScreen(parent, client, proxy, report));
     }
 
     @Override
@@ -1543,6 +1574,8 @@ public final class DesktopServerHost implements ServerScreenHost {
                 }
                 Instance template = instance(server.template());
                 if (template == null) return Async.failed(new IllegalArgumentException("Server Configuration Is Unavailable"));
+                if (server.proxy() && !isVelocityProxy(template)) return Async.failed(new IllegalArgumentException("The Proxy Must Use Velocity"));
+                if (!server.proxy() && template.isProxyServer()) return Async.failed(new IllegalArgumentException("Backends Must Use Minecraft Server Software"));
                 String name = template.getName() == null ? "" : template.getName().trim();
                 if (name.isBlank()) return Async.failed(new IllegalArgumentException("Every New Server Needs A Name"));
                 if (!validServerName(name)) return Async.failed(new IllegalArgumentException("Server Names Cannot Contain File Path Characters"));

@@ -22,7 +22,7 @@ class NetworkCreationFlowTest {
         Fixture fixture = new Fixture();
         NetworkCreationPlan plan = fixture.plan(false);
 
-        fixture.host.createNetwork(plan).join();
+        assertEquals("proxy", fixture.host.createNetwork(plan).join());
 
         assertEquals(List.of("create:proxy", "save:proxy", "create:backend", "save:backend", "network:proxy:backend"), fixture.events);
         assertEquals(25570, fixture.entryPort);

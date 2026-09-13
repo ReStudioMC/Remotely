@@ -1,6 +1,7 @@
 package redxax.oxy.remotely.ui.server;
 
 import redxax.oxy.remotely.host.ApplicationHost;
+import redxax.oxy.remotely.network.NetworkAdoptionReport;
 import redxax.oxy.remotely.network.NetworkCreationMember;
 import redxax.oxy.remotely.RemotelyClient;
 import redxax.oxy.remotely.RemotelyServerApi;
@@ -740,6 +741,10 @@ public interface ServerScreenHost {
     }
 
     default NetworkOverviewProvider networkOverviewProvider(RemotelyClient client) {
+        return networkOverviewProvider();
+    }
+
+    default NetworkOverviewProvider networkOverviewProvider() {
         return NetworkOverviewProvider.from(this);
     }
 
@@ -767,6 +772,14 @@ public interface ServerScreenHost {
         return saveRemoteHost(draft).thenCompose(host -> hostAction(host, "test").thenApply(ignored -> host));
     }
 
+    default Async<NetworkAdoptionReport> scanNetwork(ServerModels.ClientServerView proxy, boolean migrate) {
+        return Async.failed(new UnsupportedOperationException("Network Import Requires A Connected Desktop Host"));
+    }
+
+    default void openNetworkImport(Screen parent, ServerModels.ClientServerView proxy, NetworkAdoptionReport report, boolean migrate) {
+        throw new UnsupportedOperationException("Network Import Requires A Connected Desktop Host");
+    }
+
     default Async<Void> networkAction(NetworkView network, String action) {
         return Async.failed(new UnsupportedOperationException("Network Action Is Unavailable"));
     }
@@ -779,7 +792,7 @@ public interface ServerScreenHost {
         return createNetwork(name, proxyId, backends.stream().map(NetworkCreationMember::instanceId).toList(), installReSync);
     }
 
-    default Async<Void> createNetwork(NetworkCreationPlan plan) {
+    default Async<String> createNetwork(NetworkCreationPlan plan) {
         Objects.requireNonNull(plan, "Network creation plan is required");
         List<NetworkCreationPlan.Server> proxies = plan.servers().stream().filter(NetworkCreationPlan.Server::proxy).toList();
         List<NetworkCreationPlan.Server> backends = plan.servers().stream().filter(server -> !server.proxy()).toList();
@@ -821,11 +834,11 @@ public interface ServerScreenHost {
                 }
             }));
         }
-        Async<Void> transaction = creation.thenCompose(ignored -> {
+        Async<String> transaction = creation.thenCompose(ignored -> {
             String proxyId = networkServerId(proxies.getFirst(), resolved);
             List<NetworkCreationMember> members = backends.stream().map(server -> new NetworkCreationMember(
                 networkServerId(server, resolved), server.route(), server.role(), "", 0, server.capacity(), server.reSync())).toList();
-            return createNetwork(plan.name(), proxyId, plan.entryPort(), members, proxies.getFirst().reSync());
+            return createNetwork(plan.name(), proxyId, plan.entryPort(), members, proxies.getFirst().reSync()).thenApply(completed -> proxyId);
         });
         return transaction.exceptionallyCompose(failure -> rollbackNetworkServers(resolved, failure)
             .thenCompose(ignored -> Async.failed(failure)));

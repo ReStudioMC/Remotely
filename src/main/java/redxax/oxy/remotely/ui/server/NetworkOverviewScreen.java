@@ -130,8 +130,14 @@ public class NetworkOverviewScreen extends ReScreen {
 
     public NetworkOverviewScreen(Screen parent, NetworkOverviewProvider provider, String networkId) {
         this.parent = parent;
+        enableNavigation(parent);
         this.networkId = networkId;
         this.provider = provider == null ? NetworkOverviewProvider.unavailableProvider() : provider;
+    }
+
+    @Override
+    public void close() {
+        ScreenManager.getInstance().goBack(this, parent);
     }
 
     public String getDesktopAppId() {
@@ -153,7 +159,7 @@ public class NetworkOverviewScreen extends ReScreen {
         playerGroupEditors.clear();
         if (!provider.available()) {
             new Notification("Network Unavailable", Notification.Type.ERROR);
-            client.setScreen(parent);
+            ScreenManager.getInstance().goBack(this, parent);
             return;
         }
         registerNetworkChangeListener();
@@ -172,7 +178,7 @@ public class NetworkOverviewScreen extends ReScreen {
         deletePlayerGroupButton.visible = false;
         header()
             .addLeft(networkPowerButton)
-            .addRight("close.png", () -> client.setScreen(parent), RIGHT_HEADER_ACTIONS.getLast())
+            .addRight("close.png", () -> ScreenManager.getInstance().goBack(this, parent), RIGHT_HEADER_ACTIONS.getLast())
             .addRight("save.png", this::saveAll, RIGHT_HEADER_ACTIONS.getFirst())
             .addRight(deletePlayerGroupButton)
             .build();
@@ -201,7 +207,7 @@ public class NetworkOverviewScreen extends ReScreen {
             applyingNetworkChange = false;
             if (throwable != null || state == null || state.network() == null) {
                 new Notification("Network Unavailable", throwable == null ? "Network Data Is Unavailable" : rootMessage(throwable), Notification.Type.ERROR);
-                client.setScreen(parent);
+                ScreenManager.getInstance().goBack(this, parent);
                 return;
             }
             applyInitialState(state);
@@ -1736,7 +1742,7 @@ public class NetworkOverviewScreen extends ReScreen {
                 return;
             }
             notification.update().message("Network Dissolved").description(network.name()).type(Notification.Type.SUCCESS).loading(false).autoSlideOut(true).commit();
-            client.setScreen(parent);
+            ScreenManager.getInstance().goBack(this, parent);
         }));
     }
 

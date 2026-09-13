@@ -1,211 +1,235 @@
 package redxax.oxy.remotely.ui.server;
 
-import redxax.oxy.remotely.util.TaskSchedulers;
-
-import redxax.oxy.remotely.util.AsyncTools;
-
 import redxax.oxy.remotely.RemotelyClient;
+import redxax.oxy.remotely.network.DesktopNetworkAccess;
 import redxax.oxy.remotely.network.NetworkAdoptionReport;
 import redxax.oxy.remotely.network.NetworkAdoptionRoute;
-import redxax.oxy.remotely.network.DesktopNetworkAccess;
 import redxax.oxy.remotely.network.NetworkDefinition;
-import redxax.oxy.remotely.network.NetworkJobStatus;
 import redxax.oxy.remotely.network.NetworkMemberManagement;
 import redxax.oxy.remotely.network.NetworkValidationIssue;
 import restudio.rebase.Rebase;
 import restudio.rebase.instance.Instance;
-
-import restudio.rescreen.theme.Accent;
-import restudio.rescreen.theme.ThemeManager;
+import restudio.rescreen.platform.Async;
 import restudio.rescreen.ui.core.Screen;
 import restudio.rescreen.ui.core.ScreenManager;
+import restudio.rescreen.ui.desktop.DesktopWindowBehaviorProvider;
 import restudio.rescreen.ui.rescreen.Container;
 import restudio.rescreen.ui.rescreen.ReScreen;
 import restudio.rescreen.ui.rescreen.layout.ManagedLayout;
-import restudio.rescreen.ui.widgets.AnimatedButton;
+import restudio.rescreen.ui.settings.Setting;
 import restudio.rescreen.ui.widgets.IconButton;
-import restudio.rescreen.ui.widgets.PopupWidget;
+import restudio.rescreen.ui.widgets.MountableButtonWidget;
 import restudio.rescreen.ui.widgets.TextInputWidget;
 import restudio.rescreen.util.Notification;
 
 import java.util.List;
-import java.util.Map;
-import restudio.rescreen.platform.Async;
-
 
 import static redxax.oxy.remotely.ui.server.NetworkRouteMappingFlow.rootMessage;
 import static redxax.oxy.remotely.ui.server.NetworkRouteMappingFlow.titleCase;
 
-public class NetworkAdoptionScreen extends ReScreen {
+public class NetworkAdoptionScreen extends ReScreen implements DesktopWindowBehaviorProvider {
     private final Screen parent;
     private final RemotelyClient remotelyClient;
     private final Instance proxy;
     private final NetworkAdoptionReport report;
-    private final String initialName;
+    private String name;
     private TextInputWidget nameInput;
+    private IconButton importButton;
+    private IconButton scanButton;
     private NetworkRouteMappingFlow routeMappingFlow;
-    private boolean adopting;
+    private boolean busy;
+    private boolean closed;
 
     public NetworkAdoptionScreen(Screen parent, RemotelyClient remotelyClient, Instance proxy, NetworkAdoptionReport report) {
         this(parent, remotelyClient, proxy, report, proxy.getName() + " Network");
     }
 
-    private NetworkAdoptionScreen(Screen parent, RemotelyClient remotelyClient, Instance proxy, NetworkAdoptionReport report, String initialName) {
+    private NetworkAdoptionScreen(Screen parent, RemotelyClient remotelyClient, Instance proxy, NetworkAdoptionReport report, String name) {
         this.parent = parent;
+        enableNavigation(parent);
         this.remotelyClient = remotelyClient;
         this.proxy = proxy;
         this.report = report;
-        this.initialName = initialName;
-    }
-
-    public String getDesktopAppId() {
-        return "network-adoption";
-    }
-
-    public String getDesktopAppTitle() {
-        return "Import Network";
-    }
-
-    public String getDesktopAppIconPath() {
-        return "merge.png";
+        this.name = name;
     }
 
     @Override
+    public String getDesktopAppId() { return "network-adoption"; }
+
+    @Override
+    public String getDesktopAppTitle() { return "Import Network"; }
+
+    @Override
+    public String getDesktopAppIconPath() { return "merge.png"; }
+
+    @Override
+    public DesktopWindowBehavior getDesktopWindowBehavior() { return DesktopWindowBehavior.SINGLETON; }
+
+    @Override
+    public boolean closeThroughDesktopOverlay() { return !busy; }
+
+    @Override
     public void init() {
+        if (nameInput != null) name = nameInput.getText();
         super.init();
-        routeMappingFlow = new NetworkRouteMappingFlow(this, remotelyClient, screen -> client.setScreen(screen));
-        header().addLeft("close.png", () -> client.setScreen(parent), "Back").addRight("checkmark.png", this::adopt, "Import Network").build();
-        int contentY = 60;
-        int contentHeight = Math.max(80, height - contentY - 6);
-        Container routes = createContainer("network_adoption_routes", 6, contentY, width - 12, contentHeight).columns(1).padding(8).layout(new ManagedLayout()).scrolling(true).backgroundDrawing(false);
-        Container findings = createContainer("network_adoption_findings", 6, contentY, width - 12, contentHeight).columns(1).padding(8).layout(new ManagedLayout()).scrolling(true).backgroundDrawing(false);
-        populateRoutes(routes);
-        populateFindings(findings);
-        tabs().addTab("Routes", routes);
-        tabs().addTab("Findings", findings);
-        tabsManager.builder().allowAdd(false).allowClose(false).allowRename(false).allowReorder(false).position(6, 36).size(width - 12, 18).onTabSelected(tab -> setActiveContainer(tab.getContainer())).build();
-        tabs().setActiveTab(routes);
-        setActiveContainer(routes);
+        closed = false;
+        routeMappingFlow = new NetworkRouteMappingFlow(this, remotelyClient, screen -> ScreenManager.getInstance().replaceScreen(this, screen));
+        importButton = new IconButton.Builder().label("Import Network").imagePath("checkmark.png").size(110, 20)
+            .autoWidthOnTextChange(true).onClick(this::adopt).build();
+        scanButton = new IconButton.Builder().label("Scan Again").imagePath("reload.png").size(90, 20)
+            .autoWidthOnTextChange(true).onClick(this::scan).build();
+        header().addLeft(scanButton).addRight(importButton).build();
+        tabs().setVisible(false);
+        Container content = createContainer("network_import", 6, 36, width - 12, Math.max(1, height - 42))
+            .columns(1).padding(4).verticalSpacing(2).layout(new ManagedLayout()).scrolling(true).backgroundDrawing(true);
+        nameInput = new TextInputWidget.Builder().text(name).placeholder("Network Name").size(180, 20).build();
+        nameInput.setOnChange(this::refreshActions);
+        Setting.Builder overview = new Setting.Builder("Network");
+        overview.addRow("", new MountableButtonWidget.Builder("Network Name").description("Choose A Name For This Network")
+            .addWidget(nameInput).build());
+        overview.addRow("", row(proxy.getName(), "Velocity Proxy • Port " + report.entryPort(), "network.png"));
+        overview.addRow("", row("Connection", (report.proxyOnlineMode() ? "Online Mode" : "Offline Mode")
+            + " • Forwarding: " + titleCase(report.forwardingMode().name()), "link.png"));
+        addSection(content, overview);
+        populateFindings(content);
+        populateRoutes(content);
+        if (!report.fallbackRoutes().isEmpty() || !report.forcedHosts().isEmpty()) {
+            Setting.Builder routing = new Setting.Builder("Player Routing");
+            if (!report.fallbackRoutes().isEmpty()) routing.addRow("", row("Join Order", String.join(" → ", report.fallbackRoutes()), "server.png"));
+            report.forcedHosts().forEach((host, routes) -> routing.addRow("", row(host, String.join(" → ", routes), "link.png")));
+            addSection(content, routing);
+        }
+        setActiveContainer(content);
+        content.updateWidgetPositions();
+        refreshActions();
     }
 
-    private void populateRoutes(Container container) {
-        nameInput = new TextInputWidget.Builder().size(Math.max(220, width - 44), 22).text(initialName).placeholder("Network Name").build();
-        container.addWidget(nameInput);
-        container.addWidget(summary(report.bindAddress() + ":" + report.entryPort() + " • " + titleCase(report.forwardingMode().name()), report.proxyOnlineMode() ? "Proxy Online Mode" : "Proxy Offline Mode", ThemeManager.getAccent("calm")));
-        long matched = report.routes().stream().filter(NetworkAdoptionRoute::matched).count();
-        container.addWidget(summary(matched + "/" + report.routes().size() + " Routes Matched", report.canAdopt() ? "Ready To Import" : "Resolve Findings", report.canAdopt() ? ThemeManager.getAccent("nice") : ThemeManager.getAccent("danger")));
-        for (NetworkAdoptionRoute route : report.routes()) {
-            String label = route.routeName() + " • " + route.address() + ":" + route.port();
-            boolean external = route.management() == NetworkMemberManagement.EXTERNAL;
-            container.addWidget(new IconButton.Builder().size(Math.max(220, width - 44), 28).label(label).hint(route.matched() ? route.finding() + " • Click To Change" : route.finding() + " • Click To Resolve").imagePath(route.matched() && !external ? "link.png" : "report.png").accentType(external ? ThemeManager.getDefaultAccent() : route.matched() ? ThemeManager.getAccent("nice") : ThemeManager.getAccent("danger")).onClick(() -> openRouteMapping(route)).build());
-        }
-        if (!report.fallbackRoutes().isEmpty()) {
-            container.addWidget(summary("Fallback • " + String.join(" → ", report.fallbackRoutes()), "Velocity Try Order", ThemeManager.getAccent("calm")));
-        }
-        report.forcedHosts().forEach((host, routeNames) -> container.addWidget(summary(host + " • " + String.join(" → ", routeNames), "Forced Host", ThemeManager.getAccent("calm"))));
-    }
-
-    private void populateFindings(Container container) {
-        if (report.issues().isEmpty()) {
-            container.addWidget(summary("No Blocking Findings", "No Files Have Been Changed", ThemeManager.getAccent("nice")));
-            return;
-        }
+    private void populateFindings(Container content) {
+        if (report.issues().isEmpty()) return;
+        Setting.Builder findings = new Setting.Builder(report.canAdopt() ? "Review Notes" : "Before You Import");
         for (NetworkValidationIssue issue : report.issues()) {
-            Accent accent = switch (issue.severity()) {
-                case INFO -> ThemeManager.getAccent("calm");
-                case WARNING -> ThemeManager.getDefaultAccent();
-                case ERROR -> ThemeManager.getAccent("danger");
-            };
-            container.addWidget(new IconButton.Builder().size(Math.max(220, width - 44), 28).label(issue.message()).hint(issue.code()).imagePath(issue.blocksPersistence() ? "report.png" : "info.png").accentType(accent).build());
+            findings.addRow("", row(issue.subject().isBlank() || issue.subject().equals(proxy.getInstanceId())
+                ? titleCase(issue.severity().name()) : issue.subject(), issue.message(), issue.blocksPersistence() ? "report.png" : "info.png"));
         }
+        addSection(content, findings);
     }
 
-    private AnimatedButton summary(String label, String hint, Accent accent) {
-        return new AnimatedButton.Builder().size(Math.max(220, width - 44), 22).label(label).hint(hint).accentType(accent).build();
+    private void populateRoutes(Container content) {
+        Setting.Builder routes = new Setting.Builder("Backend Servers");
+        if (report.routes().isEmpty()) {
+            routes.addRow("", row("No Backend Routes Found", "This Proxy Has No Existing Backend Routes To Import", "server.png"));
+            routes.addRow("", new MountableButtonWidget.Builder("Set Up A New Network")
+                .description("Use This Proxy And Add Backend Servers")
+                .iconPath("add.png").addWidget(new IconButton.Builder().label("Set Up Network").size(110, 20)
+                    .autoWidthOnTextChange(true).onClick(this::createNetwork).build()).build());
+        } else {
+            for (NetworkAdoptionRoute route : report.routes()) {
+                boolean external = route.management() == NetworkMemberManagement.EXTERNAL;
+                String status = external ? "External Server" : route.matched() ? "Matched" : "Needs Mapping";
+                routes.addRow("", new MountableButtonWidget.Builder(route.routeName()).hiddenText(status)
+                    .description(route.address() + ":" + route.port() + " • " + route.finding())
+                    .iconPath(route.matched() ? "server.png" : "report.png")
+                    .addWidget(new IconButton.Builder().label(route.matched() ? "Change" : "Resolve").size(70, 20)
+                        .onClick(() -> openRouteMapping(route)).build()).build());
+            }
+            routes.addRow("", row(report.canAdopt() ? "Ready To Import" : "Resolve Routes Before Importing",
+                "Import Keeps Existing Configuration. ReSync Can Be Installed Later In Network Settings", "info.png"));
+        }
+        addSection(content, routes);
+    }
+
+    private MountableButtonWidget row(String title, String description, String icon) {
+        MountableButtonWidget row = new MountableButtonWidget.Builder(title).description(description).iconPath(icon).build();
+        row.setHeight(32);
+        return row;
+    }
+
+    private void addSection(Container content, Setting.Builder builder) {
+        Setting section = builder.build();
+        section.fitContentHeight();
+        content.addWidget(section);
+    }
+
+    private void refreshActions() {
+        if (importButton == null) return;
+        importButton.setActive(!busy && report.canAdopt() && !report.routes().isEmpty() && nameInput != null && !nameInput.getText().isBlank());
+        scanButton.setActive(!busy);
+        if (nameInput != null) nameInput.setActive(!busy);
     }
 
     private void openRouteMapping(NetworkAdoptionRoute route) {
+        if (busy) return;
         List<Instance> instances = Rebase.get().getInstanceManager().getAllInstances();
-        routeMappingFlow.openMapping(new NetworkRouteMappingFlow.RouteMapping(report, route, instances, proxy, () -> nameInput == null ? initialName : nameInput.getText(), (updated, name) -> new NetworkAdoptionScreen(parent, remotelyClient, proxy, updated, name), instance -> instance.getName() + " • " + instance.getInstanceId(), 100, true));
+        routeMappingFlow.openMapping(new NetworkRouteMappingFlow.RouteMapping(report, route, instances, proxy,
+            () -> nameInput.getText(), (updated, requestedName) -> new NetworkAdoptionScreen(parent, remotelyClient, proxy, updated, requestedName),
+            instance -> instance.getName() + " • " + instance.getInstanceId(), 100, true));
+    }
+
+    private void createNetwork() {
+        if (busy) return;
+        ServerScreenHost host = remotelyClient.getHost().serverScreenHost(remotelyClient);
+        ScreenManager.getInstance().navigate(this, new NetworkCreationScreen(this, host, List.of(host.serverView(proxy))));
+    }
+
+    private void scan() {
+        if (busy) return;
+        busy = true;
+        refreshActions();
+        Notification notification = new Notification.Builder().message("Scanning Network").description(proxy.getName())
+            .type(Notification.Type.INFO).loading(true).autoSlideOut(false).build();
+        Async<NetworkAdoptionReport> request;
+        try {
+            request = DesktopNetworkAccess.capability(remotelyClient).scanForAdoption(proxy, Rebase.get().getInstanceManager().getAllInstances());
+        } catch (RuntimeException error) {
+            request = Async.failed(error);
+        }
+        request.whenComplete((updated, error) -> ScreenManager.getInstance().execute(() -> {
+                notification.update().message(error == null ? "Network Scanned" : "Network Scan Failed")
+                    .description(error == null ? proxy.getName() : rootMessage(error))
+                    .type(error == null ? Notification.Type.SUCCESS : Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
+                if (closed) return;
+                busy = false;
+                if (error == null) ScreenManager.getInstance().replaceScreen(this, new NetworkAdoptionScreen(parent, remotelyClient, proxy, updated, nameInput.getText()));
+                else refreshActions();
+            }));
     }
 
     private void adopt() {
-        if (adopting) {
-            return;
+        if (busy || !report.canAdopt() || report.routes().isEmpty() || nameInput.getText().isBlank()) return;
+        busy = true;
+        refreshActions();
+        Notification notification = new Notification.Builder().message("Importing Network").description(proxy.getName())
+            .type(Notification.Type.INFO).loading(true).autoSlideOut(false).build();
+        Async<NetworkDefinition> request;
+        try {
+            request = DesktopNetworkAccess.capability(remotelyClient).adoptNetwork(nameInput.getText().trim(), report,
+                Rebase.get().getInstanceManager().getAllInstances());
+        } catch (RuntimeException error) {
+            request = Async.failed(error);
         }
-        if (!report.canAdopt()) {
-            new Notification("Import Blocked", "Resolve Adoption Findings", Notification.Type.ERROR);
-            return;
-        }
-        String name = nameInput == null ? "" : nameInput.getText();
-        if (name == null || name.isBlank()) {
-            new Notification("Network Name Required", Notification.Type.ERROR);
-            return;
-        }
-        List<Instance> instances = Rebase.get().getInstanceManager().getAllInstances();
-        List<Instance> targets = reSyncTargets(instances);
-        if (targets.size() <= 1) {
-            runAdoption(name, instances, false);
-            return;
-        }
-        PopupWidget[] popup = new PopupWidget[1];
-        PopupWidget.Builder builder = new PopupWidget.Builder("Install ReSync").width(360).onClose(() -> popup[0].hide());
-        builder.addRow(new PopupWidget.PopupRow.Builder("Add Live Network Features").id("resync").description("Install The Latest ReSync On The Proxy And Managed Servers For Player Controls, Shared Chat, Content, Events, And Live Status. The Network Still Works Without It.").build());
-        builder.addTitleAction("Continue Without ReSync", () -> {
-            popup[0].hide();
-            runAdoption(name, instances, false);
-        }, PopupWidget.TitleActionRole.SECONDARY);
-        builder.addTitleAction("Install ReSync", () -> {
-            popup[0].hide();
-            runAdoption(name, instances, true);
-        }, PopupWidget.TitleActionRole.PRIMARY);
-        popup[0] = builder.build();
-        popup[0].setX((width - popup[0].getWidth()) / 2);
-        popup[0].setY((height - popup[0].getHeight()) / 2);
-        addDrawableChild(popup[0]);
-        popup[0].show();
-    }
-
-    private void runAdoption(String name, List<Instance> instances, boolean installReSync) {
-        adopting = true;
-        Notification notification = new Notification.Builder().message(installReSync ? "Installing ReSync" : "Importing Network").description(proxy.getName()).type(Notification.Type.INFO).loading(true).autoSlideOut(false).build();
-        Async<NetworkReSyncSetup.SetupResult> setup = installReSync
-            ? AsyncTools.supply(TaskSchedulers.current(), () -> NetworkReSyncSetup.installLatest(reSyncTargets(instances)))
-            : Async.completed(new NetworkReSyncSetup.SetupResult(0, 0, Map.of()));
-        setup.thenCompose(result -> {
-            if (!result.successful()) {
-                return Async.failed(new IllegalStateException(result.failureMessage()));
+        request.whenComplete((network, error) -> ScreenManager.getInstance().execute(() -> {
+            notification.update().message(error == null ? "Network Imported" : "Import Failed")
+                .description(error == null ? network.name() : rootMessage(error))
+                .type(error == null ? Notification.Type.SUCCESS : Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
+            if (closed) return;
+            busy = false;
+            if (error != null) {
+                refreshActions();
+                return;
             }
-            return DesktopNetworkAccess.capability(remotelyClient).adoptNetwork(name, report, instances);
-        }).thenCompose(network -> {
-            if (!installReSync) {
-                return Async.completed(network);
-            }
-            List<String> backendIds = report.routes().stream().filter(route -> route.management() == NetworkMemberManagement.MANAGED).map(NetworkAdoptionRoute::instanceId).toList();
-            return DesktopNetworkAccess.capability(remotelyClient).enableReSyncSafely(network, backendIds, instances, "Network Import").thenApply(job -> {
-                if (job.status() != NetworkJobStatus.SUCCEEDED) {
-                    throw new IllegalStateException(new IllegalStateException(job.message()));
-                }
-                return DesktopNetworkAccess.capability(remotelyClient).getNetwork(network.networkId()).orElse(network);
-            });
-        }).whenComplete((network, throwable) -> ScreenManager.getInstance().execute(() -> finishAdoption(notification, network, throwable)));
+            ScreenManager.getInstance().replaceScreen(this,
+                new NetworkOverviewScreen(parent, NetworkOverviewProvider.forClient(remotelyClient), network.networkId()));
+        }));
     }
 
-    private List<Instance> reSyncTargets(List<Instance> instances) {
-        List<String> ids = report.routes().stream().filter(route -> route.management() == NetworkMemberManagement.MANAGED).map(NetworkAdoptionRoute::instanceId).toList();
-        return instances.stream().filter(instance -> instance.getInstanceId().equals(proxy.getInstanceId()) || ids.contains(instance.getInstanceId())).toList();
+    @Override
+    public void close() {
+        if (!busy) ScreenManager.getInstance().goBack(this, parent);
     }
 
-    private void finishAdoption(Notification notification, NetworkDefinition network, Throwable throwable) {
-        adopting = false;
-        if (throwable != null) {
-            notification.update().message("Import Failed").description(rootMessage(throwable)).type(Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
-            return;
-        }
-        notification.update().message("Network Imported").description(network.name()).type(Notification.Type.SUCCESS).loading(false).autoSlideOut(true).commit();
-        client.setScreen(parent);
-        if (parent instanceof ServerManagerScreen serverManager) {
-            serverManager.showNetworkSettings(network.networkId());
-        }
+    @Override
+    public void removed() {
+        closed = true;
+        super.removed();
     }
 }

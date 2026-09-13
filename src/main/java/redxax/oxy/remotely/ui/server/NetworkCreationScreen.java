@@ -54,9 +54,12 @@ public class NetworkCreationScreen extends ReScreen implements DesktopWindowBeha
     private boolean creating;
     private boolean closed;
     private long generation;
+    private int backendNumber;
+    private String createdProxyId;
 
     public NetworkCreationScreen(Screen parent, ServerScreenHost host, List<ServerModels.ClientServerView> selected) {
         this.parent = parent;
+        enableNavigation(parent);
         this.host = host;
         this.selected = selected == null ? List.of() : selected.stream().filter(server -> server != null && !serverId(server).isBlank()).toList();
     }
@@ -141,9 +144,9 @@ public class NetworkCreationScreen extends ReScreen implements DesktopWindowBeha
             .resettable(false)
             .build();
         reSyncOption = ConfigOption.<Boolean>builder("Install ReSync")
-            .description("Install ReSync Across Every New Network Server")
-            .bind(() -> true, value -> {})
-            .defaultValue(true)
+            .description("Optional. Add Live Network Features; You Can Install ReSync Later In Network Settings")
+            .bind(() -> false, value -> {})
+            .defaultValue(false)
             .resettable(false)
             .build();
         networkSections.clear();
@@ -170,21 +173,40 @@ public class NetworkCreationScreen extends ReScreen implements DesktopWindowBeha
 
     private void addNewMember(boolean proxy, boolean select) {
         if (closed || creating || proxy && members.stream().anyMatch(member -> member.proxy)) return;
-        int number = proxy ? 1 : Math.max(1, (int) members.stream().filter(member -> !member.proxy).count() + 1);
+        int number = proxy ? 1 : ++backendNumber;
         String name = proxy ? "Proxy" : "Backend " + number;
         Member member = new Member(proxy, null, proxy ? "proxy" : route(name), proxy ? NetworkMemberRole.PROXY : members.stream().noneMatch(current -> !current.proxy) ? NetworkMemberRole.LOBBY : NetworkMemberRole.GAMEPLAY);
         members.add(member);
         attachMember(member, select);
         rebuildNetwork();
         refreshHeader();
+        loadMember(member, name);
+    }
+
+    private void loadMember(Member member, String name) {
+        member.failure = "";
+        buildMember(member);
         long requestGeneration = generation;
-        ServerConfigurationDraft.create(this, host, proxy ? "VELOCITY" : "PAPER", name).whenComplete((draft, error) -> ScreenManager.getInstance().execute(() -> {
+        Async<ServerConfigurationDraft> request;
+        try {
+            request = ServerConfigurationDraft.create(this, host, member.proxy ? "VELOCITY" : "PAPER", name);
+        } catch (RuntimeException error) {
+            request = Async.failed(error);
+        }
+        request.whenComplete((draft, error) -> ScreenManager.getInstance().execute(() -> {
             if (closed || requestGeneration != generation || !members.contains(member)) {
                 if (draft != null) draft.close();
                 return;
             }
             if (error != null) member.failure = rootMessage(error);
-            else member.draft = draft;
+            else {
+                member.draft = draft;
+                draft.onChanged(() -> {
+                    if (closed || !members.contains(member)) return;
+                    buildMember(member);
+                    refreshHeader();
+                });
+            }
             buildMember(member);
             refreshHeader();
         }));
@@ -200,12 +222,14 @@ public class NetworkCreationScreen extends ReScreen implements DesktopWindowBeha
 
     private void buildMember(Member member) {
         if (member.container == null) return;
-        member.container.clearWidgets();
+        member.container.detachWidgets();
         if (!member.proxy) {
             Setting.Builder networking = new Setting.Builder("Networking");
             networking.addOption(member.route);
             networking.addOption(member.role);
-            member.container.addWidget(networking.build());
+            Setting section = networking.build();
+            section.fitContentHeight();
+            member.container.addWidget(section);
         }
         if (member.existing != null) {
             Setting.Builder existing = new Setting.Builder("Server");
@@ -215,8 +239,18 @@ public class NetworkCreationScreen extends ReScreen implements DesktopWindowBeha
             Setting.Builder status = new Setting.Builder(member.failure.isBlank() ? "Loading Server Configuration" : "Configuration Unavailable");
             status.addRow("", message(member.failure.isBlank() ? "Preparing " + member.title() : "Could Not Prepare " + member.title(),
                 member.failure.isBlank() ? "Loading The Server Software And Resource Options" : member.failure));
+            if (!member.failure.isBlank()) {
+                status.addRow("", new IconButton.Builder().label("Retry").imagePath("refresh.png").size(80, 20)
+                    .onClick(() -> loadMember(member, member.title())).build());
+            }
             member.container.addWidget(status.build());
         } else {
+            if (!member.draft.failure().isBlank()) {
+                Setting.Builder status = new Setting.Builder(member.draft.failure());
+                status.addRow("", new IconButton.Builder().label("Retry").imagePath("refresh.png").size(80, 20)
+                    .onClick(() -> member.draft.reload(host)).build());
+                member.container.addWidget(status.build());
+            }
             for (Setting section : member.draft.sections()) {
                 section.fitContentHeight();
                 member.container.addWidget(section);
@@ -236,7 +270,9 @@ public class NetworkCreationScreen extends ReScreen implements DesktopWindowBeha
         Setting.Builder topology = new Setting.Builder("Servers");
         for (Member member : members) {
             String description = member.proxy ? "Velocity Proxy" : roleName(member.role.get()) + " • " + member.route.get();
-            topology.addRow("", message(member.title(), description));
+            MountableButtonWidget row = message(member.title(), description + " • Click To Configure");
+            row.setOnClick(() -> tabs().setActiveTab(member.container));
+            topology.addRow("", row);
         }
         networkContainer.addWidget(topology.build());
         Setting.Builder transaction = new Setting.Builder("Creation");
@@ -284,6 +320,10 @@ public class NetworkCreationScreen extends ReScreen implements DesktopWindowBeha
 
     private void create() {
         if (creating || closed) return;
+        if (createdProxyId != null) {
+            openCreatedNetwork(createdProxyId);
+            return;
+        }
         NetworkCreationPlan plan;
         try {
             plan = plan();
@@ -301,13 +341,13 @@ public class NetworkCreationScreen extends ReScreen implements DesktopWindowBeha
             .loading(true)
             .autoSlideOut(false)
             .build();
-        Async<Void> request;
+        Async<String> request;
         try {
             request = host.createNetwork(plan);
         } catch (RuntimeException error) {
             request = Async.failed(error);
         }
-        request.whenComplete((ignored, error) -> ScreenManager.getInstance().execute(() -> {
+        request.whenComplete((proxyId, error) -> ScreenManager.getInstance().execute(() -> {
             if (error == null) {
                 notification.update().message("Network Created").description(plan.name()).type(Notification.Type.SUCCESS).loading(false).autoSlideOut(true).commit();
             } else {
@@ -320,10 +360,32 @@ public class NetworkCreationScreen extends ReScreen implements DesktopWindowBeha
                 refreshHeader();
                 return;
             }
-            closeDrafts();
-            closed = true;
-            host.reloadInstances();
-            host.application().openParentScreen(this, parent);
+            createdProxyId = proxyId;
+            refreshHeader();
+            openCreatedNetwork(proxyId);
+        }));
+    }
+
+    private void openCreatedNetwork(String proxyId) {
+        creating = true;
+        refreshHeader();
+        Async<List<ServerScreenHost.NetworkView>> request;
+        try {
+            request = host.networks();
+        } catch (RuntimeException error) {
+            request = Async.failed(error);
+        }
+        request.whenComplete((networks, error) -> ScreenManager.getInstance().execute(() -> {
+            if (closed) return;
+            creating = false;
+            ServerScreenHost.NetworkView network = error == null && networks != null
+                ? networks.stream().filter(candidate -> proxyId.equals(candidate.proxyId())).findFirst().orElse(null) : null;
+            if (network == null) {
+                new Notification("Network Created", "Open The Network From Server Manager To View Its Topology", Notification.Type.WARN);
+                refreshHeader();
+                return;
+            }
+            ScreenManager.getInstance().replaceScreen(this, new NetworkOverviewScreen(parent, host.networkOverviewProvider(), network.id()));
         }));
     }
 
@@ -355,8 +417,8 @@ public class NetworkCreationScreen extends ReScreen implements DesktopWindowBeha
     private void refreshHeader() {
         if (createButton == null || cancelButton == null) return;
         boolean ready = !creating && members.stream().anyMatch(member -> member.proxy) && members.stream().anyMatch(member -> !member.proxy)
-            && members.stream().noneMatch(member -> member.existing == null && member.draft == null);
-        createButton.setMessage(creating ? "Creating Network" : "Create Network");
+            && members.stream().noneMatch(member -> member.existing == null && (member.draft == null || !member.draft.ready()));
+        createButton.setMessage(creating ? createdProxyId == null ? "Creating Network" : "Opening Network" : createdProxyId == null ? "Create Network" : "Open Network");
         createButton.setIcon(creating ? Identifier.animatedIcon("loadingGreen.png") : Identifier.icon("checkmark.png"));
         createButton.setActive(ready);
         cancelButton.setActive(!creating);
@@ -374,10 +436,7 @@ public class NetworkCreationScreen extends ReScreen implements DesktopWindowBeha
     @Override
     public void close() {
         if (creating || closed) return;
-        closed = true;
-        generation++;
-        closeDrafts();
-        host.application().openParentScreen(this, parent);
+        ScreenManager.getInstance().goBack(this, parent);
     }
 
     @Override
