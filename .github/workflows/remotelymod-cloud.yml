@@ -15,7 +15,7 @@ on:
           - publishAllFabric
           - publishAllNeoForge
       publish_confirm:
-        description: Type PUBLISH to upload (uses Modrinth when goal is buildAllVersions)
+        description: Type PUBLISH to run a publish goal
         required: false
         type: string
         default: ''
@@ -26,7 +26,35 @@ on:
         default: ''
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      rescreen_ref: ${{ steps.dependencies.outputs.rescreen }}
+      remodel_ref: ${{ steps.dependencies.outputs.remodel }}
+      rebase_ref: ${{ steps.dependencies.outputs.rebase }}
+      recast_ref: ${{ steps.dependencies.outputs.recast }}
+      resync_ref: ${{ steps.dependencies.outputs.resync }}
+    steps:
+      - id: dependencies
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.REPROJECTS_PAT }}
+        run: |
+          resolve() {
+            local repository=$1
+            local output=$2
+            local branch
+            branch=$(gh api "repos/$repository" --jq '.default_branch')
+            printf '%s=%s\n' "$output" "$(gh api "repos/$repository/commits/$branch" --jq '.sha')" >> "$GITHUB_OUTPUT"
+          }
+          resolve RedxAx/ReScreen rescreen
+          resolve RedxAx/Remodel remodel
+          resolve RedxAx/Rebase rebase
+          resolve RedxAx/Recast recast
+          resolve RedxAx/ReSync resync
+
   remotelymod:
+    needs: prepare
     runs-on: [self-hosted, node1, linux, release]
     timeout-minutes: 480
     env:
@@ -46,22 +74,13 @@ jobs:
           path: Remotely
           ref: ${{ inputs.remotely_ref != '' && inputs.remotely_ref || github.ref }}
 
-      - name: Read Workspace Lock
-        id: refs
-        working-directory: Remotely
-        run: |
-          lock=.restudio/workspace.lock.json
-          for project in ReScreen Remodel Rebase Recast ReSync; do
-            printf '%s=%s\n' "${project,,}" "$(jq -r --arg project "$project" '.[$project]' "$lock")" >> "$GITHUB_OUTPUT"
-          done
-
       - name: Checkout ReScreen
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: RedxAx/ReScreen
           token: ${{ secrets.REPROJECTS_PAT }}
           path: ReScreen
-          ref: ${{ steps.refs.outputs.rescreen }}
+          ref: ${{ needs.prepare.outputs.rescreen_ref }}
 
       - name: Checkout Remodel
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -69,7 +88,7 @@ jobs:
           repository: RedxAx/Remodel
           token: ${{ secrets.REPROJECTS_PAT }}
           path: Remodel
-          ref: ${{ steps.refs.outputs.remodel }}
+          ref: ${{ needs.prepare.outputs.remodel_ref }}
 
       - name: Checkout Rebase
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -77,7 +96,7 @@ jobs:
           repository: RedxAx/Rebase
           token: ${{ secrets.REPROJECTS_PAT }}
           path: Rebase
-          ref: ${{ steps.refs.outputs.rebase }}
+          ref: ${{ needs.prepare.outputs.rebase_ref }}
 
       - name: Checkout Recast
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -85,7 +104,7 @@ jobs:
           repository: RedxAx/Recast
           token: ${{ secrets.REPROJECTS_PAT }}
           path: Recast
-          ref: ${{ steps.refs.outputs.recast }}
+          ref: ${{ needs.prepare.outputs.recast_ref }}
 
       - name: Checkout ReSync
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -93,7 +112,7 @@ jobs:
           repository: RedxAx/ReSync
           token: ${{ secrets.REPROJECTS_PAT }}
           path: ReSync
-          ref: ${{ steps.refs.outputs.resync }}
+          ref: ${{ needs.prepare.outputs.resync_ref }}
 
       - name: Ensure Remodel Java 21 toolchain
         run: |
@@ -127,12 +146,9 @@ jobs:
         run: |
           chmod +x gradlew
           goal="${{ inputs.goal }}"
-          confirm="${{ inputs.publish_confirm }}"
           publish_task=""
-          echo "workflow goal=$goal publish_confirm=$confirm"
-          if [[ "$confirm" == "PUBLISH" && "$goal" == "buildAllVersions" ]]; then
-            publish_task="publishAllVersionsToModrinth"
-          elif [[ "$goal" == publish* ]]; then
+          echo "workflow goal=$goal"
+          if [[ "$goal" == publish* ]]; then
             publish_task="$goal"
           fi
           if [[ -n "$publish_task" ]]; then
