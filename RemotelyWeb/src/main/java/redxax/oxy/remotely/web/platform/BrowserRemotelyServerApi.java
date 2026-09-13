@@ -94,6 +94,7 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
     private static final int MAX_BROWSER_READ_REQUESTS = 128;
     private static final int MAX_BROWSER_READ_COOLDOWNS = 128;
     private static final int MAX_BROWSER_READ_VALUES = 128;
+    private static final int MAX_GLYPH_IMAGE_BYTES = 16 * 1024 * 1024;
     private static final long JOB_TIMEOUT_MILLIS = 30_000;
     private final HttpTransport transport;
     private final Clock clock;
@@ -1269,6 +1270,46 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
 
     public Async<String> downloadFile(String serverId, String path) {
         return getStringMap("/servers/" + path(serverId) + "/files/download?path=" + query(path)).thenApply(value -> value.get("url"));
+    }
+
+    Async<byte[]> downloadFileData(String serverId, String path) {
+        return downloadFileData(serverId, path, true);
+    }
+
+    private Async<byte[]> downloadFileData(String serverId, String path, boolean retry) {
+        String endpoint = "/servers/" + path(serverId) + "/files/data?path=" + query(path);
+        HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + endpoint))
+                .header("Accept", "image/png,image/gif,image/*")
+                .header("X-Remotely-Web-Ticket", BrowserLaunchSession.ticket())
+                .timeout(Duration.ofSeconds(20))
+                .GET()
+                .build();
+        List<byte[]> chunks = new ArrayList<>();
+        int[] size = {0};
+        return transport.sendStreaming(request, bytes -> {
+            if (bytes == null || bytes.length == 0) return;
+            if (bytes.length > MAX_GLYPH_IMAGE_BYTES - size[0]) {
+                throw new IllegalStateException("Glyph Preview Image Is Too Large");
+            }
+            size[0] += bytes.length;
+            chunks.add(bytes);
+        }).thenCompose(response -> {
+            byte[] body = new byte[size[0]];
+            int offset = 0;
+            for (byte[] chunk : chunks) {
+                System.arraycopy(chunk, 0, body, offset, chunk.length);
+                offset += chunk.length;
+            }
+            if (response.statusCode() >= 200 && response.statusCode() < 300) {
+                return Async.completed(body);
+            }
+            if (response.statusCode() == 401 && retry && BrowserLaunchSession.authenticated()) {
+                return renewAndRetry(() -> downloadFileData(serverId, path, false));
+            }
+            String message = new String(body, StandardCharsets.UTF_8);
+            if (response.statusCode() == 401) return sessionExpired(new IllegalStateException("Browser Session Expired"));
+            return Async.failed(capabilityFailure(response.statusCode(), message));
+        });
     }
 
     public Async<Void> openFileDownload(String serverId, String path) {

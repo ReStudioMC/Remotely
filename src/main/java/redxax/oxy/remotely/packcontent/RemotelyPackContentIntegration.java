@@ -88,7 +88,6 @@ public final class RemotelyPackContentIntegration {
         Path workspaceRoot = Path.of(binding.workspaceRoot().asString()).normalize();
         Path filePath = resolveEditorPath(workspaceRoot, binding.filePath() == null ? null : binding.filePath().asString());
         Path contentRoot = contentRootFor(workspaceRoot, filePath);
-        refresh(instance, provider, contentRoot);
         GlyphPreviewRenderer renderer = new GlyphPreviewRenderer(new DesktopGlyphPreviewAccess(instance, provider, contentRoot),
                 filePath == null ? null : filePath.toString(), binding.language());
         binding.editor().setLineDecoration(new TextLineDecoration() {

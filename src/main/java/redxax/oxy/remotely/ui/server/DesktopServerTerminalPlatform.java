@@ -56,7 +56,6 @@ public final class DesktopServerTerminalPlatform implements ServerTerminalPlatfo
         if (instance == null || instance.getPath() == null) return;
         Path root = Path.of(instance.getPath());
         UnifiedFileSystemProvider provider = new UnifiedFileSystemProvider(InstanceApi.of(instance).files());
-        RemotelyPackContentIntegration.refresh(instance, provider, root);
         GlyphPreviewAccess access = new DesktopGlyphPreviewAccess(instance, provider, root);
         glyphPreviewRenderer = new GlyphPreviewRenderer(access, null, null);
         terminal.setTextDecoration(new TerminalTextDecoration() {

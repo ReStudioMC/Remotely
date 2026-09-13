@@ -8,6 +8,7 @@ import redxax.oxy.remotely.data.flow.FlowManager;
 import redxax.oxy.remotely.data.flow.ReSyncNotificationLevel;
 import redxax.oxy.remotely.packcontent.GlyphPreviewMode;
 import redxax.oxy.remotely.packcontent.GlyphPreviewRenderer;
+import redxax.oxy.remotely.packcontent.NexoGlyphPreviewAccess;
 import redxax.oxy.remotely.ui.server.ServerConfigurationScreen;
 import redxax.oxy.remotely.ui.server.ServerConfigurationUiComposition;
 import redxax.oxy.remotely.ui.server.ServerConfigurationUiPlatform;
@@ -135,7 +136,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     private final FileExplorerProviders.Snapshot previousFileExplorerProviders;
     private final FileExplorerRuntime.Snapshot previousFileExplorerRuntime;
     private final Map<String, ServerUiCapabilityProvider> capabilityProviders = new LinkedHashMap<>();
-    private final Map<String, BrowserGlyphPreviewAccess> glyphPreviews = new LinkedHashMap<>();
+    private final Map<String, NexoGlyphPreviewAccess> glyphPreviews = new LinkedHashMap<>();
     private final Map<String, DeveloperCapabilityProvider> developerProviders = new LinkedHashMap<>();
     private final Map<String, DeveloperCapabilityProvider.Workspace.Binding> developerBindings = new LinkedHashMap<>();
     private final Set<String> resolvedDeveloperBindings = new HashSet<>();
@@ -1055,7 +1056,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
 
     @Override
     public ServerTerminalPlatform terminalPlatform(RemotelyServerApi api, ServerModels.ClientServerView server) {
-        BrowserGlyphPreviewAccess access = glyphPreview(server);
+        NexoGlyphPreviewAccess access = glyphPreview(server);
         return access == null ? ServerTerminalPlatform.NONE : new BrowserServerTerminalPlatform(access, this::glyphPreviewMode);
     }
 
@@ -1975,15 +1976,20 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         return config == null ? GlyphPreviewMode.INLINE_HOVER : config.getGlyphPreviewMode();
     }
 
-    private BrowserGlyphPreviewAccess glyphPreview(ServerModels.ClientServerView server) {
+    private NexoGlyphPreviewAccess glyphPreview(ServerModels.ClientServerView server) {
         String id = serverId(server);
-        if (id.isBlank() || serverApi == null) return null;
-        return glyphPreviews.computeIfAbsent(id, ignored -> new BrowserGlyphPreviewAccess(serverApi, capabilities(server), server));
+        BrowserRemotelyServerApi api = browserApi();
+        if (id.isBlank() || api == null) return null;
+        return glyphPreviews.computeIfAbsent(id, ignored -> {
+            RemotePath root = RemotePath.root();
+            RemoteFileSystemProvider files = new BrowserServerFileSystemProvider(this, api, capabilities(server), server);
+            return new NexoGlyphPreviewAccess(files, root, new BrowserGlyphPreviewRuntime(api, files, server, root));
+        });
     }
 
     private void bindEditorDecoration(EditorDecorationBinding binding) {
         if (binding == null || binding.editor() == null || !(binding.provider() instanceof BrowserServerFileSystemProvider provider)) return;
-        BrowserGlyphPreviewAccess access = glyphPreview(provider.server);
+        NexoGlyphPreviewAccess access = glyphPreview(provider.server);
         if (access == null) return;
         String filePath = binding.filePath() == null ? null : binding.filePath().asString();
         GlyphPreviewRenderer renderer = new GlyphPreviewRenderer(access, filePath, binding.language());
@@ -2317,7 +2323,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
             remotelyClient.shutdownAllTerminals();
         }
         capabilityProviders.clear();
-        glyphPreviews.values().forEach(BrowserGlyphPreviewAccess::close);
+        glyphPreviews.values().forEach(NexoGlyphPreviewAccess::close);
         glyphPreviews.clear();
         developerProviders.clear();
         developerBindings.clear();

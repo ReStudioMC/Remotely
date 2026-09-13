@@ -8,36 +8,45 @@ public final class NexoGlyphCatalog {
     private static final String PROVIDER_ID = "nexo";
     private final Map<String, GlyphDefinition> glyphs = new LinkedHashMap<>();
 
-    public void clear() {
+    public synchronized void clear() {
         glyphs.clear();
     }
 
-    public void replace(Map<String, GlyphDefinition> next) {
+    public synchronized void replace(Map<String, GlyphDefinition> next) {
         glyphs.clear();
         if (next != null) glyphs.putAll(next);
     }
 
-    public void put(GlyphDefinition glyph) {
+    public synchronized void put(GlyphDefinition glyph) {
         if (glyph != null && glyph.id() != null && !glyph.id().isBlank()) glyphs.put(glyph.id(), glyph);
     }
 
-    public GlyphDefinition get(String id) {
+    public synchronized GlyphDefinition get(String id) {
         return id == null ? null : glyphs.get(id);
     }
 
-    public Map<String, GlyphDefinition> glyphs() {
+    public synchronized Map<String, GlyphDefinition> glyphs() {
         return Map.copyOf(glyphs);
     }
 
-    public List<GlyphTagMatch> parse(String text) {
-        return NexoGlyphText.parse(PROVIDER_ID, text, glyphs.values());
+    public synchronized List<GlyphTagMatch> parse(String text) {
+        List<GlyphTagMatch> matches = NexoGlyphText.parse(PROVIDER_ID, text, glyphs.values());
+        for (int index = 0; index < matches.size(); index++) {
+            GlyphTagMatch match = matches.get(index);
+            if (match.indexStart() != null) continue;
+            GlyphDefinition glyph = materialized(match.glyphId());
+            if (glyph == null || glyph.index() == null) continue;
+            matches.set(index, new GlyphTagMatch(match.providerId(), match.glyphId(), match.start(), match.end(),
+                    glyph.index(), glyph.index(), match.shift()));
+        }
+        return matches;
     }
 
-    public GlyphDefinition materialized(String id) {
+    public synchronized GlyphDefinition materialized(String id) {
         return materialized(get(id));
     }
 
-    public GlyphDefinition materialized(GlyphDefinition glyph) {
+    public synchronized GlyphDefinition materialized(GlyphDefinition glyph) {
         GlyphDefinition target = resolved(glyph);
         if (glyph == null || target == null || target.assetRef() == null) return null;
         if (glyph == target) return glyph;
@@ -47,7 +56,7 @@ public final class NexoGlyphCatalog {
                 glyph.index(), glyph.offset(), target.frameCount(), glyph.raw(), target.frames());
     }
 
-    public GlyphDefinition resolved(GlyphDefinition glyph) {
+    public synchronized GlyphDefinition resolved(GlyphDefinition glyph) {
         GlyphDefinition current = glyph;
         for (int depth = 0; current != null && current.isReference() && depth < 16; depth++) current = glyphs.get(current.reference());
         return current != null && current.isReference() ? null : current;

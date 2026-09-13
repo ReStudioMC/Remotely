@@ -214,6 +214,8 @@ val verifyBrowserGraph by tasks.registering {
             "redxax/oxy/remotely/flow/ui/GraphEditorScreen",
             "redxax/oxy/remotely/flow/ui/studio/StudioScreen",
             "redxax/oxy/remotely/flow/ui/marketplace/ReSyncMarketplaceScreen",
+            "redxax/oxy/remotely/packcontent/NexoGlyphLoader",
+            "redxax/oxy/remotely/packcontent/NexoGlyphPreviewAccess",
             "redxax/oxy/remotely/worldgen/WorldGenManager",
             "restudio/rebase/ui/screens/explorer/FileExplorerScreen",
             "restudio/rebase/ui/screens/editor/FileEditorScreen",
@@ -267,6 +269,9 @@ val verifyBrowserGraph by tasks.registering {
         }
         require(!file("src/main/java/redxax/oxy/remotely/web/platform/BrowserResourceMarketplaceProvider.java").exists()) {
             "The Browser Must Not Contain A Duplicate Resource Marketplace Provider"
+        }
+        require(!file("src/main/java/redxax/oxy/remotely/web/platform/BrowserGlyphPreviewAccess.java").exists()) {
+            "The Browser Must Use The Shared Nexo Glyph Preview Access"
         }
         val roots = mutableSetOf<String>()
         sourceSets.main.get().output.classesDirs.files.filter(File::isDirectory).forEach { classDir ->
