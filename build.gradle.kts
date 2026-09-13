@@ -535,7 +535,7 @@ dependencies {
     implementation("org.lwjgl:lwjgl-opengl")
     implementation("org.lwjgl:lwjgl-stb")
     implementation("org.lwjgl:lwjgl-glfw")
-    implementation("org.joml:joml:1.9.25")
+    implementation("org.joml:joml:1.10.8")
 
     runtimeOnly("org.lwjgl:lwjgl::natives-windows")
     runtimeOnly("org.lwjgl:lwjgl-opengl::natives-windows")
