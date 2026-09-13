@@ -514,7 +514,7 @@ dependencies {
     implementation("com.vladsch.flexmark:flexmark-ext-gfm-tasklist:0.64.8")
     implementation("com.vladsch.flexmark:flexmark-ext-ins:0.64.8")
     implementation("com.vladsch.flexmark:flexmark-ext-tables:0.64.8")
-    implementation("org.jsoup:jsoup:1.15.4")
+    implementation("org.jsoup:jsoup:1.23.1")
 
     implementation("org.apache.xmlgraphics:batik-transcoder:1.19")
     implementation("com.googlecode.soundlibs:vorbisspi:1.0.3.3")
