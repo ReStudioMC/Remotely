@@ -524,7 +524,7 @@ dependencies {
     implementation("com.github.JnCrMx:discord-game-sdk4j:1.0.0")
 
     implementation("org.jetbrains.pty4j:pty4j:0.13.10-1")
-    implementation("org.jetbrains.jediterm:jediterm-core:3.54")
+    implementation("org.jetbrains.jediterm:jediterm-core:3.66")
     implementation("org.jetbrains.jediterm:jediterm-pty:2.69")
 
     testImplementation("org.junit.jupiter:junit-jupiter:5.11.4")
