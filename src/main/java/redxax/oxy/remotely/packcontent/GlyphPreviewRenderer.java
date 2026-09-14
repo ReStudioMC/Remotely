@@ -17,9 +17,11 @@ import restudio.rescreen.ui.core.Screen;
 import restudio.rescreen.ui.core.ScreenManager;
 import restudio.rescreen.ui.widgets.AnimatedWidget;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -34,6 +36,11 @@ import static restudio.rescreen.config.Config.globalExpandSpeed;
 import static restudio.rescreen.render.TextRenderer.tr;
 
 public class GlyphPreviewRenderer {
+    enum PreviewSurface {
+        FILE_EDITOR,
+        TERMINAL
+    }
+
     private static final char TERMINAL_WIDE_CONTINUATION = '\uE000';
     private static final int HOVER_SIZE = 48;
     private static final int HOVER_MAX_IMAGE_WIDTH = 144;
@@ -67,7 +74,7 @@ public class GlyphPreviewRenderer {
 
     public void drawEditor(TextLineDecoration.TextLineDecorationContext context, GlyphPreviewMode mode) {
         refreshIfDue();
-        draw(context.drawContext(), context.lineText(), context.drawX(), context.drawY(), context.lineHeight(), context.monospace() ? context.charWidth() : -1, context.mouseX(), context.mouseY(), mode, false);
+        draw(context.drawContext(), context.lineText(), context.drawX(), context.drawY(), context.lineHeight(), context.monospace() ? context.charWidth() : -1, context.mouseX(), context.mouseY(), mode, false, PreviewSurface.FILE_EDITOR);
         drawGlyphConfigPreview(context, mode, false);
     }
 
@@ -90,7 +97,7 @@ public class GlyphPreviewRenderer {
 
     public void drawTerminal(TerminalTextDecoration.TerminalTextDecorationContext context, GlyphPreviewMode mode) {
         refreshIfDue();
-        draw(context.drawContext(), context.text(), context.segmentX(), context.segmentY(), context.lineHeight(), context.charWidth(), context.mouseX(), context.mouseY(), mode, false);
+        draw(context.drawContext(), context.text(), context.segmentX(), context.segmentY(), context.lineHeight(), context.charWidth(), context.mouseX(), context.mouseY(), mode, false, PreviewSurface.TERMINAL);
     }
 
     public boolean replaceTerminal(TerminalTextDecoration.TerminalTextDecorationContext context, GlyphPreviewMode mode) {
@@ -100,7 +107,7 @@ public class GlyphPreviewRenderer {
             return false;
         }
         if (!mode.inline()) {
-            draw(context.drawContext(), context.text(), context.segmentX(), context.segmentY(), context.lineHeight(), context.charWidth(), context.mouseX(), context.mouseY(), mode, false);
+            draw(context.drawContext(), context.text(), context.segmentX(), context.segmentY(), context.lineHeight(), context.charWidth(), context.mouseX(), context.mouseY(), mode, false, PreviewSurface.TERMINAL);
             return false;
         }
         List<GlyphPreviewAccess.Preview> previews = access.resolveGlyphs(context.text());
@@ -156,8 +163,20 @@ public class GlyphPreviewRenderer {
     }
 
     static int terminalTokenEnd(String text, int start, int end) {
-        boolean rawCharacter = text != null && start >= 0 && start < end && end <= text.length() && text.charAt(start) != '<';
+        boolean rawCharacter = isRawGlyph(text, start, end);
         return rawCharacter && end < text.length() && text.charAt(end) == TERMINAL_WIDE_CONTINUATION ? end + 1 : end;
+    }
+
+    private static boolean isRawGlyph(String text, GlyphTagMatch match) {
+        return match != null && isRawGlyph(text, match.start(), match.end());
+    }
+
+    private static boolean isRawGlyph(String text, int start, int end) {
+        return text != null && start >= 0 && start < end && end <= text.length() && text.charAt(start) != '<';
+    }
+
+    static boolean rendersPreview(String text, GlyphTagMatch match, PreviewSurface surface) {
+        return surface != PreviewSurface.FILE_EDITOR || !isRawGlyph(text, match);
     }
 
     static String terminalPlainText(String text) {
@@ -172,7 +191,7 @@ public class GlyphPreviewRenderer {
         return filePath == null ? access.openSource(hoverTarget.preview().glyph()) : access.openAsset(hoverTarget.preview().glyph());
     }
 
-    private void draw(IDrawContext ctx, String text, int drawX, int drawY, int lineHeight, int charWidth, int mouseX, int mouseY, GlyphPreviewMode mode, boolean immediateHover) {
+    private void draw(IDrawContext ctx, String text, int drawX, int drawY, int lineHeight, int charWidth, int mouseX, int mouseY, GlyphPreviewMode mode, boolean immediateHover, PreviewSurface surface) {
         expireHoverTarget();
         if (mode == null || mode == GlyphPreviewMode.OFF || text == null || text.isEmpty()) {
             return;
@@ -180,8 +199,12 @@ public class GlyphPreviewRenderer {
         List<GlyphPreviewAccess.Preview> previews = access.resolveGlyphs(text);
         GlyphPreviewAccess.Preview hovered = null;
         for (GlyphPreviewAccess.Preview preview : previews) {
+            if (!rendersPreview(text, preview.match(), surface)) {
+                continue;
+            }
             int tokenX = drawX + textWidth(text, 0, preview.match().start(), charWidth) + preview.match().shift();
-            int tokenW = Math.max(lineHeight, textWidth(text, preview.match().start(), preview.match().end(), charWidth));
+            int textTokenW = Math.max(1, textWidth(text, preview.match().start(), preview.match().end(), charWidth));
+            int tokenW = Math.max(lineHeight, textTokenW);
             if (mode.inline()) {
                 GlyphPreviewAccess.Image image = previewImage(preview);
                 if (image != null) {
@@ -201,16 +224,15 @@ public class GlyphPreviewRenderer {
     }
 
     private void drawGlyphConfigPreview(TextLineDecoration.TextLineDecorationContext context, GlyphPreviewMode mode, boolean immediateHover) {
-        if (mode == null || mode == GlyphPreviewMode.OFF || !isGlyphYaml()) {
+        if (mode == null || mode == GlyphPreviewMode.OFF || !isYamlFile(filePath, language)) {
             return;
         }
-        Matcher matcher = YAML_GLYPH_ID.matcher(context.lineText());
-        if (!matcher.matches()) {
+        String glyphId = glyphConfigId(context.lineText());
+        if (glyphId == null) {
             return;
         }
-        String glyphId = matcher.group(1);
         Optional<GlyphPreviewAccess.Preview> preview = access.resolveGlyph("nexo", glyphId, null);
-        if (preview.isEmpty()) {
+        if (preview.isEmpty() || !sourceMatchesFile(filePath, preview.get().glyph().sourceFile())) {
             return;
         }
         GlyphPreviewAccess.Image image = previewImage(preview.get());
@@ -241,18 +263,72 @@ public class GlyphPreviewRenderer {
         }
     }
 
-    private boolean isGlyphYaml() {
-        if (filePath == null) {
+    static String glyphConfigId(String line) {
+        if (line == null) {
+            return null;
+        }
+        Matcher matcher = YAML_GLYPH_ID.matcher(line);
+        return matcher.matches() ? matcher.group(1) : null;
+    }
+
+    static boolean isYamlFile(String filePath, String language) {
+        if (filePath == null || !"yaml".equalsIgnoreCase(language)) {
             return false;
         }
-        String normalizedPath = filePath.replace('\\', '/');
+        String normalizedPath = normalizePath(filePath);
         int separator = normalizedPath.lastIndexOf('/');
-        String name = (separator >= 0 ? normalizedPath.substring(separator + 1) : normalizedPath).toLowerCase();
-        if (!name.endsWith(".yml") && !name.endsWith(".yaml")) {
+        String name = (separator >= 0 ? normalizedPath.substring(separator + 1) : normalizedPath).toLowerCase(Locale.ROOT);
+        return name.endsWith(".yml") || name.endsWith(".yaml");
+    }
+
+    static boolean sourceMatchesFile(String filePath, String sourceFile) {
+        String file = normalizePath(filePath);
+        String source = normalizePath(sourceFile);
+        if (file.isEmpty() || source.isEmpty()) {
             return false;
         }
-        String normalized = normalizedPath.toLowerCase();
-        return "yaml".equals(language) && normalized.contains("/glyphs/");
+        if (isWindowsPath(file) || isWindowsPath(source)) {
+            file = file.toLowerCase(Locale.ROOT);
+            source = source.toLowerCase(Locale.ROOT);
+        }
+        return file.equals(source) || file.endsWith("/" + source) || source.endsWith("/" + file);
+    }
+
+    private static String normalizePath(String path) {
+        if (path == null) {
+            return "";
+        }
+        String value = path.trim().replace('\\', '/');
+        boolean absolute = value.startsWith("/");
+        String drive = isWindowsPath(value) ? value.substring(0, 2) : "";
+        int offset = drive.isEmpty() ? 0 : 2;
+        while (offset < value.length() && value.charAt(offset) == '/') {
+            offset++;
+        }
+        List<String> segments = new ArrayList<>();
+        for (String segment : value.substring(offset).split("/")) {
+            if (segment.isEmpty() || ".".equals(segment)) {
+                continue;
+            }
+            if ("..".equals(segment)) {
+                if (!segments.isEmpty() && !"..".equals(segments.getLast())) {
+                    segments.removeLast();
+                } else if (!absolute && drive.isEmpty()) {
+                    segments.add(segment);
+                }
+                continue;
+            }
+            segments.add(segment);
+        }
+        String joined = String.join("/", segments);
+        if (!drive.isEmpty()) {
+            return drive + (joined.isEmpty() ? "/" : "/" + joined);
+        }
+        return absolute ? "/" + joined : joined;
+    }
+
+    private static boolean isWindowsPath(String path) {
+        return path != null && path.length() >= 2 && Character.isLetter(path.charAt(0)) && path.charAt(1) == ':';
     }
 
     private void refreshIfDue() {

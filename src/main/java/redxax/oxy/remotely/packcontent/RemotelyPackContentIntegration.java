@@ -13,11 +13,11 @@ import restudio.rebase.ui.screens.editor.FileEditorScreen;
 import restudio.rebase.hosting.RemoteHost;
 import restudio.rebase.ui.widgets.editor.TextLineDecoration;
 import restudio.rescreen.config.Config;
+import restudio.rescreen.platform.Async;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import restudio.rescreen.platform.Async;
 
 public final class RemotelyPackContentIntegration {
     private RemotelyPackContentIntegration() {
