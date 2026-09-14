@@ -469,17 +469,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         }, "Update All Resources");
         headerSearchMode = new SearchMode(false);
         headerSearchMode.setPlaceholder("Search Logs...");
-        headerSearchMode.setOnTextChange(query -> {
-            TerminalWidget terminal = getActiveTerminalWidget();
-            if (terminal != null && header().liveUpdate) terminal.search(query);
-        });
-        headerSearchMode.setOnSearchEnter(query -> {
-            TerminalWidget terminal = getActiveTerminalWidget();
-            if (terminal != null) {
-                terminal.search(query);
-                terminal.nextMatch();
-            }
-        });
+        headerSearchMode.setSearchTarget(this::getActiveTerminalWidget);
         resourcesSearchMode = new SearchMode(false);
         resourcesSearchMode.setPlaceholder("Search Resources...");
         resourcesSearchMode.setOnTextChange(query -> {
@@ -809,12 +799,10 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
             resources.loadResources();
         } else if (activeView.widget() instanceof TerminalWidget terminal) {
             String query = header().searchBox == null ? "" : header().searchBox.getText();
-            boolean searchActive = query != null && !query.trim().isEmpty();
-            terminal.setShowSearchNavigation(searchActive);
             terminal.setFocused(true);
             setFocusedWidget(terminal);
-            if (searchActive) terminal.search(query);
             header().setSearchMode(headerSearchMode, true);
+            headerSearchMode.search(query);
         } else if (info.getPlayersContainer() != null && info.getPlayersContainer() == activeView.widget()) {
             header().setSearchMode(playersSearchMode, true);
             if (header().searchBox != null) info.getPlayersContainer().search(header().searchBox.getText());
