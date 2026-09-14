@@ -351,6 +351,7 @@ artifacts {
 
 tasks.processResources {
     dependsOn(relocatedSnakeYaml)
+    exclude("agent/linux-amd64/**")
     from(relocatedSnakeYaml.map { zipTree(it.archiveFile.get().asFile) }) {
         exclude("META-INF/MANIFEST.MF")
     }
@@ -508,14 +509,6 @@ dependencies {
     implementation("org.apache.commons:commons-compress:1.28.0")
     remotelySnakeYaml("org.yaml:snakeyaml:2.6")
 
-    implementation("com.vladsch.flexmark:flexmark:0.64.8")
-    implementation("com.vladsch.flexmark:flexmark-ext-autolink:0.64.8")
-    implementation("com.vladsch.flexmark:flexmark-ext-gfm-strikethrough:0.64.8")
-    implementation("com.vladsch.flexmark:flexmark-ext-gfm-tasklist:0.64.8")
-    implementation("com.vladsch.flexmark:flexmark-ext-ins:0.64.8")
-    implementation("com.vladsch.flexmark:flexmark-ext-tables:0.64.8")
-    implementation("org.jsoup:jsoup:1.15.4")
-
     implementation("org.apache.xmlgraphics:batik-transcoder:1.19")
     implementation("com.googlecode.soundlibs:vorbisspi:1.0.3.3")
     implementation("com.github.javakeyring:java-keyring:1.0.4")
@@ -617,6 +610,7 @@ tasks.register<Jar>("fatJar") {
             if (it.isDirectory) it else zipTree(it)
         }
     })
+    exclude("module-info.class", "META-INF/versions/**/module-info.class")
     exclude("META-INF/*.SF", "META-INF/*.DSA", "META-INF/*.RSA")
     manifest {
         attributes["Main-Class"] = "redxax.oxy.remotely.RemotelyInit"
@@ -677,6 +671,8 @@ val jpackageExecutable = javaLauncher.map {
     val executable = if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) "jpackage.exe" else "jpackage"
     File(it.metadata.installationPath.asFile, "bin/$executable").absolutePath
 }
+val packagedRuntimeModules = "java.base,java.desktop,java.net.http,java.security.jgss,java.sql,jdk.crypto.ec,jdk.httpserver,jdk.management,jdk.net,jdk.security.auth,jdk.unsupported"
+val packagedJlinkOptions = "--strip-debug --no-man-pages --no-header-files --compress=2"
 
 fun preparePackageInput(stagingDir: File, outputDir: File, artifactName: String) {
     outputDir.deleteRecursively()
@@ -722,7 +718,8 @@ tasks.register<Exec>("createInstaller") {
             "--app-version", installerVersion,
             *upgradeArguments,
             "--icon", iconPath,
-            "--jlink-options", "--strip-debug --no-man-pages --no-header-files",
+            "--add-modules", packagedRuntimeModules,
+            "--jlink-options", packagedJlinkOptions,
             "--win-shortcut",
             "--win-menu",
             "--win-menu-group", "ReStudio",
@@ -755,7 +752,8 @@ tasks.register<Exec>("createLinuxAppImage") {
         "--main-class", application.mainClass.get(),
         "--app-version", cleanVersion,
         "--icon", iconPath,
-        "--jlink-options", "--strip-debug --no-man-pages --no-header-files",
+        "--add-modules", packagedRuntimeModules,
+        "--jlink-options", packagedJlinkOptions,
         "--java-options", "-Dfile.encoding=UTF-8",
         "--java-options", "-Xmx4G",
         "--java-options", "--enable-native-access=ALL-UNNAMED"
@@ -786,7 +784,8 @@ tasks.register<Exec>("createMacDmg") {
         "--main-class", application.mainClass.get(),
         "--app-version", macVersion,
         "--icon", iconPath.get(),
-        "--jlink-options", "--strip-debug --no-man-pages --no-header-files",
+        "--add-modules", packagedRuntimeModules,
+        "--jlink-options", packagedJlinkOptions,
         "--mac-package-identifier", "net.restudiomc.remotely",
         "--java-options", "-Dfile.encoding=UTF-8",
         "--java-options", "-Xmx4G",

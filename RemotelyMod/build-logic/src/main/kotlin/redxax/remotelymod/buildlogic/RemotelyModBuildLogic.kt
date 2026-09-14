@@ -231,6 +231,7 @@ private fun Project.configureSharedConfigurations() {
         exclude(mapOf("group" to "org.jetbrains.jediterm"))
         exclude(mapOf("group" to "org.jetbrains.pty4j"))
         exclude(mapOf("group" to "org.lwjgl"))
+        exclude(mapOf("group" to "org.teavm"))
         exclude(mapOf("group" to "commons-logging", "module" to "commons-logging"))
         exclude(mapOf("group" to "xml-apis", "module" to "xml-apis"))
     }
@@ -254,6 +255,7 @@ private fun Project.configureSharedConfigurations() {
         exclude(mapOf("group" to "org.slf4j"))
         exclude(mapOf("group" to "org.joml"))
         exclude(mapOf("group" to "org.lwjgl"))
+        exclude(mapOf("group" to "org.teavm"))
         exclude(mapOf("group" to "commons-logging", "module" to "commons-logging"))
         exclude(mapOf("group" to "xml-apis", "module" to "xml-apis"))
     }
@@ -357,7 +359,6 @@ private fun Project.configureSharedDependencies() {
         bundled("com.github.javakeyring:java-keyring:1.0.4")
     }
     bundled("net.java.dev.jna:jna-platform:5.13.0")
-    bundled("com.vladsch.flexmark:flexmark-all:0.64.8")
     bundled("org.apache.xmlgraphics:batik-transcoder:1.19")
     bundled("com.googlecode.soundlibs:vorbisspi:1.0.3.3")
     bundled("org.java-websocket:Java-WebSocket:1.5.7")
