@@ -19,8 +19,11 @@ import net.minecraft.client.input.MouseButtonEvent;
 //$$ import net.minecraft.client.input.MouseButtonEvent;
 //#endif
 import net.minecraft.network.chat.Component;
-import org.lwjgl.glfw.GLFW;
+//#if MC >= 26.2 && MC < 26.3
+//$$ import org.lwjgl.glfw.GLFW;
+//#endif
 import redxax.oxy.remotely.adapters.MinecraftDrawContextAdapter;
+import redxax.oxy.remotely.host.MinecraftMouseInput;
 import restudio.rescreen.config.Config;
 import restudio.rescreen.platform.input.ReDropEvent;
 import restudio.rescreen.platform.input.ReInputEventFactory;
@@ -30,9 +33,6 @@ import restudio.rescreen.platform.input.ReModifierState;
 import restudio.rescreen.platform.input.ReMouseEvent;
 import restudio.rescreen.render.Render;
 import restudio.rescreen.ui.core.ScreenManager;
-//#if MC >= 26.2
-import org.lwjgl.glfw.GLFW;
-//#endif
 
 import java.lang.reflect.Field;
 import java.nio.file.Path;
@@ -53,6 +53,14 @@ public class RematrixScreen extends Screen {
         this.libScreen = libScreen;
         suspendedScreen = libScreen;
     }
+
+    //#if MC >= 26.3
+    @Override
+    public void added() {
+        super.added();
+        Minecraft.getInstance().textInputManager().startTextInput(this);
+    }
+    //#endif
 
     @Override
     protected void init() {
@@ -117,12 +125,12 @@ public class RematrixScreen extends Screen {
         RematrixContext ctx = new RematrixContext(guiGraphics, renderScale);
         MinecraftDrawContextAdapter libCtx = new MinecraftDrawContextAdapter(ctx);
 
-        //#if MC >= 26.2
-            long previousContext = GLFW.glfwGetCurrentContext();
-            long windowHandle = Minecraft.getInstance().getWindow().handle();
-            if (previousContext != windowHandle) {
-                GLFW.glfwMakeContextCurrent(windowHandle);
-            }
+        //#if MC >= 26.2 && MC < 26.3
+        //$$ long previousContext = GLFW.glfwGetCurrentContext();
+        //$$ long windowHandle = Minecraft.getInstance().getWindow().handle();
+        //$$ if (previousContext != windowHandle) {
+        //$$     GLFW.glfwMakeContextCurrent(windowHandle);
+        //$$ }
         //#endif
 
         var pose = guiGraphics.pose();
@@ -134,10 +142,10 @@ public class RematrixScreen extends Screen {
         Render.animatedScaling();
         pose.popMatrix();
 
-        //#if MC >= 26.2
-            if (previousContext != windowHandle) {
-                GLFW.glfwMakeContextCurrent(previousContext);
-            }
+        //#if MC >= 26.2 && MC < 26.3
+        //$$ if (previousContext != windowHandle) {
+        //$$     GLFW.glfwMakeContextCurrent(previousContext);
+        //$$ }
         //#endif
     }
     //#endif
@@ -254,14 +262,14 @@ public class RematrixScreen extends Screen {
     @Override
     public boolean mouseClicked(MouseButtonEvent event, boolean bl) {
         double sf = getInputScale();
-        boolean handled = sm.mouseClicked(ReInputEventFactory.mouseEvent(sm, sm.getCurrentScreen(), ReMouseEvent.Action.PRESSED, event.x() * sf, event.y() * sf, event.button(), currentModifiers(), 0, 0));
+        boolean handled = sm.mouseClicked(ReInputEventFactory.mouseEvent(sm, sm.getCurrentScreen(), ReMouseEvent.Action.PRESSED, event.x() * sf, event.y() * sf, MinecraftMouseInput.button(event.button()), currentModifiers(), 0, 0));
         return handled || super.mouseClicked(event, bl);
     }
     //#else
     //$$ @Override
     //$$ public boolean mouseClicked(double mouseX, double mouseY, int button) {
     //$$     double sf = getInputScale();
-    //$$     boolean handled = sm.mouseClicked(ReInputEventFactory.mouseEvent(sm, sm.getCurrentScreen(), ReMouseEvent.Action.PRESSED, mouseX * sf, mouseY * sf, button, currentModifiers(), 0, 0));
+    //$$     boolean handled = sm.mouseClicked(ReInputEventFactory.mouseEvent(sm, sm.getCurrentScreen(), ReMouseEvent.Action.PRESSED, mouseX * sf, mouseY * sf, MinecraftMouseInput.button(button), currentModifiers(), 0, 0));
     //$$     return handled || super.mouseClicked(mouseX, mouseY, button);
     //$$ }
     //#endif
@@ -270,14 +278,14 @@ public class RematrixScreen extends Screen {
     @Override
     public boolean mouseReleased(MouseButtonEvent event) {
         double sf = getInputScale();
-        boolean handled = sm.mouseReleased(ReInputEventFactory.mouseEvent(sm, sm.getCurrentScreen(), ReMouseEvent.Action.RELEASED, event.x() * sf, event.y() * sf, event.button(), currentModifiers(), 0, 0));
+        boolean handled = sm.mouseReleased(ReInputEventFactory.mouseEvent(sm, sm.getCurrentScreen(), ReMouseEvent.Action.RELEASED, event.x() * sf, event.y() * sf, MinecraftMouseInput.button(event.button()), currentModifiers(), 0, 0));
         return handled || super.mouseReleased(event);
     }
     //#else
     //$$ @Override
     //$$ public boolean mouseReleased(double mouseX, double mouseY, int button) {
     //$$     double sf = getInputScale();
-    //$$     boolean handled = sm.mouseReleased(ReInputEventFactory.mouseEvent(sm, sm.getCurrentScreen(), ReMouseEvent.Action.RELEASED, mouseX * sf, mouseY * sf, button, currentModifiers(), 0, 0));
+    //$$     boolean handled = sm.mouseReleased(ReInputEventFactory.mouseEvent(sm, sm.getCurrentScreen(), ReMouseEvent.Action.RELEASED, mouseX * sf, mouseY * sf, MinecraftMouseInput.button(button), currentModifiers(), 0, 0));
     //$$     return handled || super.mouseReleased(mouseX, mouseY, button);
     //$$ }
     //#endif
@@ -286,14 +294,14 @@ public class RematrixScreen extends Screen {
     @Override
     public boolean mouseDragged(MouseButtonEvent event, double deltaX, double deltaY) {
         double sf = getInputScale();
-        boolean handled = sm.mouseDragged(ReInputEventFactory.mouseEvent(sm, sm.getCurrentScreen(), ReMouseEvent.Action.DRAGGED, event.x() * sf, event.y() * sf, event.button(), currentModifiers(), deltaX * sf, deltaY * sf));
+        boolean handled = sm.mouseDragged(ReInputEventFactory.mouseEvent(sm, sm.getCurrentScreen(), ReMouseEvent.Action.DRAGGED, event.x() * sf, event.y() * sf, MinecraftMouseInput.button(event.button()), currentModifiers(), deltaX * sf, deltaY * sf));
         return handled || super.mouseDragged(event, deltaX, deltaY);
     }
     //#else
     //$$ @Override
     //$$ public boolean mouseDragged(double mouseX, double mouseY, int button, double deltaX, double deltaY) {
     //$$     double sf = getInputScale();
-    //$$     boolean handled = sm.mouseDragged(ReInputEventFactory.mouseEvent(sm, sm.getCurrentScreen(), ReMouseEvent.Action.DRAGGED, mouseX * sf, mouseY * sf, button, currentModifiers(), deltaX * sf, deltaY * sf));
+    //$$     boolean handled = sm.mouseDragged(ReInputEventFactory.mouseEvent(sm, sm.getCurrentScreen(), ReMouseEvent.Action.DRAGGED, mouseX * sf, mouseY * sf, MinecraftMouseInput.button(button), currentModifiers(), deltaX * sf, deltaY * sf));
     //$$     return handled || super.mouseDragged(mouseX, mouseY, button, deltaX, deltaY);
     //$$ }
     //#endif
@@ -324,7 +332,11 @@ public class RematrixScreen extends Screen {
     //#if MC >= 1.21.9 || MC >= 26.1
     @Override
     public boolean keyPressed(KeyEvent keyEvent) {
-        ReKeyEvent event = ReInputEventFactory.keyPressed(sm, sm.getCurrentScreen(), keyEvent.key(), keyEvent.scancode(), keyEvent.modifiers(), false);
+        //#if MC >= 26.3
+        ReKeyEvent event = ReInputEventFactory.keyPressed(sm, sm.getCurrentScreen(), keyEvent.key(), keyEvent.keycode(), keyEvent.modifiers(), false);
+        //#else
+        //$$ ReKeyEvent event = ReInputEventFactory.keyPressed(sm, sm.getCurrentScreen(), keyEvent.key(), keyEvent.scancode(), keyEvent.modifiers(), false);
+        //#endif
         if (scaleScroll(keyEvent.key(), keyEvent.modifiers())) {
             return true;
         }
@@ -382,7 +394,11 @@ public class RematrixScreen extends Screen {
     //#if MC >= 1.21.9 || MC >= 26.1
     @Override
     public boolean keyReleased(KeyEvent keyEvent) {
-        boolean handled = sm.keyReleased(ReInputEventFactory.keyReleased(sm, sm.getCurrentScreen(), keyEvent.key(), keyEvent.scancode(), keyEvent.modifiers()));
+        //#if MC >= 26.3
+        boolean handled = sm.keyReleased(ReInputEventFactory.keyReleased(sm, sm.getCurrentScreen(), keyEvent.key(), keyEvent.keycode(), keyEvent.modifiers()));
+        //#else
+        //$$ boolean handled = sm.keyReleased(ReInputEventFactory.keyReleased(sm, sm.getCurrentScreen(), keyEvent.key(), keyEvent.scancode(), keyEvent.modifiers()));
+        //#endif
         return handled || super.keyReleased(keyEvent);
     }
     //#else
@@ -526,35 +542,11 @@ public class RematrixScreen extends Screen {
     }
 
     private boolean isControlDown() {
-        long handle = getWindowHandle();
-        return GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_LEFT_CONTROL) == GLFW.GLFW_PRESS
-                || GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_RIGHT_CONTROL) == GLFW.GLFW_PRESS;
+        return sm.inputState().modifiers().control();
     }
 
     private int currentModifiers() {
-        long handle = getWindowHandle();
-        int modifiers = 0;
-        if (GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_LEFT_SHIFT) == GLFW.GLFW_PRESS || GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_RIGHT_SHIFT) == GLFW.GLFW_PRESS) {
-            modifiers |= GLFW.GLFW_MOD_SHIFT;
-        }
-        if (GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_LEFT_CONTROL) == GLFW.GLFW_PRESS || GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_RIGHT_CONTROL) == GLFW.GLFW_PRESS) {
-            modifiers |= GLFW.GLFW_MOD_CONTROL;
-        }
-        if (GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_LEFT_ALT) == GLFW.GLFW_PRESS || GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_RIGHT_ALT) == GLFW.GLFW_PRESS) {
-            modifiers |= GLFW.GLFW_MOD_ALT;
-        }
-        if (GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_LEFT_SUPER) == GLFW.GLFW_PRESS || GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_RIGHT_SUPER) == GLFW.GLFW_PRESS) {
-            modifiers |= GLFW.GLFW_MOD_SUPER;
-        }
-        return modifiers;
-    }
-
-    private long getWindowHandle() {
-        //#if MC >= 1.21.9 || MC >= 26.1
-        return Minecraft.getInstance().getWindow().handle();
-        //#else
-        //$$ return Minecraft.getInstance().getWindow().getWindow();
-        //#endif
+        return ReInputEventFactory.nativeModifiers(sm.inputState().modifiers());
     }
 
     private void reopenAfterMinecraftClose() {

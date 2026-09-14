@@ -1,12 +1,12 @@
 package redxax.oxy.remotely.mixin;
 
+import com.mojang.blaze3d.platform.InputConstants;
 import net.minecraft.client.KeyboardHandler;
 import net.minecraft.client.Minecraft;
 //#if MC >= 1.21.9 || MC >= 26.1
 import net.minecraft.client.input.CharacterEvent;
 import net.minecraft.client.input.KeyEvent;
 //#endif
-import org.lwjgl.glfw.GLFW;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
@@ -19,6 +19,7 @@ import redxax.oxy.remotely.rematrix.mc.RematrixScreen;
 import redxax.oxy.remotely.resync.bridge.ReSyncVanillaBridgeManager;
 import redxax.oxy.remotely.util.InitializationManager;
 import restudio.rescreen.platform.input.ReInputEventFactory;
+import restudio.rescreen.platform.input.GlfwInputTranslator;
 import restudio.rescreen.platform.input.ReKey;
 import restudio.rescreen.platform.input.ReKeyEvent;
 import restudio.rescreen.ui.core.ScreenManager;
@@ -50,7 +51,7 @@ public class KeyboardMixin {
     @Unique
     private boolean remotely$shouldOpenReSync(int key, int modifiers) {
         ReKeyEvent event = remotely$keyEvent(key, modifiers);
-        ReKey configuredKey = remotely$keyEvent(Config.resyncKeyCode, 0).key();
+        ReKey configuredKey = GlfwInputTranslator.key(Config.resyncKeyCode);
         return event.modifiers().alt() && !event.modifiers().shift() && !event.modifiers().control() && event.key() == configuredKey;
     }
 
@@ -117,17 +118,17 @@ public class KeyboardMixin {
     //#if MC >= 1.21.9 || MC >= 26.1
     private void onKey(long l, int i, KeyEvent keyEvent, CallbackInfo ci) {
         if (remotely$shouldToggle(keyEvent.key(), keyEvent.modifiers())) {
-            if (i == GLFW.GLFW_PRESS) {
+            if (i == InputConstants.PRESS) {
                 remotely$toggleDown = remotely$toggleScreen();
                 remotely$skipNextToggleChar();
-            } else if (i == GLFW.GLFW_RELEASE) {
+            } else if (i == InputConstants.RELEASE) {
                 remotely$toggleDown = false;
             }
             ci.cancel();
             return;
         }
         if (remotely$shouldOpenReSync(keyEvent.key(), keyEvent.modifiers())) {
-            if (i == GLFW.GLFW_RELEASE) {
+            if (i == InputConstants.RELEASE) {
                 remotely$resyncKeyDown = false;
                 ci.cancel();
                 return;
@@ -140,18 +141,22 @@ public class KeyboardMixin {
             return;
         }
         if (remotely$toggleDown && remotely$isToggleKey(keyEvent.key())) {
-            if (i == GLFW.GLFW_RELEASE) {
+            if (i == InputConstants.RELEASE) {
                 remotely$toggleDown = false;
             }
             ci.cancel();
             return;
         }
-        if (remotely$handlePinnedWindowKey(i, keyEvent.key(), keyEvent.scancode(), keyEvent.modifiers())) {
+        //#if MC >= 26.3
+        if (remotely$handlePinnedWindowKey(i, keyEvent.key(), keyEvent.keycode(), keyEvent.modifiers())) {
+        //#else
+        //$$ if (remotely$handlePinnedWindowKey(i, keyEvent.key(), keyEvent.scancode(), keyEvent.modifiers())) {
+        //#endif
             ci.cancel();
             return;
         }
         ReKeyEvent event = remotely$keyEvent(keyEvent.key(), keyEvent.modifiers());
-        if (i == GLFW.GLFW_PRESS && event.modifiers().control() && event.key() == ReKey.B) {
+        if (i == InputConstants.PRESS && event.modifiers().control() && event.key() == ReKey.B) {
             //#if MC >= 26.2
             if (client.gui.screen() == null) return;
             client.gui.screen().keyPressed(keyEvent);
@@ -166,17 +171,17 @@ public class KeyboardMixin {
     //#else
     //$$ private void onKey(long l, int i, int j, int k, int m, CallbackInfo ci) {
     //$$     if (remotely$shouldToggle(i, m)) {
-    //$$         if (k == GLFW.GLFW_PRESS) {
+    //$$         if (k == InputConstants.PRESS) {
     //$$             remotely$toggleDown = remotely$toggleScreen();
     //$$             remotely$skipNextToggleChar();
-    //$$         } else if (k == GLFW.GLFW_RELEASE) {
+    //$$         } else if (k == InputConstants.RELEASE) {
     //$$             remotely$toggleDown = false;
     //$$         }
     //$$         ci.cancel();
     //$$         return;
     //$$     }
     //$$     if (remotely$shouldOpenReSync(i, m)) {
-    //$$         if (k == GLFW.GLFW_RELEASE) {
+    //$$         if (k == InputConstants.RELEASE) {
     //$$             remotely$resyncKeyDown = false;
     //$$             ci.cancel();
     //$$             return;
@@ -189,7 +194,7 @@ public class KeyboardMixin {
     //$$         return;
     //$$     }
     //$$     if (remotely$toggleDown && remotely$isToggleKey(i)) {
-    //$$         if (k == GLFW.GLFW_RELEASE) {
+    //$$         if (k == InputConstants.RELEASE) {
     //$$             remotely$toggleDown = false;
     //$$         }
     //$$         ci.cancel();
@@ -199,7 +204,7 @@ public class KeyboardMixin {
     //$$         ci.cancel();
     //$$         return;
     //$$     }
-    //$$     if (((m & GLFW.GLFW_MOD_CONTROL) != 0) && i == GLFW.GLFW_KEY_B && k == GLFW.GLFW_PRESS) {
+    //$$     if (((m & InputConstants.MOD_CONTROL) != 0) && i == InputConstants.KEY_B && k == InputConstants.PRESS) {
     //$$         if (client.screen == null) return;
     //$$         client.screen.keyPressed(i, j, k);
     //$$         ci.cancel();
@@ -210,11 +215,11 @@ public class KeyboardMixin {
     @Unique
     private boolean remotely$handlePinnedWindowKey(int action, int key, int scanCode, int modifiers) {
         ScreenManager manager = ScreenManager.getInstance();
-        if (action == GLFW.GLFW_RELEASE) {
+        if (action == InputConstants.RELEASE) {
             return manager.keyReleasedPinnedInGame(ReInputEventFactory.keyReleased(this, manager.getDesktopWindowsOverlay(), key, scanCode, modifiers));
         }
-        if (action == GLFW.GLFW_PRESS || action == GLFW.GLFW_REPEAT) {
-            return manager.keyPressedPinnedInGame(ReInputEventFactory.keyPressed(this, manager.getDesktopWindowsOverlay(), key, scanCode, modifiers, action == GLFW.GLFW_REPEAT));
+        if (action == InputConstants.PRESS || action == InputConstants.REPEAT) {
+            return manager.keyPressedPinnedInGame(ReInputEventFactory.keyPressed(this, manager.getDesktopWindowsOverlay(), key, scanCode, modifiers, action == InputConstants.REPEAT));
         }
         return false;
     }

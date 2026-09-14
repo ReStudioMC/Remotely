@@ -1,7 +1,11 @@
 package redxax.oxy.remotely.host;
 
 import net.minecraft.client.Minecraft;
-import org.lwjgl.glfw.GLFW;
+//#if MC >= 26.3
+import org.lwjgl.sdl.SDLMouse;
+//#else
+//$$ import org.lwjgl.glfw.GLFW;
+//#endif
 import restudio.rescreen.platform.CursorHandler;
 import restudio.rescreen.platform.input.ReMouseButton;
 
@@ -14,54 +18,75 @@ public final class MinecraftCursorHandler implements CursorHandler {
 
     @Override
     public boolean windowActive() {
-        long window = windowHandle();
-        return window != 0
-            && GLFW.glfwGetWindowAttrib(window, GLFW.GLFW_ICONIFIED) != GLFW.GLFW_TRUE
-            && GLFW.glfwGetWindowAttrib(window, GLFW.GLFW_FOCUSED) != GLFW.GLFW_FALSE;
+        return windowHandle() != 0 && !minecraft.getWindow().isIconified() && minecraft.getWindow().isFocused();
     }
 
     @Override
     public boolean pointerAvailable() {
-        long window = windowHandle();
-        return window != 0
-            && GLFW.glfwGetWindowAttrib(window, GLFW.GLFW_ICONIFIED) != GLFW.GLFW_TRUE
-            && GLFW.glfwGetWindowAttrib(window, GLFW.GLFW_FOCUSED) != GLFW.GLFW_FALSE
-            && GLFW.glfwGetInputMode(window, GLFW.GLFW_CURSOR) != GLFW.GLFW_CURSOR_DISABLED;
+        return windowActive() && !minecraft.mouseHandler.isMouseGrabbed();
     }
 
     @Override
     public boolean isButtonDown(ReMouseButton button) {
-        int nativeButton = switch (button) {
-            case LEFT -> GLFW.GLFW_MOUSE_BUTTON_LEFT;
-            case RIGHT -> GLFW.GLFW_MOUSE_BUTTON_RIGHT;
-            case MIDDLE -> GLFW.GLFW_MOUSE_BUTTON_MIDDLE;
-            case BACK -> GLFW.GLFW_MOUSE_BUTTON_4;
-            case FORWARD -> GLFW.GLFW_MOUSE_BUTTON_5;
-            default -> -1;
+        //#if MC >= 26.3
+        int mask = switch (button) {
+            case LEFT -> SDLMouse.SDL_BUTTON_LMASK;
+            case RIGHT -> SDLMouse.SDL_BUTTON_RMASK;
+            case MIDDLE -> SDLMouse.SDL_BUTTON_MMASK;
+            case BACK -> SDLMouse.SDL_BUTTON_X1MASK;
+            case FORWARD -> SDLMouse.SDL_BUTTON_X2MASK;
+            default -> 0;
         };
-        return nativeButton >= 0 && GLFW.glfwGetMouseButton(windowHandle(), nativeButton) == GLFW.GLFW_PRESS;
+        return mask != 0 && (SDLMouse.SDL_GetMouseState(null, null) & mask) != 0;
+        //#else
+        //$$ int nativeButton = switch (button) {
+        //$$     case LEFT -> GLFW.GLFW_MOUSE_BUTTON_LEFT;
+        //$$     case RIGHT -> GLFW.GLFW_MOUSE_BUTTON_RIGHT;
+        //$$     case MIDDLE -> GLFW.GLFW_MOUSE_BUTTON_MIDDLE;
+        //$$     case BACK -> GLFW.GLFW_MOUSE_BUTTON_4;
+        //$$     case FORWARD -> GLFW.GLFW_MOUSE_BUTTON_5;
+        //$$     default -> -1;
+        //$$ };
+        //$$ return nativeButton >= 0 && GLFW.glfwGetMouseButton(windowHandle(), nativeButton) == GLFW.GLFW_PRESS;
+        //#endif
     }
 
     @Override
     public void hideNativeCursor() {
-        long window = windowHandle();
-        if (window != 0 && GLFW.glfwGetInputMode(window, GLFW.GLFW_CURSOR) != GLFW.GLFW_CURSOR_HIDDEN) {
-            GLFW.glfwSetInputMode(window, GLFW.GLFW_CURSOR, GLFW.GLFW_CURSOR_HIDDEN);
+        //#if MC >= 26.3
+        if (windowHandle() != 0 && SDLMouse.SDL_CursorVisible()) {
+            SDLMouse.SDL_HideCursor();
         }
+        //#else
+        //$$ long window = windowHandle();
+        //$$ if (window != 0 && GLFW.glfwGetInputMode(window, GLFW.GLFW_CURSOR) != GLFW.GLFW_CURSOR_HIDDEN) {
+        //$$     GLFW.glfwSetInputMode(window, GLFW.GLFW_CURSOR, GLFW.GLFW_CURSOR_HIDDEN);
+        //$$ }
+        //#endif
     }
 
     @Override
     public boolean isNativeCursorHidden() {
-        long window = windowHandle();
-        return window != 0 && GLFW.glfwGetInputMode(window, GLFW.GLFW_CURSOR) == GLFW.GLFW_CURSOR_HIDDEN;
+        //#if MC >= 26.3
+        return windowHandle() != 0 && !SDLMouse.SDL_CursorVisible();
+        //#else
+        //$$ long window = windowHandle();
+        //$$ return window != 0 && GLFW.glfwGetInputMode(window, GLFW.GLFW_CURSOR) == GLFW.GLFW_CURSOR_HIDDEN;
+        //#endif
     }
 
     @Override
     public void showNativeCursor() {
-        long window = windowHandle();
-        if (window != 0 && GLFW.glfwGetInputMode(window, GLFW.GLFW_CURSOR) == GLFW.GLFW_CURSOR_HIDDEN) {
-            GLFW.glfwSetInputMode(window, GLFW.GLFW_CURSOR, GLFW.GLFW_CURSOR_NORMAL);
+        //#if MC >= 26.3
+        if (windowHandle() != 0 && !SDLMouse.SDL_CursorVisible()) {
+            SDLMouse.SDL_ShowCursor();
         }
+        //#else
+        //$$ long window = windowHandle();
+        //$$ if (window != 0 && GLFW.glfwGetInputMode(window, GLFW.GLFW_CURSOR) == GLFW.GLFW_CURSOR_HIDDEN) {
+        //$$     GLFW.glfwSetInputMode(window, GLFW.GLFW_CURSOR, GLFW.GLFW_CURSOR_NORMAL);
+        //$$ }
+        //#endif
     }
 
     private long windowHandle() {

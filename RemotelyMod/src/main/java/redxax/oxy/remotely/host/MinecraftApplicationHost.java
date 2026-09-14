@@ -24,11 +24,15 @@ import restudio.rescreen.platform.ScreenResourceHandler;
 import restudio.rescreen.platform.assets.ImageAssetRegistry;
 import restudio.rescreen.platform.desktop.DesktopImageAssetRegistry;
 import restudio.rescreen.platform.desktop.DesktopMarkdownMedia;
+//#if MC < 26.3
 import restudio.rescreen.platform.input.GlfwInputMapper;
+//#endif
 import restudio.rescreen.platform.input.NativeInputMapper;
 import restudio.rescreen.platform.input.ReInputEventFactory;
 import restudio.rescreen.platform.input.ReInputState;
+//#if MC < 26.3
 import restudio.rescreen.platform.lwjgl.GlfwInputState;
+//#endif
 import restudio.rescreen.render.TextRenderer;
 import restudio.rescreen.ui.core.Screen;
 import restudio.rescreen.ui.core.ScreenManager;
@@ -41,7 +45,11 @@ public class MinecraftApplicationHost extends ReScreenApplicationHost {
     private final MinecraftGameAssets gameAssets = new MinecraftNativeGameAssets();
 
     public MinecraftApplicationHost() {
-        ReInputEventFactory.setNativeMapper(new GlfwInputMapper());
+        //#if MC >= 26.3
+        ReInputEventFactory.setNativeMapper(new MinecraftSdlInputMapper());
+        //#else
+        //$$ ReInputEventFactory.setNativeMapper(new GlfwInputMapper());
+        //#endif
         ScreenManager.getInstance().installRuntime(new MinecraftReScreenRuntime());
     }
 
@@ -74,8 +82,13 @@ public class MinecraftApplicationHost extends ReScreenApplicationHost {
         };
         private final HostActionHandler hostActionHandler = new MinecraftHostActionHandler();
         private final CursorHandler cursorHandler = new MinecraftCursorHandler(mc);
-        private final ReInputState inputState = new GlfwInputState(MinecraftApplicationHost.this::windowHandle);
-        private final NativeInputMapper nativeInputMapper = new GlfwInputMapper();
+        //#if MC >= 26.3
+        private final MinecraftSdlInputMapper nativeInputMapper = new MinecraftSdlInputMapper();
+        private final ReInputState inputState = new MinecraftSdlInputState(mc, nativeInputMapper);
+        //#else
+        //$$ private final NativeInputMapper nativeInputMapper = new GlfwInputMapper();
+        //$$ private final ReInputState inputState = new GlfwInputState(MinecraftApplicationHost.this::windowHandle);
+        //#endif
 
         @Override
         public ImageAssetRegistry imageAssets() {

@@ -13,12 +13,12 @@ import net.minecraft.client.input.MouseButtonEvent;
 //$$ import net.minecraft.client.input.KeyEvent;
 //$$ import net.minecraft.client.input.MouseButtonEvent;
 //#endif
-import org.lwjgl.glfw.GLFW;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+import redxax.oxy.remotely.host.MinecraftMouseInput;
 import redxax.oxy.remotely.rematrix.mc.RematrixScale;
 import restudio.rescreen.platform.input.ReInputEventFactory;
 import restudio.rescreen.platform.input.ReMouseEvent;
@@ -46,7 +46,7 @@ public interface ContainerEventHandlerMixin {
             return;
         }
         ScreenManager manager = ScreenManager.getInstance();
-        if (manager.mouseClickedPinnedInGame(ReInputEventFactory.mouseEvent(this, manager.getDesktopWindowsOverlay(), ReMouseEvent.Action.PRESSED, event.x() * sf, event.y() * sf, event.button(), remotely$currentModifiers(), 0, 0))) {
+        if (manager.mouseClickedPinnedInGame(ReInputEventFactory.mouseEvent(this, manager.getDesktopWindowsOverlay(), ReMouseEvent.Action.PRESSED, event.x() * sf, event.y() * sf, MinecraftMouseInput.button(event.button()), remotely$currentModifiers(), 0, 0))) {
             cir.setReturnValue(true);
         }
     }
@@ -61,7 +61,7 @@ public interface ContainerEventHandlerMixin {
     //$$         return;
     //$$     }
     //$$     ScreenManager manager = ScreenManager.getInstance();
-    //$$     if (manager.mouseClickedPinnedInGame(ReInputEventFactory.mouseEvent(this, manager.getDesktopWindowsOverlay(), ReMouseEvent.Action.PRESSED, mouseX * sf, mouseY * sf, button, remotely$currentModifiers(), 0, 0))) {
+    //$$     if (manager.mouseClickedPinnedInGame(ReInputEventFactory.mouseEvent(this, manager.getDesktopWindowsOverlay(), ReMouseEvent.Action.PRESSED, mouseX * sf, mouseY * sf, MinecraftMouseInput.button(button), remotely$currentModifiers(), 0, 0))) {
     //$$         cir.setReturnValue(true);
     //$$     }
     //$$ }
@@ -79,7 +79,7 @@ public interface ContainerEventHandlerMixin {
             return;
         }
         ScreenManager manager = ScreenManager.getInstance();
-        if (manager.mouseReleasedPinnedInGame(ReInputEventFactory.mouseEvent(this, manager.getDesktopWindowsOverlay(), ReMouseEvent.Action.RELEASED, event.x() * sf, event.y() * sf, event.button(), remotely$currentModifiers(), 0, 0))) {
+        if (manager.mouseReleasedPinnedInGame(ReInputEventFactory.mouseEvent(this, manager.getDesktopWindowsOverlay(), ReMouseEvent.Action.RELEASED, event.x() * sf, event.y() * sf, MinecraftMouseInput.button(event.button()), remotely$currentModifiers(), 0, 0))) {
             cir.setReturnValue(true);
         }
     }
@@ -94,7 +94,7 @@ public interface ContainerEventHandlerMixin {
     //$$         return;
     //$$     }
     //$$     ScreenManager manager = ScreenManager.getInstance();
-    //$$     if (manager.mouseReleasedPinnedInGame(ReInputEventFactory.mouseEvent(this, manager.getDesktopWindowsOverlay(), ReMouseEvent.Action.RELEASED, mouseX * sf, mouseY * sf, button, remotely$currentModifiers(), 0, 0))) {
+    //$$     if (manager.mouseReleasedPinnedInGame(ReInputEventFactory.mouseEvent(this, manager.getDesktopWindowsOverlay(), ReMouseEvent.Action.RELEASED, mouseX * sf, mouseY * sf, MinecraftMouseInput.button(button), remotely$currentModifiers(), 0, 0))) {
     //$$         cir.setReturnValue(true);
     //$$     }
     //$$ }
@@ -112,7 +112,7 @@ public interface ContainerEventHandlerMixin {
             return;
         }
         ScreenManager manager = ScreenManager.getInstance();
-        if (manager.mouseDraggedPinnedInGame(ReInputEventFactory.mouseEvent(this, manager.getDesktopWindowsOverlay(), ReMouseEvent.Action.DRAGGED, event.x() * sf, event.y() * sf, event.button(), remotely$currentModifiers(), deltaX * sf, deltaY * sf))) {
+        if (manager.mouseDraggedPinnedInGame(ReInputEventFactory.mouseEvent(this, manager.getDesktopWindowsOverlay(), ReMouseEvent.Action.DRAGGED, event.x() * sf, event.y() * sf, MinecraftMouseInput.button(event.button()), remotely$currentModifiers(), deltaX * sf, deltaY * sf))) {
             cir.setReturnValue(true);
         }
     }
@@ -127,7 +127,7 @@ public interface ContainerEventHandlerMixin {
     //$$         return;
     //$$     }
     //$$     ScreenManager manager = ScreenManager.getInstance();
-    //$$     if (manager.mouseDraggedPinnedInGame(ReInputEventFactory.mouseEvent(this, manager.getDesktopWindowsOverlay(), ReMouseEvent.Action.DRAGGED, mouseX * sf, mouseY * sf, button, remotely$currentModifiers(), deltaX * sf, deltaY * sf))) {
+    //$$     if (manager.mouseDraggedPinnedInGame(ReInputEventFactory.mouseEvent(this, manager.getDesktopWindowsOverlay(), ReMouseEvent.Action.DRAGGED, mouseX * sf, mouseY * sf, MinecraftMouseInput.button(button), remotely$currentModifiers(), deltaX * sf, deltaY * sf))) {
     //$$         cir.setReturnValue(true);
     //$$     }
     //$$ }
@@ -173,7 +173,11 @@ public interface ContainerEventHandlerMixin {
             return;
         }
         ScreenManager manager = ScreenManager.getInstance();
-        if (manager.keyReleasedPinnedInGame(ReInputEventFactory.keyReleased(this, manager.getDesktopWindowsOverlay(), keyEvent.key(), keyEvent.scancode(), keyEvent.modifiers()))) {
+        //#if MC >= 26.3
+        if (manager.keyReleasedPinnedInGame(ReInputEventFactory.keyReleased(this, manager.getDesktopWindowsOverlay(), keyEvent.key(), keyEvent.keycode(), keyEvent.modifiers()))) {
+        //#else
+        //$$ if (manager.keyReleasedPinnedInGame(ReInputEventFactory.keyReleased(this, manager.getDesktopWindowsOverlay(), keyEvent.key(), keyEvent.scancode(), keyEvent.modifiers()))) {
+        //#endif
             cir.setReturnValue(true);
         }
     }
@@ -228,27 +232,7 @@ public interface ContainerEventHandlerMixin {
 
     @Unique
     private int remotely$currentModifiers() {
-        //#if NEOFORGE && MC < 1.21.10
-        //$$ long handle = Minecraft.getInstance().getWindow().getWindow();
-        //#elseif MC >= 1.21.6 || MC >= 26.1 || MC == 1.21.10
-        long handle = Minecraft.getInstance().getWindow().handle();
-        //#else
-        //$$ long handle = Minecraft.getInstance().getWindow().getWindow();
-        //#endif
-        int modifiers = 0;
-        if (GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_LEFT_SHIFT) == GLFW.GLFW_PRESS || GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_RIGHT_SHIFT) == GLFW.GLFW_PRESS) {
-            modifiers |= GLFW.GLFW_MOD_SHIFT;
-        }
-        if (GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_LEFT_CONTROL) == GLFW.GLFW_PRESS || GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_RIGHT_CONTROL) == GLFW.GLFW_PRESS) {
-            modifiers |= GLFW.GLFW_MOD_CONTROL;
-        }
-        if (GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_LEFT_ALT) == GLFW.GLFW_PRESS || GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_RIGHT_ALT) == GLFW.GLFW_PRESS) {
-            modifiers |= GLFW.GLFW_MOD_ALT;
-        }
-        if (GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_LEFT_SUPER) == GLFW.GLFW_PRESS || GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_RIGHT_SUPER) == GLFW.GLFW_PRESS) {
-            modifiers |= GLFW.GLFW_MOD_SUPER;
-        }
-        return modifiers;
+        return ReInputEventFactory.nativeModifiers(ScreenManager.getInstance().inputState().modifiers());
     }
 
     @Unique
@@ -262,7 +246,7 @@ public interface ContainerEventHandlerMixin {
         double scaledX = mouseX * scale;
         double scaledY = mouseY * scale;
         for (Notification notification : Notification.getActiveNotifications()) {
-            if (Widget.dispatchMouseClicked(notification, ReInputEventFactory.mouseEvent(this, notification, ReMouseEvent.Action.PRESSED, scaledX, scaledY, button, remotely$currentModifiers(), 0, 0))) {
+            if (Widget.dispatchMouseClicked(notification, ReInputEventFactory.mouseEvent(this, notification, ReMouseEvent.Action.PRESSED, scaledX, scaledY, MinecraftMouseInput.button(button), remotely$currentModifiers(), 0, 0))) {
                 return true;
             }
         }
@@ -275,7 +259,7 @@ public interface ContainerEventHandlerMixin {
         double scaledX = mouseX * scale;
         double scaledY = mouseY * scale;
         for (Notification notification : Notification.getActiveNotifications()) {
-            if (Widget.dispatchMouseReleased(notification, ReInputEventFactory.mouseEvent(this, notification, ReMouseEvent.Action.RELEASED, scaledX, scaledY, button, remotely$currentModifiers(), 0, 0))) {
+            if (Widget.dispatchMouseReleased(notification, ReInputEventFactory.mouseEvent(this, notification, ReMouseEvent.Action.RELEASED, scaledX, scaledY, MinecraftMouseInput.button(button), remotely$currentModifiers(), 0, 0))) {
                 return true;
             }
         }
@@ -290,7 +274,7 @@ public interface ContainerEventHandlerMixin {
         double scaledDeltaX = deltaX * scale;
         double scaledDeltaY = deltaY * scale;
         for (Notification notification : Notification.getActiveNotifications()) {
-            if (Widget.dispatchMouseDragged(notification, ReInputEventFactory.mouseEvent(this, notification, ReMouseEvent.Action.DRAGGED, scaledX, scaledY, button, remotely$currentModifiers(), scaledDeltaX, scaledDeltaY))) {
+            if (Widget.dispatchMouseDragged(notification, ReInputEventFactory.mouseEvent(this, notification, ReMouseEvent.Action.DRAGGED, scaledX, scaledY, MinecraftMouseInput.button(button), remotely$currentModifiers(), scaledDeltaX, scaledDeltaY))) {
                 return true;
             }
         }

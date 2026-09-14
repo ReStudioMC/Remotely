@@ -20,6 +20,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Optional;
+import java.util.stream.Stream;
 
 public final class RemotelyBuiltInResourcePack {
     private static final String ID = Constants.ID;
@@ -80,15 +81,27 @@ public final class RemotelyBuiltInResourcePack {
             return new FilePackResources.FileResourcesSupplier(root);
         }
         return new Pack.ResourcesSupplier() {
+            //#if MC >= 26.3
             @Override
-            public PackResources openPrimary(PackLocationInfo location) {
+            public PackResources openMetadata(PackLocationInfo location) {
                 return new PathPackResources(location, root);
             }
 
             @Override
-            public PackResources openFull(PackLocationInfo location, Pack.Metadata metadata) {
-                return new PathPackResources(location, root);
+            public Stream<PackResources> openResources(PackLocationInfo location, Pack.Metadata metadata) {
+                return Stream.of(new PathPackResources(location, root));
             }
+            //#else
+            //$$ @Override
+            //$$ public PackResources openPrimary(PackLocationInfo location) {
+            //$$     return new PathPackResources(location, root);
+            //$$ }
+
+            //$$ @Override
+            //$$ public PackResources openFull(PackLocationInfo location, Pack.Metadata metadata) {
+            //$$     return new PathPackResources(location, root);
+            //$$ }
+            //#endif
         };
     }
     //#endif

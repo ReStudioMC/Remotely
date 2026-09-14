@@ -36,7 +36,6 @@ import net.minecraft.client.input.KeyEvent;
 //#if MC >= 1.21.9 && MC < 26.1
 //$$ import net.minecraft.client.input.KeyEvent;
 //#endif
-import org.lwjgl.glfw.GLFW;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
@@ -66,6 +65,7 @@ import restudio.rescreen.Main;
 import restudio.rescreen.platform.input.ReInputEventFactory;
 import restudio.rescreen.platform.input.ReKey;
 import restudio.rescreen.platform.input.ReKeyEvent;
+import restudio.rescreen.platform.input.ReMouseButton;
 import restudio.rescreen.platform.input.ReMouseEvent;
 import restudio.rescreen.ui.MouseCursor;
 import restudio.rescreen.ui.core.ScreenManager;
@@ -291,14 +291,7 @@ public abstract class ScreenMixin implements ICustomWidgetHolder {
 
     @Unique
     private void remotely$handleInput(int mouseX, int mouseY) {
-        //#if NEOFORGE && MC < 1.21.10
-        //$$ long handle = Minecraft.getInstance().getWindow().getWindow();
-        //#elseif MC >= 1.21.6 || MC >= 26.1 || MC == 1.21.10
-        long handle = Minecraft.getInstance().getWindow().handle();
-        //#else
-        //$$ long handle = Minecraft.getInstance().getWindow().getWindow();
-        //#endif
-        boolean mouseDown = GLFW.glfwGetMouseButton(handle, GLFW.GLFW_MOUSE_BUTTON_LEFT) == GLFW.GLFW_PRESS;
+        boolean mouseDown = ScreenManager.getInstance().cursorHandler().isButtonDown(ReMouseButton.LEFT);
 
         if (mouseDown && !remotely$wasMouseDown) {
             for (int i = remotely$customWidgets.size() - 1; i >= 0; i--) {
@@ -859,7 +852,11 @@ public abstract class ScreenMixin implements ICustomWidgetHolder {
     //#if MC >= 1.21.9 || MC >= 26.1
     private void keyPressedPinnedInGame(KeyEvent keyEvent, CallbackInfoReturnable<Boolean> cir) {
         ScreenManager manager = ScreenManager.getInstance();
-        if (manager.keyPressedPinnedInGame(ReInputEventFactory.keyPressed(this, manager.getDesktopWindowsOverlay(), keyEvent.key(), keyEvent.scancode(), keyEvent.modifiers(), false))) {
+        //#if MC >= 26.3
+        if (manager.keyPressedPinnedInGame(ReInputEventFactory.keyPressed(this, manager.getDesktopWindowsOverlay(), keyEvent.key(), keyEvent.keycode(), keyEvent.modifiers(), false))) {
+        //#else
+        //$$ if (manager.keyPressedPinnedInGame(ReInputEventFactory.keyPressed(this, manager.getDesktopWindowsOverlay(), keyEvent.key(), keyEvent.scancode(), keyEvent.modifiers(), false))) {
+        //#endif
             cir.setReturnValue(true);
         }
     }
