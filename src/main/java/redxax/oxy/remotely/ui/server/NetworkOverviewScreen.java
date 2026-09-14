@@ -173,7 +173,9 @@ public class NetworkOverviewScreen extends ReScreen {
         routingRows.clear();
         playerDataRows.clear();
         serverSearchQuery = "";
-        networkPowerButton = new LifecycleButtonWidget(this::toggleNetworkPower, "Network");
+        networkPowerButton = new LifecycleButtonWidget(this, this::toggleNetworkPower, "Network")
+                .lifecycleAction(LifecycleButtonWidget.Operation.START, () -> runNetworkLifecycle(NetworkLifecycleOperation.START))
+                .lifecycleAction(LifecycleButtonWidget.Operation.STOP, () -> runNetworkLifecycle(NetworkLifecycleOperation.STOP));
         deletePlayerGroupButton = new SquareButtonWidget.Builder().imagePath("delete.png").hint("Delete Player Group").accentType(ThemeManager.getAccent("danger")).onClick(this::deleteActivePlayerGroup).build();
         deletePlayerGroupButton.visible = false;
         header()
@@ -314,7 +316,10 @@ public class NetworkOverviewScreen extends ReScreen {
 
     private void populateOverviewTab(Container container) {
         int topologyWidth = Math.max(220, container.getEffectiveWidth() - 8);
-        topologyWidget = new NetworkTopologyWidget(0, 0, topologyWidth, NetworkTopologyWidget.preferredHeight(topologyWidth, network.members().size()), network, discovery.observations(), () -> runtimeSnapshot, null, () -> transferFailureHeat, this::displayName, this::memberState, this::memberIcon, this::toggleMemberPower, this::openMember);
+        topologyWidget = new NetworkTopologyWidget(this, 0, 0, topologyWidth,
+                NetworkTopologyWidget.preferredHeight(topologyWidth, network.members().size()), network, discovery.observations(),
+                () -> runtimeSnapshot, null, () -> transferFailureHeat, this::displayName, this::memberState, this::memberIcon,
+                this::toggleMemberPower, this::runMemberLifecycle, this::openMember);
         container.addWidget(topologyWidget);
 
         populateCurrentJobs(container);
@@ -996,7 +1001,22 @@ public class NetworkOverviewScreen extends ReScreen {
         lifecycle(canStart(networkState()) ? NetworkLifecycleOperation.START : NetworkLifecycleOperation.STOP);
     }
 
+    private void runNetworkLifecycle(NetworkLifecycleOperation operation) {
+        if (network == null || operation == NetworkLifecycleOperation.START != canStart(networkState())) return;
+        lifecycle(operation);
+    }
+
     private void toggleMemberPower(NetworkMember member) {
+        if (member == null) return;
+        NetworkOverviewProvider.ServerView instance = instancesById.get(member.instanceId());
+        if (instance == null) {
+            new Notification("Server Unavailable", displayName(member), Notification.Type.ERROR);
+            return;
+        }
+        runMemberLifecycle(member, canStart(instance.state()) ? NetworkLifecycleOperation.START : NetworkLifecycleOperation.STOP);
+    }
+
+    private void runMemberLifecycle(NetworkMember member, NetworkLifecycleOperation operation) {
         if (applyingNetworkChange || member == null || !member.isManaged()) {
             return;
         }
@@ -1006,7 +1026,7 @@ public class NetworkOverviewScreen extends ReScreen {
             new Notification("Server Unavailable", displayName(member), Notification.Type.ERROR);
             return;
         }
-        NetworkLifecycleOperation operation = canStart(instance.state()) ? NetworkLifecycleOperation.START : NetworkLifecycleOperation.STOP;
+        if (operation == NetworkLifecycleOperation.START != canStart(instance.state())) return;
         applyingNetworkChange = true;
         Notification notification = operationNotification(operation == NetworkLifecycleOperation.START ? "Starting Server" : "Stopping Server", displayName(member));
         provider.memberLifecycle(networkId, member.nodeId(), operation).whenComplete((job, throwable) -> ScreenManager.getInstance().execute(() -> {

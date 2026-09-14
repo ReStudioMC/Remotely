@@ -443,7 +443,11 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         developmentModeToggle.setVisible(false);
         developmentModeToggle.setHint("Switch Local And Remote");
         header().addLeft(developmentModeToggle);
-        startIconButton = new LifecycleButtonWidget(this::launchOrStopInstance, "Server")
+        startIconButton = new LifecycleButtonWidget(this, this::launchOrStopInstance, "Server")
+                .lifecycleAction(LifecycleButtonWidget.Operation.START, () -> runLifecycleOperation(LifecycleButtonWidget.Operation.START))
+                .lifecycleAction(LifecycleButtonWidget.Operation.STOP, () -> runLifecycleOperation(LifecycleButtonWidget.Operation.STOP))
+                .lifecycleAction(LifecycleButtonWidget.Operation.RESTART, () -> runLifecycleOperation(LifecycleButtonWidget.Operation.RESTART))
+                .lifecycleAction(LifecycleButtonWidget.Operation.KILL, () -> runLifecycleOperation(LifecycleButtonWidget.Operation.KILL), state -> canKillActiveServer())
                 .shiftAction("Restart Server", "Restart Server", "reload.png", state -> state == InstanceState.RUNNING);
         header().addLeft(startIconButton);
         ServerScreenHost.EnvironmentNotice notice = screenHost().environmentNotice();
@@ -1257,6 +1261,33 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
             return;
         }
         startInstance(context, info);
+    }
+
+    private void runLifecycleOperation(LifecycleButtonWidget.Operation operation) {
+        TabContext context = getActiveContext();
+        TerminalSession info = context == null ? null : contextInfos.get(context);
+        if (context == null || context.instance == null || info == null || info.isLocalTerminalMode()) return;
+        ServerScreenHost.ServerState state = stateOf(context.instance);
+        InstanceState instanceState;
+        try {
+            instanceState = InstanceState.valueOf(state.name());
+        } catch (IllegalArgumentException exception) {
+            instanceState = InstanceState.STOPPED;
+        }
+        if (!LifecycleButtonWidget.supports(operation, instanceState)) return;
+        switch (operation) {
+            case START, STOP -> launchOrStopInstance(false);
+            case RESTART -> restartInstance(context, info);
+            case KILL -> {
+                if (canKillActiveServer()) killStoppingServer(context, info);
+            }
+        }
+    }
+
+    private boolean canKillActiveServer() {
+        TabContext context = getActiveContext();
+        return context != null && context.instance != null && stateOf(context.instance) == ServerScreenHost.ServerState.STOPPING
+                && screenHost().killAvailability(context.instance).available() && !isKilling(context.instance);
     }
 
     private void restartInstance(TabContext context, TerminalSession info){

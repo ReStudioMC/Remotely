@@ -4,6 +4,7 @@ import restudio.rebase.ui.widgets.LifecycleButtonWidget;
 import redxax.oxy.remotely.network.NetworkDefinition;
 import redxax.oxy.remotely.network.NetworkMember;
 import redxax.oxy.remotely.network.NetworkMemberObservation;
+import redxax.oxy.remotely.network.NetworkLifecycleOperation;
 import redxax.oxy.remotely.network.NetworkRuntimeNodePresence;
 import redxax.oxy.remotely.network.NetworkRuntimeNodeStatus;
 import redxax.oxy.remotely.network.NetworkRuntimeSnapshot;
@@ -15,6 +16,7 @@ import restudio.rescreen.platform.input.ReScrollEvent;
 import restudio.rescreen.theme.Accent;
 import restudio.rescreen.theme.ThemeColor;
 import restudio.rescreen.theme.ThemeManager;
+import restudio.rescreen.ui.rescreen.ReScreen;
 import restudio.rescreen.ui.widgets.AnimatedWidget;
 import restudio.rescreen.ui.widgets.MountableButtonWidget;
 import restudio.rescreen.ui.widgets.ScrollSelectorWidget;
@@ -26,6 +28,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -48,26 +51,38 @@ public class NetworkTopologyWidget extends AnimatedWidget {
     private final Function<NetworkMember, ?> memberState;
     private final Function<NetworkMember, Identifier> memberIcon;
     private final Consumer<NetworkMember> onPower;
+    private final BiConsumer<NetworkMember, NetworkLifecycleOperation> onLifecycle;
     private final Consumer<NetworkMember> onMemberSelected;
+    private final ReScreen screen;
     private final ScrollSelectorWidget viewSelector;
     private NetworkTopologyHeat selectedHeat;
     private boolean layoutDirty = true;
     private boolean childrenActive = true;
 
     public NetworkTopologyWidget(int x, int y, int width, int height, NetworkDefinition network, List<NetworkMemberObservation> observations, Supplier<NetworkRuntimeSnapshot> runtimeSnapshot, Consumer<NetworkMember> onMemberSelected) {
-        this(x, y, width, height, network, observations, runtimeSnapshot, () -> NetworkTopologyHeat.STATUS, () -> Map.of(), NetworkMember::routeName, null, null, null, onMemberSelected);
+        this(null, x, y, width, height, network, observations, runtimeSnapshot, () -> NetworkTopologyHeat.STATUS,
+                () -> Map.of(), NetworkMember::routeName, null, null, null, null, onMemberSelected);
     }
 
     public NetworkTopologyWidget(int x, int y, int width, int height, NetworkDefinition network, List<NetworkMemberObservation> observations, Supplier<NetworkRuntimeSnapshot> runtimeSnapshot, Supplier<NetworkTopologyHeat> heatMode, Supplier<Map<String, Integer>> transferFailureHeat, Consumer<NetworkMember> onMemberSelected) {
-        this(x, y, width, height, network, observations, runtimeSnapshot, heatMode, transferFailureHeat, NetworkMember::routeName, null, null, null, onMemberSelected);
+        this(null, x, y, width, height, network, observations, runtimeSnapshot, heatMode, transferFailureHeat,
+                NetworkMember::routeName, null, null, null, null, onMemberSelected);
     }
 
     public NetworkTopologyWidget(int x, int y, int width, int height, NetworkDefinition network, List<NetworkMemberObservation> observations, Supplier<NetworkRuntimeSnapshot> runtimeSnapshot, Supplier<NetworkTopologyHeat> heatMode, Supplier<Map<String, Integer>> transferFailureHeat, Function<NetworkMember, String> memberName, Consumer<NetworkMember> onMemberSelected) {
-        this(x, y, width, height, network, observations, runtimeSnapshot, heatMode, transferFailureHeat, memberName, null, null, null, onMemberSelected);
+        this(null, x, y, width, height, network, observations, runtimeSnapshot, heatMode, transferFailureHeat,
+                memberName, null, null, null, null, onMemberSelected);
     }
 
-    public NetworkTopologyWidget(int x, int y, int width, int height, NetworkDefinition network, List<NetworkMemberObservation> observations, Supplier<NetworkRuntimeSnapshot> runtimeSnapshot, Supplier<NetworkTopologyHeat> heatMode, Supplier<Map<String, Integer>> transferFailureHeat, Function<NetworkMember, String> memberName, Function<NetworkMember, ?> memberState, Function<NetworkMember, Identifier> memberIcon, Consumer<NetworkMember> onPower, Consumer<NetworkMember> onMemberSelected) {
+    public NetworkTopologyWidget(ReScreen screen, int x, int y, int width, int height, NetworkDefinition network,
+                                 List<NetworkMemberObservation> observations, Supplier<NetworkRuntimeSnapshot> runtimeSnapshot,
+                                 Supplier<NetworkTopologyHeat> heatMode, Supplier<Map<String, Integer>> transferFailureHeat,
+                                 Function<NetworkMember, String> memberName, Function<NetworkMember, ?> memberState,
+                                 Function<NetworkMember, Identifier> memberIcon, Consumer<NetworkMember> onPower,
+                                 BiConsumer<NetworkMember, NetworkLifecycleOperation> onLifecycle,
+                                 Consumer<NetworkMember> onMemberSelected) {
         super(x, y, width, height, "");
+        this.screen = screen;
         this.network = network;
         if (observations != null) {
             observations.forEach(observation -> this.observations.put(observation.nodeId(), observation));
@@ -78,6 +93,7 @@ public class NetworkTopologyWidget extends AnimatedWidget {
         this.memberState = memberState;
         this.memberIcon = memberIcon;
         this.onPower = onPower;
+        this.onLifecycle = onLifecycle;
         this.onMemberSelected = onMemberSelected;
         NetworkTopologyHeat initialHeat = heatMode == null ? null : heatMode.get();
         selectedHeat = initialHeat == null ? NetworkTopologyHeat.STATUS : initialHeat;
@@ -98,7 +114,12 @@ public class NetworkTopologyWidget extends AnimatedWidget {
 
     private NodeEntry node(NetworkMember member) {
         NodeEntry[] entry = new NodeEntry[1];
-        LifecycleButtonWidget power = memberState == null || memberState.apply(member) == null || onPower == null ? null : new LifecycleButtonWidget(() -> onPower.accept(entry[0].member), "Server");
+        LifecycleButtonWidget power = memberState == null || memberState.apply(member) == null || onPower == null ? null
+                : new LifecycleButtonWidget(screen, () -> onPower.accept(entry[0].member), "Server")
+                .lifecycleAction(LifecycleButtonWidget.Operation.START,
+                        () -> onLifecycle.accept(entry[0].member, NetworkLifecycleOperation.START))
+                .lifecycleAction(LifecycleButtonWidget.Operation.STOP,
+                        () -> onLifecycle.accept(entry[0].member, NetworkLifecycleOperation.STOP));
         MountableButtonWidget.Builder builder = new MountableButtonWidget.Builder(memberName.apply(member))
             .icon(memberIcon == null ? null : memberIcon.apply(member))
             .onClick(() -> {
