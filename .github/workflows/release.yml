@@ -35,6 +35,12 @@ on:
         type: choice
         default: release
         options: [release, verify]
+      target:
+        description: Release Target
+        required: true
+        type: choice
+        default: app
+        options: [app, mod]
 
 permissions:
   contents: read
@@ -52,6 +58,7 @@ jobs:
       visibility: ${{ steps.release.outputs.visibility }}
       changelog: ${{ steps.release.outputs.changelog }}
       source_ref: ${{ steps.release.outputs.source_ref }}
+      target: ${{ steps.release.outputs.target }}
       rescreen_ref: ${{ steps.dependencies.outputs.rescreen }}
       remodel_ref: ${{ steps.dependencies.outputs.remodel }}
       rebase_ref: ${{ steps.dependencies.outputs.rebase }}
@@ -66,6 +73,8 @@ jobs:
           INPUT_VISIBILITY: ${{ inputs.visibility }}
           INPUT_CHANGELOG: ${{ inputs.changelog }}
           INPUT_CONFIRM: ${{ inputs.publish_confirm }}
+          INPUT_OPERATION: ${{ inputs.operation }}
+          INPUT_TARGET: ${{ inputs.target }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           RELEASE_BODY: ${{ github.event.release.body }}
           RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
@@ -82,12 +91,22 @@ jobs:
             visibility=PUBLIC
             changelog=$RELEASE_BODY
             source_ref=$RELEASE_TAG
+            target=app
           else
             version=$INPUT_VERSION
             channel=$INPUT_CHANNEL
             visibility=$INPUT_VISIBILITY
             changelog=$INPUT_CHANGELOG
             source_ref=$GITHUB_REF
+            target=$INPUT_TARGET
+          fi
+          if [[ "$target" == "mod" && "$channel" != "dev" ]]; then
+            printf 'RemotelyMod Public Releases Require The Dev Channel\n' >&2
+            exit 1
+          fi
+          if [[ "$target" == "mod" && "$INPUT_OPERATION" == "verify" ]]; then
+            printf 'RemotelyMod Does Not Support The App Verification Operation\n' >&2
+            exit 1
           fi
           if [[ ${#version} -gt 64 || ! "$version" =~ ^[0-9]+([.][0-9A-Za-z]+|[-+_][0-9A-Za-z]+)*$ ]]; then
             printf 'Release Version Is Invalid: %s\n' "$version" >&2
@@ -99,6 +118,7 @@ jobs:
             printf 'channel=%s\n' "$channel"
             printf 'visibility=%s\n' "$visibility"
             printf 'source_ref=%s\n' "$source_ref"
+            printf 'target=%s\n' "$target"
             printf 'changelog<<%s\n%s\n%s\n' "$delimiter" "$changelog" "$delimiter"
           } >> "$GITHUB_OUTPUT"
       - id: dependencies
@@ -121,6 +141,7 @@ jobs:
 
   jar:
     needs: prepare
+    if: needs.prepare.outputs.target == 'app'
     runs-on: [self-hosted, node1, linux, release]
     env:
       GRADLE_USER_HOME: /var/cache/restudio-gradle
@@ -192,6 +213,7 @@ jobs:
 
   windows:
     needs: prepare
+    if: needs.prepare.outputs.target == 'app'
     runs-on: windows-2022
     env:
       RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
@@ -253,6 +275,7 @@ jobs:
 
   macos:
     needs: prepare
+    if: needs.prepare.outputs.target == 'app'
     strategy:
       fail-fast: false
       matrix:
@@ -342,6 +365,7 @@ jobs:
 
   publish:
     needs: [prepare, jar, windows, macos]
+    if: needs.prepare.outputs.target == 'app'
     runs-on: [self-hosted, node1, linux, release]
     environment: production
     permissions:
@@ -439,4 +463,156 @@ jobs:
           publish_release "${artifacts[2]}" linux
           publish_release "${artifacts[3]}" macos-arm64
           publish_release "${artifacts[4]}" macos-x64
+          trap - EXIT
+
+  publish-mod:
+    needs: prepare
+    if: needs.prepare.outputs.target == 'mod'
+    runs-on: [self-hosted, node1, linux, release]
+    timeout-minutes: 480
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GRADLE_USER_HOME: /var/cache/restudio-gradle
+      ORG_GRADLE_PROJECT_org.gradle.jvmargs: -Xmx8g -Dfile.encoding=UTF-8
+      ORG_GRADLE_PROJECT_org.gradle.workers.max: '2'
+      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+      RELEASE_CHANGELOG: ${{ needs.prepare.outputs.changelog }}
+      RELEASE_VISIBILITY: ${{ needs.prepare.outputs.visibility }}
+    steps:
+      - name: Checkout Remotely
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: ReProjects/Remotely
+          ref: ${{ needs.prepare.outputs.source_ref }}
+      - name: Checkout ReScreen
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: RedxAx/ReScreen
+          token: ${{ secrets.REPROJECTS_PAT }}
+          path: ReProjects/ReScreen
+          ref: ${{ needs.prepare.outputs.rescreen_ref }}
+      - name: Checkout Remodel
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: RedxAx/Remodel
+          token: ${{ secrets.REPROJECTS_PAT }}
+          path: ReProjects/Remodel
+          ref: ${{ needs.prepare.outputs.remodel_ref }}
+      - name: Checkout Rebase
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: RedxAx/Rebase
+          token: ${{ secrets.REPROJECTS_PAT }}
+          path: ReProjects/Rebase
+          ref: ${{ needs.prepare.outputs.rebase_ref }}
+      - name: Checkout Recast
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: RedxAx/Recast
+          token: ${{ secrets.REPROJECTS_PAT }}
+          path: ReProjects/Recast
+          ref: ${{ needs.prepare.outputs.recast_ref }}
+      - name: Checkout ReSync
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: RedxAx/ReSync
+          token: ${{ secrets.REPROJECTS_PAT }}
+          path: ReProjects/ReSync
+          ref: ${{ needs.prepare.outputs.resync_ref }}
+      - name: Set Up JDK 21
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Prepare RemotelyMod Sources
+        working-directory: ReProjects
+        shell: bash
+        run: |
+          chmod +x Remotely/RemotelyMod/scripts/ci-ensure-remodel-java21.sh
+          Remotely/RemotelyMod/scripts/ci-ensure-remodel-java21.sh Remodel
+          chmod +x Remotely/RemotelyMod/scripts/ensure-version-project-dirs.sh
+          Remotely/RemotelyMod/scripts/ensure-version-project-dirs.sh
+      - name: Build Every RemotelyMod Version
+        working-directory: ReProjects/Remotely
+        shell: bash
+        run: |
+          chmod +x gradlew RemotelyMod/gradlew
+          flock /var/lock/restudio-release-build.lock ./gradlew jar --no-daemon --stacktrace
+          cd RemotelyMod
+          flock /var/lock/restudio-release-build.lock ./gradlew "-Premotely.version=$RELEASE_VERSION" buildAllVersions --no-daemon --stacktrace
+          mapfile -t jars < <(find build/versions -maxdepth 1 -type f -name "Remotely-$RELEASE_VERSION+*.jar" -print | sort)
+          [[ ${#jars[@]} -gt 0 ]] || { printf 'No RemotelyMod Jars Were Produced\n' >&2; exit 1; }
+      - name: Retain RemotelyMod Bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: remotelymod-${{ needs.prepare.outputs.version }}
+          path: ReProjects/Remotely/RemotelyMod/build/versions/*.jar
+          if-no-files-found: error
+          retention-days: 30
+      - name: Checkout Release Tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: RedxAx/ReStudio
+          token: ${{ secrets.REPROJECTS_PAT }}
+          path: release-tools
+          ref: 78d63bab135fc1819ea3f4b0f3b48d20b2e5b122
+      - name: Publish Every RemotelyMod Version To ReStudio
+        shell: bash
+        run: |
+          chmod +x release-tools/scripts/releases/publish-release.sh
+          api=${RESTUDIO_RELEASE_API:-https://restudiomc.net/api/releases}
+          audience=${RESTUDIO_RELEASE_AUDIENCE:-https://restudiomc.net/api/releases}
+          project=remotely-dev
+          channel=dev
+          published_ids=()
+          oidc_token() {
+            local audience_encoded
+            audience_encoded=$(jq -rn --arg value "$audience" '$value | @uri')
+            curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+              --header "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${audience_encoded}" | jq -er '.value'
+          }
+          rollback_releases() {
+            local status=$?
+            trap - EXIT
+            if [[ "$status" != "0" && ${#published_ids[@]} -gt 0 ]]; then
+              set +e
+              printf 'Rolling Back %s Published RemotelyMod Artifacts\n' "${#published_ids[@]}" >&2
+              for ((index=${#published_ids[@]} - 1; index >= 0; index--)); do
+                token=$(oidc_token)
+                curl --silent --show-error --location --output /dev/null --request DELETE \
+                  --header "Authorization: Bearer $token" "$api/${published_ids[$index]}"
+              done
+            fi
+            exit "$status"
+          }
+          publish_release() {
+            local file=$1
+            local name variant loader minecraft platform checksum existing response release_id
+            name=$(basename "$file")
+            variant=${name#"Remotely-$RELEASE_VERSION+"}
+            variant=${variant%.jar}
+            loader=${variant##*-}
+            minecraft=${variant%-*}
+            platform="$loader-$minecraft"
+            checksum=$(sha256sum "$file" | awk '{print tolower($1)}')
+            existing=$(curl --fail --silent --show-error --location --retry 3 --retry-all-errors "$api/$project" | jq -r \
+              --arg version "$RELEASE_VERSION" --arg channel "$channel" --arg platform "$platform" --arg checksum "$checksum" \
+              '[.[] | select(.version == $version and .channel == $channel and .platform == $platform and (.checksum | ascii_downcase) == $checksum)] | first | .id // empty')
+            response=$(release-tools/scripts/releases/publish-release.sh "$file" "$project" "$RELEASE_VERSION" "$channel" "$platform" "$RELEASE_VISIBILITY")
+            printf '%s\n' "$response" | jq .
+            release_id=$(jq -er '.id' <<< "$response")
+            if [[ -z "$existing" ]]; then
+              published_ids+=("$release_id")
+            fi
+          }
+          mapfile -t artifacts < <(find ReProjects/Remotely/RemotelyMod/build/versions -maxdepth 1 -type f -name "Remotely-$RELEASE_VERSION+*.jar" -print | sort)
+          [[ ${#artifacts[@]} -gt 0 ]] || { printf 'No RemotelyMod Artifacts Were Found\n' >&2; exit 1; }
+          trap rollback_releases EXIT
+          for artifact in "${artifacts[@]}"; do
+            publish_release "$artifact"
+          done
           trap - EXIT

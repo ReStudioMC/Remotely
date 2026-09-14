@@ -40,7 +40,7 @@ val dropFabricProjectPattern = Regex("""^\d{2,}\.\d+(?:\.\d+)?(?:-(?:snapshot|pr
 val remotelyAppProperties = Properties().apply {
     file("../gradle.properties").inputStream().use(::load)
 }
-val remotelyVersion = remotelyAppProperties.getProperty("remotely.version")
+val remotelyVersion = providers.gradleProperty("remotely.version").orNull ?: remotelyAppProperties.getProperty("remotely.version")
     ?: throw MissingPropertyException("remotely.version has not been set.")
 
 gradle.beforeProject {
@@ -161,6 +161,7 @@ listOf(
     "1.21.11-neoforge",
     "1.21.11-fabric",
 
+    "26.3-rc-3-fabric",
     "26.2-fabric",
     "26.2-neoforge",
     "26.1-neoforge",
