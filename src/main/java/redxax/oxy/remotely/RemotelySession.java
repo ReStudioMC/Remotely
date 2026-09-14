@@ -1,5 +1,7 @@
 package redxax.oxy.remotely;
 
+import restudio.rebase.backend.FileExplorerProviders;
+
 import java.util.Objects;
 
 public final class RemotelySession implements AutoCloseable {
@@ -57,6 +59,7 @@ public final class RemotelySession implements AutoCloseable {
             }
         } finally {
             initialized = false;
+            FileExplorerProviders.clearServerIconResolver(composition.serverIconProvider());
             if (RemotelyClient.INSTANCE == client) {
                 RemotelyClient.INSTANCE = null;
             }

@@ -78,10 +78,12 @@ import restudio.rebase.settings.controllers.ModpackSettingsProvider;
 import restudio.rebase.settings.controllers.ModpackSettingsTarget;
 import restudio.rebase.settings.controllers.BackupSettingsProvider;
 import restudio.rebase.settings.controllers.SettingsActionCapability;
+import restudio.rebase.settings.controllers.MinecraftAssetsSettingsProvider;
 import restudio.rebase.settings.controllers.VersionSettingsCatalog;
 import restudio.rebase.settings.controllers.VersionSettingsTarget;
 import restudio.rebase.util.VersionUtil;
 import restudio.rebase.ui.widgets.TerminalWidget;
+import restudio.rebase.ui.widgets.IconCustomizerWidget;
 import restudio.rebase.ui.screens.editor.FileEditorScreen;
 import restudio.rebase.ui.screens.editor.EditorDecorationBinding;
 import restudio.rebase.ui.screens.explorer.FileExplorerScreen;
@@ -94,7 +96,6 @@ import restudio.rebase.ui.screens.auth.ReStudioLoginScreen;
 import restudio.rescreen.ui.core.Screen;
 import restudio.rescreen.ui.rescreen.ReScreen;
 import restudio.rescreen.ui.widgets.IconButton;
-import restudio.rescreen.ui.widgets.IconCustomizerWidget;
 import restudio.rescreen.ui.widgets.PopupWidget;
 import restudio.rescreen.util.Identifier;
 import restudio.rescreen.util.Notification;
@@ -787,7 +788,10 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         Runnable guardedCompletion = onComplete == null ? null : () -> {
             if (isCurrent(context)) onComplete.run();
         };
-        IconCustomizerWidget popup = IconCustomizerWidget.selecting("Icon Customizer", icons, tints, selection -> {
+        MinecraftAssetsSettingsProvider.Settings minecraftAssetSettings =
+                configStore() instanceof MinecraftAssetsSettingsProvider.Settings settings ? settings : null;
+        IconCustomizerWidget popup = IconCustomizerWidget.selecting("Icon Customizer", icons, tints,
+                application.getGameAssets(), MinecraftAssetsSettingsProvider.browser(minecraftAssetSettings), selection -> {
             if (!isCurrent(context)) return;
             ServerIconProvider.Customization customization = new ServerIconProvider.Customization(selection.image(), selection.tint(), selection.rendered());
             iconManager.customizeIcon(server, host, customization, guardedCompletion).whenComplete((ignored, failure) -> execute(() -> {
@@ -1027,6 +1031,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
             List<ServerModels.ClientServerView> available = servers == null ? List.of() : servers.stream()
                     .filter(Objects::nonNull)
                     .filter(server -> !serverId(server).isBlank())
+                    .filter(this::isVisibleExplorerServer)
                     .toList();
             if (available.isEmpty()) {
                 application.notify("File Explorer", "No ReStudio Servers Are Available", ReSyncNotificationLevel.WARN);
@@ -1040,6 +1045,13 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
             List<BrowserServerFileRootProvider.ServerRoot> roots = available.stream().map(server ->
                     new BrowserServerFileRootProvider.ServerRoot(serverId(server), server.name,
                             new BrowserServerFileSystemProvider(this, browserApi, capabilities(server), server))).toList();
+            FileExplorerProviders.installServerRoots(this, available.stream().map(server -> {
+                BrowserServerFileRootProvider.ServerRoot root = roots.stream()
+                        .filter(candidate -> candidate.id().equals(serverId(server)))
+                        .findFirst()
+                        .orElseThrow();
+                return new FileExplorerProviders.Root(root.name(), RemotePath.root(), root.provider(), server, null, iconProvider.getQuickIconId(server));
+            }).toList());
             RemotePath root = RemotePath.root();
             application.setScreen(new FileExplorerScreen(current, null, root, root, false, new BrowserServerFileRootProvider(roots)));
         }));
@@ -1219,11 +1231,40 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
                 unavailable(Action.FILE_EXPLORER);
                 return;
             }
-            RemotePath root = RemotePath.root();
-            RemoteFileSystemProvider provider = new BrowserServerFileSystemProvider(this, browserApi, capabilities(server), server);
-            application.setScreen(new FileExplorerScreen(current, null, root, root, false,
-                    provider));
+            HostContext context = captureContext();
+            restudioServers().whenComplete((servers, failure) -> execute(() -> {
+                if (!isCurrent(context)) return;
+                List<ServerModels.ClientServerView> available = new ArrayList<>();
+                if (servers != null) available.addAll(servers.stream()
+                        .filter(Objects::nonNull)
+                        .filter(candidate -> !serverId(candidate).isBlank())
+                        .filter(this::isVisibleExplorerServer)
+                        .toList());
+                RemotePath root = RemotePath.root();
+                List<FileExplorerProviders.Root> roots = available.stream().map(candidate -> {
+                    RemoteFileSystemProvider candidateProvider = new BrowserServerFileSystemProvider(this, browserApi, capabilities(candidate), candidate);
+                    String name = candidate.name == null || candidate.name.isBlank() ? serverId(candidate) : candidate.name;
+                    return new FileExplorerProviders.Root(name, root, candidateProvider, candidate, null, iconProvider.getQuickIconId(candidate));
+                }).toList();
+                FileExplorerProviders.installServerRoots(this, roots);
+                FileExplorerProviders.Root selected = roots.stream()
+                        .filter(candidate -> serverId(server).equals(candidate.provider().getMetadata("serverId")))
+                        .findFirst()
+                        .orElseGet(() -> new FileExplorerProviders.Root(serverName(server), root,
+                                new BrowserServerFileSystemProvider(this, browserApi, capabilities(server), server), server, null,
+                                iconProvider.getQuickIconId(server)));
+                application.setScreen(new FileExplorerScreen(current, selected.context(), root, root, false, selected.provider()));
+            }));
         });
+    }
+
+    private boolean isVisibleExplorerServer(ServerModels.ClientServerView server) {
+        RemotelyConfigStore config = configStore();
+        List<String> hidden = config == null ? List.of() : config.getHiddenRestudioServers();
+        if (hidden.isEmpty()) return true;
+        String id = serverId(server);
+        String name = serverName(server);
+        return !hidden.contains(id) && !hidden.contains(name);
     }
 
     @Override
@@ -2314,6 +2355,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     private void clearBrowserSessionState() {
         advanceHostGeneration();
         retireResourceContexts();
+        FileExplorerProviders.clearServerRoots(this);
         BrowserRemotelyServerApi browserApi = browserApi();
         if (browserApi != null) {
             browserApi.closeAllTerminals();

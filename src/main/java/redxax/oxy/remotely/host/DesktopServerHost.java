@@ -38,7 +38,6 @@ import redxax.oxy.remotely.ui.server.ServerManagerScreen;
 import redxax.oxy.remotely.ui.server.ServerScreenHost;
 import redxax.oxy.remotely.ui.server.NetworkOverviewProvider;
 import redxax.oxy.remotely.ui.server.DesktopNetworkOverviewProvider;
-import redxax.oxy.remotely.ui.server.DesktopServerIconProvider;
 import redxax.oxy.remotely.ui.server.ServerIconManager;
 import redxax.oxy.remotely.ui.server.ServerIconProvider;
 import redxax.oxy.remotely.ui.server.ServerUiCapabilityProvider;
@@ -68,6 +67,7 @@ import restudio.rebase.api.RebaseApiFactory;
 import restudio.rebase.api.unified.InstanceApi;
 import restudio.rebase.api.unified.internal.StandardOutputStateParser;
 import restudio.rebase.backend.BackendConfig;
+import restudio.rebase.backend.CapabilityIds;
 import restudio.rebase.backend.FileExplorerProviders;
 import restudio.rebase.backend.RemoteFileSystemProvider;
 import restudio.rebase.backend.RemotePath;
@@ -95,6 +95,7 @@ import restudio.rebase.util.FileUtils;
 import restudio.rebase.util.ssh.SSHManager;
 import restudio.rescreen.platform.Async;
 import restudio.rebase.platform.jvm.JvmAsyncBridge;
+import restudio.rebase.platform.jvm.JvmMinecraftAssetsSettingsProvider;
 import restudio.rebase.platform.jvm.JvmStandardOutputStateParser;
 import restudio.rebase.restudio.api.models.ServerModels;
 import restudio.rebase.restudio.AuthStateListener;
@@ -108,12 +109,12 @@ import restudio.rebase.resource.marketplace.JvmResourceMarketplaceAdapter;
 import restudio.rebase.ui.screens.resources.ResourceContainer;
 import restudio.rebase.ui.screens.resources.DesktopResourceContainerProvider;
 import restudio.rebase.ui.screens.explorer.FileExplorerScreen;
+import restudio.rebase.ui.widgets.IconCustomizerWidget;
 import restudio.rebase.ui.widgets.TerminalWidget;
 import restudio.rebase.ui.worldmap.WorldMapScreen;
 import restudio.rebase.util.VersionUtil;
 import restudio.rescreen.ui.core.Screen;
 import restudio.rescreen.ui.rescreen.ReScreen;
-import restudio.rescreen.ui.widgets.IconCustomizerWidget;
 import restudio.rescreen.util.Notification;
 import restudio.rescreen.util.BrowserUtils;
 import restudio.rescreen.util.Identifier;
@@ -153,12 +154,16 @@ public final class DesktopServerHost implements ServerScreenHost {
     private final Map<Runnable, ReStudio> authStateOwners = new IdentityHashMap<>();
     private final Map<String, Instance> restudioBridgeInstances = new ConcurrentHashMap<>();
     private final Map<String, ServerModels.ClientServerView> restudioBridgeViews = new ConcurrentHashMap<>();
+    private volatile List<ServerModels.ClientServerView> restudioServerSnapshot = List.of();
     private final AtomicLong restudioRequestGeneration = new AtomicLong();
     private final ServerIconProvider iconProvider;
+    private final ServerIconManager iconManager;
 
     public DesktopServerHost(RemotelyClient client) {
         this.client = Objects.requireNonNull(client, "client");
-        this.iconProvider = new DesktopServerIconProvider(DesktopRemotelyPaths.appDir());
+        this.iconProvider = client.getComposition().serverIconProvider();
+        this.iconManager = new ServerIconManager(iconProvider);
+        FileExplorerProviders.installAdditionalRootGroups(this, this::reactorExplorerRootGroups);
     }
 
     @Override
@@ -1199,6 +1204,7 @@ public final class DesktopServerHost implements ServerScreenHost {
                 restudioBridgeInstances.putAll(nextInstances);
                 restudioBridgeViews.clear();
                 restudioBridgeViews.putAll(nextViews);
+                restudioServerSnapshot = List.copyOf(nextViews.values());
 
                 for (Map.Entry<String, Instance> entry : nextInstances.entrySet()) {
                     String identifier = entry.getKey();
@@ -1543,6 +1549,78 @@ public final class DesktopServerHost implements ServerScreenHost {
                 .toList();
         if (proxy == null) return Async.failed(new IllegalArgumentException("Proxy Server Is Unavailable"));
         return createNetwork(name, proxyId, observedPort(proxy, 25565), defaultNetworkMembers(proxy, backends, installReSync), installReSync);
+    }
+
+    private Async<List<FileExplorerProviders.RootGroup>> reactorExplorerRootGroups() {
+        ReStudio studio = ReStudio.getInstance();
+        if (studio == null || !studio.isAuthenticated()) {
+            clearRestudioBridge();
+            return Async.completed(List.of());
+        }
+        List<FileExplorerProviders.Root> roots = visibleRestudioServers(restudioServerSnapshot, hiddenRestudioServers()).stream()
+                .map(this::reactorExplorerRoot)
+                .filter(Objects::nonNull)
+                .toList();
+        return Async.completed(roots.isEmpty() ? List.of() : List.of(new FileExplorerProviders.RootGroup("Reactor Servers", roots)));
+    }
+
+    private FileExplorerProviders.Root reactorExplorerRoot(ServerModels.ClientServerView server) {
+        String identifier = restudioIdentifier(server);
+        Instance instance = restudioBridgeInstances.get(identifier);
+        if (identifier.isBlank() || instance == null) return null;
+        RemotePath root = RemotePath.root();
+        String name = server.name == null || server.name.isBlank() ? identifier : server.name;
+        Identifier icon = reactorExplorerIcon(instance);
+        return new FileExplorerProviders.Root(name, root, RemoteFileSystemProvider.unavailable(), instance,
+                ignored -> resolveReactorExplorerRoot(identifier), icon);
+    }
+
+    private Async<FileExplorerProviders.Root> resolveReactorExplorerRoot(String identifier) {
+        ReStudio studio = ReStudio.getInstance();
+        Instance instance = restudioBridgeInstances.get(identifier);
+        if (studio == null || !studio.isAuthenticated() || instance == null) {
+            return Async.failed(new IllegalStateException("Reactor Server Is Unavailable"));
+        }
+        return JvmAsyncBridge.fromFuture(studio.getApi().getSftpToken(identifier)).thenApply(token -> {
+            if (ReStudio.getInstance() != studio || !studio.isAuthenticated()
+                    || restudioBridgeInstances.get(identifier) != instance) {
+                throw new IllegalStateException("Reactor Server Is Unavailable");
+            }
+            updateRestudioCredential(instance, "password", token);
+            RemoteFileSystemProvider provider = FileExplorerProviders.forInstance(instance);
+            if (provider == null || !provider.operationCapability(CapabilityIds.FILES, List.of(), null).available()) {
+                throw new IllegalStateException("Reactor Server Files Are Unavailable");
+            }
+            iconManager.resolveIconPath(instance, true, null);
+            String name = instance.getName() == null || instance.getName().isBlank() ? identifier : instance.getName();
+            return new FileExplorerProviders.Root(name, RemotePath.root(), provider, instance, null,
+                    reactorExplorerIcon(instance));
+        });
+    }
+
+    private Identifier reactorExplorerIcon(Instance instance) {
+        Identifier icon = FileExplorerProviders.serverIcon(instance);
+        return icon == null ? iconManager.getQuickIconId(instance) : icon;
+    }
+
+    private List<String> hiddenRestudioServers() {
+        RemotelyConfigStore config = client.getComposition().configManager();
+        return config == null ? List.of() : config.getHiddenRestudioServers();
+    }
+
+    static boolean isHiddenRestudioServer(List<String> hidden, ServerModels.ClientServerView server) {
+        if (hidden == null || hidden.isEmpty() || server == null) return false;
+        String identifier = restudioIdentifier(server);
+        if (!identifier.isBlank() && hidden.contains(identifier)) return true;
+        return server.name != null && !server.name.isBlank() && hidden.contains(server.name);
+    }
+
+    static List<ServerModels.ClientServerView> visibleRestudioServers(List<ServerModels.ClientServerView> loaded, List<String> hidden) {
+        if (loaded == null || loaded.isEmpty()) return List.of();
+        return loaded.stream()
+                .filter(Objects::nonNull)
+                .filter(server -> !isHiddenRestudioServer(hidden, server))
+                .toList();
     }
 
     @Override
@@ -1974,7 +2052,7 @@ public final class DesktopServerHost implements ServerScreenHost {
             return Async.failed(new IllegalArgumentException("Server Icon Is Unavailable"));
         }
         RemoteHost remoteHost = findHost(host);
-        return new ServerIconManager(iconProvider).customizeIcon(instance, remoteHost, icon, onComplete);
+        return iconManager.customizeIcon(instance, remoteHost, icon, onComplete);
     }
 
     @Override
@@ -1983,14 +2061,14 @@ public final class DesktopServerHost implements ServerScreenHost {
             unavailable(Action.CUSTOMIZE_ICON);
             return;
         }
-        ServerIconManager iconManager = new ServerIconManager(iconProvider);
         List<Identifier> images = iconManager.loadIconAssetIds();
         if (images.isEmpty()) {
             application().notify("Icon Customizer", "Icon Assets Are Unavailable", ReSyncNotificationLevel.WARN);
             return;
         }
         List<Integer> tints = iconManager.loadIconTints();
-        IconCustomizerWidget popup = new IconCustomizerWidget("Icon Customizer", images, tints, icon ->
+        IconCustomizerWidget popup = new IconCustomizerWidget("Icon Customizer", images, tints,
+                application().getGameAssets(), new JvmMinecraftAssetsSettingsProvider(config()), icon ->
                 customizeIcon(server, host, icon, onComplete));
         current.addDrawableChild(popup);
         popup.show();
@@ -2998,6 +3076,7 @@ public final class DesktopServerHost implements ServerScreenHost {
         restudioRequestGeneration.incrementAndGet();
         restudioBridgeInstances.clear();
         restudioBridgeViews.clear();
+        restudioServerSnapshot = List.of();
     }
 
     private static String firstNonBlank(String... values) {

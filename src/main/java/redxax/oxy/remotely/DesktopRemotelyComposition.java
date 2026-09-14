@@ -17,6 +17,7 @@ import redxax.oxy.remotely.network.DesktopNetworkAccess;
 import redxax.oxy.remotely.ui.server.DesktopServerUiCapabilities;
 import redxax.oxy.remotely.ui.server.DesktopPanelServerProvider;
 import redxax.oxy.remotely.ui.server.DesktopRemoteHostConnectionProvider;
+import redxax.oxy.remotely.ui.server.DesktopServerIconProvider;
 import redxax.oxy.remotely.ui.server.DesktopTerminalSessionLifecycle;
 import restudio.rebase.Rebase;
 import restudio.rebase.instance.Instance;
@@ -57,6 +58,7 @@ public final class DesktopRemotelyComposition {
                 .serverUiCapabilityProvider(DesktopServerUiCapabilities.desktop())
                 .panelServerProvider(DesktopPanelServerProvider.instance())
                 .remoteHostConnectionProvider(DesktopRemoteHostConnectionProvider.instance())
+                .serverIconProvider(new DesktopServerIconProvider(applicationDirectory))
                 .terminalSessionManagerFactory(() -> new TerminalSessionManager(new DesktopTerminalSessionLifecycle()))
                 .networkManagerFactory(() -> new DesktopNetworkManager(applicationDirectory))
                 .instanceManagerFactory(() -> Rebase.get().getInstanceManager())

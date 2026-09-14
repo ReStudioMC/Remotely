@@ -6,6 +6,7 @@ import restudio.rebase.instance.Instance;
 import restudio.rebase.restudio.api.models.ServerModels;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -47,5 +48,35 @@ class DesktopServerHostIdentityTest {
         assertEquals("SSH", DesktopServerHost.terminalBackendType(server, null));
         assertEquals(DesktopServerHost.TerminalInputRoute.DIRECT,
                 DesktopServerHost.terminalInputRoute(DesktopServerHost.terminalBackendType(server, null)));
+    }
+
+    @Test
+    void reactorExplorerVisibilityAcceptsIdentifiersAndNames() {
+        ServerModels.ClientServerView server = new ServerModels.ClientServerView();
+        server.identifier = "reactor-one";
+        server.name = "Reactor One";
+
+        assertFalse(DesktopServerHost.isHiddenRestudioServer(List.of(), server));
+        assertTrue(DesktopServerHost.isHiddenRestudioServer(List.of("reactor-one"), server));
+        assertTrue(DesktopServerHost.isHiddenRestudioServer(List.of("Reactor One"), server));
+        assertFalse(DesktopServerHost.isHiddenRestudioServer(List.of("reactor-two"), server));
+    }
+
+    @Test
+    void reactorExplorerUsesTheLoadedVisibleSnapshotInOrder() {
+        ServerModels.ClientServerView first = new ServerModels.ClientServerView();
+        first.identifier = "reactor-one";
+        first.name = "Reactor One";
+        ServerModels.ClientServerView hidden = new ServerModels.ClientServerView();
+        hidden.identifier = "reactor-hidden";
+        hidden.name = "Hidden Reactor";
+        ServerModels.ClientServerView last = new ServerModels.ClientServerView();
+        last.identifier = "reactor-three";
+        last.name = "Reactor Three";
+
+        List<ServerModels.ClientServerView> visible = DesktopServerHost.visibleRestudioServers(
+                List.of(first, hidden, last), List.of("reactor-hidden"));
+
+        assertEquals(List.of(first, last), visible);
     }
 }

@@ -1,10 +1,10 @@
 package redxax.oxy.remotely.web.platform;
 
 import redxax.oxy.remotely.ui.server.ServerIconProvider;
+import restudio.rebase.ui.widgets.IconCustomizerWidget;
 import restudio.rescreen.platform.Async;
 import restudio.rebase.restudio.api.models.ServerModels;
 import restudio.rescreen.ui.core.ScreenManager;
-import restudio.rescreen.ui.widgets.IconCustomizerWidget;
 import restudio.rescreen.ui.widgets.ImportedIconLibrary;
 import restudio.rescreen.util.Identifier;
 

@@ -14,6 +14,8 @@ import redxax.oxy.remotely.settings.server.ServerSettingsRegistry;
 import redxax.oxy.remotely.settings.server.ServerSettingsRegistryStorage;
 import redxax.oxy.remotely.ui.server.PanelServerProvider;
 import redxax.oxy.remotely.ui.server.RemoteHostConnectionProvider;
+import redxax.oxy.remotely.ui.server.ServerIconManager;
+import redxax.oxy.remotely.ui.server.ServerIconProvider;
 import redxax.oxy.remotely.ui.server.ServerUiCapabilityProvider;
 import restudio.rebase.backend.FileExplorerProviders;
 import restudio.rescreen.platform.Clock;
@@ -90,6 +92,7 @@ public final class RemotelyComposition {
     private final ServerUiCapabilityProvider serverUiCapabilityProvider;
     private final PanelServerProvider panelServerProvider;
     private final RemoteHostConnectionProvider remoteHostConnectionProvider;
+    private final ServerIconProvider serverIconProvider;
     private final Supplier<?> networkManagerFactory;
     private final BiFunction<RemotelyClient, RemotelyServerApi, FlowManager> flowManagerFactory;
     private final ReSyncFlowClientFactory reSyncFlowClientFactory;
@@ -118,6 +121,7 @@ public final class RemotelyComposition {
         serverUiCapabilityProvider = builder.serverUiCapabilityProvider;
         panelServerProvider = builder.panelServerProvider;
         remoteHostConnectionProvider = builder.remoteHostConnectionProvider;
+        serverIconProvider = builder.serverIconProvider;
         networkManagerFactory = builder.networkManagerFactory;
         flowManagerFactory = builder.flowManagerFactory;
         reSyncFlowClientFactory = builder.reSyncFlowClientFactory;
@@ -125,6 +129,13 @@ public final class RemotelyComposition {
         clock = builder.clock;
         TaskSchedulers.configure(scheduler);
         FileExplorerProviders.installScheduler(this, scheduler);
+        if (environment == Environment.DESKTOP) {
+            ServerIconManager icons = new ServerIconManager(serverIconProvider);
+            FileExplorerProviders.installServerIconResolver(serverIconProvider, instance -> {
+                icons.resolveIconPath(instance, true, null);
+                return icons.getIconId(instance);
+            });
+        }
         reSyncFrameTransportFactory = builder.reSyncFrameTransportFactory;
         reSyncIdentityProvider = builder.reSyncIdentityProvider;
         instanceManagerFactory = builder.instanceManagerFactory;
@@ -202,6 +213,10 @@ public final class RemotelyComposition {
         return remoteHostConnectionProvider;
     }
 
+    public ServerIconProvider serverIconProvider() {
+        return serverIconProvider;
+    }
+
     public <T> T createNetworkManager() {
         return networkManagerFactory == null ? null : (T) networkManagerFactory.get();
     }
@@ -276,6 +291,7 @@ public final class RemotelyComposition {
         private ServerUiCapabilityProvider serverUiCapabilityProvider = ServerUiCapabilityProvider.unavailable();
         private PanelServerProvider panelServerProvider = PanelServerProvider.unavailable();
         private RemoteHostConnectionProvider remoteHostConnectionProvider = RemoteHostConnectionProvider.unavailable();
+        private ServerIconProvider serverIconProvider = ServerIconProvider.logical();
         private Supplier<?> networkManagerFactory;
         private BiFunction<RemotelyClient, RemotelyServerApi, FlowManager> flowManagerFactory;
         private ReSyncFlowClientFactory reSyncFlowClientFactory;
@@ -354,6 +370,11 @@ public final class RemotelyComposition {
 
         public Builder remoteHostConnectionProvider(RemoteHostConnectionProvider provider) {
             this.remoteHostConnectionProvider = Objects.requireNonNull(provider, "remoteHostConnectionProvider");
+            return this;
+        }
+
+        public Builder serverIconProvider(ServerIconProvider provider) {
+            this.serverIconProvider = Objects.requireNonNull(provider, "serverIconProvider");
             return this;
         }
 
