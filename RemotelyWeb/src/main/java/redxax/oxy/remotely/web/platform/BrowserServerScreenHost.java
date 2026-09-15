@@ -3022,23 +3022,26 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         }
 
         @Override
-        public CapabilityDescriptor deviceDownloadCapability(List<RemotePath> sources) {
+        public DeviceDownloadCapability deviceDownloadCapability(List<RemotePath> sources) {
+            CapabilityDescriptor availability;
             if (sources == null || sources.isEmpty()) {
-                return CapabilityDescriptor.unavailable(CapabilityIds.DOWNLOAD, "Select Files To Download");
+                availability = CapabilityDescriptor.unavailable(CapabilityIds.DOWNLOAD, "Select Files To Download");
+            } else if (sources.stream().anyMatch(path -> path == null || path.isRoot())) {
+                availability = CapabilityDescriptor.unavailable(CapabilityIds.DOWNLOAD, "Select Files To Download");
+            } else {
+                availability = capability(CapabilityIds.DOWNLOAD, "files.download");
             }
-            if (sources.stream().anyMatch(path -> path == null || path.isRoot())) {
-                return CapabilityDescriptor.unavailable(CapabilityIds.DOWNLOAD, "Select Files To Download");
-            }
-            return capability(CapabilityIds.DOWNLOAD, "files.download");
+            return new DeviceDownloadCapability(availability, DeviceDownloadFeedback.NATIVE);
         }
 
         @Override
-        public Async<Void> downloadToDevice(List<RemotePath> sources, BiConsumer<Long, Long> progressCallback,
-                                            BooleanSupplier isCancelled) {
+        public Async<DeviceDownloadResult> downloadToDevice(List<RemotePath> sources, BiConsumer<Long, Long> progressCallback,
+                                                            BooleanSupplier isCancelled) {
             if (isCancelled != null && isCancelled.getAsBoolean()) return Async.failed(new Async.Cancellation());
             List<String> selected = sources == null ? List.of() : sources.stream()
                     .filter(Objects::nonNull).map(this::remote).toList();
-            return operation("files.download", () -> api.downloadFiles(serverId, selected));
+            return operation("files.download", () -> api.downloadFiles(serverId, selected))
+                    .thenApply(ignored -> DeviceDownloadResult.started());
         }
 
         @Override
