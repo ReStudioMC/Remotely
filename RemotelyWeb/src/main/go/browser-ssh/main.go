@@ -626,9 +626,16 @@ func (writer *terminalWriter) Write(bytes []byte) (int, error) {
 		data = data[size:]
 	}
 	if output.Len() > 0 {
-		emit("output", "", output.String())
+		emitOutput(output.String())
 	}
 	return len(bytes), nil
+}
+
+func emitOutput(message string) {
+	event := js.Global().Get("Object").New()
+	event.Set("type", "output")
+	event.Set("message", message)
+	js.Global().Call("postMessage", event)
 }
 
 func emit(kind string, code string, message string) {
