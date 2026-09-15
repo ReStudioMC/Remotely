@@ -396,11 +396,40 @@ final class BrowserSshTerminalTransport implements TerminalTransport {
     @JSBody(params = "id", script = """
             try {
                 const state = window.__remotelySshWorkers || (window.__remotelySshWorkers = Object.create(null));
+                const diagnostics = window.__remotelySshDiagnostics || (window.__remotelySshDiagnostics = Object.create(null));
                 const key = String(id);
                 if (state[key]) return false;
+                const diagnostic = {
+                    id: id,
+                    transportFrames: 0,
+                    transportBytes: 0,
+                    postedFrames: 0,
+                    postedBytes: 0,
+                    receivedFrames: 0,
+                    receivedBytes: 0,
+                    writtenFrames: 0,
+                    writtenBytes: 0,
+                    postFailures: 0,
+                    lastStage: 'created'
+                };
+                diagnostics[key] = diagnostic;
+                diagnostics.latest = diagnostic;
                 const worker = new Worker(new URL('ssh/restudio-ssh-worker.js', document.baseURI), {name: 'Reactor SSH'});
                 worker.onmessage = function(event) {
                     const value = event && event.data && typeof event.data === 'object' ? event.data : {};
+                    if (value.type === 'diagnostic') {
+                        const length = Math.max(0, Math.min(32768, Number.parseInt(String(value.message || '0'), 10) || 0));
+                        if (value.code === 'input_received') {
+                            diagnostic.receivedFrames++;
+                            diagnostic.receivedBytes += length;
+                            diagnostic.lastStage = 'received';
+                        } else if (value.code === 'input_written') {
+                            diagnostic.writtenFrames++;
+                            diagnostic.writtenBytes += length;
+                            diagnostic.lastStage = 'written';
+                        }
+                        return;
+                    }
                     javaMethods.get('redxax.oxy.remotely.web.platform.BrowserSshTerminalTransport.workerMessage(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V').invoke(id, String(value.type || ''), String(value.code || ''), String(value.message || ''));
                 };
                 worker.onerror = function(event) {
@@ -430,12 +459,30 @@ final class BrowserSshTerminalTransport implements TerminalTransport {
 
     @JSBody(params = {"id", "bytes"}, script = """
             const state = window.__remotelySshWorkers;
-            const worker = state && state[String(id)];
+            const key = String(id);
+            const worker = state && state[key];
             if (!worker) return false;
+            const diagnostics = window.__remotelySshDiagnostics;
+            const diagnostic = diagnostics && diagnostics[key];
+            const length = Math.max(0, Math.min(32768, Number(bytes && bytes.byteLength) || 0));
+            if (diagnostic) {
+                diagnostic.transportFrames++;
+                diagnostic.transportBytes += length;
+                diagnostic.lastStage = 'transport';
+            }
             try {
                 worker.postMessage({type: 'input', data: new Uint8Array(bytes)});
+                if (diagnostic) {
+                    diagnostic.postedFrames++;
+                    diagnostic.postedBytes += length;
+                    diagnostic.lastStage = 'posted';
+                }
                 return true;
             } catch (error) {
+                if (diagnostic) {
+                    diagnostic.postFailures++;
+                    diagnostic.lastStage = 'post_failed';
+                }
                 return false;
             }
             """)

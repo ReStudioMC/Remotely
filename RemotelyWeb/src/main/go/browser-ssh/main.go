@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall/js"
@@ -21,6 +22,7 @@ const (
 	maxFrameBytes    = 32 * 1024
 	maxQueuedFrames  = 16
 	maxBufferedBytes = 256 * 1024
+	maxDiagnostics   = 32
 )
 
 var (
@@ -33,16 +35,18 @@ var (
 )
 
 type operation struct {
-	mu        sync.Mutex
-	closeOnce sync.Once
-	closed    chan struct{}
-	inputs    chan []byte
-	resizes   chan dimensions
-	carrier   *webSocketConn
-	client    *ssh.Client
-	session   *ssh.Session
-	stdin     io.WriteCloser
-	explicit  bool
+	mu                  sync.Mutex
+	closeOnce           sync.Once
+	closed              chan struct{}
+	inputs              chan []byte
+	resizes             chan dimensions
+	carrier             *webSocketConn
+	client              *ssh.Client
+	session             *ssh.Session
+	stdin               io.WriteCloser
+	explicit            bool
+	receivedDiagnostics int
+	writtenDiagnostics  int
 }
 
 type frame struct {
@@ -116,7 +120,9 @@ func receiveCommand(this js.Value, arguments []js.Value) any {
 		if current := currentOperation(); current != nil {
 			bytes, valid := copyBytes(message.Get("data"))
 			if valid && len(bytes) > 0 && len(bytes) <= maxFrameBytes {
-				current.enqueueInput(bytes)
+				if current.enqueueInput(bytes) {
+					current.recordInputReceived(len(bytes))
+				}
 			}
 		}
 	case "resize":
@@ -237,12 +243,15 @@ func (current *operation) run(request openRequest) {
 	}
 }
 
-func (current *operation) enqueueInput(bytes []byte) {
+func (current *operation) enqueueInput(bytes []byte) bool {
 	select {
 	case current.inputs <- bytes:
+		return true
 	case <-current.closed:
+		return false
 	default:
 		current.fail("input_overflow", "Browser SSH Input Queue Is Full")
+		return false
 	}
 }
 
@@ -266,14 +275,49 @@ func (current *operation) pumpInput(stdin io.Writer) {
 	for {
 		select {
 		case bytes := <-current.inputs:
-			if _, err := stdin.Write(bytes); err != nil && !current.isClosed() {
-				current.fail("connection_lost", "Browser SSH Input Failed")
+			if err := writeAll(stdin, bytes); err != nil {
+				if !current.isClosed() {
+					current.fail("connection_lost", "Browser SSH Input Failed")
+				}
 				return
 			}
+			current.recordInputWritten(len(bytes))
 		case <-current.closed:
 			return
 		}
 	}
+}
+
+func writeAll(writer io.Writer, bytes []byte) error {
+	for len(bytes) > 0 {
+		written, err := writer.Write(bytes)
+		if written > 0 {
+			bytes = bytes[written:]
+		}
+		if err != nil {
+			return err
+		}
+		if written == 0 {
+			return io.ErrShortWrite
+		}
+	}
+	return nil
+}
+
+func (current *operation) recordInputReceived(length int) {
+	if current.receivedDiagnostics >= maxDiagnostics {
+		return
+	}
+	current.receivedDiagnostics++
+	emitInputDiagnostic("input_received", length)
+}
+
+func (current *operation) recordInputWritten(length int) {
+	if current.writtenDiagnostics >= maxDiagnostics {
+		return
+	}
+	current.writtenDiagnostics++
+	emitInputDiagnostic("input_written", length)
 }
 
 func (current *operation) pumpResize(session *ssh.Session) {
@@ -648,6 +692,10 @@ func emit(kind string, code string, message string) {
 		event.Set("message", boundedMessage(message))
 	}
 	js.Global().Call("postMessage", event)
+}
+
+func emitInputDiagnostic(code string, length int) {
+	emit("diagnostic", code, strconv.Itoa(length))
 }
 
 func copyBytes(value js.Value) ([]byte, bool) {
