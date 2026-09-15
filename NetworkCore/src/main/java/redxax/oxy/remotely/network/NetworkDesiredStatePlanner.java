@@ -1,15 +1,12 @@
 package redxax.oxy.remotely.network;
 
-import restudio.rebase.instance.Instance;
-import restudio.rescreen.platform.Sha256;
-
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.EnumSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
-import java.util.Properties;
+import java.util.Objects;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -17,14 +14,26 @@ import java.util.stream.Collectors;
 public class NetworkDesiredStatePlanner {
     private static final Set<SyncDataFamily> SUPPORTED_TRANSFER_FAMILIES = Set.copyOf(EnumSet.allOf(SyncDataFamily.class));
     private static final String VELOCITY_CONFIG_VERSION = "2.8";
-    public NetworkReconciliationPlan plan(NetworkDiscoveryResult discovery, NetworkSecretStore secretStore) {
-        NetworkDefinition network = discovery.network();
+    private final NetworkClock clock;
+
+    public NetworkDesiredStatePlanner() {
+        this(NetworkClock.SYSTEM);
+    }
+
+    public NetworkDesiredStatePlanner(NetworkClock clock) {
+        this.clock = Objects.requireNonNull(clock, "clock");
+    }
+
+    public NetworkReconciliationPlan plan(NetworkPlanInput input, NetworkSecrets secrets) {
+        Objects.requireNonNull(input, "input");
+        Objects.requireNonNull(secrets, "secrets");
+        NetworkDefinition network = Objects.requireNonNull(input.network(), "input.network");
         List<NetworkConfigMutation> mutations = new ArrayList<>();
-        List<NetworkValidationIssue> issues = new ArrayList<>(discovery.issues());
+        List<NetworkValidationIssue> issues = new ArrayList<>(input.issues());
         if (network.forwarding().mode() == ForwardingMode.LEGACY || network.forwarding().mode() == ForwardingMode.BUNGEEGUARD) {
             issues.add(new NetworkValidationIssue(NetworkValidationIssue.Severity.ERROR, "forwarding.mode.apply.unsupported", network.networkId(), "Legacy forwarding requires its dedicated compatibility adapter before Remotely can apply this network"));
         }
-        String forwardingSecret = secretStore.resolveForwardingSecret(network.forwarding().secretReference());
+        String forwardingSecret = secrets.forwardingSecret(network.forwarding().secretReference());
         if (network.forwarding().mode() != ForwardingMode.NONE && forwardingSecret.isBlank()) {
             issues.add(new NetworkValidationIssue(NetworkValidationIssue.Severity.ERROR, "forwarding.secret.unavailable", network.networkId(), "Forwarding secret is unavailable in the credential store"));
         }
@@ -37,11 +46,12 @@ public class NetworkDesiredStatePlanner {
         if (network.syncRealms().stream().filter(realm -> realm.dataFamilies().stream().anyMatch(family -> family != SyncDataFamily.PRESENCE)).count() > 1) {
             issues.add(new NetworkValidationIssue(NetworkValidationIssue.Severity.ERROR, "realm.runtime.multiple.unsupported", network.networkId(), "The installed ReSync runtime currently supports one player state realm per network"));
         }
+        Map<String, NetworkEnrollment> enrollments = new LinkedHashMap<>();
         NetworkMember proxyMember = network.proxyMember();
         if (proxyMember != null) {
-            Instance proxy = discovery.instancesById(Instance.class).get(proxyMember.instanceId());
+            NetworkServerDescriptor proxy = input.servers().get(proxyMember.instanceId());
             if (proxy != null) {
-                planProxy(network, proxy, proxyMember, forwardingSecret, secretStore, mutations);
+                planProxy(network, proxy, proxyMember, forwardingSecret, secrets, enrollments, mutations, issues);
             }
         }
         for (NetworkMember member : network.members()) {
@@ -51,15 +61,15 @@ public class NetworkDesiredStatePlanner {
             if (!member.isManaged()) {
                 continue;
             }
-            Instance backend = discovery.instancesById(Instance.class).get(member.instanceId());
+            NetworkServerDescriptor backend = input.servers().get(member.instanceId());
             if (backend != null) {
-                planBackend(network, backend, member, proxyMember, forwardingSecret, secretStore, mutations, issues);
+                planBackend(network, backend, member, proxyMember, forwardingSecret, secrets, enrollments, mutations, issues);
             }
         }
-        return new NetworkReconciliationPlan("", network.networkId(), network.revision(), 0, mutations, issues);
+        return new NetworkReconciliationPlan("", network.networkId(), network.revision(), clock.millis(), mutations, issues);
     }
 
-    private void planProxy(NetworkDefinition network, Instance proxy, NetworkMember proxyMember, String forwardingSecret, NetworkSecretStore secretStore, List<NetworkConfigMutation> mutations) {
+    private void planProxy(NetworkDefinition network, NetworkServerDescriptor proxy, NetworkMember proxyMember, String forwardingSecret, NetworkSecrets secrets, Map<String, NetworkEnrollment> enrollments, List<NetworkConfigMutation> mutations, List<NetworkValidationIssue> issues) {
         String bind = network.entryPoints().isEmpty() ? "0.0.0.0:" + proxyMember.port() : network.entryPoints().getFirst().bindAddress() + ":" + network.entryPoints().getFirst().port();
         add(mutations, proxy, "velocity.toml", ConfigurationFormat.TOML, "config-version", "", quote(VELOCITY_CONFIG_VERSION), false, true, "Set Velocity Config Version");
         add(mutations, proxy, "velocity.toml", ConfigurationFormat.TOML, "bind", "", quote(bind), false, true, "Set Proxy Address");
@@ -83,10 +93,10 @@ public class NetworkDesiredStatePlanner {
                 add(mutations, proxy, "velocity.toml", ConfigurationFormat.TOML, "forced-hosts." + forcedHost, "", tomlArray(routes), false, true, "Route " + forcedHost);
             }
         }
-        planRuntimeHub(network, proxy, secretStore, mutations);
+        planRuntimeHub(network, proxy, secrets, enrollments, mutations, issues);
     }
 
-    private void planRuntimeHub(NetworkDefinition network, Instance proxy, NetworkSecretStore secretStore, List<NetworkConfigMutation> mutations) {
+    private void planRuntimeHub(NetworkDefinition network, NetworkServerDescriptor proxy, NetworkSecrets secrets, Map<String, NetworkEnrollment> enrollments, List<NetworkConfigMutation> mutations, List<NetworkValidationIssue> issues) {
         String path = "plugins/resyncvelocity/network.properties";
         NetworkRuntimePolicy runtime = network.runtime();
         add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, "network.enabled", "", String.valueOf(runtime.enabled()), false, true, "Set ReSync Network Hub");
@@ -122,15 +132,15 @@ public class NetworkDesiredStatePlanner {
         nodeIds.add(operatorNodeId);
         nodes.stream().map(NetworkMember::nodeId).forEach(nodeIds::add);
         add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, "nodes", "", String.join(",", nodeIds), false, true, "Set ReSync Network Nodes");
-        String operatorToken = secretStore.getOrCreateEnrollmentToken(network.networkId(), operatorNodeId);
+        NetworkEnrollment operatorEnrollment = enrollment(network, operatorNodeId, secrets, enrollments, issues);
         String operatorPrefix = "node." + operatorNodeId + ".";
         add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, operatorPrefix + "display-name", "", "Remotely", false, true, "Set ReSync Operator Name");
         add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, operatorPrefix + "role", "", "OPERATOR", false, true, "Set ReSync Operator Role");
         add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, operatorPrefix + "capabilities", "", "observe,routing,operate,command,broadcast,state-admin,events", false, true, "Set ReSync Operator Capabilities");
-        add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, operatorPrefix + "enrollment-token-hash", "", enrollmentHash(operatorToken), true, true, "Set ReSync Operator Enrollment Hash");
+        add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, operatorPrefix + "enrollment-token-hash", "", operatorEnrollment.hash(), true, true, "Set ReSync Operator Enrollment Hash");
         add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, operatorPrefix + "enrollment-expires-at", "", "0", false, true, "Set ReSync Operator Enrollment Expiry");
         for (NetworkMember member : nodes) {
-            String token = secretStore.getOrCreateEnrollmentToken(network.networkId(), member.nodeId());
+            NetworkEnrollment enrollment = enrollment(network, member.nodeId(), secrets, enrollments, issues);
             String prefix = "node." + member.nodeId() + ".";
             add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, prefix + "display-name", "", member.routeName(), false, true, "Set ReSync Node Name");
             add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, prefix + "role", "", member.role().name(), false, true, "Set ReSync Node Role");
@@ -143,7 +153,7 @@ public class NetworkDesiredStatePlanner {
                 capabilities.add("resources");
             }
             add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, prefix + "capabilities", "", String.join(",", capabilities), false, true, "Set ReSync Node Capabilities");
-            add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, prefix + "enrollment-token-hash", "", enrollmentHash(token), true, true, "Set ReSync Enrollment Hash");
+            add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, prefix + "enrollment-token-hash", "", enrollment.hash(), true, true, "Set ReSync Enrollment Hash");
             add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, prefix + "enrollment-expires-at", "", "0", false, true, "Set ReSync Enrollment Expiry");
         }
         List<NetworkMember> routes = network.members().stream().filter(member -> !member.isProxy()).toList();
@@ -158,12 +168,11 @@ public class NetworkDesiredStatePlanner {
         add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, "maintenance-route", "", maintenanceRoute, false, true, "Set ReSync Maintenance Route");
     }
 
-    private void planBackend(NetworkDefinition network, Instance backend, NetworkMember member, NetworkMember proxyMember, String forwardingSecret, NetworkSecretStore secretStore, List<NetworkConfigMutation> mutations, List<NetworkValidationIssue> issues) {
-        Properties properties = backend.getServerProperties();
-        add(mutations, backend, "server.properties", ConfigurationFormat.PROPERTIES, "server-port", properties.getProperty("server-port", "25565"), String.valueOf(member.port()), false, true, "Set Backend Port");
-        add(mutations, backend, "server.properties", ConfigurationFormat.PROPERTIES, "online-mode", properties.getProperty("online-mode", "true"), "false", false, true, "Delegate Authentication To Proxy");
+    private void planBackend(NetworkDefinition network, NetworkServerDescriptor backend, NetworkMember member, NetworkMember proxyMember, String forwardingSecret, NetworkSecrets secrets, Map<String, NetworkEnrollment> enrollments, List<NetworkConfigMutation> mutations, List<NetworkValidationIssue> issues) {
+        add(mutations, backend, "server.properties", ConfigurationFormat.PROPERTIES, "server-port", backend.property("server-port", "25565"), String.valueOf(member.port()), false, true, "Set Backend Port");
+        add(mutations, backend, "server.properties", ConfigurationFormat.PROPERTIES, "online-mode", backend.property("online-mode", "true"), "false", false, true, "Delegate Authentication To Proxy");
         if (proxyMember != null && proxyMember.hostScope().equals(member.hostScope())) {
-            add(mutations, backend, "server.properties", ConfigurationFormat.PROPERTIES, "server-ip", properties.getProperty("server-ip", ""), "127.0.0.1", false, true, "Restrict Backend To Loopback");
+            add(mutations, backend, "server.properties", ConfigurationFormat.PROPERTIES, "server-ip", backend.property("server-ip", ""), "127.0.0.1", false, true, "Restrict Backend To Loopback");
         }
         if (network.forwarding().mode() == ForwardingMode.MODERN) {
             planModernForwarding(network, backend, forwardingSecret, mutations, issues);
@@ -198,7 +207,8 @@ public class NetworkDesiredStatePlanner {
         }
         if (member.resyncEnabled() && network.runtime().enabled()) {
             add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.hub-url", "", network.runtime().hubUrl(), false, true, "Set ReSync Hub");
-            add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.enrollment-token", "", secretStore.getOrCreateEnrollmentToken(network.networkId(), member.nodeId()), true, true, "Set ReSync Enrollment Token");
+            NetworkEnrollment enrollment = enrollment(network, member.nodeId(), secrets, enrollments, issues);
+            add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.enrollment-token", "", enrollment.token(), true, true, "Set ReSync Enrollment Token");
             add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.credential-file", "", "network/node.credential", false, true, "Set ReSync Credential File");
             add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.capacity", "", String.valueOf(member.capacity()), false, true, "Set ReSync Capacity");
             add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.maximum-frame-bytes", "", "1048576", false, true, "Set ReSync Frame Limit");
@@ -213,7 +223,7 @@ public class NetworkDesiredStatePlanner {
         }
     }
 
-    private void planTransferRealm(NetworkDefinition network, Instance backend, NetworkMember member, List<NetworkConfigMutation> mutations, List<NetworkValidationIssue> issues) {
+    private void planTransferRealm(NetworkDefinition network, NetworkServerDescriptor backend, NetworkMember member, List<NetworkConfigMutation> mutations, List<NetworkValidationIssue> issues) {
         SyncRealm realm = stateRealm(network, member);
         String path = "plugins/ReSync/resync.properties";
         if (realm == null) {
@@ -245,7 +255,7 @@ public class NetworkDesiredStatePlanner {
         add(mutations, backend, path, ConfigurationFormat.PROPERTIES, "network.transfer.persistent-data-namespaces", "", realm.dataFamilies().contains(SyncDataFamily.PERSISTENT_DATA) ? realm.persistentDataNamespaces().stream().sorted().collect(Collectors.joining(",")) : "", false, true, "Set Persistent Data Allowlist");
     }
 
-    private void addTransferFamily(List<NetworkConfigMutation> mutations, Instance backend, String path, String family, boolean enabled) {
+    private void addTransferFamily(List<NetworkConfigMutation> mutations, NetworkServerDescriptor backend, String path, String family, boolean enabled) {
         String name = switch (family) {
             case "ender-chest" -> "Ender Chest";
             default -> Character.toUpperCase(family.charAt(0)) + family.substring(1);
@@ -257,11 +267,11 @@ public class NetworkDesiredStatePlanner {
         return network.syncRealms().stream().filter(realm -> realm.nodeIds().contains(member.nodeId()) && realm.dataFamilies().stream().anyMatch(family -> family != SyncDataFamily.PRESENCE)).findFirst().orElse(null);
     }
 
-    private void planModernForwarding(NetworkDefinition network, Instance backend, String forwardingSecret, List<NetworkConfigMutation> mutations, List<NetworkValidationIssue> issues) {
-        switch (NetworkBackendForwardingAdapter.resolve(backend)) {
+    private void planModernForwarding(NetworkDefinition network, NetworkServerDescriptor backend, String forwardingSecret, List<NetworkConfigMutation> mutations, List<NetworkValidationIssue> issues) {
+        switch (backend.forwardingAdapter()) {
             case PAPER -> {
                 add(mutations, backend, "spigot.yml", ConfigurationFormat.YAML, "settings.bungeecord", "", "false", false, true, "Disable Legacy Forwarding");
-                if (usesLegacyPaperConfiguration(backend.getVersionId())) {
+                if (usesLegacyPaperConfiguration(backend.version())) {
                     add(mutations, backend, "paper.yml", ConfigurationFormat.YAML, "settings.velocity-support.enabled", "", "true", false, true, "Enable Modern Forwarding");
                     add(mutations, backend, "paper.yml", ConfigurationFormat.YAML, "settings.velocity-support.online-mode", "", String.valueOf(network.forwarding().proxyOnlineMode()), false, true, "Match Proxy Online Mode");
                     add(mutations, backend, "paper.yml", ConfigurationFormat.YAML, "settings.velocity-support.secret", "", forwardingSecret, true, true, "Set Forwarding Secret");
@@ -277,20 +287,34 @@ public class NetworkDesiredStatePlanner {
                 add(mutations, backend, "config/proxy-compatible-forge.toml", ConfigurationFormat.TOML, "forwarding.mode", "", quote("MODERN"), false, true, "Set Forge Forwarding Mode");
                 add(mutations, backend, "config/proxy-compatible-forge.toml", ConfigurationFormat.TOML, "forwarding.secret", "", quote(forwardingSecret), true, true, "Set Forge Forwarding Secret");
             }
-            case UNSUPPORTED -> issues.add(new NetworkValidationIssue(NetworkValidationIssue.Severity.ERROR, "backend.forwarding.adapter.unavailable", backend.getInstanceId(), "Backend does not have a supported modern-forwarding configuration adapter"));
+            case UNSUPPORTED -> issues.add(new NetworkValidationIssue(NetworkValidationIssue.Severity.ERROR, "backend.forwarding.adapter.unavailable", backend.serverId(), "Backend does not have a supported modern-forwarding configuration adapter"));
         }
     }
 
-    private void add(List<NetworkConfigMutation> mutations, Instance instance, String path, ConfigurationFormat format, String key, String currentValue, String desiredValue, boolean sensitive, boolean restartRequired, String description) {
-        mutations.add(new NetworkConfigMutation(instance.getInstanceId(), path, format, key, currentValue, desiredValue, sensitive, restartRequired, description));
+    private void add(List<NetworkConfigMutation> mutations, NetworkServerDescriptor server, String path, ConfigurationFormat format, String key, String currentValue, String desiredValue, boolean sensitive, boolean restartRequired, String description) {
+        mutations.add(new NetworkConfigMutation(server.serverId(), path, format, key, currentValue, desiredValue, sensitive, restartRequired, description));
     }
 
-    private void remove(List<NetworkConfigMutation> mutations, Instance instance, String path, ConfigurationFormat format, String key, boolean sensitive, boolean restartRequired, String description) {
-        mutations.add(new NetworkConfigMutation(instance.getInstanceId(), path, format, key, "", "", sensitive, restartRequired, description, NetworkMutationAction.REMOVE));
+    private void remove(List<NetworkConfigMutation> mutations, NetworkServerDescriptor server, String path, ConfigurationFormat format, String key, boolean sensitive, boolean restartRequired, String description) {
+        mutations.add(new NetworkConfigMutation(server.serverId(), path, format, key, "", "", sensitive, restartRequired, description, NetworkMutationAction.REMOVE));
     }
 
     private boolean pathSyncEnabled(NetworkDefinition network, NetworkMember member) {
         return network.featureEnabled(NetworkDefinition.FEATURE_PATH_SYNC) && network.sharedDataPolicy().pathSyncs().stream().anyMatch(sync -> sync.enabled() && sync.nodeIds().contains(member.nodeId()));
+    }
+
+    private NetworkEnrollment enrollment(NetworkDefinition network, String nodeId, NetworkSecrets secrets, Map<String, NetworkEnrollment> enrollments, List<NetworkValidationIssue> issues) {
+        NetworkEnrollment enrollment = enrollments.get(nodeId);
+        if (enrollment != null) {
+            return enrollment;
+        }
+        enrollment = secrets.enrollment(network.networkId(), nodeId);
+        if (enrollment == null || enrollment.token().isBlank() || enrollment.hash().isBlank()) {
+            issues.add(new NetworkValidationIssue(NetworkValidationIssue.Severity.ERROR, "runtime.enrollment.unavailable", nodeId, "ReSync enrollment credentials are unavailable"));
+            enrollment = new NetworkEnrollment("", "");
+        }
+        enrollments.put(nodeId, enrollment);
+        return enrollment;
     }
 
     private String routeForNode(NetworkDefinition network, String nodeId) {
@@ -326,7 +350,4 @@ public class NetworkDesiredStatePlanner {
         return values.stream().map(this::quote).collect(Collectors.joining(", ", "[", "]"));
     }
 
-    private String enrollmentHash(String token) {
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(Sha256.digest(token.getBytes(StandardCharsets.UTF_8)));
-    }
 }

@@ -21,11 +21,13 @@ import redxax.oxy.remotely.ui.settings.data.ServerSettingsDataController;
 import restudio.rebase.settings.controllers.ModpackSettingsController;
 import restudio.rebase.settings.controllers.VersionSettingsController;
 import restudio.rebase.restudio.api.models.ServerModels;
+import restudio.rebase.resource.ResourcePoolModels;
 import restudio.rescreen.config.Config;
 import restudio.rescreen.ui.core.Screen;
 import restudio.rescreen.ui.rescreen.ReScreen;
 import restudio.rescreen.ui.settings.Setting;
 import restudio.rescreen.ui.widgets.TextInputWidget;
+import restudio.rescreen.ui.widgets.ScrollSelectorWidget;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -60,19 +62,24 @@ public final class ServerConfigurationUiComposition {
                     .build();
         }
         TextInputWidget locationField = instanceLocationField;
+        List<ProfileChoice> profileChoices = state.resourcePoolCreation() ? choices(state.poolOptions()) : List.of();
+        ScrollSelectorWidget profile = state.resourcePoolCreation() ? new ScrollSelectorWidget.Builder()
+                .options(profileChoices.stream().map(ProfileChoice::label).toList()).selectedIndex(0).size(180, 20).build() : null;
         VersionSettingsController version = new VersionSettingsController(platform.versionTarget(), platform.versionCatalog());
         if (state.restudioBackend() || state.restudioCreation()) {
             version.bindToRemoteVariables(remoteVariables);
         }
         version.allowServerSoftwareChangeWhen(ignored -> allow == null || allow.getAsBoolean());
         version.onServerSoftwareChanged(ignored -> reload.run());
-        ServerGeneralSettingsController general = new ServerGeneralSettingsController(platform.generalSettingsProvider(), state.editMode());
+        ServerGeneralSettingsController general = new ServerGeneralSettingsController(platform.generalSettingsProvider(),
+                state.editMode() || state.resourcePoolCreation());
         ModpackSettingsController modpack = new ModpackSettingsController(platform.modpackTarget(), platform.managedModpackTarget(), platform.modpackProvider());
         boolean linkedModpack = platform.modpackTarget().linkedModpack();
         cleanup.add(modpack::cleanup);
-        ServerPlanSettingsController plan = state.restudioCreation() ? new ServerPlanSettingsController(platform.planSettingsProvider()) : null;
+        ServerPlanSettingsController plan = state.restudioCreation() && !state.resourcePoolCreation()
+                ? new ServerPlanSettingsController(platform.planSettingsProvider()) : null;
         if (plan != null) plan.selectPlanByName(state.preselectedPlanName());
-        if (!linkedModpack) {
+        if (!linkedModpack && !state.resourcePoolCreation()) {
             settings.put("Server Software", version::getSettings);
         }
         settings.put("General", () -> {
@@ -89,6 +96,23 @@ public final class ServerConfigurationUiComposition {
             }
             return result;
         });
+        if (state.resourcePoolCreation()) {
+            settings.put("Pool", () -> {
+                Setting.Builder identity = new Setting.Builder("Server Profile");
+                identity.addRow("Profile", profile);
+                return List.of(identity.build());
+            });
+            Runnable dispose = () -> cleanup.forEach(Runnable::run);
+            return new ServerScreenHost.ConfigurationUi(settings, dispose, "Create Server",
+                    () -> "", () -> "", () -> null, () -> defaultLocation,
+                    () -> {
+                        if (profileChoices.isEmpty()) {
+                            return new ServerScreenHost.PoolResources("", "", "", "", "", "", "", "");
+                        }
+                        ProfileChoice selected = profileChoices.get(Math.clamp(profile.getSelectedIndex(), 0, profileChoices.size() - 1));
+                        return new ServerScreenHost.PoolResources(selected.gameId(), selected.profileId(), "", "", "", "", "", "");
+                    });
+        }
         settings.put("Features", new ServerFeatureSettingsController(platform.featureSettingsProvider())::getSettings);
         if (state.editMode() && state.restudioBackend()) {
             settings.put("Software Settings", new ServerStartupSettingsController(ServerStartupSettingsProvider.map(remoteVariables,
@@ -138,12 +162,28 @@ public final class ServerConfigurationUiComposition {
                 return new ServerExtraSettingsController(availableFiles, data.documentPaths(), platform.documentAccess()).getSettings();
             });
         }
-        String title = state.editMode() ? "Edit " + platform.name() : state.restudioCreation() ? "Order New Server" : "Create New Server";
+        String title = state.editMode() ? "Edit " + platform.name()
+                : state.resourcePoolCreation() ? "Create Server"
+                : state.restudioCreation() ? "Order New Server" : "Create New Server";
         Runnable dispose = () -> cleanup.forEach(Runnable::run);
         return new ServerScreenHost.ConfigurationUi(settings, dispose, title,
                 () -> plan == null ? "" : plan.getSelectedPlanName(),
                 () -> plan == null ? "" : plan.getSubdomain(),
                 () -> plan == null ? null : plan.getCustomPlanRequest(),
-                () -> locationField == null ? defaultLocation : locationField.getText().trim());
+                () -> locationField == null ? defaultLocation : locationField.getText().trim(),
+                () -> new ServerScreenHost.PoolResources("", "", "", "", "", "", "", ""));
+    }
+
+    private static List<ProfileChoice> choices(ResourcePoolModels.DraftOptions options) {
+        List<ProfileChoice> result = new ArrayList<>();
+        for (ResourcePoolModels.GameOption game : options.games()) {
+            for (ResourcePoolModels.ProfileOption profile : game.profiles()) {
+                result.add(new ProfileChoice(game.id(), profile.id(), game.label() + " • " + profile.label()));
+            }
+        }
+        return List.copyOf(result);
+    }
+
+    private record ProfileChoice(String gameId, String profileId, String label) {
     }
 }

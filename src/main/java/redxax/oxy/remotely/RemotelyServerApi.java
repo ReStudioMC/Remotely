@@ -2,9 +2,11 @@ package redxax.oxy.remotely;
 
 import restudio.rescreen.platform.Async;
 import restudio.rebase.backend.DeveloperCapabilityProvider;
+import restudio.rebase.backend.feature.BackupOperations;
 import redxax.oxy.remotely.flow.ui.marketplace.ReSyncMarketplaceApi;
 import redxax.oxy.remotely.ui.server.NetworkOverviewProvider;
 import restudio.rebase.restudio.api.models.ServerModels;
+import restudio.rebase.resource.ResourcePoolClient;
 import restudio.rebase.schedule.ServerScheduleModels;
 
 import java.util.List;
@@ -18,6 +20,11 @@ public interface RemotelyServerApi {
     }
 
     Async<List<ServerModels.ClientServerView>> getServers();
+
+    default ResourcePoolClient resourcePools() {
+        return new ResourcePoolClient((method, path, body) ->
+                Async.failed(new UnsupportedOperationException("Resource Pools Are Unavailable")));
+    }
 
     default Async<ServerCapabilities> getServerCapabilities(String serverId) {
         return Async.failed(new UnsupportedOperationException("Server Capability Inventory Is Unavailable"));
@@ -67,12 +74,34 @@ public interface RemotelyServerApi {
         return Async.failed(new UnsupportedOperationException("Backups Are Unavailable"));
     }
 
+    default Async<BackupOperations.CreateResult> createBackup(BackupOperations.CreateRequest request) {
+        return createBackup(request.serverId(), request.name(), request.ignored(), request.locked())
+                .thenApply(backup -> BackupOperations.created(request, backup));
+    }
+
+    default Async<BackupOperations.CreateResult> observeCreate(BackupOperations.CreateRequest request) {
+        return Async.failed(new UnsupportedOperationException("Backup Creation Recovery Is Unavailable"));
+    }
+
     default Async<Void> deleteBackup(String serverId, String backupUuid) {
         return Async.failed(new UnsupportedOperationException("Backups Are Unavailable"));
     }
 
     default Async<Void> restoreBackup(String serverId, String backupUuid, boolean truncate) {
         return Async.failed(new UnsupportedOperationException("Backups Are Unavailable"));
+    }
+
+    default Async<BackupOperations.RestoreResult> restoreBackup(BackupOperations.RestoreRequest request) {
+        return restoreBackup(request.serverId(), request.backupId(), request.truncate())
+                .thenApply(ignored -> BackupOperations.completed(request));
+    }
+
+    default Async<BackupOperations.RestoreResult> observeRestore(BackupOperations.RestoreRequest request) {
+        return Async.failed(new UnsupportedOperationException("Restore Recovery Is Unavailable"));
+    }
+
+    default Async<ServerModels.BackupRestoreDiscovery> discoverRestore(String serverId) {
+        return Async.completed(null);
     }
 
     default Async<ServerModels.Backup> toggleBackupLock(String serverId, String backupUuid) {

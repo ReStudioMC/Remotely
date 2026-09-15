@@ -1,6 +1,7 @@
 package redxax.oxy.remotely.network.config;
 
 import org.junit.jupiter.api.Test;
+import redxax.oxy.remotely.settings.server.BrowserSafeYaml;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -72,7 +73,7 @@ class NetworkConfigurationAdaptersTest {
 
     @Test
     void tomlUpdatesSectionsAndQuotesForcedHosts() {
-        TomlConfigurationAdapter adapter = new TomlConfigurationAdapter();
+        TomlConfigurationAdapter adapter = new TomlConfigurationAdapter(BrowserSafeYaml::parse);
         String source = "bind = \"0.0.0.0:25565\"\n\n[servers]\nlobby = \"127.0.0.1:25566\"\ntry = [\"lobby\"]\n\n[advanced]\ncompression-threshold = 256\n";
 
         String updated = adapter.apply(source, "servers.lobby", "\"127.0.0.1:25570\"");
@@ -87,7 +88,7 @@ class NetworkConfigurationAdaptersTest {
 
     @Test
     void tomlReadsQuotedHashesAndPreservesTrailingComments() {
-        TomlConfigurationAdapter adapter = new TomlConfigurationAdapter();
+        TomlConfigurationAdapter adapter = new TomlConfigurationAdapter(BrowserSafeYaml::parse);
         String source = """
                 [servers]
                 lobby = "127.0.0.1:25566 # internal" # Keep lobby route
@@ -112,7 +113,7 @@ class NetworkConfigurationAdaptersTest {
 
     @Test
     void tomlReplacesDynamicSectionsWithQuotedHashes() {
-        TomlConfigurationAdapter adapter = new TomlConfigurationAdapter();
+        TomlConfigurationAdapter adapter = new TomlConfigurationAdapter(BrowserSafeYaml::parse);
         String source = """
                 [servers]
                 lobby = "127.0.0.1:25566 # internal" # Keep lobby route
@@ -130,7 +131,7 @@ class NetworkConfigurationAdaptersTest {
 
     @Test
     void tomlReplacesAndRemovesWholeMultilineArrays() {
-        TomlConfigurationAdapter adapter = new TomlConfigurationAdapter();
+        TomlConfigurationAdapter adapter = new TomlConfigurationAdapter(BrowserSafeYaml::parse);
         String source = """
                 [servers]
                 lobby = "127.0.0.1:30066"
@@ -155,7 +156,7 @@ class NetworkConfigurationAdaptersTest {
 
     @Test
     void tomlClearsManagedSectionsWithoutLeavingMultilineValues() {
-        TomlConfigurationAdapter adapter = new TomlConfigurationAdapter();
+        TomlConfigurationAdapter adapter = new TomlConfigurationAdapter(BrowserSafeYaml::parse);
         String source = """
                 [servers]
                 lobby = "127.0.0.1:30066"
@@ -178,7 +179,7 @@ class NetworkConfigurationAdaptersTest {
 
     @Test
     void tomlCreatesExplicitEmptySectionWhenClearingMissingDefaults() {
-        TomlConfigurationAdapter adapter = new TomlConfigurationAdapter();
+        TomlConfigurationAdapter adapter = new TomlConfigurationAdapter(BrowserSafeYaml::parse);
         String source = "config-version = \"2.8\"\n\n[servers]\nlobby = \"127.0.0.1:25566\"\n";
 
         String updated = adapter.remove(source, "forced-hosts.*");
@@ -190,7 +191,7 @@ class NetworkConfigurationAdaptersTest {
 
     @Test
     void tomlReadsAndReplacesWholeSectionsAsStructuredMaps() {
-        TomlConfigurationAdapter adapter = new TomlConfigurationAdapter();
+        TomlConfigurationAdapter adapter = new TomlConfigurationAdapter(BrowserSafeYaml::parse);
         String source = "# Proxy\n[servers]\nlobby = \"127.0.0.1:25566\"\ntry = [\"lobby\"]\n\n[advanced]\ncompression-threshold = 256\n";
 
         assertEquals("{lobby: \"127.0.0.1:25566\", try: [\"lobby\"]}", adapter.read(source, "servers.*"));
@@ -212,7 +213,7 @@ class NetworkConfigurationAdaptersTest {
 
     @Test
     void yamlUpdatesNestedValuesWithoutRewritingDocument() {
-        YamlConfigurationAdapter adapter = new YamlConfigurationAdapter();
+        YamlConfigurationAdapter adapter = new YamlConfigurationAdapter(BrowserSafeYaml::parse);
         String source = "settings:\n  bungeecord: true # Keep Note\nworld-settings:\n  default:\n    verbose: false\n";
 
         String updated = adapter.apply(source, "settings.bungeecord", "false");
@@ -229,7 +230,7 @@ class NetworkConfigurationAdaptersTest {
 
     @Test
     void yamlSupportsEscapedDottedKeysAndDynamicWorldSections() {
-        YamlConfigurationAdapter adapter = new YamlConfigurationAdapter();
+        YamlConfigurationAdapter adapter = new YamlConfigurationAdapter(BrowserSafeYaml::parse);
         String source = "world-settings:\n  default:\n    keep: true # Keep default\n  world.one:\n    value: 1\n  world-two:\n    value: 2\nserver-settings:\n  keep: true\n";
 
         assertEquals("true", adapter.read(source, "world-settings.default.keep"));
@@ -252,7 +253,7 @@ class NetworkConfigurationAdaptersTest {
 
     @Test
     void yamlTreatsNamespacedKeysAsWholeKeysInsideDynamicMaps() {
-        YamlConfigurationAdapter adapter = new YamlConfigurationAdapter();
+        YamlConfigurationAdapter adapter = new YamlConfigurationAdapter(BrowserSafeYaml::parse);
         String source = "packet-limiter:\n  overrides:\n    minecraft:place_recipe:\n      action: DROP\n      interval: 4.0\n    'minecraft:elytra':\n      action: KICK\n      interval: 8.0\n";
 
         assertEquals("DROP", adapter.read(source, "packet-limiter.overrides.minecraft:place_recipe.action"));

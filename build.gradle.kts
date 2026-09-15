@@ -75,6 +75,7 @@ val relocatedSnakeYaml by tasks.registering(ShadowJar::class) {
 data class BrowserJavaSource(val className: String, val packageName: String, val relativePath: String, val file: File)
 
 val browserMainSourceRoot = file("src/main/java")
+val browserNetworkCoreSourceRoot = file("NetworkCore/src/main/java")
 val browserOwnPrefix = "redxax.oxy.remotely"
 val browserSources = linkedMapOf<String, BrowserJavaSource>()
 
@@ -89,6 +90,7 @@ fun indexBrowserSources(root: File) {
 }
 
 indexBrowserSources(browserMainSourceRoot)
+indexBrowserSources(browserNetworkCoreSourceRoot)
 
 val browserSourceAliases = linkedMapOf<String, BrowserJavaSource>()
 val browserTypeDeclaration = Regex("""\b(?:class|interface|enum|record)\s+([A-Za-z_$][A-Za-z0-9_$]*)""")
@@ -255,7 +257,7 @@ val browserDesktopOnlyClasses = setOf(
 val browserSourceIncludes = browserRequiredSources.filterNot { it.className in browserDesktopOnlyClasses }.map { it.relativePath }.toSortedSet()
 
 val browser by sourceSets.creating {
-    java.srcDir(browserMainSourceRoot)
+    java.srcDirs(browserMainSourceRoot, browserNetworkCoreSourceRoot)
     java.include(browserSourceIncludes)
     resources.srcDir("src/main/resources")
     resources.include("server-settings/**")
@@ -366,6 +368,7 @@ tasks.compileJava {
 
 val sourceRuntimeInputs = linkedMapOf(
     "Remotely" to listOf("build/classes/java/main", "build/resources/main"),
+    "NetworkCore" to listOf("NetworkCore/build/classes/java/main", "NetworkCore/build/resources/main"),
     "ReScreen" to listOf("../ReScreen/build/classes/java/main", "../ReScreen/build/resources/main"),
     "Rebase" to listOf("../Rebase/build/classes/java/main", "../Rebase/build/resources/main"),
     "Remodel" to listOf("../Remodel/build/classes/java/main", "../Remodel/build/resources/main"),
@@ -376,6 +379,7 @@ val stageSourceRuntime = tasks.register<Sync>("stageSourceRuntime") {
     if (useReStudioSourceDependencies) {
         dependsOn(
             tasks.named("classes"),
+            ":NetworkCore:classes",
             gradle.includedBuild("ReScreen").task(":classes"),
             gradle.includedBuild("Rebase").task(":classes"),
             gradle.includedBuild("Remodel").task(":classes"),
@@ -400,6 +404,7 @@ tasks.named<JavaExec>("run") {
             configurations.runtimeClasspath.get().files.filter {
                 val path = it.absolutePath.replace('\\', '/')
                 !path.contains("/ReScreen/build/libs/") &&
+                    !path.contains("/NetworkCore/build/libs/") &&
                     !path.contains("/Rebase/build/libs/") &&
                     !path.contains("/Remodel/build/libs/") &&
                     !path.contains("/ReSync/ReSyncCore/build/libs/")
@@ -421,6 +426,7 @@ if (useReStudioSourceDependencies) {
         })
         dependsOn(
             tasks.named("classes"),
+            ":NetworkCore:classes",
             gradle.includedBuild("ReScreen").task(":classes"),
             gradle.includedBuild("ReScreen").task(":liveAgentJar"),
             gradle.includedBuild("Rebase").task(":classes"),
@@ -431,6 +437,7 @@ if (useReStudioSourceDependencies) {
         val externalRuntime = configurations.runtimeClasspath.get().files.filter {
             val path = it.absolutePath.replace('\\', '/')
             !path.contains("/ReScreen/build/libs/") &&
+                !path.contains("/NetworkCore/build/libs/") &&
                 !path.contains("/Rebase/build/libs/") &&
                 !path.contains("/Remodel/build/libs/") &&
                 !path.contains("/ReSync/ReSyncCore/build/libs/")
@@ -478,7 +485,17 @@ publishing {
     }
 }
 
+tasks.named("publish") {
+    dependsOn(":NetworkCore:publish")
+}
+
+tasks.named("publishToMavenLocal") {
+    dependsOn(":NetworkCore:publishToMavenLocal")
+}
+
 dependencies {
+    api(project(":NetworkCore"))
+
     if (useReStudioSourceDependencies) {
         api(reStudioSourceJars)
         api("dev.restudio:rescreen:1.0")

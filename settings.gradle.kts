@@ -1,5 +1,8 @@
 rootProject.name = "Remotely"
 
+include(":NetworkCore")
+project(":NetworkCore").projectDir = file("NetworkCore")
+
 include(":RemotelyWeb")
 project(":RemotelyWeb").projectDir = file("RemotelyWeb")
 

@@ -27,7 +27,7 @@ class NetworkDetachPlannerTest {
         NetworkDefinition network = NetworkDefinition.create("Network", proxy.getInstanceId(), NetworkForwardingPolicy.secureDefault("secret"), List.of(NetworkEntryPoint.primary(25565)), List.of(proxyMember, lobbyMember));
         NetworkDiscoveryResult discovery = new NetworkDiscoveryResult(network, Map.of(proxy.getInstanceId(), proxy, lobby.getInstanceId(), lobby), List.of(), List.of(), List.of());
 
-        NetworkReconciliationPlan plan = new NetworkDetachPlanner().plan(discovery, lobby.getInstanceId());
+        NetworkReconciliationPlan plan = new NetworkDetachPlanner().plan(DesktopNetworkPlanInput.from(discovery), lobby.getInstanceId());
 
         assertFalse(plan.canApply());
         assertTrue(plan.mutations().isEmpty());
@@ -70,7 +70,8 @@ class NetworkDetachPlannerTest {
             }
         };
 
-        NetworkReconciliationPlan plan = new NetworkDetachPlanner().plan(discovery, survival.getInstanceId(), restorePoint, secrets);
+        NetworkReconciliationPlan plan = new NetworkDetachPlanner().plan(DesktopNetworkPlanInput.from(discovery), survival.getInstanceId(), restorePoint,
+                entry -> entry.sensitive() ? secrets.resolveRestoreValue(entry.value()) : entry.value());
 
         assertEquals(NetworkPlanStrategy.DETACH, plan.strategy());
         assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.instanceId().equals(proxy.getInstanceId()) && mutation.key().equals("servers.survival") && mutation.action() == NetworkMutationAction.REMOVE));
@@ -105,7 +106,7 @@ class NetworkDetachPlannerTest {
         NetworkDefinition network = NetworkDefinition.create("Network", proxy.getInstanceId(), NetworkForwardingPolicy.secureDefault("secret"), List.of(NetworkEntryPoint.primary(25565)), List.of(proxyMember, lobbyMember, survivalMember));
         NetworkDiscoveryResult discovery = new NetworkDiscoveryResult(network, Map.of(proxy.getInstanceId(), proxy, lobby.getInstanceId(), lobby, survival.getInstanceId(), survival), List.of(), List.of(), List.of());
 
-        NetworkReconciliationPlan plan = new NetworkDetachPlanner().plan(discovery, survival.getInstanceId());
+        NetworkReconciliationPlan plan = new NetworkDetachPlanner().plan(DesktopNetworkPlanInput.from(discovery), survival.getInstanceId());
 
         assertTrue(plan.canApply());
         assertTrue(plan.issues().stream().anyMatch(issue -> issue.code().equals("detach.restore-point.missing") && issue.severity() == NetworkValidationIssue.Severity.WARNING));
@@ -129,7 +130,7 @@ class NetworkDetachPlannerTest {
         NetworkDefinition network = new NetworkDefinition(base.schemaVersion(), base.networkId(), base.name(), base.revision(), base.proxyInstanceId(), base.desiredState(), base.forwarding(), base.entryPoints(), base.members(), List.of(fallback), List.of(), base.runtime(), base.features(), base.createdAt(), base.updatedAt());
         NetworkDiscoveryResult discovery = new NetworkDiscoveryResult(network, Map.of(proxy.getInstanceId(), proxy, lobby.getInstanceId(), lobby), List.of(), List.of(), List.of());
 
-        NetworkReconciliationPlan plan = new NetworkDetachPlanner().plan(discovery, external.instanceId());
+        NetworkReconciliationPlan plan = new NetworkDetachPlanner().plan(DesktopNetworkPlanInput.from(discovery), external.instanceId());
 
         assertTrue(plan.canApply());
         assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.instanceId().equals(proxy.getInstanceId()) && mutation.key().equals("servers.minigames") && mutation.action() == NetworkMutationAction.REMOVE));

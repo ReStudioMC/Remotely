@@ -1,7 +1,5 @@
 package redxax.oxy.remotely.network;
 
-import restudio.rescreen.platform.Clock;
-
 import java.util.List;
 import java.util.UUID;
 
@@ -13,7 +11,7 @@ public record NetworkReconciliationPlan(String planId, String networkId, long ne
     public NetworkReconciliationPlan {
         planId = planId == null || planId.isBlank() ? UUID.randomUUID().toString() : planId;
         networkId = networkId == null ? "" : networkId.trim();
-        createdAt = createdAt <= 0 ? Clock.system().millis() : createdAt;
+        createdAt = createdAt <= 0 ? NetworkClock.SYSTEM.millis() : createdAt;
         mutations = mutations == null ? List.of() : List.copyOf(mutations);
         issues = issues == null ? List.of() : List.copyOf(issues);
         strategy = strategy == null ? NetworkPlanStrategy.RECONCILE : strategy;

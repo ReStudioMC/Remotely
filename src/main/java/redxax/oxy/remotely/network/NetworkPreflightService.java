@@ -51,7 +51,7 @@ public class NetworkPreflightService {
             instances.stream().filter(instance -> instance != null).forEach(instance -> instancesById.put(instance.getInstanceId(), instance));
         }
         NetworkDiscoveryResult discovery = discoveryService.discover(network, instances, networks, List.of());
-        NetworkReconciliationPlan plan = desiredStatePlanner.plan(discovery, secretStore);
+        NetworkReconciliationPlan plan = desiredStatePlanner.plan(DesktopNetworkPlanInput.from(discovery), secretStore);
         List<NetworkPreflightCheck> immediate = new ArrayList<>();
         immediate.addAll(findingChecks(discovery.issues()));
         immediate.add(routingCheck(network));

@@ -24,7 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-public class NetworkRepository {
+public class NetworkRepository implements NetworkStore {
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().setPrettyPrinting().create();
     private final Path directory;
 
@@ -35,6 +35,7 @@ public class NetworkRepository {
         this.directory = applicationDirectory.resolve("networks").toAbsolutePath().normalize();
     }
 
+    @Override
     public synchronized List<NetworkDefinition> loadAll() {
         return locked(() -> {
             List<NetworkDefinition> networks = new ArrayList<>();
@@ -55,6 +56,7 @@ public class NetworkRepository {
         });
     }
 
+    @Override
     public synchronized void save(NetworkDefinition network) {
         NetworkValidator.requireValid(network);
         locked(() -> {
@@ -93,6 +95,7 @@ public class NetworkRepository {
         });
     }
 
+    @Override
     public synchronized void delete(NetworkDefinition network) {
         locked(() -> {
             Path target = pathFor(network.networkId());

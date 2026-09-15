@@ -35,6 +35,7 @@ import redxax.oxy.remotely.ui.server.NetworkOverviewScreen;
 import redxax.oxy.remotely.ui.server.NetworkCreationPlan;
 import redxax.oxy.remotely.ui.server.ServerDetailsScreen;
 import redxax.oxy.remotely.ui.server.ServerManagerScreen;
+import redxax.oxy.remotely.ui.server.ResourcePoolScreen;
 import redxax.oxy.remotely.ui.server.ServerScreenHost;
 import redxax.oxy.remotely.ui.server.NetworkOverviewProvider;
 import redxax.oxy.remotely.ui.server.DesktopNetworkOverviewProvider;
@@ -83,6 +84,7 @@ import restudio.rebase.localcontrol.LocalServerControllerClient;
 import restudio.rebase.localcontrol.LocalServerControllerModels;
 import restudio.rebase.localcontrol.LifecycleManager;
 import restudio.rebase.instance.Instance;
+import restudio.rebase.health.ServerHealth;
 import restudio.rebase.instance.InstanceFactory;
 import restudio.rebase.instance.InstanceManager;
 import restudio.rebase.instance.InstanceRepairer;
@@ -2257,14 +2259,12 @@ public final class DesktopServerHost implements ServerScreenHost {
     }
 
     @Override
-    public Async<ServerScreenHost.ServerHealth> serverHealth(ServerModels.ClientServerView server) {
+    public Async<ServerHealth> serverHealth(ServerModels.ClientServerView server) {
         Instance instance = resolve(server);
         if (instance == null) {
             return Async.failed(new IllegalStateException("Server Is Unavailable"));
         }
-        return JvmAsyncBridge.fromFuture(InstanceApi.of(instance).health().check()).thenApply(status ->
-                new ServerScreenHost.ServerHealth(status.eulaAccepted(), status.hasServerJar(),
-                        status.hasStartScript(), status.isHealthy()));
+        return JvmAsyncBridge.fromFuture(InstanceApi.of(instance).health().check());
     }
 
     @Override
@@ -2794,7 +2794,7 @@ public final class DesktopServerHost implements ServerScreenHost {
 
     @Override
     public boolean supports(Action action) {
-        return application().supportsDesktopIntegrations() || action == Action.GLOBAL_TERMINAL;
+        return application().supportsDesktopIntegrations() || action == Action.GLOBAL_TERMINAL || action == Action.RESOURCES;
     }
 
     @Override
@@ -2805,6 +2805,11 @@ public final class DesktopServerHost implements ServerScreenHost {
     @Override
     public void openReports(Screen current) {
         application().setScreen(new FeedbackBrowserScreen(current, "Remotely"));
+    }
+
+    @Override
+    public void openResources(Screen current) {
+        application().setScreen(new ResourcePoolScreen(current, client));
     }
 
     @Override

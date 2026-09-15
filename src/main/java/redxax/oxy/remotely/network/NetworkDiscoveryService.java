@@ -105,7 +105,7 @@ public class NetworkDiscoveryService {
     }
 
     private boolean supportsModernForwarding(Instance instance) {
-        return NetworkBackendForwardingAdapter.resolve(instance) != NetworkBackendForwardingAdapter.UNSUPPORTED;
+        return DesktopNetworkPlanInput.forwardingAdapter(instance) != NetworkBackendForwardingAdapter.UNSUPPORTED;
     }
 
     private boolean providerManaged(Instance instance) {

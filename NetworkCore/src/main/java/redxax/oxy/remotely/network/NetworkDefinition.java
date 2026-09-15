@@ -1,11 +1,10 @@
 package redxax.oxy.remotely.network;
 
-import restudio.rescreen.platform.Clock;
-
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 
@@ -34,7 +33,7 @@ public record NetworkDefinition(int schemaVersion, String networkId, String name
         runtime = runtime == null ? NetworkRuntimePolicy.disabled() : runtime;
         features = features == null ? Map.of() : Map.copyOf(new LinkedHashMap<>(features));
         sharedDataPolicy = sharedDataPolicy == null ? NetworkSharedDataPolicy.defaults() : sharedDataPolicy;
-        long now = Clock.system().millis();
+        long now = NetworkClock.SYSTEM.millis();
         createdAt = createdAt <= 0 ? now : createdAt;
         updatedAt = updatedAt <= 0 ? createdAt : updatedAt;
     }
@@ -48,7 +47,11 @@ public record NetworkDefinition(int schemaVersion, String networkId, String name
     }
 
     public static NetworkDefinition create(String name, String proxyInstanceId, NetworkForwardingPolicy forwarding, List<NetworkEntryPoint> entryPoints, List<NetworkMember> members) {
-        long now = Clock.system().millis();
+        return create(name, proxyInstanceId, forwarding, entryPoints, members, NetworkClock.SYSTEM);
+    }
+
+    public static NetworkDefinition create(String name, String proxyInstanceId, NetworkForwardingPolicy forwarding, List<NetworkEntryPoint> entryPoints, List<NetworkMember> members, NetworkClock clock) {
+        long now = Objects.requireNonNull(clock, "clock").millis();
         return new NetworkDefinition(CURRENT_SCHEMA_VERSION, UUID.randomUUID().toString(), name, 1, proxyInstanceId, NetworkDesiredState.STOPPED, forwarding, entryPoints, members, List.of(), List.of(), defaultRuntime(proxyInstanceId, entryPoints, members), defaultFeatures(), NetworkSharedDataPolicy.defaults(), now, now);
     }
 
@@ -64,15 +67,27 @@ public record NetworkDefinition(int schemaVersion, String networkId, String name
     }
 
     public NetworkDefinition nextRevision(List<NetworkMember> updatedMembers, List<RoutingGroup> updatedRoutingGroups, List<SyncRealm> updatedSyncRealms, NetworkDesiredState updatedDesiredState) {
-        return new NetworkDefinition(schemaVersion, networkId, name, revision + 1, proxyInstanceId, updatedDesiredState, forwarding, entryPoints, updatedMembers, updatedRoutingGroups, updatedSyncRealms, runtime, features, sharedDataPolicy, createdAt, Clock.system().millis());
+        return nextRevision(updatedMembers, updatedRoutingGroups, updatedSyncRealms, updatedDesiredState, NetworkClock.SYSTEM);
+    }
+
+    public NetworkDefinition nextRevision(List<NetworkMember> updatedMembers, List<RoutingGroup> updatedRoutingGroups, List<SyncRealm> updatedSyncRealms, NetworkDesiredState updatedDesiredState, NetworkClock clock) {
+        return new NetworkDefinition(schemaVersion, networkId, name, revision + 1, proxyInstanceId, updatedDesiredState, forwarding, entryPoints, updatedMembers, updatedRoutingGroups, updatedSyncRealms, runtime, features, sharedDataPolicy, createdAt, Objects.requireNonNull(clock, "clock").millis());
     }
 
     public NetworkDefinition renamed(String updatedName) {
-        return new NetworkDefinition(schemaVersion, networkId, updatedName, revision + 1, proxyInstanceId, desiredState, forwarding, entryPoints, members, routingGroups, syncRealms, runtime, features, sharedDataPolicy, createdAt, Clock.system().millis());
+        return renamed(updatedName, NetworkClock.SYSTEM);
+    }
+
+    public NetworkDefinition renamed(String updatedName, NetworkClock clock) {
+        return new NetworkDefinition(schemaVersion, networkId, updatedName, revision + 1, proxyInstanceId, desiredState, forwarding, entryPoints, members, routingGroups, syncRealms, runtime, features, sharedDataPolicy, createdAt, Objects.requireNonNull(clock, "clock").millis());
     }
 
     public NetworkDefinition withForwarding(NetworkForwardingPolicy updatedForwarding) {
-        return new NetworkDefinition(schemaVersion, networkId, name, revision + 1, proxyInstanceId, desiredState, updatedForwarding, entryPoints, members, routingGroups, syncRealms, runtime, features, sharedDataPolicy, createdAt, Clock.system().millis());
+        return withForwarding(updatedForwarding, NetworkClock.SYSTEM);
+    }
+
+    public NetworkDefinition withForwarding(NetworkForwardingPolicy updatedForwarding, NetworkClock clock) {
+        return new NetworkDefinition(schemaVersion, networkId, name, revision + 1, proxyInstanceId, desiredState, updatedForwarding, entryPoints, members, routingGroups, syncRealms, runtime, features, sharedDataPolicy, createdAt, Objects.requireNonNull(clock, "clock").millis());
     }
 
     public NetworkDefinition withSharedData(List<SyncRealm> updatedRealms, Map<String, Boolean> updatedFeatures) {
@@ -80,7 +95,11 @@ public record NetworkDefinition(int schemaVersion, String networkId, String name
     }
 
     public NetworkDefinition withSharedData(List<SyncRealm> updatedRealms, Map<String, Boolean> updatedFeatures, NetworkSharedDataPolicy updatedPolicy) {
-        return new NetworkDefinition(schemaVersion, networkId, name, revision + 1, proxyInstanceId, desiredState, forwarding, entryPoints, members, routingGroups, updatedRealms, runtime, updatedFeatures, updatedPolicy, createdAt, Clock.system().millis());
+        return withSharedData(updatedRealms, updatedFeatures, updatedPolicy, NetworkClock.SYSTEM);
+    }
+
+    public NetworkDefinition withSharedData(List<SyncRealm> updatedRealms, Map<String, Boolean> updatedFeatures, NetworkSharedDataPolicy updatedPolicy, NetworkClock clock) {
+        return new NetworkDefinition(schemaVersion, networkId, name, revision + 1, proxyInstanceId, desiredState, forwarding, entryPoints, members, routingGroups, updatedRealms, runtime, updatedFeatures, updatedPolicy, createdAt, Objects.requireNonNull(clock, "clock").millis());
     }
 
     public boolean featureEnabled(String feature) {

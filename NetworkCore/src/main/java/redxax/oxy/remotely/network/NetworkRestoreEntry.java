@@ -6,7 +6,9 @@ public record NetworkRestoreEntry(String path, ConfigurationFormat format, Strin
         format = format == null ? ConfigurationFormat.PROPERTIES : format;
         key = normalize(key);
         value = value == null ? "" : value;
-        if (path.isBlank() || key.isBlank()) throw new IllegalArgumentException("Restore entry path and key are required");
+        if (path.isBlank() || key.isBlank()) {
+            throw new IllegalArgumentException("Restore entry path and key are required");
+        }
     }
 
     private static String normalize(String value) {

@@ -17,6 +17,7 @@ import redxax.oxy.remotely.ui.server.NetworkOverviewScreen;
 import redxax.oxy.remotely.ui.server.NetworkOverviewProvider;
 import redxax.oxy.remotely.ui.server.NewTerminalTargetProvider;
 import redxax.oxy.remotely.ui.server.ServerDetailsScreen;
+import redxax.oxy.remotely.ui.server.ResourcePoolScreen;
 import redxax.oxy.remotely.network.NetworkLifecycleOperation;
 import redxax.oxy.remotely.ui.server.ServerIconManager;
 import redxax.oxy.remotely.ui.server.ServerIconProvider;
@@ -72,6 +73,8 @@ import restudio.rebase.resource.provider.AsyncReStudioMarketplaceProvider;
 import restudio.rebase.resource.provider.ResourceProviderCatalog;
 import restudio.rebase.resource.provider.ResourceProviderTransport;
 import restudio.rebase.restudio.api.models.ServerModels;
+import restudio.rebase.health.ServerHealth;
+import restudio.rebase.instance.loaders.ModLoader;
 import restudio.rebase.restudio.community.ReStudioCommunityProvider;
 import restudio.rebase.restudio.community.ReStudioCommunityProviders;
 import restudio.rebase.settings.controllers.ModpackSettingsProvider;
@@ -1180,7 +1183,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     }
 
     @Override
-    public Async<ServerScreenHost.ServerHealth> serverHealth(ServerModels.ClientServerView server) {
+    public Async<ServerHealth> serverHealth(ServerModels.ClientServerView server) {
         BrowserRemotelyServerApi api = browserApi();
         HostContext context = captureContext();
         if (api == null || serverId(server).isBlank() || !isCurrent(context)) {
@@ -1189,24 +1192,8 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         return observeSessionFailure(api.getServerHealth(serverId(server)).thenApply(health -> {
             if (!isCurrent(context)) throw new IllegalStateException("Browser Session Expired");
             if (health == null) throw new UnsupportedOperationException("Server Health Is Unavailable");
-            ServerScreenHost.PrerequisiteState eula = hostedPrerequisite(health.eulaState(), health.eulaAccepted());
-            ServerScreenHost.PrerequisiteState serverJar = hostedPrerequisite(health.serverJarState(), health.hasServerJar());
-            ServerScreenHost.PrerequisiteState startScript = hostedPrerequisite(health.startScriptState(), health.hasStartScript());
-            boolean healthy = health.healthy() != null && health.healthy();
-            return new ServerScreenHost.ServerHealth(eula, serverJar, startScript, healthy);
+            return health.health();
         }), context);
-    }
-
-    private static ServerScreenHost.PrerequisiteState hostedPrerequisite(String state, Boolean value) {
-        if (state != null && !state.isBlank()) {
-            try {
-                return ServerScreenHost.PrerequisiteState.valueOf(state.strip().toUpperCase(Locale.ROOT));
-            } catch (IllegalArgumentException ignored) {
-                return ServerScreenHost.PrerequisiteState.UNAVAILABLE;
-            }
-        }
-        if (value == null) return ServerScreenHost.PrerequisiteState.UNAVAILABLE;
-        return value ? ServerScreenHost.PrerequisiteState.VERIFIED : ServerScreenHost.PrerequisiteState.FAILED;
     }
 
     @Override
@@ -1539,7 +1526,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         BrowserRemotelyServerApi api = browserApi();
         VersionSettingsCatalog catalog = new VersionSettingsCatalog() {
             @Override public Async<List<GameVersion>> gameVersions() { return api.getCatalogGameVersions(); }
-            @Override public Async<List<ModLoaderVersion>> modLoaderVersions(restudio.rebase.instance.loaders.ModLoader loader, String gameVersion) {
+            @Override public Async<List<ModLoaderVersion>> modLoaderVersions(ModLoader loader, String gameVersion) {
                 return api.getCatalogModLoaderVersions(loader, gameVersion);
             }
             @Override public Async<Map<String, Software>> software() { return api.getCatalogSoftware(); }
@@ -1588,7 +1575,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
             @Override public ServerPlanSettingsProvider planSettingsProvider() { return api::getPlans; }
             @Override public ServerJvmSettingsProvider jvmSettingsProvider() { return null; }
             @Override public BackupSettingsProvider backupProvider() {
-                return BackupSettingsProvider.managed(owner, BrowserHostedSettingsProviders.backups(api, target.id()));
+                return BackupSettingsProvider.managed(owner, BrowserHostedSettingsProviders.backups(api, target.id(), configStore()));
             }
             @Override public AsyncServerScheduleFeature scheduleProvider() {
                 return BrowserHostedSettingsProviders.schedules(api, target.id());
@@ -2149,10 +2136,15 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
             case FILE_EXPLORER, GLOBAL_TERMINAL, DEVELOPMENT, RESYNC_STUDIO, WORLD,
                     SERVER_CONFIGURATION, DUPLICATE_SERVER, DELETE_SERVER, CREATE_SERVER, INBOX,
                     HOST_SETTINGS, REPORTS, SIGN_IN, SIGN_OUT, REACTOR_PLANS, OPEN_PANEL,
-                    RESYNC_PROVISION, RESYNC_UPDATE, CUSTOMIZE_ICON, MODPACK_SERVER -> true;
+                    RESYNC_PROVISION, RESYNC_UPDATE, CUSTOMIZE_ICON, MODPACK_SERVER, RESOURCES -> true;
             case NETWORK_SETTINGS -> BrowserLaunchSession.authenticated();
             default -> false;
         };
+    }
+
+    @Override
+    public void openResources(Screen current) {
+        application.setScreen(new ResourcePoolScreen(current, remotelyClient));
     }
 
     @Override

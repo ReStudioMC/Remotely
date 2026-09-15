@@ -67,13 +67,15 @@ class BrowserServerIconPersistenceTest {
         }
 
         @Override
-        public void write(String key, String value) {
+        public boolean write(String key, String value) {
             values.put(key, value);
+            return true;
         }
 
         @Override
-        public void erase(String key) {
+        public boolean erase(String key) {
             values.remove(key);
+            return true;
         }
     }
 }

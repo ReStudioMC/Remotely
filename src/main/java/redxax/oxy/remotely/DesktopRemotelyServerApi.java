@@ -4,12 +4,14 @@ import redxax.oxy.remotely.flow.ui.marketplace.ReSyncMarketplaceApi;
 import restudio.rescreen.platform.Async;
 import restudio.rebase.platform.jvm.JvmAsyncBridge;
 import restudio.rebase.Rebase;
+import restudio.rebase.backend.feature.BackupOperations;
 import restudio.rebase.minecraft.GameVersion;
 import restudio.rebase.restudio.ReStudio;
 import restudio.rebase.restudio.api.ReStudioApiClient;
 import restudio.rebase.restudio.api.models.MarketplaceModels;
 import restudio.rebase.restudio.api.models.ReleaseModels;
 import restudio.rebase.restudio.api.models.ServerModels;
+import restudio.rebase.resource.ResourcePoolClient;
 import restudio.rebase.schedule.ServerScheduleModels;
 
 import java.nio.file.Files;
@@ -27,6 +29,11 @@ public final class DesktopRemotelyServerApi implements RemotelyServerApi {
 
     public ReStudioApiClient studioApi() {
         return delegate;
+    }
+
+    @Override
+    public ResourcePoolClient resourcePools() {
+        return delegate.resourcePools();
     }
 
     @Override
@@ -120,6 +127,16 @@ public final class DesktopRemotelyServerApi implements RemotelyServerApi {
     }
 
     @Override
+    public Async<BackupOperations.CreateResult> createBackup(BackupOperations.CreateRequest request) {
+        return JvmAsyncBridge.fromFuture(delegate.createBackup(request));
+    }
+
+    @Override
+    public Async<BackupOperations.CreateResult> observeCreate(BackupOperations.CreateRequest request) {
+        return JvmAsyncBridge.fromFuture(delegate.observeCreate(request));
+    }
+
+    @Override
     public Async<Void> deleteBackup(String serverId, String backupUuid) {
         return JvmAsyncBridge.fromFuture(delegate.deleteBackup(serverId, backupUuid));
     }
@@ -127,6 +144,21 @@ public final class DesktopRemotelyServerApi implements RemotelyServerApi {
     @Override
     public Async<Void> restoreBackup(String serverId, String backupUuid, boolean truncate) {
         return JvmAsyncBridge.fromFuture(delegate.restoreBackup(serverId, backupUuid, truncate));
+    }
+
+    @Override
+    public Async<BackupOperations.RestoreResult> restoreBackup(BackupOperations.RestoreRequest request) {
+        return JvmAsyncBridge.fromFuture(delegate.restoreBackup(request));
+    }
+
+    @Override
+    public Async<BackupOperations.RestoreResult> observeRestore(BackupOperations.RestoreRequest request) {
+        return JvmAsyncBridge.fromFuture(delegate.observeRestore(request));
+    }
+
+    @Override
+    public Async<ServerModels.BackupRestoreDiscovery> discoverRestore(String serverId) {
+        return JvmAsyncBridge.fromFuture(delegate.discoverRestore(serverId));
     }
 
     @Override

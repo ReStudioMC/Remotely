@@ -438,6 +438,9 @@ public class ServerManagerScreen extends DesktopShellScreen {
         if (serverHost().supports(ServerScreenHost.Action.REPORTS)) {
             builder.addHeaderButton("report.png", () -> serverHost().openReports(this), "Reports And Feedback");
         }
+        if (serverHost().supports(ServerScreenHost.Action.RESOURCES)) {
+            builder.addHeaderButton("resources.png", () -> serverHost().openResources(this), "Resources");
+        }
         if (serverHost().supports(ServerScreenHost.Action.SIGN_OUT)) {
             builder.addHeaderButton("close.png", () -> serverHost().signOut(this), "Sign Out", ThemeManager.getAccent("danger"));
         }

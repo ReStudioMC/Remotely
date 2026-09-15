@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -34,10 +35,10 @@ class NetworkLifecycleJobTest {
     @Test
     void ordersFallbackBackendsBeforeProxyForStartAndProxyFirstForStop() {
         NetworkDefinition network = network();
-        NetworkLifecycleJobManager manager = new NetworkLifecycleJobManager(directory);
+        NetworkLifecyclePlanner planner = new NetworkLifecyclePlanner();
 
-        List<NetworkLifecycleStep> start = manager.plan(network, NetworkLifecycleOperation.START);
-        List<NetworkLifecycleStep> stop = manager.plan(network, NetworkLifecycleOperation.STOP);
+        List<NetworkLifecycleStep> start = planner.plan(network, NetworkLifecycleOperation.START);
+        List<NetworkLifecycleStep> stop = planner.plan(network, NetworkLifecycleOperation.STOP);
 
         assertEquals("lobby", start.getFirst().routeName());
         assertEquals("proxy", start.getLast().routeName());
@@ -48,9 +49,9 @@ class NetworkLifecycleJobTest {
     @Test
     void restartContainsAFullStopThenAFullStart() {
         NetworkDefinition network = network();
-        NetworkLifecycleJobManager manager = new NetworkLifecycleJobManager(directory);
+        NetworkLifecyclePlanner planner = new NetworkLifecyclePlanner();
 
-        List<NetworkLifecycleStep> steps = manager.plan(network, NetworkLifecycleOperation.RESTART);
+        List<NetworkLifecycleStep> steps = planner.plan(network, NetworkLifecycleOperation.RESTART);
 
         assertEquals(network.members().size() * 2, steps.size());
         assertTrue(steps.subList(0, network.members().size()).stream().allMatch(step -> step.action() == NetworkLifecycleAction.STOP));
@@ -60,9 +61,9 @@ class NetworkLifecycleJobTest {
     @Test
     void rollingRestartDrainsGameplayBeforeFallbackAndHealthGatesEveryBackend() {
         NetworkDefinition network = network();
-        NetworkLifecycleJobManager manager = new NetworkLifecycleJobManager(directory);
+        NetworkLifecyclePlanner planner = new NetworkLifecyclePlanner();
 
-        List<NetworkLifecycleStep> steps = manager.plan(network, NetworkLifecycleOperation.ROLLING_RESTART);
+        List<NetworkLifecycleStep> steps = planner.plan(network, NetworkLifecycleOperation.ROLLING_RESTART);
 
         assertEquals(14, steps.size());
         assertEquals("survival", steps.getFirst().routeName());
@@ -85,6 +86,26 @@ class NetworkLifecycleJobTest {
         assertFalse(NetworkManager.shouldRecoverLifecycle(pending, newer));
         assertFalse(NetworkManager.shouldRecoverLifecycle(future, network));
         assertFalse(NetworkManager.shouldRecoverLifecycle(drain, network));
+    }
+
+    @Test
+    void lifecycleMachineOwnsAttemptStepAndCompletionTransitions() {
+        NetworkDefinition network = network();
+        AtomicLong time = new AtomicLong(100);
+        NetworkLifecycleMachine machine = new NetworkLifecycleMachine(time::incrementAndGet);
+        NetworkLifecycleJob ready = NetworkLifecycleJob.create(network, NetworkLifecycleOperation.STOP, "Test",
+                new NetworkLifecyclePlanner().planMember(network, network.members().get(1), NetworkLifecycleOperation.STOP), time::incrementAndGet);
+
+        NetworkLifecycleJob running = machine.start(ready);
+        List<NetworkLifecycleStep> next = machine.next(running);
+        NetworkLifecycleJob begun = machine.begin(running, next);
+        NetworkLifecycleJob succeeded = machine.succeed(begun, next.getFirst(), false, "Stopped");
+        NetworkLifecycleJob complete = machine.finish(succeeded);
+
+        assertEquals(1, running.attempt());
+        assertEquals(NetworkLifecycleStepStatus.RUNNING, begun.steps().getFirst().status());
+        assertEquals(NetworkLifecycleStepStatus.SUCCEEDED, succeeded.steps().getFirst().status());
+        assertEquals(NetworkLifecycleStatus.SUCCEEDED, complete.status());
     }
 
     private NetworkDefinition network() {

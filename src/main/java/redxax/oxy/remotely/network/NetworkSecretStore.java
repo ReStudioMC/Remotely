@@ -1,13 +1,14 @@
 package redxax.oxy.remotely.network;
 
 import restudio.rebase.util.CredentialsManager;
+import restudio.rescreen.platform.Sha256;
 
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.Base64;
 import java.util.UUID;
 
-public class NetworkSecretStore {
+public class NetworkSecretStore implements NetworkSecrets {
     private static final String FORWARDING_SERVICE = "remotely_network_forwarding";
     private static final String ENROLLMENT_SERVICE = "remotely_network_enrollment";
     private static final String RUNTIME_CREDENTIAL_SERVICE = "remotely_network_runtime_credential";
@@ -29,6 +30,11 @@ public class NetworkSecretStore {
         }
         String value = CredentialsManager.getPassword(FORWARDING_SERVICE, reference.trim());
         return value == null ? "" : value;
+    }
+
+    @Override
+    public String forwardingSecret(String reference) {
+        return resolveForwardingSecret(reference);
     }
 
     public Secret importForwardingSecret(String value) {
@@ -67,6 +73,13 @@ public class NetworkSecretStore {
         String encoded = Base64.getUrlEncoder().withoutPadding().encodeToString(value);
         CredentialsManager.setPassword(ENROLLMENT_SERVICE, account, encoded);
         return encoded;
+    }
+
+    @Override
+    public NetworkEnrollment enrollment(String networkId, String nodeId) {
+        String token = getOrCreateEnrollmentToken(networkId, nodeId);
+        String hash = Base64.getUrlEncoder().withoutPadding().encodeToString(Sha256.digest(token.getBytes(StandardCharsets.UTF_8)));
+        return new NetworkEnrollment(token, hash);
     }
 
     public String resolveEnrollmentToken(String networkId, String nodeId) {

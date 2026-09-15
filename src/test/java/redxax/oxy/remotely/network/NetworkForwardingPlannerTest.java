@@ -21,7 +21,7 @@ class NetworkForwardingPlannerTest {
         NetworkDefinition network = network(proxy, backend);
         NetworkDiscoveryResult discovery = discovery(network, proxy, backend);
 
-        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(discovery, secrets());
+        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(DesktopNetworkPlanInput.from(discovery), secrets());
 
         assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.path().equals("config/FabricProxy-Lite.toml") && mutation.key().equals("secret")));
         assertFalse(plan.mutations().stream().anyMatch(mutation -> mutation.path().contains("paper")));
@@ -35,7 +35,7 @@ class NetworkForwardingPlannerTest {
         NetworkDefinition network = network(proxy, backend);
         NetworkDiscoveryResult discovery = discovery(network, proxy, backend);
 
-        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(discovery, secrets());
+        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(DesktopNetworkPlanInput.from(discovery), secrets());
 
         assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.path().equals("config/proxy-compatible-forge.toml") && mutation.key().equals("forwarding.enabled") && mutation.desiredValue().equals("true")));
         assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.path().equals("config/proxy-compatible-forge.toml") && mutation.key().equals("forwarding.secret") && mutation.sensitive()));
@@ -50,7 +50,7 @@ class NetworkForwardingPlannerTest {
         NetworkDefinition network = network(proxy, backend);
         NetworkDiscoveryResult discovery = discovery(network, proxy, backend);
 
-        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(discovery, secrets());
+        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(DesktopNetworkPlanInput.from(discovery), secrets());
 
         assertTrue(plan.issues().stream().anyMatch(issue -> issue.code().equals("backend.forwarding.adapter.unavailable")));
         assertFalse(plan.mutations().stream().anyMatch(mutation -> mutation.path().contains("paper")));
@@ -64,7 +64,7 @@ class NetworkForwardingPlannerTest {
         NetworkDefinition network = network(proxy, backend);
         NetworkDiscoveryResult discovery = discovery(network, proxy, backend);
 
-        NetworkReconciliationPlan plan = new NetworkDetachPlanner().planDissolve(discovery);
+        NetworkReconciliationPlan plan = new NetworkDetachPlanner().planDissolve(DesktopNetworkPlanInput.from(discovery));
 
         assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.path().equals("config/proxy-compatible-forge.toml") && mutation.key().equals("forwarding.enabled") && mutation.desiredValue().equals("false")));
         assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.instanceId().equals(backend.getInstanceId()) && mutation.key().equals("online-mode") && mutation.desiredValue().equals("true")));
@@ -79,7 +79,7 @@ class NetworkForwardingPlannerTest {
         RoutingGroup fallback = new RoutingGroup("fallback", "Fallback", RoutingStrategy.ORDERED, List.of(backendMember.nodeId()), Map.of(), "", Set.of("play.example.com"), "");
         NetworkDefinition routed = base.nextRevision(base.members(), List.of(fallback), base.syncRealms(), base.desiredState());
 
-        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(discovery(routed, proxy, backend), secrets());
+        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(DesktopNetworkPlanInput.from(discovery(routed, proxy, backend)), secrets());
 
         assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.key().equals("servers.try") && mutation.desiredValue().contains("backend")));
         assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.key().equals("forced-hosts.play.example.com") && mutation.desiredValue().contains("backend")));
@@ -91,7 +91,7 @@ class NetworkForwardingPlannerTest {
         Instance backend = instance("Lobby", ModLoader.PAPER);
         NetworkDefinition network = network(proxy, backend);
 
-        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(discovery(network, proxy, backend), secrets());
+        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(DesktopNetworkPlanInput.from(discovery(network, proxy, backend)), secrets());
 
         assertTrue(network.runtime().enabled());
         assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.instanceId().equals(proxy.getInstanceId()) && mutation.path().equals("plugins/resyncvelocity/network.properties") && mutation.key().equals("network.enabled") && mutation.desiredValue().equals("true")));
@@ -121,7 +121,7 @@ class NetworkForwardingPlannerTest {
         NetworkDefinition network = base.withSharedData(base.syncRealms(), features, policy);
 
         NetworkDiscoveryResult discovery = new NetworkDiscoveryResult(network, Map.of(proxy.getInstanceId(), proxy, backend.getInstanceId(), backend, survival.getInstanceId(), survival), List.of(), List.of(), List.of());
-        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(discovery, secrets());
+        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(DesktopNetworkPlanInput.from(discovery), secrets());
 
         assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.key().equals("network.chat.channel-mode") && mutation.desiredValue().equals("ALLOW_LIST")));
         assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.key().equals("network.chat.channels") && Set.of(mutation.desiredValue().split(",")).equals(Set.of("global", "staff"))));
@@ -146,7 +146,7 @@ class NetworkForwardingPlannerTest {
         NetworkRuntimePolicy pending = new NetworkRuntimePolicy(true, "10.0.0.10", local.runtime().hubPort(), NetworkTransportSecurity.WSS, false);
         NetworkDefinition network = new NetworkDefinition(local.schemaVersion(), local.networkId(), local.name(), local.revision(), local.proxyInstanceId(), local.desiredState(), local.forwarding(), local.entryPoints(), List.of(local.members().getFirst(), remoteBackend), local.routingGroups(), local.syncRealms(), pending, local.features(), local.createdAt(), local.updatedAt());
 
-        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(discovery(network, proxy, backend), secrets());
+        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(DesktopNetworkPlanInput.from(discovery(network, proxy, backend)), secrets());
 
         assertTrue(plan.issues().stream().anyMatch(issue -> issue.code().equals("resync.transport.unavailable") && issue.blocksPersistence()));
     }
@@ -164,7 +164,7 @@ class NetworkForwardingPlannerTest {
         NetworkDefinition network = base.nextRevision(base.members(), base.routingGroups(), List.of(realm), base.desiredState());
         NetworkDiscoveryResult discovery = new NetworkDiscoveryResult(network, Map.of(proxy.getInstanceId(), proxy, first.getInstanceId(), first, second.getInstanceId(), second), List.of(), List.of(), List.of());
 
-        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(discovery, secrets());
+        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(DesktopNetworkPlanInput.from(discovery), secrets());
 
         assertTrue(plan.mutations().stream().filter(mutation -> mutation.key().endsWith(".capabilities")).filter(mutation -> mutation.desiredValue().contains("state:survival")).count() == 2);
         assertTrue(plan.mutations().stream().filter(mutation -> mutation.key().equals("network.transfer.profile") && mutation.desiredValue().equals("CUSTOM")).count() == 2);
@@ -191,7 +191,7 @@ class NetworkForwardingPlannerTest {
             }
         };
 
-        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(discovery(rotated, proxy, backend), secrets);
+        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(DesktopNetworkPlanInput.from(discovery(rotated, proxy, backend)), secrets);
 
         assertTrue(rotated.revision() == base.revision() + 1);
         assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.path().equals("forwarding.secret") && mutation.sensitive() && mutation.desiredValue().equals("new-secret-value")));
@@ -203,7 +203,7 @@ class NetworkForwardingPlannerTest {
         Instance proxy = instance("Proxy", ModLoader.VELOCITY);
         Instance backend = instance("Survival", ModLoader.PAPER);
 
-        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(discovery(network(proxy, backend), proxy, backend), secrets());
+        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(DesktopNetworkPlanInput.from(discovery(network(proxy, backend), proxy, backend)), secrets());
 
         assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.key().equals("config-version") && mutation.desiredValue().equals("\"2.8\"")));
         assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.action() == NetworkMutationAction.REMOVE && mutation.key().equals("forwarding-secret")));

@@ -1,6 +1,5 @@
 package redxax.oxy.remotely.network.config;
 
-import redxax.oxy.remotely.settings.server.BrowserSafeYaml;
 import redxax.oxy.remotely.util.TextLines;
 
 import java.util.ArrayList;
@@ -12,10 +11,6 @@ import java.util.Objects;
 
 public class YamlConfigurationAdapter implements NetworkConfigurationAdapter {
     private final StructuredDocumentParser structuredParser;
-
-    public YamlConfigurationAdapter() {
-        this(BrowserSafeYaml::parse);
-    }
 
     public YamlConfigurationAdapter(StructuredDocumentParser structuredParser) {
         this.structuredParser = Objects.requireNonNull(structuredParser, "structuredParser");

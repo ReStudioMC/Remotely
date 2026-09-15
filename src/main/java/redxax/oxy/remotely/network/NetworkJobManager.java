@@ -1,11 +1,10 @@
 package redxax.oxy.remotely.network;
 
 import redxax.oxy.remotely.util.BrowserSafeState;
-
 import restudio.rebase.instance.Instance;
+import restudio.rescreen.platform.Async;
 
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -13,9 +12,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import restudio.rescreen.platform.Async;
-
-
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -180,7 +176,8 @@ public class NetworkJobManager {
         NetworkJob ready;
         synchronized (this) {
             NetworkJob current = requireJob(job.jobId());
-            List<NetworkJobDocument> documents = recovery && !current.documents().isEmpty() ? recoverDocuments(current.documents(), described) : described;
+            List<NetworkJobDocument> documents = recovery && !current.documents().isEmpty()
+                    ? NetworkExecutionPlan.recover(current.documents(), described) : described;
             ready = current.prepared(documents);
             persist(ready);
             ready = ready.startingAttempt();
@@ -213,36 +210,6 @@ public class NetworkJobManager {
             updated.put("restartInstanceIds", restartInstanceIds);
         }
         return updated;
-    }
-
-    private List<NetworkJobDocument> recoverDocuments(List<NetworkJobDocument> stored, List<NetworkJobDocument> current) {
-        Map<NetworkConfigDocumentKey, NetworkJobDocument> currentByKey = new LinkedHashMap<>();
-        current.forEach(document -> currentByKey.put(document.key(), document));
-        if (currentByKey.size() != stored.size()) {
-            throw new IllegalStateException("Network plan shape changed and cannot be resumed safely");
-        }
-        List<NetworkJobDocument> recovered = new ArrayList<>(stored.size());
-        for (NetworkJobDocument original : stored) {
-            NetworkJobDocument observed = currentByKey.get(original.key());
-            if (observed == null || !observed.desiredHash().equals(original.desiredHash())) {
-                throw new IllegalStateException("Desired configuration changed for " + original.key().path());
-            }
-            NetworkJobDocumentState state;
-            if (!original.changed()) {
-                if (!observed.originalHash().equals(original.originalHash())) {
-                    throw new IllegalStateException("Configuration drift prevents recovery of " + original.key().path());
-                }
-                state = NetworkJobDocumentState.UNCHANGED;
-            } else if (observed.originalHash().equals(original.desiredHash())) {
-                state = NetworkJobDocumentState.APPLIED;
-            } else if (observed.originalExists() == original.originalExists() && observed.originalHash().equals(original.originalHash())) {
-                state = NetworkJobDocumentState.PENDING;
-            } else {
-                throw new IllegalStateException("Configuration drift prevents recovery of " + original.key().path());
-            }
-            recovered.add(new NetworkJobDocument(original.key(), original.applyOrder(), original.originalExists(), original.originalHash(), original.desiredHash(), state));
-        }
-        return List.copyOf(recovered);
     }
 
     private NetworkTransactionListener listener(String jobId) {

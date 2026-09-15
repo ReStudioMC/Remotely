@@ -14,6 +14,8 @@ import restudio.rescreen.platform.Async;
 import restudio.rebase.api.unified.internal.StandardOutputStateParser;
 import restudio.rebase.backend.TerminalSessionProvider;
 import restudio.rebase.restudio.api.models.ServerModels;
+import restudio.rebase.resource.ResourcePoolModels;
+import restudio.rebase.health.ServerHealth;
 import restudio.rebase.ui.widgets.TerminalWidget;
 import restudio.rescreen.ui.core.Screen;
 import restudio.rescreen.ui.core.ScreenManager;
@@ -78,36 +80,6 @@ public interface ServerScreenHost {
 
     record ServerMetrics(long uptimeMs, double cpuPercent, long memoryBytes, long memoryLimitBytes, int players,
                          int maxPlayers) {
-    }
-
-    enum PrerequisiteState {
-        VERIFIED,
-        FAILED,
-        NOT_APPLICABLE,
-        UNAVAILABLE;
-
-        public boolean allowsStart() {
-            return this == VERIFIED || this == NOT_APPLICABLE;
-        }
-    }
-
-    record ServerHealth(PrerequisiteState eula, PrerequisiteState serverJar, PrerequisiteState startScript, boolean healthy) {
-        public ServerHealth {
-            eula = eula == null ? PrerequisiteState.UNAVAILABLE : eula;
-            serverJar = serverJar == null ? PrerequisiteState.UNAVAILABLE : serverJar;
-            startScript = startScript == null ? PrerequisiteState.UNAVAILABLE : startScript;
-            healthy = healthy && eula.allowsStart() && serverJar.allowsStart() && startScript.allowsStart();
-        }
-
-        public ServerHealth(boolean eulaAccepted, boolean hasServerJar, boolean hasStartScript, boolean healthy) {
-            this(eulaAccepted ? PrerequisiteState.VERIFIED : PrerequisiteState.FAILED,
-                    hasServerJar ? PrerequisiteState.VERIFIED : PrerequisiteState.FAILED,
-                    hasStartScript ? PrerequisiteState.VERIFIED : PrerequisiteState.FAILED, healthy);
-        }
-
-        public boolean eulaAccepted() { return eula.allowsStart(); }
-        public boolean hasServerJar() { return serverJar.allowsStart(); }
-        public boolean hasStartScript() { return startScript.allowsStart(); }
     }
 
     default Async<String> connectionInfo(Object target) {
@@ -309,18 +281,56 @@ public interface ServerScreenHost {
     }
 
     record ConfigurationState(Object original, Object draft, HostView remoteHost, boolean editMode,
-                              boolean restudioBackend, boolean restudioCreation, String serverIdentifier,
-                              String preselectedPlanName) {
+                               boolean restudioBackend, boolean restudioCreation, String serverIdentifier,
+                               String preselectedPlanName, boolean resourcePoolCreation,
+                               ResourcePoolModels.DraftOptions poolOptions) {
+        public ConfigurationState(Object original, Object draft, HostView remoteHost, boolean editMode,
+                                  boolean restudioBackend, boolean restudioCreation, String serverIdentifier,
+                                  String preselectedPlanName, boolean resourcePoolCreation) {
+            this(original, draft, remoteHost, editMode, restudioBackend, restudioCreation, serverIdentifier,
+                    preselectedPlanName, resourcePoolCreation, new ResourcePoolModels.DraftOptions(List.of()));
+        }
+
+        public ConfigurationState(Object original, Object draft, HostView remoteHost, boolean editMode,
+                                  boolean restudioBackend, boolean restudioCreation, String serverIdentifier,
+                                  String preselectedPlanName) {
+            this(original, draft, remoteHost, editMode, restudioBackend, restudioCreation, serverIdentifier,
+                    preselectedPlanName, false, new ResourcePoolModels.DraftOptions(List.of()));
+        }
+
         public ConfigurationState {
             serverIdentifier = serverIdentifier == null ? "" : serverIdentifier;
             preselectedPlanName = preselectedPlanName == null ? "" : preselectedPlanName;
+            poolOptions = poolOptions == null ? new ResourcePoolModels.DraftOptions(List.of()) : poolOptions;
+        }
+    }
+
+    record PoolResources(String gameId, String profileId, String installerRamMiB, String installerCpuPercent,
+                         String runtimeRamMiB, String runtimeCpuPercent, String diskMiB, String backupMiB) {
+        public PoolResources {
+            gameId = gameId == null ? "" : gameId.trim();
+            profileId = profileId == null ? "" : profileId.trim();
+            installerRamMiB = installerRamMiB == null ? "" : installerRamMiB.trim();
+            installerCpuPercent = installerCpuPercent == null ? "" : installerCpuPercent.trim();
+            runtimeRamMiB = runtimeRamMiB == null ? "" : runtimeRamMiB.trim();
+            runtimeCpuPercent = runtimeCpuPercent == null ? "" : runtimeCpuPercent.trim();
+            diskMiB = diskMiB == null ? "" : diskMiB.trim();
+            backupMiB = backupMiB == null ? "" : backupMiB.trim();
         }
     }
 
     record ConfigurationUi(Map<String, Supplier<List<Setting>>> settings,
                            Runnable cleanup, String title, Supplier<String> planName,
                            Supplier<String> subdomain, Supplier<ServerModels.CustomPlanRequest> customPlan,
-                           Supplier<String> localLocation) {
+                           Supplier<String> localLocation, Supplier<PoolResources> poolResources) {
+        public ConfigurationUi(Map<String, Supplier<List<Setting>>> settings,
+                               Runnable cleanup, String title, Supplier<String> planName,
+                               Supplier<String> subdomain, Supplier<ServerModels.CustomPlanRequest> customPlan,
+                               Supplier<String> localLocation) {
+            this(settings, cleanup, title, planName, subdomain, customPlan, localLocation,
+                    () -> new PoolResources("", "", "", "", "", "", "", ""));
+        }
+
         public ConfigurationUi {
             settings = settings == null ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(settings));
             cleanup = cleanup == null ? () -> {} : cleanup;
@@ -329,6 +339,8 @@ public interface ServerScreenHost {
             subdomain = subdomain == null ? () -> "" : subdomain;
             customPlan = customPlan == null ? () -> null : customPlan;
             localLocation = localLocation == null ? () -> "" : localLocation;
+            poolResources = poolResources == null
+                    ? () -> new PoolResources("", "", "", "", "", "", "", "") : poolResources;
         }
     }
 
@@ -359,6 +371,7 @@ public interface ServerScreenHost {
         CUSTOMIZE_ICON,
         INBOX,
         REPORTS,
+        RESOURCES,
         SIGN_IN,
         SIGN_OUT,
         WORLD,
@@ -994,6 +1007,10 @@ public interface ServerScreenHost {
         unavailable(Action.REPORTS);
     }
 
+    default void openResources(Screen current) {
+        unavailable(Action.RESOURCES);
+    }
+
     default void signIn(Screen current) {
         unavailable(Action.SIGN_IN);
     }
@@ -1038,7 +1055,10 @@ public interface ServerScreenHost {
     }
 
     default Async<ServerHealth> serverHealth(ServerModels.ClientServerView server) {
-        return Async.failed(new UnsupportedOperationException("Server Health Is Unavailable"));
+        String id = serverId(server);
+        if (id.isBlank()) return Async.failed(new UnsupportedOperationException("Server Health Is Unavailable"));
+        return Async.completed(new ServerHealth(id, ServerHealth.UNKNOWN_GAME,
+                ServerHealth.LaunchAvailability.ADAPTER_UNAVAILABLE, List.of(), false));
     }
 
     default Async<LocalStatus> localStatus(Object target) {

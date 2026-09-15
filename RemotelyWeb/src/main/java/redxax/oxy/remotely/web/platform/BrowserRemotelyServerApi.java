@@ -14,6 +14,7 @@ import redxax.oxy.remotely.ui.server.ServerScreenHost;
 import restudio.rebase.backend.CapabilityDescriptor;
 import restudio.rebase.backend.CapabilityIds;
 import restudio.rebase.backend.DeveloperCapabilityProvider;
+import restudio.rebase.backend.feature.BackupOperations;
 import restudio.rebase.backend.GitJobProvider;
 import restudio.rebase.backend.RemoteFileSystemProvider;
 import restudio.rebase.backend.RemotePath;
@@ -49,6 +50,9 @@ import restudio.rebase.api.git.data.GitFileStatus;
 import restudio.rebase.api.git.data.GitStatus;
 import restudio.rebase.api.git.data.GitStashEntry;
 import restudio.rebase.restudio.api.models.ServerModels;
+import restudio.rebase.resource.ResourcePoolClient;
+import restudio.rebase.health.ServerHealth;
+import restudio.rebase.health.ServerHealthJsonCodec;
 import restudio.rebase.schedule.ServerScheduleCapabilityClient;
 import restudio.rebase.schedule.ServerScheduleModels;
 import restudio.rebase.restudio.api.ReStudioResourceCapabilityClient;
@@ -107,6 +111,7 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
     private final BrowserApplicationHost host;
     private final ReStudioResourceCapabilityClient resourceApi;
     private final ServerScheduleCapabilityClient scheduleClient;
+    private final ResourcePoolClient resourcePools;
     private final Map<String, Consumer<DeveloperCapabilityProvider.JobProgress>> developerProgress = new LinkedHashMap<>();
     private final Set<BrowserTerminalTransport> activeTerminalTransports = new HashSet<>();
     private final Set<UUID> activeConsoleSessions = new HashSet<>();
@@ -145,12 +150,18 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         marketplace = new BrowserReSyncMarketplaceApi(transport, session, host);
         baseUrl = BrowserLaunchSession.capabilityBaseUrl();
         scheduleClient = new ServerScheduleCapabilityClient(this::request);
+        resourcePools = new ResourcePoolClient(this::resourcePoolRequest);
         resourceApi = new ReStudioResourceCapabilityClient(transport);
         resourceApi.setBaseUrl(BrowserLaunchSession.apiBaseUrl());
         resourceApi.useSessionCookies();
         BrowserLaunchSession.addAuthStateListener(browserReadAuthListener);
         BrowserLaunchSession.addTicketListener(browserReadTicketListener);
         BrowserLaunchSession.addSessionExpiryListener(browserReadExpiryListener);
+    }
+
+    @Override
+    public ResourcePoolClient resourcePools() {
+        return resourcePools;
     }
 
     public void close() {
@@ -626,8 +637,8 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         });
     }
 
-    public Async<ServerHealthView> getServerHealth(String serverId) {
-        return get("/servers/" + path(serverId) + "/health", BrowserRemotelyServerApi::serverHealth);
+    public Async<ServerHealthResponse> getServerHealth(String serverId) {
+        return get("/servers/" + path(serverId) + "/health", value -> serverHealth(value, serverId));
     }
 
     @Override
@@ -798,6 +809,32 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
     }
 
     @Override
+    public Async<BackupOperations.CreateResult> createBackup(BackupOperations.CreateRequest operation) {
+        Objects.requireNonNull(operation, "operation");
+        String body = json(Map.of("request_id", operation.requestId(), "name", operation.name(),
+                "ignored", operation.ignored(), "locked", operation.locked()));
+        return mutation("POST", "/servers/" + path(operation.serverId()) + "/backups", body, operation.requestId())
+                .thenApply(response -> {
+                    JsonObject value = BrowserJson.object(response);
+                    if (value.has("requestId") || value.has("state")) {
+                        return BackupOperations.create(backupCreateObservation(value), operation);
+                    }
+                    return BackupOperations.created(operation, backup(value));
+                })
+                .handle((result, failure) -> failure == null ? result
+                        : BackupOperations.createFailure(operation, failure, capabilityStatus(failure)));
+    }
+
+    @Override
+    public Async<BackupOperations.CreateResult> observeCreate(BackupOperations.CreateRequest operation) {
+        Objects.requireNonNull(operation, "operation");
+        return request("GET", "/servers/" + path(operation.serverId()) + "/backups/requests/" + path(operation.requestId()), null)
+                .thenApply(response -> BackupOperations.create(backupCreateObservation(BrowserJson.object(response)), operation))
+                .handle((result, failure) -> failure == null ? result
+                        : BackupOperations.createObservationFailure(operation, failure));
+    }
+
+    @Override
     public ServerScheduleModels.Capabilities scheduleCapabilities(String serverId) {
         if (BrowserLaunchSession.metadata().demo()) {
             return ServerScheduleModels.Capabilities.unavailable("Scheduling Is Not Available In Reactor Demo");
@@ -852,6 +889,33 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
     @Override
     public Async<Void> restoreBackup(String serverId, String backupUuid, boolean truncate) {
         return job("/servers/" + path(serverId) + "/backups/" + path(backupUuid) + "/restore", Map.of("truncate", truncate));
+    }
+
+    @Override
+    public Async<BackupOperations.RestoreResult> restoreBackup(BackupOperations.RestoreRequest operation) {
+        Objects.requireNonNull(operation, "operation");
+        return mutation("POST", "/servers/" + path(operation.serverId()) + "/backups/" + path(operation.backupId()) + "/restore",
+                json(Map.of("truncate", operation.truncate())), operation.requestId())
+                .thenApply(response -> BackupOperations.restore(capabilityJob(BrowserJson.object(response)), operation))
+                .handle((result, failure) -> failure == null ? result
+                        : BackupOperations.restoreFailure(operation, failure, capabilityStatus(failure)));
+    }
+
+    @Override
+    public Async<BackupOperations.RestoreResult> observeRestore(BackupOperations.RestoreRequest operation) {
+        Objects.requireNonNull(operation, "operation");
+        return get("/servers/" + path(operation.serverId()) + "/backups/restores/" + path(operation.requestId()),
+                BrowserRemotelyServerApi::capabilityJob)
+                .thenApply(job -> BackupOperations.restore(job, operation))
+                .handle((result, failure) -> failure == null ? result
+                        : BackupOperations.restoreObservationFailure(operation, failure));
+    }
+
+    @Override
+    public Async<ServerModels.BackupRestoreDiscovery> discoverRestore(String serverId) {
+        return requestAllowMissingContent("GET", "/servers/" + path(serverId) + "/backups/restores/active", null)
+                .thenApply(response -> response == null || response.isBlank() ? null
+                        : backupRestoreDiscovery(BrowserJson.object(response)));
     }
 
     @Override
@@ -1540,7 +1604,7 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         return serverId;
     }
 
-    private Async<Void> await(CapabilityJob job) {
+    private Async<Void> await(ServerModels.CapabilityJob job) {
         Async<Void> result = Async.pending();
         poll(job, clock.millis() + JOB_TIMEOUT_MILLIS, result);
         return result;
@@ -1580,7 +1644,7 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
                 });
     }
 
-    private void poll(CapabilityJob job, long deadline, Async<Void> result) {
+    private void poll(ServerModels.CapabilityJob job, long deadline, Async<Void> result) {
         if (job == null || job.status == null) {
             result.fail(new IllegalStateException("Capability job response is invalid"));
             return;
@@ -2530,11 +2594,8 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         return BrowserJson.element(value, name) == null ? null : BrowserJson.integer(value, name, 0);
     }
 
-    private static Boolean nullableBoolean(JsonObject value, String... names) {
-        for (String name : names) {
-            if (BrowserJson.element(value, name) != null) return BrowserJson.bool(value, name, false);
-        }
-        return null;
+    private static Boolean nullableBoolean(JsonObject value, String name) {
+        return BrowserJson.element(value, name) == null ? null : BrowserJson.bool(value, name, false);
     }
 
     private static Long nullableLong(JsonObject value, String name) {
@@ -2671,28 +2732,12 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         return result;
     }
 
-    private static ServerHealthView serverHealth(JsonObject value) {
-        ServerHealthView result = new ServerHealthView();
-        result.serverId = BrowserJson.string(value, "serverId");
-        result.uuid = BrowserJson.string(value, "uuid");
-        result.name = BrowserJson.string(value, "name");
+    private static ServerHealthResponse serverHealth(JsonObject value, String serverId) {
+        ServerHealthResponse result = new ServerHealthResponse();
         result.status = BrowserJson.string(value, "status");
-        result.reachable = BrowserJson.bool(value, "reachable", false);
-        result.ready = BrowserJson.bool(value, "ready", false);
-        result.online = BrowserJson.bool(value, "online", false);
         result.suspended = BrowserJson.bool(value, "suspended", false);
         result.installing = BrowserJson.bool(value, "installing", false);
-        result.clientAvailable = BrowserJson.bool(value, "clientAvailable", false);
-        result.resourcesAvailable = BrowserJson.bool(value, "resourcesAvailable", false);
-        result.eulaAccepted = nullableBoolean(value, "eulaAccepted", "eula_accepted");
-        result.hasServerJar = nullableBoolean(value, "hasServerJar", "has_server_jar");
-        result.hasStartScript = nullableBoolean(value, "hasStartScript", "has_start_script");
-        result.eulaState = BrowserJson.string(value, "eulaState");
-        result.serverJarState = BrowserJson.string(value, "serverJarState");
-        result.startScriptState = BrowserJson.string(value, "startScriptState");
-        result.healthy = nullableBoolean(value, "healthy");
-        result.reason = BrowserJson.string(value, "reason");
-        result.checkedAt = BrowserJson.string(value, "checkedAt");
+        result.health = ServerHealthJsonCodec.decode(value.toString(), serverId);
         return result;
     }
 
@@ -2903,11 +2948,59 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         return result;
     }
 
-    private static CapabilityJob capabilityJob(JsonObject value) {
-        CapabilityJob result = new CapabilityJob();
+    static ServerModels.CapabilityJob capabilityJob(JsonObject value) {
+        ServerModels.CapabilityJob result = new ServerModels.CapabilityJob();
         result.id = nullableString(value, "id");
+        result.serverId = nullableString(value, "serverId");
+        result.operation = nullableString(value, "operation");
         result.status = nullableString(value, "status");
+        result.progress = nullableInteger(value, "progress");
+        JsonObject proof = child(value, "result");
+        if (proof != null && !proof.entrySet().isEmpty()) {
+            result.result = new ServerModels.BackupRestoreResult();
+            result.result.outcome = nullableString(proof, "outcome");
+            result.result.requestId = nullableString(proof, "requestId");
+            result.result.backupId = nullableString(proof, "backupId");
+            result.result.providerServerId = nullableString(proof, "providerServerId");
+            result.result.providerState = nullableString(proof, "providerState");
+            result.result.legacy = nullableBoolean(proof, "legacy");
+            result.result.active = BrowserJson.element(proof, "active") == null ? null : BrowserJson.bool(proof, "active", false);
+            result.result.truncate = nullableBoolean(proof, "truncate");
+            result.result.restoreStartup = nullableBoolean(proof, "restoreStartup");
+            result.result.createdAt = nullableLong(proof, "createdAt");
+            result.result.updatedAt = nullableLong(proof, "updatedAt");
+            result.result.settledAt = nullableLong(proof, "settledAt");
+            result.result.digestVersion = nullableInteger(proof, "digestVersion");
+            result.result.canonicalDigest = nullableString(proof, "canonicalDigest");
+            result.result.providerErrorCode = nullableString(proof, "providerErrorCode");
+        }
         result.error = nullableString(value, "error");
+        result.createdAt = nullableString(value, "createdAt");
+        result.completedAt = nullableString(value, "completedAt");
+        return result;
+    }
+
+    static ServerModels.BackupCreateObservation backupCreateObservation(JsonObject value) {
+        ServerModels.BackupCreateObservation result = new ServerModels.BackupCreateObservation();
+        result.requestId = nullableString(value, "requestId");
+        result.backupId = nullableString(value, "backupId");
+        result.state = nullableString(value, "state");
+        result.replaySafe = nullableBoolean(value, "replaySafe");
+        JsonObject created = child(value, "backup");
+        result.backup = created == null || created.entrySet().isEmpty() ? null : backup(created);
+        return result;
+    }
+
+    static ServerModels.BackupRestoreDiscovery backupRestoreDiscovery(JsonObject value) {
+        ServerModels.BackupRestoreDiscovery result = new ServerModels.BackupRestoreDiscovery();
+        result.requestId = nullableString(value, "requestId");
+        result.backupId = nullableString(value, "backupId");
+        result.state = nullableString(value, "state");
+        result.active = nullableBoolean(value, "active");
+        result.truncate = nullableBoolean(value, "truncate");
+        result.restoreStartup = nullableBoolean(value, "restoreStartup");
+        result.createdAt = nullableLong(value, "createdAt");
+        result.updatedAt = nullableLong(value, "updatedAt");
         return result;
     }
 
@@ -3584,6 +3677,21 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         return result;
     }
 
+    private Async<String> request(String method, String endpoint, String body, String idempotencyKey) {
+        synchronized (browserReadLock) {
+            if (closed) return Async.failed(new IllegalStateException("Browser API Is Closed"));
+        }
+        String normalizedEndpoint = normalizeEndpoint(endpoint);
+        return requestOnce(method, normalizedEndpoint, body, true, idempotencyKey);
+    }
+
+    private Async<String> mutation(String method, String endpoint, String body, String idempotencyKey) {
+        synchronized (browserReadLock) {
+            if (closed) return Async.failed(new IllegalStateException("Browser API Is Closed"));
+        }
+        return requestOnce(method, normalizeEndpoint(endpoint), body, false, idempotencyKey);
+    }
+
     private static boolean rateLimitedRead(Throwable failure) {
         Throwable current = failure;
         while (current != null) {
@@ -3592,6 +3700,16 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
             current = current.getCause();
         }
         return false;
+    }
+
+    private static int capabilityStatus(Throwable failure) {
+        Throwable current = failure;
+        while (current != null) {
+            if (current instanceof RemotelyCapabilityException exception) return exception.status();
+            if (current.getCause() == current) break;
+            current = current.getCause();
+        }
+        return 0;
     }
 
     private Async<String> requestOnce(String method, String endpoint, String body, boolean retry, String idempotencyKey) {
@@ -3650,6 +3768,10 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
 
     private Async<String> apiRequest(String method, String endpoint, String body) {
         return apiRequestOnce(method, endpoint, body, true);
+    }
+
+    private Async<String> resourcePoolRequest(String method, String endpoint, String body) {
+        return apiRequestOnce(method, endpoint, body, "GET".equals(method));
     }
 
     private Async<String> demoRequest(String method, String endpoint, String body) {
@@ -4701,60 +4823,14 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         return value == null || value.isBlank() ? "" : value.trim().toUpperCase(Locale.ROOT);
     }
 
-    private static final class CapabilityJob {
-        private String id;
+    public static final class ServerHealthResponse {
         private String status;
-        private String error;
-    }
-
-    public static final class ServerHealthView {
-        private String serverId;
-        private String uuid;
-        private String name;
-        private String status;
-        private boolean reachable;
-        private boolean ready;
-        private boolean online;
         private boolean suspended;
         private boolean installing;
-        private boolean clientAvailable;
-        private boolean resourcesAvailable;
-        private Boolean eulaAccepted;
-        private Boolean hasServerJar;
-        private Boolean hasStartScript;
-        private String eulaState;
-        private String serverJarState;
-        private String startScriptState;
-        private Boolean healthy;
-        private String reason;
-        private String checkedAt;
-
-        public String serverId() {
-            return serverId;
-        }
-
-        public String uuid() {
-            return uuid;
-        }
-
-        public String name() {
-            return name;
-        }
+        private ServerHealth health;
 
         public String status() {
             return status;
-        }
-
-        public boolean reachable() {
-            return reachable;
-        }
-
-        public boolean ready() {
-            return ready;
-        }
-
-        public boolean online() {
-            return online;
         }
 
         public boolean suspended() {
@@ -4765,28 +4841,8 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
             return installing;
         }
 
-        public boolean clientAvailable() {
-            return clientAvailable;
-        }
-
-        public boolean resourcesAvailable() {
-            return resourcesAvailable;
-        }
-
-        public Boolean eulaAccepted() { return eulaAccepted; }
-        public Boolean hasServerJar() { return hasServerJar; }
-        public Boolean hasStartScript() { return hasStartScript; }
-        public String eulaState() { return eulaState; }
-        public String serverJarState() { return serverJarState; }
-        public String startScriptState() { return startScriptState; }
-        public Boolean healthy() { return healthy; }
-
-        public String reason() {
-            return reason;
-        }
-
-        public String checkedAt() {
-            return checkedAt;
+        public ServerHealth health() {
+            return health;
         }
     }
 

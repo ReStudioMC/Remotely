@@ -141,13 +141,13 @@ public final class BrowserRemotelyConfigStore implements RemotelyConfigStore, Re
         if (value == null && accountScoped(key)) {
             String legacy = storage.read(PREFIX + key);
             if (legacy != null) {
-                storage.write(storageKey, legacy);
-                storage.erase(PREFIX + key);
+                write(storageKey, legacy);
+                erase(PREFIX + key);
                 return legacy;
             }
         }
         if (value != null && accountScoped(key)) {
-            storage.erase(PREFIX + key);
+            erase(PREFIX + key);
         }
         return value == null ? fallback : value;
     }
@@ -161,9 +161,9 @@ public final class BrowserRemotelyConfigStore implements RemotelyConfigStore, Re
             quarantineLegacyRecentItems();
         }
         String storageKey = recentItems ? recentStorageKey() : scopedStorageKey(key);
-        if (value == null) storage.erase(storageKey);
-        else storage.write(storageKey, value);
-        if (recentItems || accountScoped(key)) storage.erase(PREFIX + key);
+        if (value == null) erase(storageKey);
+        else write(storageKey, value);
+        if (recentItems || accountScoped(key)) erase(PREFIX + key);
     }
 
     public void remove(String key) {
@@ -174,8 +174,8 @@ public final class BrowserRemotelyConfigStore implements RemotelyConfigStore, Re
             }
             quarantineLegacyRecentItems();
         }
-        storage.erase(recentItems ? recentStorageKey() : scopedStorageKey(key));
-        if (recentItems || accountScoped(key)) storage.erase(PREFIX + key);
+        erase(recentItems ? recentStorageKey() : scopedStorageKey(key));
+        if (recentItems || accountScoped(key)) erase(PREFIX + key);
     }
 
     public void save() {
@@ -432,8 +432,8 @@ public final class BrowserRemotelyConfigStore implements RemotelyConfigStore, Re
         if (legacy == null) {
             return;
         }
-        storage.write(UNOWNED_RECENT_ITEMS_KEY, legacy);
-        storage.erase(LEGACY_RECENT_ITEMS_KEY);
+        write(UNOWNED_RECENT_ITEMS_KEY, legacy);
+        erase(LEGACY_RECENT_ITEMS_KEY);
     }
 
     private String scopedStorageKey(String key) {
@@ -566,9 +566,9 @@ public final class BrowserRemotelyConfigStore implements RemotelyConfigStore, Re
     interface Storage {
         String read(String key);
 
-        void write(String key, String value);
+        boolean write(String key, String value);
 
-        void erase(String key);
+        boolean erase(String key);
     }
 
     private static final class NativeStorage implements Storage {
@@ -578,22 +578,30 @@ public final class BrowserRemotelyConfigStore implements RemotelyConfigStore, Re
         }
 
         @Override
-        public void write(String key, String value) {
-            writeNative(key, value);
+        public boolean write(String key, String value) {
+            return writeNative(key, value);
         }
 
         @Override
-        public void erase(String key) {
-            eraseNative(key);
+        public boolean erase(String key) {
+            return eraseNative(key);
         }
     }
 
-    @JSBody(params = "key", script = "try { return window.localStorage.getItem(key); } catch (e) { return null; }")
+    private void write(String key, String value) {
+        if (!storage.write(key, value)) throw new IllegalStateException("Browser Storage Write Failed");
+    }
+
+    private void erase(String key) {
+        if (!storage.erase(key)) throw new IllegalStateException("Browser Storage Removal Failed");
+    }
+
+    @JSBody(params = "key", script = "return window.localStorage.getItem(key);")
     private static native String readNative(String key);
 
-    @JSBody(params = {"key", "value"}, script = "try { window.localStorage.setItem(key, value); } catch (e) {}")
-    private static native void writeNative(String key, String value);
+    @JSBody(params = {"key", "value"}, script = "try { window.localStorage.setItem(key, value); return true; } catch (e) { return false; }")
+    private static native boolean writeNative(String key, String value);
 
-    @JSBody(params = "key", script = "try { window.localStorage.removeItem(key); } catch (e) {}")
-    private static native void eraseNative(String key);
+    @JSBody(params = "key", script = "try { window.localStorage.removeItem(key); return true; } catch (e) { return false; }")
+    private static native boolean eraseNative(String key);
 }

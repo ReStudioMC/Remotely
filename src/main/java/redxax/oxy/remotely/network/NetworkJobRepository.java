@@ -16,7 +16,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
 
-public class NetworkJobRepository {
+public class NetworkJobRepository implements NetworkJobStore {
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().setPrettyPrinting().create();
     private final Path directory;
 
@@ -27,6 +27,7 @@ public class NetworkJobRepository {
         this.directory = applicationDirectory.resolve("networks").resolve("jobs").toAbsolutePath().normalize();
     }
 
+    @Override
     public synchronized List<NetworkJob> loadAll() {
         ensureDirectory();
         try (var files = Files.list(directory)) {
@@ -36,6 +37,7 @@ public class NetworkJobRepository {
         }
     }
 
+    @Override
     public synchronized void save(NetworkJob job) {
         validate(job);
         ensureDirectory();

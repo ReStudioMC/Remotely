@@ -212,7 +212,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
             return Async.failed(exception);
         }
         try {
-            NetworkReconciliationPlan plan = desiredStatePlanner.plan(discoverObserved(candidate, instances, externalReservations), secretStore);
+            NetworkReconciliationPlan plan = desiredStatePlanner.plan(DesktopNetworkPlanInput.from(discoverObserved(candidate, instances, externalReservations)), secretStore);
             if (!plan.canApply()) {
                 secretStore.deleteForwardingSecret(secret.reference());
                 secretStore.deleteEnrollmentTokens(candidate);
@@ -292,7 +292,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
         try {
             NetworkForwardingPolicy forwarding = new NetworkForwardingPolicy(current.forwarding().mode(), current.forwarding().proxyOnlineMode(), secret.reference(), current.forwarding().firewallVerified());
             NetworkDefinition candidate = current.withForwarding(forwarding);
-            NetworkReconciliationPlan plan = desiredStatePlanner.plan(discoverObserved(candidate, instances, List.of()), secretStore);
+            NetworkReconciliationPlan plan = desiredStatePlanner.plan(DesktopNetworkPlanInput.from(discoverObserved(candidate, instances, List.of())), secretStore);
             if (!plan.canApply()) {
                 secretStore.deleteForwardingSecret(secret.reference());
                 return Async.failed(new IllegalStateException(plan.issues().stream().filter(NetworkValidationIssue::blocksPersistence).map(NetworkValidationIssue::message).findFirst().orElse("Forwarding secret rotation is blocked")));
@@ -549,7 +549,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
         try {
             NetworkDefinition candidate = buildSharedDataCandidate(current, realms, features, sharedDataPolicy);
             NetworkValidator.requireValid(candidate);
-            NetworkReconciliationPlan plan = desiredStatePlanner.plan(discoverObserved(candidate, instances, List.of()), secretStore);
+            NetworkReconciliationPlan plan = desiredStatePlanner.plan(DesktopNetworkPlanInput.from(discoverObserved(candidate, instances, List.of())), secretStore);
             return configurationTransaction.prepare(plan, instances).thenApply(prepared -> new NetworkRealmPreparedPlan(current, candidate.syncRealms(), candidate.features(), candidate.sharedDataPolicy(), prepared));
         } catch (RuntimeException exception) {
             return Async.failed(exception);
@@ -611,7 +611,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
         } catch (RuntimeException exception) {
             return Async.failed(exception);
         }
-        NetworkReconciliationPlan plan = desiredStatePlanner.plan(discoverObserved(candidate, instances, List.of()), secretStore);
+        NetworkReconciliationPlan plan = desiredStatePlanner.plan(DesktopNetworkPlanInput.from(discoverObserved(candidate, instances, List.of())), secretStore);
         Map<String, String> context = Map.of("candidate", GSON.toJson(candidate), "baseRevision", String.valueOf(current.revision()));
         return withMutationLock(current.networkId(), () -> jobManager.execute(candidate, plan, instances, NetworkJobType.ADOPT, initiator, context).thenCompose(job -> {
             if (job.status() != NetworkJobStatus.SUCCEEDED) {
@@ -667,7 +667,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
         }
         return withMutationLock(resolved.base().networkId(), () -> {
             NetworkDiscoveryResult discovery = discoverObserved(resolved.candidate(), instances, externalReservations);
-            NetworkReconciliationPlan plan = desiredStatePlanner.plan(discovery, secretStore);
+            NetworkReconciliationPlan plan = desiredStatePlanner.plan(DesktopNetworkPlanInput.from(discovery), secretStore);
             return configurationTransaction.prepare(plan, instances).thenCompose(prepared -> {
                 NetworkMemberRestorePoint restorePoint = captureRestorePoint(resolved.member(), prepared);
                 Map<String, String> context = attachContext(resolved.candidate(), resolved.member(), resolved.routingGroupId(), restorePoint);
@@ -707,7 +707,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
         } catch (RuntimeException exception) {
             return Async.failed(exception);
         }
-        NetworkReconciliationPlan plan = desiredStatePlanner.plan(discoverObserved(resolved.candidate(), instances, externalReservations), secretStore);
+        NetworkReconciliationPlan plan = desiredStatePlanner.plan(DesktopNetworkPlanInput.from(discoverObserved(resolved.candidate(), instances, externalReservations)), secretStore);
         if (!plan.canApply()) {
             return Async.failed(new IllegalStateException(plan.issues().stream().filter(NetworkValidationIssue::blocksPersistence).map(NetworkValidationIssue::message).findFirst().orElse("Server attach is blocked")));
         }
@@ -721,7 +721,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
         } catch (RuntimeException exception) {
             return Async.failed(exception);
         }
-        NetworkReconciliationPlan plan = desiredStatePlanner.plan(discoverObserved(resolved.candidate(), instances, externalReservations), secretStore);
+        NetworkReconciliationPlan plan = desiredStatePlanner.plan(DesktopNetworkPlanInput.from(discoverObserved(resolved.candidate(), instances, externalReservations)), secretStore);
         if (!plan.canApply()) {
             return Async.failed(new IllegalStateException(plan.issues().stream().filter(NetworkValidationIssue::blocksPersistence).map(NetworkValidationIssue::message).findFirst().orElse("External route attach is blocked")));
         }
@@ -862,7 +862,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
         );
         return withMutationLock(current.networkId(), () -> {
             NetworkDiscoveryResult discovery = discoverObserved(current, instances, List.of());
-            NetworkReconciliationPlan plan = detachPlanner.planDissolve(discovery);
+            NetworkReconciliationPlan plan = detachPlanner.planDissolve(DesktopNetworkPlanInput.from(discovery));
             return jobManager.execute(current, plan, instances, NetworkJobType.DELETE, initiator, context).thenCompose(job -> {
                 String cleanupMessage = job.status() == NetworkJobStatus.SUCCEEDED ? "Network dissolved and reachable servers restored" : "Network dissolved; some server files require manual review: " + job.message();
                 Async<Void> cleanup = job.status() == NetworkJobStatus.SUCCEEDED ? Async.completed(null) : applyDissolveFallback(current, plan, instances);
@@ -935,7 +935,8 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
         Async<NetworkMemberRestorePoint> restorePoint = member.isManaged() ? resolveRestorePoint(current, member, instances) : Async.completed(null);
         return restorePoint.thenCompose(original -> withMutationLock(current.networkId(), () -> {
             NetworkDiscoveryResult discovery = discoverObserved(current, instances, List.of());
-            NetworkReconciliationPlan plan = detachPlanner.plan(discovery, member.instanceId(), original, secretStore);
+            NetworkReconciliationPlan plan = detachPlanner.plan(DesktopNetworkPlanInput.from(discovery), member.instanceId(), original,
+                    entry -> entry.sensitive() ? secretStore.resolveRestoreValue(entry.value()) : entry.value());
             Map<String, String> context = new LinkedHashMap<>();
             context.put("instanceId", member.instanceId());
             context.put("nodeId", member.nodeId());
@@ -1006,7 +1007,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
         return withMutationLock(current.networkId(), () -> {
             Async<NetworkJob> preflight = Async.completed(null);
             if (operation == NetworkLifecycleOperation.START || operation == NetworkLifecycleOperation.RESTART || operation == NetworkLifecycleOperation.ROLLING_RESTART) {
-                NetworkReconciliationPlan plan = desiredStatePlanner.plan(discoverObserved(current, instances, List.of()), secretStore);
+                NetworkReconciliationPlan plan = desiredStatePlanner.plan(DesktopNetworkPlanInput.from(discoverObserved(current, instances, List.of())), secretStore);
                 List<NetworkValidationIssue> blocking = plan.issues().stream().filter(NetworkValidationIssue::blocksPersistence).toList();
                 if (!blocking.isEmpty()) {
                     return Async.failed(new IllegalStateException(blocking.getFirst().message()));
@@ -1080,7 +1081,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
     }
 
     public synchronized NetworkReconciliationPlan plan(NetworkDefinition network, Collection<Instance> instances, Collection<PortReservation> externalReservations) {
-        return desiredStatePlanner.plan(discover(network, instances, externalReservations), secretStore);
+        return desiredStatePlanner.plan(DesktopNetworkPlanInput.from(discover(network, instances, externalReservations)), secretStore);
     }
 
     public synchronized Async<NetworkJob> runJob(NetworkDefinition network, Collection<Instance> instances, Collection<PortReservation> externalReservations, NetworkJobType type, String initiator) {
@@ -1089,7 +1090,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
             return Async.failed(new IllegalArgumentException("Network changed before the job started"));
         }
         return withMutationLock(current.networkId(), () -> {
-            NetworkReconciliationPlan plan = desiredStatePlanner.plan(discoverObserved(current, instances, externalReservations), secretStore);
+            NetworkReconciliationPlan plan = desiredStatePlanner.plan(DesktopNetworkPlanInput.from(discoverObserved(current, instances, externalReservations)), secretStore);
             return jobManager.execute(current, plan, instances, type, initiator);
         });
     }
@@ -1142,10 +1143,11 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
             }
             NetworkDiscoveryResult discovery = discoverObserved(plannedNetwork, instances, externalReservations);
             NetworkReconciliationPlan plan = switch (job.type()) {
-                case DETACH -> detachPlanner.plan(discovery, job.context().getOrDefault("instanceId", ""), restorePointFromContext(job.context()), secretStore);
-                case DELETE -> detachPlanner.planDissolve(discovery);
+                case DETACH -> detachPlanner.plan(DesktopNetworkPlanInput.from(discovery), job.context().getOrDefault("instanceId", ""),
+                        restorePointFromContext(job.context()), entry -> entry.sensitive() ? secretStore.resolveRestoreValue(entry.value()) : entry.value());
+                case DELETE -> detachPlanner.planDissolve(DesktopNetworkPlanInput.from(discovery));
                 case ROUTING -> routingPlan(current, plannedNetwork, instances, externalReservations);
-                default -> desiredStatePlanner.plan(discovery, secretStore);
+                default -> desiredStatePlanner.plan(DesktopNetworkPlanInput.from(discovery), secretStore);
             };
             return jobManager.resume(jobId, plannedNetwork, plan, instances).thenCompose(updated -> {
                 if (updated.type() == NetworkJobType.ROTATE_SECRET && updated.status() == NetworkJobStatus.ROLLED_BACK) {
@@ -1184,7 +1186,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
     private synchronized Async<NetworkJob> resumeCreationJob(String jobId, NetworkDefinition candidate, Collection<Instance> instances, Collection<PortReservation> externalReservations, Map<String, NetworkProviderAllocation> providerAllocations) {
         validateProviderAllocations(candidate, instances, providerAllocations);
         return withMutationLock(candidate.networkId(), () -> {
-            NetworkReconciliationPlan plan = desiredStatePlanner.plan(discoverObserved(candidate, instances, externalReservations), secretStore);
+            NetworkReconciliationPlan plan = desiredStatePlanner.plan(DesktopNetworkPlanInput.from(discoverObserved(candidate, instances, externalReservations)), secretStore);
             return jobManager.resume(jobId, candidate, plan, instances).thenCompose(updated -> updated.status() == NetworkJobStatus.SUCCEEDED ? finalizeCreation(updated, instances).thenApply(unused -> updated) : Async.completed(updated));
         });
     }
@@ -2268,7 +2270,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
 
     private NetworkReconciliationPlan routingPlan(NetworkDefinition current, NetworkDefinition candidate, Collection<Instance> instances, Collection<PortReservation> externalReservations) {
         NetworkDiscoveryResult discovery = discoverObserved(candidate, instances, externalReservations == null ? List.of() : externalReservations);
-        NetworkReconciliationPlan desired = desiredStatePlanner.plan(discovery, secretStore);
+        NetworkReconciliationPlan desired = desiredStatePlanner.plan(DesktopNetworkPlanInput.from(discovery), secretStore);
         List<NetworkConfigMutation> mutations = new ArrayList<>(desired.mutations());
         Set<String> desiredHosts = candidate.routingGroups().stream().flatMap(group -> group.forcedHosts().stream()).collect(Collectors.toCollection(LinkedHashSet::new));
         current.routingGroups().stream().flatMap(group -> group.forcedHosts().stream()).filter(host -> !desiredHosts.contains(host)).distinct().forEach(host -> mutations.add(new NetworkConfigMutation(candidate.proxyInstanceId(), "velocity.toml", ConfigurationFormat.TOML, "forced-hosts." + host, "", "", false, true, "Remove " + host, NetworkMutationAction.REMOVE)));
@@ -2512,7 +2514,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
         if (stored != null && stored.entries().stream().filter(NetworkRestoreEntry::present).filter(NetworkRestoreEntry::sensitive).allMatch(entry -> secretStore.canResolveRestoreValue(entry.value()))) return Async.completed(stored);
         List<NetworkJobDocument> documents = attachJob.documents().stream().filter(document -> document.key().instanceId().equals(member.instanceId())).toList();
         if (documents.isEmpty()) return Async.completed(null);
-        NetworkReconciliationPlan currentPlan = desiredStatePlanner.plan(discoverObserved(network, instances, List.of()), secretStore);
+        NetworkReconciliationPlan currentPlan = desiredStatePlanner.plan(DesktopNetworkPlanInput.from(discoverObserved(network, instances, List.of())), secretStore);
         List<NetworkConfigMutation> templates = currentPlan.mutations().stream().filter(mutation -> mutation.instanceId().equals(member.instanceId())).toList();
         return configurationTransaction.readOriginalDocuments(attachJob.jobId(), documents, instances).handle((originals, throwable) -> throwable == null ? captureRestorePoint(member, templates, originals) : null);
     }

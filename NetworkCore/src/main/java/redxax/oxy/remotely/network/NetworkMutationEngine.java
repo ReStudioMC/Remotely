@@ -2,18 +2,18 @@ package redxax.oxy.remotely.network;
 
 import redxax.oxy.remotely.network.config.NetworkConfigurationAdapter;
 import redxax.oxy.remotely.network.config.NetworkConfigurationAdapters;
-import redxax.oxy.remotely.settings.server.BrowserSafeYaml;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 public class NetworkMutationEngine {
     private final NetworkConfigurationAdapters adapters;
 
     public NetworkMutationEngine(NetworkConfigurationAdapters adapters) {
-        this.adapters = adapters == null ? new NetworkConfigurationAdapters(BrowserSafeYaml::parse) : adapters;
+        this.adapters = Objects.requireNonNull(adapters, "adapters");
     }
 
     public NetworkReconciliationPlan resolveCurrentValues(NetworkReconciliationPlan plan, Map<NetworkConfigDocumentKey, String> documents) {

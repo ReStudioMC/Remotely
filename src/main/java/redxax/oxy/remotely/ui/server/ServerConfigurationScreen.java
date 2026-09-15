@@ -13,6 +13,7 @@ import redxax.oxy.remotely.discord.DiscordRpcBridge;
 import redxax.oxy.remotely.settings.server.ServerSettingsRegistry;
 import redxax.oxy.remotely.settings.server.ServerSettingsSnapshot;
 import redxax.oxy.remotely.ui.settings.data.ServerSettingsDataController;
+import restudio.rebase.resource.ResourcePoolModels;
 import restudio.rescreen.config.Config;
 import restudio.rescreen.theme.ThemeManager;
 import restudio.rescreen.platform.input.ReKey;
@@ -30,8 +31,11 @@ import restudio.rescreen.util.Sound;
 
 import java.io.IOException;
 import java.io.StringWriter;
+import java.time.Duration;
 import java.util.*;
 import restudio.rescreen.platform.Async;
+import redxax.oxy.remotely.util.AsyncTools;
+import redxax.oxy.remotely.util.TaskSchedulers;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -57,6 +61,8 @@ public class ServerConfigurationScreen extends ReScreen {
     private final String preselectedPlanName;
     private final Consumer<Object> creationInitializer;
     private final Consumer<Object> creationCallback;
+    private final ResourcePoolController.Creation poolCreation;
+    private ResourcePoolModels.DraftOptions poolOptions = new ResourcePoolModels.DraftOptions(List.of());
 
     private final Map<String, String> remoteVariables = Collections.synchronizedMap(new LinkedHashMap<>());
     private final Map<String, String> originalRemoteVariables = Collections.synchronizedMap(new LinkedHashMap<>());
@@ -109,6 +115,19 @@ public class ServerConfigurationScreen extends ReScreen {
     }
 
     private <T> ServerConfigurationScreen(Screen parent, T instance, Object remoteHostContext, RemotelyClient remotelyClient, boolean isReStudioCreation, String preselectedPlanName, Object preset, Consumer<T> creationInitializer, Consumer<T> creationCallback) {
+        this(parent, instance, remoteHostContext, remotelyClient, isReStudioCreation, preselectedPlanName, preset,
+                creationInitializer, creationCallback, null);
+    }
+
+    public ServerConfigurationScreen(Screen parent, RemotelyClient remotelyClient, ResourcePoolController.Creation poolCreation) {
+        this(parent, null, null, remotelyClient, true, null, null, null, null,
+                Objects.requireNonNull(poolCreation, "poolCreation"));
+    }
+
+    private <T> ServerConfigurationScreen(Screen parent, T instance, Object remoteHostContext, RemotelyClient remotelyClient,
+                                          boolean isReStudioCreation, String preselectedPlanName, Object preset,
+                                          Consumer<T> creationInitializer, Consumer<T> creationCallback,
+                                          ResourcePoolController.Creation poolCreation) {
         super();
         this.parent = parent;
         this.isEditMode = instance != null;
@@ -120,6 +139,7 @@ public class ServerConfigurationScreen extends ReScreen {
         this.preselectedPlanName = preselectedPlanName;
         this.creationInitializer = creationInitializer == null ? null : value -> creationInitializer.accept((T) value);
         this.creationCallback = creationCallback == null ? null : value -> creationCallback.accept((T) value);
+        this.poolCreation = poolCreation;
 
         if (isEditMode) {
             this.tempInstance = host.copyConfigurationTarget(instance, originalInstance.name());
@@ -170,8 +190,31 @@ public class ServerConfigurationScreen extends ReScreen {
         }
         ServerSettingsDataController controller = screenHost().createServerSettingsController(tempInstance.raw(),
                 ServerSettingsRegistry.getInstance().snapshot(tempInstance.raw()));
-        setupSettingsUI(extraFiles, controller);
-        startInitialConfigLoad();
+        if (poolCreation == null) {
+            setupSettingsUI(extraFiles, controller);
+            startInitialConfigLoad();
+            return;
+        }
+        RemotelyServerApi api = serverApi();
+        Async<ResourcePoolModels.DraftOptions> options = api == null
+                ? Async.failed(new IllegalStateException("Server Profiles Are Unavailable"))
+                : AsyncTools.withTimeout(api.resourcePools().getDraftOptions(), TaskSchedulers.current(), Duration.ofSeconds(20));
+        options.whenComplete((available, failure) -> ScreenManager.getInstance().execute(() -> {
+            if (screenClosed) {
+                controller.close();
+                return;
+            }
+            if (failure != null || available == null || available.games().isEmpty()
+                    || available.games().stream().allMatch(game -> game.profiles().isEmpty())) {
+                controller.close();
+                new Notification("Configuration Unavailable", failure == null ? "No Server Profiles Are Available"
+                        : configurationFailureMessage(failure), Notification.Type.ERROR);
+                return;
+            }
+            poolOptions = available;
+            setupSettingsUI(extraFiles, controller);
+            startInitialConfigLoad();
+        }));
     }
 
     private static String configurationFailureMessage(Throwable failure) {
@@ -191,7 +234,7 @@ public class ServerConfigurationScreen extends ReScreen {
         long revision = configurationLoadRevision.incrementAndGet();
         ServerScreenHost host = screenHost();
         boolean remote = tempInstance.remote();
-        if (isReStudioCreation) {
+        if (isReStudioCreation && poolCreation == null) {
             remoteVariables.put("SOFTWARE", "PAPER");
             remoteVariables.put("VERSION", "latest");
             remoteVariables.put("BUILD", "latest");
@@ -274,7 +317,8 @@ public class ServerConfigurationScreen extends ReScreen {
         this.settingsController = settingsController;
         ServerScreenHost.ConfigurationState state = new ServerScreenHost.ConfigurationState(
                 originalInstance == null ? null : originalInstance.raw(), tempInstance.raw(), remoteHostContext,
-                isEditMode, isReStudioBackend, isReStudioCreation, serverIdentifier, preselectedPlanName);
+                isEditMode, isReStudioBackend, isReStudioCreation, serverIdentifier, preselectedPlanName,
+                poolCreation != null, poolOptions);
         configurationUi = screenHost().createConfigurationUi(this, state, settingsController, remoteVariables, extraFiles,
                 this::reloadDataDrivenSettings, () -> allowServerSoftwareChange(null));
         Map<String, Supplier<List<Setting>>> settingsByTab = new LinkedHashMap<>(configurationUi.settings());
@@ -450,7 +494,9 @@ public class ServerConfigurationScreen extends ReScreen {
     }
 
     private void saveConfiguration() {
-        if (isReStudioCreation) {
+        if (poolCreation != null) {
+            createPoolServer();
+        } else if (isReStudioCreation) {
             createReStudioServer();
         } else if (isEditMode) {
             editServer();
@@ -477,17 +523,9 @@ public class ServerConfigurationScreen extends ReScreen {
             return;
         }
 
-        Map<String, String> fileConfigs = new HashMap<>();
-        fileConfigs.putAll(settingsController.changedFileContents());
-        try (StringWriter writer = new StringWriter()) {
-            Map<String, String> properties = new LinkedHashMap<>(tempInstance.properties());
-            properties.remove("server-port");
-            properties.forEach((key, value) -> writer.append(key).append("=").append(value).append('\n'));
-            fileConfigs.put("server.properties", writer.toString());
-            String opsJson = createOpMeFileContent(tempInstance);
-            if (opsJson != null) {
-                fileConfigs.put("ops.json", opsJson);
-            }
+        Map<String, String> fileConfigs;
+        try {
+            fileConfigs = initialFiles();
         } catch (IOException e) {
             new Notification("Error", "Failed to prepare server properties: " + e.getMessage(), Notification.Type.ERROR);
             return;
@@ -506,6 +544,60 @@ public class ServerConfigurationScreen extends ReScreen {
             ScreenManager.getInstance().execute(() -> new Notification("Checkout Error", e.getMessage(), Notification.Type.ERROR));
             return null;
         });
+    }
+
+    private void createPoolServer() {
+        if (configurationUi == null) {
+            return;
+        }
+        Map<String, String> files = new LinkedHashMap<>(settingsController.changedFileContents());
+        ResourcePoolController controller = parent instanceof ResourcePoolScreen resources
+                ? resources.controller() : null;
+        if (controller == null) {
+            new Notification("Server Draft Error", "Resource Pool Session Is Unavailable", Notification.Type.ERROR);
+            return;
+        }
+        Notification notice = new Notification.Builder().message("Creating Server Draft").description(tempInstance.name())
+                .type(Notification.Type.INFO).loading(true).autoSlideOut(false).build();
+        Async<ResourcePoolModels.Draft> request;
+        try {
+            request = controller.createDraft(poolCreation, tempInstance.name(), configurationUi.poolResources().get(),
+                    new LinkedHashMap<>(remoteVariables), files);
+        } catch (RuntimeException failure) {
+            notice.update().message("Server Draft Invalid").description(ResourcePoolController.message(failure))
+                    .type(Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
+            return;
+        }
+        request.whenComplete((draft, failure) -> ScreenManager.getInstance().execute(() -> {
+            if (screenClosed) {
+                return;
+            }
+            if (failure != null) {
+                notice.update().message("Server Creation Needs Attention").description(ResourcePoolController.message(failure))
+                        .type(Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
+                return;
+            }
+            notice.update().message("Server Draft Created").description(draft.metadata().name())
+                    .type(Notification.Type.SUCCESS).loading(false).autoSlideOut(true).commit();
+            settingsCleanup.run();
+            close();
+        }));
+    }
+
+    private Map<String, String> initialFiles() throws IOException {
+        Map<String, String> files = new LinkedHashMap<>();
+        files.putAll(settingsController.changedFileContents());
+        try (StringWriter writer = new StringWriter()) {
+            Map<String, String> properties = new LinkedHashMap<>(tempInstance.properties());
+            properties.remove("server-port");
+            properties.forEach((key, value) -> writer.append(key).append("=").append(value).append('\n'));
+            files.put("server.properties", writer.toString());
+        }
+        String opsJson = createOpMeFileContent(tempInstance);
+        if (opsJson != null) {
+            files.put("ops.json", opsJson);
+        }
+        return files;
     }
 
     private void createNewLocalServer() {

@@ -28,6 +28,7 @@ import restudio.rebase.backend.feature.DataStreamFeature;
 import restudio.rebase.backend.feature.PlayerManagementFeature;
 import restudio.rebase.backend.feature.ResourceUsageFeature;
 import restudio.rebase.backend.feature.ServerHealthFeature;
+import restudio.rebase.health.ServerHealth;
 import restudio.rebase.backend.feature.TerminalFeature;
 import restudio.rebase.backend.DeveloperCapabilityProvider;
 import restudio.rebase.backend.FileSystemProvider;
@@ -215,7 +216,7 @@ public interface DesktopServerUiCapabilities extends ServerUiCapabilityProvider 
         return Async.failed(new UnsupportedOperationException("Server Status Is Unavailable"));
     }
 
-    default Async<ServerHealthFeature.ServerHealthStatus> health(Instance instance) {
+    default Async<ServerHealth> health(Instance instance) {
         return Async.failed(new UnsupportedOperationException("Server Health Is Unavailable"));
     }
 
@@ -507,7 +508,7 @@ public interface DesktopServerUiCapabilities extends ServerUiCapabilityProvider 
         return status(instance(server));
     }
 
-    default Async<ServerHealthFeature.ServerHealthStatus> health(Object server) {
+    default Async<ServerHealth> health(Object server) {
         if (server instanceof ServerModels.ClientServerView) {
             return Async.failed(new UnsupportedOperationException("Server Health Is Unavailable"));
         }
@@ -866,7 +867,7 @@ public interface DesktopServerUiCapabilities extends ServerUiCapabilityProvider 
         }
 
         @Override
-        public Async<ServerHealthFeature.ServerHealthStatus> health(Instance instance) {
+        public Async<ServerHealth> health(Instance instance) {
             return JvmAsyncBridge.fromFuture(instance.getBackend().getFeature(ServerHealthFeature.class)
                     .orElseThrow(() -> new UnsupportedOperationException("Server Health Is Unavailable")).checkHealth());
         }

@@ -1,17 +1,12 @@
 package redxax.oxy.remotely.network.config;
 
 import redxax.oxy.remotely.network.ConfigurationFormat;
-import redxax.oxy.remotely.settings.server.BrowserSafeYaml;
 
 import java.util.EnumMap;
 import java.util.Map;
 
 public class NetworkConfigurationAdapters {
     private final Map<ConfigurationFormat, NetworkConfigurationAdapter> adapters = new EnumMap<>(ConfigurationFormat.class);
-
-    public NetworkConfigurationAdapters() {
-        this(BrowserSafeYaml::parse);
-    }
 
     public NetworkConfigurationAdapters(StructuredDocumentParser structuredParser) {
         adapters.put(ConfigurationFormat.PROPERTIES, new PropertiesConfigurationAdapter());

@@ -15,14 +15,11 @@ import restudio.resync.network.NetworkNodeStatus;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -35,8 +32,6 @@ import restudio.rebase.platform.jvm.JvmAsyncBridge;
 
 
 import java.util.function.Supplier;
-import java.util.regex.Pattern;
-import java.util.stream.Collectors;
 
 public class NetworkLifecycleJobManager {
     private static final Duration START_TIMEOUT = Duration.ofMinutes(5);
@@ -44,11 +39,10 @@ public class NetworkLifecycleJobManager {
     private static final Duration DRAIN_TIMEOUT = Duration.ofMinutes(5);
     private static final Duration HEALTH_TIMEOUT = Duration.ofMinutes(2);
     private static final long POLL_DELAY_MILLIS = 500;
-    private static final String ACCEPTED_EULA = "#By changing the setting below to TRUE you are indicating your agreement to our EULA (https://aka.ms/MinecraftEULA).\neula=true\n";
-    private static final Pattern ACCEPTED_EULA_SETTING = Pattern.compile("(?im)^[\\t ]*eula[\\t ]*=[\\t ]*true[\\t ]*\\r?$");
-    private static final Pattern EULA_SETTING = Pattern.compile("(?im)^[\\t ]*eula[\\t ]*=[\\t ]*(?:true|false)[\\t ]*\\r?$");
     private final NetworkLifecycleJobRepository repository;
     private final NetworkRuntimeMonitor runtimeMonitor;
+    private final NetworkLifecyclePlanner planner = new NetworkLifecyclePlanner();
+    private final NetworkLifecycleMachine machine = new NetworkLifecycleMachine();
     private final Map<String, NetworkLifecycleJob> jobs = new LinkedHashMap<>();
     private final Object admissionGuard = new Object();
     private final Map<String, String> activeNetworkJobs = new HashMap<>();
@@ -99,7 +93,7 @@ public class NetworkLifecycleJobManager {
         NetworkLifecycleJob job = NetworkLifecycleJob.create(network, operation, initiator, steps);
         return runAdmitted(job.networkId(), job.jobId(), () -> {
             persist(job);
-            return continueJob(job.startingAttempt(), network, instancesById);
+            return continueJob(machine.start(job), network, instancesById);
         });
     }
 
@@ -107,18 +101,14 @@ public class NetworkLifecycleJobManager {
         if (network == null || member == null || instance == null) {
             return Async.failed(new IllegalArgumentException("Server is unavailable"));
         }
-        if (!network.members().contains(member) || !member.isManaged() || !member.instanceId().equals(instance.getInstanceId())) {
+        if (!member.instanceId().equals(instance.getInstanceId())) {
             return Async.failed(new IllegalArgumentException("Server does not belong to this network"));
         }
-        NetworkLifecycleAction action = switch (operation) {
-            case START -> NetworkLifecycleAction.START;
-            case STOP -> NetworkLifecycleAction.STOP;
-            default -> throw new IllegalArgumentException("Individual servers can only be started or stopped");
-        };
-        NetworkLifecycleJob job = NetworkLifecycleJob.create(network, operation, initiator, List.of(NetworkLifecycleStep.pending(member, action, 0)));
+        NetworkLifecycleJob job = NetworkLifecycleJob.create(network, operation, initiator,
+                planner.planMember(network, member, operation));
         return runAdmitted(job.networkId(), job.jobId(), () -> {
             persist(job);
-            return continueJob(job.startingAttempt(), network, Map.of(instance.getInstanceId(), instance));
+            return continueJob(machine.start(job), network, Map.of(instance.getInstanceId(), instance));
         });
     }
 
@@ -144,7 +134,7 @@ public class NetworkLifecycleJobManager {
                     throw new IllegalStateException("Network server is unavailable: " + step.routeName());
                 }
             }
-            return continueJob(job.startingAttempt(), network, instancesById);
+            return continueJob(machine.start(job), network, instancesById);
         });
     }
 
@@ -156,46 +146,42 @@ public class NetworkLifecycleJobManager {
         if (network == null || operation == null) {
             return List.of();
         }
-        return buildSteps(network, operation);
+        return planner.plan(network, operation);
     }
 
     private Async<NetworkLifecycleJob> continueJob(NetworkLifecycleJob job, NetworkDefinition network, Map<String, Instance> instancesById) {
         persist(job);
-        NetworkLifecycleStep next = job.steps().stream().filter(step -> !step.complete()).findFirst().orElse(null);
-        if (next == null) {
-            NetworkLifecycleJob completed = job.withStatus(NetworkLifecycleStatus.SUCCEEDED, successMessage(job.operation()));
+        List<NetworkLifecycleStep> next = machine.next(job);
+        if (next.isEmpty()) {
+            NetworkLifecycleJob completed = machine.finish(job);
             persist(completed);
             return Async.completed(completed);
         }
-        if ((job.operation() == NetworkLifecycleOperation.START || job.operation() == NetworkLifecycleOperation.RESTART) && next.action() == NetworkLifecycleAction.START) {
-            return continueParallelStarts(job, network, instancesById);
+        if (next.size() > 1) {
+            return continueParallelStarts(job, network, instancesById, next);
         }
-        NetworkLifecycleStep runningStep = next.running();
-        NetworkLifecycleJob runningJob = job.withStep(runningStep);
+        NetworkLifecycleJob runningJob = machine.begin(job, next);
+        NetworkLifecycleStep runningStep = step(runningJob, next.getFirst().stepId());
         persist(runningJob);
         Instance instance = instancesById.get(runningStep.instanceId());
         return executeStep(network, instance, runningStep, runningJob.operation()).handle((outcome, throwable) -> {
             if (throwable != null) {
                 String message = rootMessage(throwable);
-                NetworkLifecycleJob failed = runningJob.withStep(runningStep.failed(message)).withStatus(NetworkLifecycleStatus.FAILED, message);
+                NetworkLifecycleJob failed = machine.fail(runningJob, runningStep, message);
                 persist(failed);
                 return Async.completed(failed);
             }
-            NetworkLifecycleJob checkpoint = runningJob.withStep(runningStep.succeeded(outcome.skipped(), outcome.message()));
+            NetworkLifecycleJob checkpoint = machine.succeed(runningJob, runningStep, outcome.skipped(), outcome.message());
             persist(checkpoint);
             return continueJob(checkpoint, network, instancesById);
         }).thenCompose(future -> future);
     }
 
-    private Async<NetworkLifecycleJob> continueParallelStarts(NetworkLifecycleJob job, NetworkDefinition network, Map<String, Instance> instancesById) {
-        List<NetworkLifecycleStep> pending = job.steps().stream().filter(step -> !step.complete() && step.action() == NetworkLifecycleAction.START).toList();
-        NetworkLifecycleJob runningJob = job;
-        List<NetworkLifecycleStep> runningSteps = new ArrayList<>();
-        for (NetworkLifecycleStep step : pending) {
-            NetworkLifecycleStep running = step.running();
-            runningSteps.add(running);
-            runningJob = runningJob.withStep(running);
-        }
+    private Async<NetworkLifecycleJob> continueParallelStarts(NetworkLifecycleJob job, NetworkDefinition network,
+                                                               Map<String, Instance> instancesById,
+                                                               List<NetworkLifecycleStep> pending) {
+        NetworkLifecycleJob runningJob = machine.begin(job, pending);
+        List<NetworkLifecycleStep> runningSteps = pending.stream().map(item -> step(runningJob, item.stepId())).toList();
         persist(runningJob);
         NetworkLifecycleJob batchJob = runningJob;
         List<Async<ParallelStepOutcome>> starts = runningSteps.stream().map(step -> executeStep(network, instancesById.get(step.instanceId()), step, batchJob.operation()).handle((outcome, throwable) -> new ParallelStepOutcome(step, outcome, throwable)).thenApply(result -> {
@@ -216,7 +202,7 @@ public class NetworkLifecycleJobManager {
                 }
             }
             if (!failure.isBlank()) {
-                NetworkLifecycleJob failed = checkpoint.withStatus(NetworkLifecycleStatus.FAILED, failure);
+                NetworkLifecycleJob failed = machine.failJob(checkpoint, failure);
                 persist(failed);
                 return Async.completed(failed);
             }
@@ -228,8 +214,15 @@ public class NetworkLifecycleJobManager {
     private synchronized void persistParallelOutcome(String jobId, ParallelStepOutcome result) {
         NetworkLifecycleJob current = jobs.get(jobId);
         if (current == null) return;
-        NetworkLifecycleStep completed = result.failure() == null ? result.step().succeeded(result.outcome().skipped(), result.outcome().message()) : result.step().failed(rootMessage(result.failure()));
-        persist(current.withStep(completed));
+        NetworkLifecycleJob completed = result.failure() == null
+                ? machine.succeed(current, result.step(), result.outcome().skipped(), result.outcome().message())
+                : machine.failStep(current, result.step(), rootMessage(result.failure()));
+        persist(completed);
+    }
+
+    private NetworkLifecycleStep step(NetworkLifecycleJob job, String stepId) {
+        return job.steps().stream().filter(step -> step.stepId().equals(stepId)).findFirst()
+                .orElseThrow(() -> new IllegalStateException("Lifecycle step does not exist: " + stepId));
     }
 
     private Async<StepOutcome> executeStep(NetworkDefinition network, Instance instance, NetworkLifecycleStep step, NetworkLifecycleOperation operation) {
@@ -279,28 +272,13 @@ public class NetworkLifecycleJobManager {
         Path path = Path.of(instance.getPath()).resolve("eula.txt");
         return JvmAsyncBridge.fromFuture(files.exists(path)).thenCompose(exists -> {
             if (!exists) {
-                return JvmAsyncBridge.fromFuture(files.write(path, ACCEPTED_EULA));
+                return JvmAsyncBridge.fromFuture(files.write(path, NetworkStartPreparation.acceptMinecraftEula("")));
             }
             return JvmAsyncBridge.fromFuture(files.read(path)).thenCompose(content -> {
-                String accepted = ensureEulaAccepted(content);
+                String accepted = NetworkStartPreparation.acceptMinecraftEula(content);
                 return accepted.equals(content) ? Async.completed(null) : JvmAsyncBridge.fromFuture(files.write(path, accepted));
             });
         });
-    }
-
-    static String ensureEulaAccepted(String content) {
-        String source = content == null ? "" : content;
-        if (ACCEPTED_EULA_SETTING.matcher(source).find()) {
-            return source;
-        }
-        if (EULA_SETTING.matcher(source).find()) {
-            return EULA_SETTING.matcher(source).replaceFirst("eula=true");
-        }
-        if (source.isBlank()) {
-            return ACCEPTED_EULA;
-        }
-        String separator = source.contains("\r\n") ? "\r\n" : "\n";
-        return source + (source.endsWith("\n") || source.endsWith("\r") ? "" : separator) + "eula=true" + separator;
     }
 
     private Async<StepOutcome> stop(Instance instance) {
@@ -460,59 +438,6 @@ public class NetworkLifecycleJobManager {
         return JvmAsyncBridge.fromFuture(InstanceApi.of(instance).console().getStatus());
     }
 
-    private List<NetworkLifecycleStep> buildSteps(NetworkDefinition network, NetworkLifecycleOperation operation) {
-        List<NetworkMember> startOrder = startOrder(network);
-        List<NetworkMember> stopOrder = new ArrayList<>(startOrder);
-        stopOrder.removeIf(NetworkMember::isProxy);
-        Collections.reverse(stopOrder);
-        stopOrder.addFirst(network.proxyMember());
-        List<NetworkLifecycleStep> steps = new ArrayList<>();
-        switch (operation) {
-            case START -> addSteps(steps, startOrder, NetworkLifecycleAction.START);
-            case STOP -> addSteps(steps, stopOrder, NetworkLifecycleAction.STOP);
-            case RESTART -> {
-                addSteps(steps, stopOrder, NetworkLifecycleAction.STOP);
-                addSteps(steps, startOrder, NetworkLifecycleAction.START);
-            }
-            case ROLLING_RESTART -> {
-                List<NetworkMember> backends = new ArrayList<>(startOrder.stream().filter(member -> !member.isProxy()).toList());
-                Collections.reverse(backends);
-                if (!network.runtime().enabled() || backends.stream().anyMatch(member -> !member.resyncEnabled())) {
-                    throw new IllegalStateException("A rolling restart requires ReSync on every managed backend");
-                }
-                if (backends.size() < 2) {
-                    throw new IllegalStateException("A rolling restart requires at least two backends");
-                }
-                for (NetworkMember member : backends) {
-                    addSteps(steps, List.of(member), NetworkLifecycleAction.CAPACITY_GATE);
-                    addSteps(steps, List.of(member), NetworkLifecycleAction.MAINTENANCE);
-                    addSteps(steps, List.of(member), NetworkLifecycleAction.DRAIN);
-                    addSteps(steps, List.of(member), NetworkLifecycleAction.STOP);
-                    addSteps(steps, List.of(member), NetworkLifecycleAction.START);
-                    addSteps(steps, List.of(member), NetworkLifecycleAction.HEALTH_GATE);
-                    addSteps(steps, List.of(member), NetworkLifecycleAction.RESUME);
-                }
-            }
-            case DRAIN -> addSteps(steps, startOrder.stream().filter(member -> !member.isProxy()).toList(), NetworkLifecycleAction.DRAIN);
-        }
-        return List.copyOf(steps);
-    }
-
-    private List<NetworkMember> startOrder(NetworkDefinition network) {
-        Map<String, NetworkMember> membersByNode = network.members().stream().collect(Collectors.toMap(NetworkMember::nodeId, member -> member));
-        LinkedHashSet<NetworkMember> ordered = new LinkedHashSet<>();
-        network.routingGroups().stream().filter(group -> group.id().equals("fallback")).flatMap(group -> group.nodeIds().stream()).map(membersByNode::get).filter(member -> member != null && member.isManaged() && !member.isProxy()).forEach(ordered::add);
-        network.members().stream().filter(NetworkMember::isManaged).filter(member -> !member.isProxy()).sorted(Comparator.comparing(NetworkMember::routeName, String.CASE_INSENSITIVE_ORDER)).forEach(ordered::add);
-        ordered.add(network.proxyMember());
-        return ordered.stream().filter(member -> member != null).toList();
-    }
-
-    private void addSteps(List<NetworkLifecycleStep> steps, List<NetworkMember> members, NetworkLifecycleAction action) {
-        for (NetworkMember member : members) {
-            steps.add(NetworkLifecycleStep.pending(member, action, steps.size()));
-        }
-    }
-
     private Map<String, Instance> indexInstances(Collection<Instance> instances) {
         Map<String, Instance> indexed = new LinkedHashMap<>();
         if (instances != null) {
@@ -563,16 +488,6 @@ public class NetworkLifecycleJobManager {
             }
             activeJobIds.remove(admission.jobId());
         }
-    }
-
-    private String successMessage(NetworkLifecycleOperation operation) {
-        return switch (operation) {
-            case START -> "Network is ready";
-            case STOP -> "Network is stopped";
-            case RESTART -> "Network restarted";
-            case ROLLING_RESTART -> "Network backends rolled without losing healthy capacity";
-            case DRAIN -> "Network has no active backend players";
-        };
     }
 
     private String rootMessage(Throwable throwable) {

@@ -14,9 +14,50 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class NetworkConfigurationTransactionTest {
+    @Test
+    void freshApplyDoesNotCreateAnAbsentDocumentForAnUnchangedMutation(@TempDir Path directory) {
+        BackendFactory.register("LOCAL", LocalBackend::new);
+        Path proxyDirectory = directory.resolve("proxy");
+        Path backendDirectory = directory.resolve("backend");
+        Instance proxy = instance("Proxy", proxyDirectory, ModLoader.VELOCITY);
+        Instance backend = instance("Lobby", backendDirectory, ModLoader.PAPER);
+        NetworkMember proxyMember = NetworkMember.proxy(proxy.getInstanceId(), 25565);
+        NetworkMember backendMember = NetworkMember.backend(backend.getInstanceId(), "lobby", NetworkMemberRole.LOBBY, 25566);
+        NetworkDefinition network = NetworkDefinition.create("Network", proxy.getInstanceId(), NetworkForwardingPolicy.secureDefault("secret"), List.of(NetworkEntryPoint.primary(25565)), List.of(proxyMember, backendMember));
+        NetworkConfigDocumentKey key = new NetworkConfigDocumentKey(backend.getInstanceId(), "plugins/ReSync/resync.properties");
+        NetworkConfigMutation unchanged = new NetworkConfigMutation(backend.getInstanceId(), key.path(), ConfigurationFormat.PROPERTIES,
+                "network.transfer.realm", "", "", false, true, "Clear Player State Realm", NetworkMutationAction.SET, false);
+        NetworkReconciliationPlan plan = new NetworkReconciliationPlan("", network.networkId(), network.revision(), 0, List.of(unchanged), List.of());
+        NetworkPreparedPlan prepared = new NetworkPreparedPlan(plan, Map.of(key, new NetworkDocumentSnapshot(key, "", false)));
+        NetworkConfigurationTransaction transaction = new NetworkConfigurationTransaction();
+
+        List<NetworkJobDocument> documents = transaction.describe(prepared, network, List.of(proxy, backend));
+        NetworkApplyResult result = transaction.apply(prepared, network, List.of(proxy, backend)).join();
+
+        assertEquals(NetworkJobDocumentState.UNCHANGED, documents.getFirst().state());
+        assertTrue(result.applied());
+        assertTrue(result.changedDocuments().isEmpty());
+        assertFalse(Files.exists(backendDirectory.resolve(key.path())));
+        assertFalse(backend.getServerProperties().containsKey("network.transfer.realm"));
+    }
+
+    @Test
+    void recoveryDistinguishesAbsentDocumentsFromEmptyFiles() {
+        NetworkConfigDocumentKey key = new NetworkConfigDocumentKey("server", "empty.properties");
+        String empty = NetworkExecutionPlan.fingerprint("");
+        NetworkJobDocument absent = new NetworkJobDocument(key, 0, false, empty, empty, NetworkJobDocumentState.UNCHANGED);
+        NetworkJobDocument emptyFile = new NetworkJobDocument(key, 0, true, empty, empty, NetworkJobDocumentState.UNCHANGED);
+        NetworkJobDocument changedToEmpty = new NetworkJobDocument(key, 0, true, NetworkExecutionPlan.fingerprint("value=true\n"), empty,
+                NetworkJobDocumentState.PENDING);
+
+        assertThrows(IllegalStateException.class, () -> NetworkExecutionPlan.recover(List.of(absent), List.of(emptyFile)));
+        assertThrows(IllegalStateException.class, () -> NetworkExecutionPlan.recover(List.of(changedToEmpty), List.of(absent)));
+    }
+
     @Test
     void preparedFingerprintMatchesOnlyAppliedChangesForNewPropertiesFile(@TempDir Path directory) throws Exception {
         BackendFactory.register("LOCAL", LocalBackend::new);

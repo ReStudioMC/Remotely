@@ -201,7 +201,7 @@ class NetworkAdoptionServiceTest {
             assertFalse(network.featureEnabled(NetworkDefinition.FEATURE_SHARED_CHAT));
             assertTrue(network.members().stream().filter(NetworkMember::isManaged).noneMatch(NetworkMember::resyncEnabled));
             NetworkDiscoveryResult discovery = new NetworkDiscoveryService(new NetworkPortAllocator()).discover(network, List.of(proxy, lobby), List.of(network), List.of());
-            NetworkReconciliationPlan reconciliation = new NetworkDesiredStatePlanner().plan(discovery, secrets());
+            NetworkReconciliationPlan reconciliation = new NetworkDesiredStatePlanner().plan(DesktopNetworkPlanInput.from(discovery), secrets());
             assertTrue(reconciliation.mutations().stream().anyMatch(mutation -> mutation.instanceId().equals(proxy.getInstanceId())
                 && mutation.key().equals("network.enabled") && mutation.desiredValue().equals("false")));
             assertTrue(reconciliation.mutations().stream().anyMatch(mutation -> mutation.instanceId().equals(lobby.getInstanceId())
@@ -212,7 +212,7 @@ class NetworkAdoptionServiceTest {
             assertTrue(enabled.featureEnabled(NetworkDefinition.FEATURE_SHARED_CHAT));
             assertTrue(enabled.members().stream().filter(NetworkMember::isManaged).allMatch(NetworkMember::resyncEnabled));
             NetworkDiscoveryResult enabledDiscovery = new NetworkDiscoveryService(new NetworkPortAllocator()).discover(enabled, List.of(proxy, lobby), List.of(enabled), List.of());
-            NetworkReconciliationPlan enabledReconciliation = new NetworkDesiredStatePlanner().plan(enabledDiscovery, secrets());
+            NetworkReconciliationPlan enabledReconciliation = new NetworkDesiredStatePlanner().plan(DesktopNetworkPlanInput.from(enabledDiscovery), secrets());
             assertTrue(enabledReconciliation.mutations().stream().filter(mutation -> mutation.key().equals("network.enabled")).allMatch(mutation -> mutation.desiredValue().equals("true")));
         } finally {
             manager.close();

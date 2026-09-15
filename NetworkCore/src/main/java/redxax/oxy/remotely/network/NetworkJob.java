@@ -1,11 +1,10 @@
 package redxax.oxy.remotely.network;
 
-import restudio.rescreen.platform.Clock;
-
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 
 public record NetworkJob(int schemaVersion, String jobId, String networkId, long networkRevision, NetworkJobType type, NetworkJobStatus status, String initiator, long createdAt, long updatedAt, int attempt, String message, Map<String, String> context, List<NetworkJobDocument> documents, List<NetworkValidationIssue> issues) {
@@ -19,7 +18,7 @@ public record NetworkJob(int schemaVersion, String jobId, String networkId, long
         type = type == null ? NetworkJobType.RECONCILE : type;
         status = status == null ? NetworkJobStatus.PLANNING : status;
         initiator = normalize(initiator);
-        long now = Clock.system().millis();
+        long now = NetworkClock.SYSTEM.millis();
         createdAt = createdAt <= 0 ? now : createdAt;
         updatedAt = updatedAt <= 0 ? createdAt : updatedAt;
         attempt = Math.max(0, attempt);
@@ -33,26 +32,50 @@ public record NetworkJob(int schemaVersion, String jobId, String networkId, long
         return create(plan, type, initiator, Map.of());
     }
 
+    public static NetworkJob create(NetworkReconciliationPlan plan, NetworkJobType type, String initiator, NetworkClock clock) {
+        return create(plan, type, initiator, Map.of(), clock);
+    }
+
     public static NetworkJob create(NetworkReconciliationPlan plan, NetworkJobType type, String initiator, Map<String, String> context) {
+        return create(plan, type, initiator, context, NetworkClock.SYSTEM);
+    }
+
+    public static NetworkJob create(NetworkReconciliationPlan plan, NetworkJobType type, String initiator, Map<String, String> context, NetworkClock clock) {
         NetworkJobStatus status = plan.canApply() ? NetworkJobStatus.PLANNING : NetworkJobStatus.BLOCKED;
         String message = plan.canApply() ? "Preparing network changes" : plan.issues().stream().filter(NetworkValidationIssue::blocksPersistence).map(NetworkValidationIssue::message).findFirst().orElse("Network changes are blocked");
-        long now = Clock.system().millis();
+        long now = Objects.requireNonNull(clock, "clock").millis();
         return new NetworkJob(CURRENT_SCHEMA_VERSION, plan.planId(), plan.networkId(), plan.networkRevision(), type, status, initiator, now, now, 0, message, context, List.of(), plan.issues());
     }
 
     public NetworkJob prepared(List<NetworkJobDocument> updatedDocuments) {
-        return update(NetworkJobStatus.READY, "Network changes are ready", updatedDocuments, attempt);
+        return prepared(updatedDocuments, NetworkClock.SYSTEM);
+    }
+
+    public NetworkJob prepared(List<NetworkJobDocument> updatedDocuments, NetworkClock clock) {
+        return update(NetworkJobStatus.READY, "Network changes are ready", updatedDocuments, attempt, clock);
     }
 
     public NetworkJob startingAttempt() {
-        return update(NetworkJobStatus.RUNNING, "Applying network changes", documents, attempt + 1);
+        return startingAttempt(NetworkClock.SYSTEM);
+    }
+
+    public NetworkJob startingAttempt(NetworkClock clock) {
+        return update(NetworkJobStatus.RUNNING, "Applying network changes", documents, attempt + 1, clock);
     }
 
     public NetworkJob withStatus(NetworkJobStatus updatedStatus, String updatedMessage) {
-        return update(updatedStatus, updatedMessage, documents, attempt);
+        return withStatus(updatedStatus, updatedMessage, NetworkClock.SYSTEM);
+    }
+
+    public NetworkJob withStatus(NetworkJobStatus updatedStatus, String updatedMessage, NetworkClock clock) {
+        return update(updatedStatus, updatedMessage, documents, attempt, clock);
     }
 
     public NetworkJob withDocumentState(NetworkConfigDocumentKey key, NetworkJobDocumentState state) {
+        return withDocumentState(key, state, NetworkClock.SYSTEM);
+    }
+
+    public NetworkJob withDocumentState(NetworkConfigDocumentKey key, NetworkJobDocumentState state, NetworkClock clock) {
         List<NetworkJobDocument> updated = new ArrayList<>(documents.size());
         boolean found = false;
         for (NetworkJobDocument document : documents) {
@@ -66,7 +89,7 @@ public record NetworkJob(int schemaVersion, String jobId, String networkId, long
         if (!found) {
             throw new IllegalArgumentException("Network job does not contain " + key.path());
         }
-        return update(status, message, updated, attempt);
+        return update(status, message, updated, attempt, clock);
     }
 
     public boolean canResume() {
@@ -81,8 +104,8 @@ public record NetworkJob(int schemaVersion, String jobId, String networkId, long
         return Boolean.parseBoolean(context.getOrDefault("restartRequired", "false"));
     }
 
-    private NetworkJob update(NetworkJobStatus updatedStatus, String updatedMessage, List<NetworkJobDocument> updatedDocuments, int updatedAttempt) {
-        return new NetworkJob(schemaVersion, jobId, networkId, networkRevision, type, updatedStatus, initiator, createdAt, Clock.system().millis(), updatedAttempt, updatedMessage, context, updatedDocuments, issues);
+    private NetworkJob update(NetworkJobStatus updatedStatus, String updatedMessage, List<NetworkJobDocument> updatedDocuments, int updatedAttempt, NetworkClock clock) {
+        return new NetworkJob(schemaVersion, jobId, networkId, networkRevision, type, updatedStatus, initiator, createdAt, Objects.requireNonNull(clock, "clock").millis(), updatedAttempt, updatedMessage, context, updatedDocuments, issues);
     }
 
     private static String normalize(String value) {

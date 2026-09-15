@@ -15,7 +15,9 @@ import restudio.rebase.api.unified.internal.StandardOutputStateParser;
 import restudio.rescreen.platform.Async;
 import restudio.rescreen.platform.TaskScheduler;
 import restudio.rebase.restudio.api.models.ServerModels;
+import restudio.rebase.resource.ResourcePoolModels;
 import restudio.rebase.instance.InstanceState;
+import restudio.rebase.health.ServerHealth;
 import restudio.rebase.ui.widgets.LifecycleButtonWidget;
 import restudio.rebase.ui.widgets.TerminalWidget;
 import restudio.rebase.ui.widgets.ViewSwitcherWidget;
@@ -75,13 +77,20 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
     private final Map<TabContext, TerminalSession> contextInfos = new HashMap<>();
     private final Map<TabContext, DevelopmentTabState> developmentTabs = new IdentityHashMap<>();
     private TaskScheduler.ScheduledTask statusScheduler;
+    private ResourcePoolController resourcePoolController;
+    private IconButton resourcePoolButton;
+    private ResourcePoolModels.Allocation activePoolAllocation;
+    private ResourcePoolModels.Progress activePoolProgress;
     private SearchMode headerSearchMode;
     private SearchMode resourcesSearchMode;
     private SearchMode playersSearchMode;
     private final Set<String> localControllerFailureNotices = new HashSet<>();
     private final Map<String, Long> serverHealthChecksInFlight = new HashMap<>();
-    private final Set<String> serverHealthRepairsInFlight = new HashSet<>();
+    private final HealthRepairRequestGate serverHealthRepairRequests = new HealthRepairRequestGate();
+    private final Runnable serverHealthAuthStateListener = this::onServerHealthAuthStateChanged;
     private long serverHealthRequestSequence;
+    private volatile long serverHealthAccountGeneration;
+    private boolean serverHealthAuthStateListenerRegistered;
     private final Map<String, Consumer<ServerScreenHost.ServerState>> restartListeners = new HashMap<>();
     private Async<Object> newTerminalTargetRequest;
     private Async<NewTerminalTargetProvider.State> terminalRestoreRequest;
@@ -94,11 +103,60 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
     private static final int TERMINAL_SCROLLBAR_WIDTH = 2;
     private final ScrollbarController terminalScrollbarController = new ScrollbarController();
 
-    private enum ServerHealthRepair {
+    enum ServerHealthRepair {
         NONE,
         EULA,
         SERVER_JAR,
         START_SCRIPT
+    }
+
+    record HealthRepairKey(String serverKey, String accountKey) {
+    }
+
+    record HealthRepairRequest(long requestGeneration, long lifecycleGeneration, long accountGeneration,
+                               HealthRepairKey key, Object context, Object popup) {
+    }
+
+    static final class HealthRepairRequestGate {
+        private final Map<HealthRepairKey, HealthRepairRequest> activeRequests = new HashMap<>();
+        private long requestGeneration;
+        private long lifecycleGeneration;
+
+        HealthRepairRequest tryStart(String serverKey, String accountKey, long accountGeneration, Object context, Object popup) {
+            HealthRepairKey key = new HealthRepairKey(serverKey, accountKey);
+            if (activeRequests.containsKey(key)) return null;
+            HealthRepairRequest request = new HealthRepairRequest(++requestGeneration, lifecycleGeneration,
+                    accountGeneration, key, context, popup);
+            activeRequests.put(key, request);
+            return request;
+        }
+
+        boolean current(HealthRepairRequest request, String accountKey, long accountGeneration,
+                        Object context, Object popup) {
+            return request != null && request.lifecycleGeneration() == lifecycleGeneration
+                    && request.accountGeneration() == accountGeneration && request.key().accountKey().equals(accountKey)
+                    && request.context() == context && request.popup() == popup
+                    && activeRequests.get(request.key()) == request;
+        }
+
+        void finish(HealthRepairRequest request) {
+            if (request != null && request.lifecycleGeneration() == lifecycleGeneration) {
+                activeRequests.remove(request.key(), request);
+            }
+        }
+
+        void invalidateServer(String serverKey) {
+            activeRequests.entrySet().removeIf(entry -> entry.getKey().serverKey().equals(serverKey));
+        }
+
+        void invalidatePopup(Object popup) {
+            activeRequests.entrySet().removeIf(entry -> entry.getValue().popup() == popup);
+        }
+
+        void invalidate() {
+            lifecycleGeneration++;
+            activeRequests.clear();
+        }
     }
 
     record MetricsRequest(long requestGeneration, long lifecycleGeneration) {
@@ -295,6 +353,20 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
                 developmentPanel != null && developmentPanel.isRequestedVisible());
         int previousActiveTabIndex = tabs().getActiveTabIndex();
         closed = false;
+        if (!serverHealthAuthStateListenerRegistered) {
+            screenHost().addAuthStateListener(serverHealthAuthStateListener);
+            serverHealthAuthStateListenerRegistered = true;
+        }
+        if (resourcePoolController != null) {
+            resourcePoolController.dispose();
+        }
+        TaskScheduler poolScheduler = remotelyClient == null || remotelyClient.getComposition() == null
+                ? TaskScheduler.unavailable() : remotelyClient.getComposition().scheduler();
+        resourcePoolController = remotelyClient == null ? null : new ResourcePoolController(
+                remotelyClient.getApiClient(), poolScheduler, () -> screenHost().accountIdentity().subjectId());
+        if (resourcePoolController != null) {
+            resourcePoolController.listen(snapshot -> screenHost().application().execute(() -> applyResourcePool(snapshot)));
+        }
         if (statusScheduler != null) {
             statusScheduler.cancel();
             statusScheduler = null;
@@ -318,7 +390,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         }
         restartListeners.clear();
         serverHealthChecksInFlight.clear();
-        serverHealthRepairsInFlight.clear();
+        serverHealthRepairRequests.invalidate();
         localControllerFailureNotices.clear();
         statusContexts.clear();
         tabContexts.clear();
@@ -450,6 +522,10 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
                 .lifecycleAction(LifecycleButtonWidget.Operation.KILL, () -> runLifecycleOperation(LifecycleButtonWidget.Operation.KILL), state -> canKillActiveServer())
                 .shiftAction("Restart Server", "Restart Server", "reload.png", state -> state == InstanceState.RUNNING);
         header().addLeft(startIconButton);
+        resourcePoolButton = new IconButton.Builder().imagePath("Reactor.png").hint("Pool Resources")
+                .onClick(this::showResourcePool).size(18, 18).build();
+        resourcePoolButton.setVisible(false);
+        header().addLeft(resourcePoolButton);
         ServerScreenHost.EnvironmentNotice notice = screenHost().environmentNotice();
         if (notice.visible()) {
             header().addLeft(new IconButton.Builder().imagePath(notice.icon()).label(notice.label()).hint(notice.description())
@@ -881,6 +957,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         }
         setSavedTabIndex(tabs().getActiveTabIndex());
         applyStatusBarForActiveTab();
+        refreshResourcePool();
         if (developmentPanel != null) {
             DevelopmentTabState development = developmentTabs.get(context);
             if (development == null) developmentPanel.activeServerChanged(context.instance);
@@ -888,6 +965,143 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         }
         persistBrowserViewContext(context);
         persistTerminalState();
+    }
+
+    private void refreshResourcePool() {
+        activePoolAllocation = null;
+        activePoolProgress = null;
+        if (resourcePoolButton != null) {
+            resourcePoolButton.setVisible(false);
+        }
+        if (resourcePoolController != null && screenHost().accountIdentity().authenticated()) {
+            resourcePoolController.refresh();
+        }
+    }
+
+    private void applyResourcePool(ResourcePoolController.Snapshot snapshot) {
+        if (closed || resourcePoolButton == null) {
+            return;
+        }
+        TabContext context = getActiveContext();
+        String serverId = context == null || context.instance == null ? "" : detailsTarget(context.instance).id();
+        ResourcePoolModels.Allocation found = null;
+        ResourcePoolModels.Progress progress = null;
+        for (ResourcePoolController.PoolView pool : snapshot.pools()) {
+            for (ResourcePoolModels.Allocation allocation : pool.allocations()) {
+                if (!allocation.serverId().equals(serverId)) {
+                    continue;
+                }
+                found = allocation;
+                progress = allocation.currentRequestId() == null
+                        ? pool.progress().values().stream().filter(value -> value.operation().serverId().equals(serverId))
+                        .findFirst().orElse(null) : pool.progress().get(allocation.currentRequestId());
+                break;
+            }
+            if (found != null) {
+                break;
+            }
+        }
+        activePoolAllocation = found;
+        activePoolProgress = progress;
+        resourcePoolButton.setVisible(found != null);
+        if (found != null) {
+            boolean pendingRestart = poolPendingRestart(found);
+            String hint = pendingRestart ? "Pool Resources • Pending Restart" : "Pool Resources • " + poolTitle(found.state().name());
+            if (progress != null) {
+                hint += " • " + poolTitle(progress.operation().state().name());
+            }
+            resourcePoolButton.setHint(hint);
+        }
+    }
+
+    private void showResourcePool() {
+        ResourcePoolModels.Allocation allocation = activePoolAllocation;
+        if (allocation == null) {
+            return;
+        }
+        PopupWidget[] popup = new PopupWidget[1];
+        PopupWidget.Builder builder = new PopupWidget.Builder("Pool Resources").width(380)
+                .onClose(() -> popup[0].hide());
+        builder.addRow(poolDetail("Desired", poolCompute(allocation.desired())));
+        builder.addRow(poolDetail("Reserved", poolCompute(allocation.reserved())));
+        builder.addRow(poolDetail("Effective", poolCompute(allocation.effective())));
+        builder.addRow(poolDetail("Storage", allocation.retained().diskMiB() + " MiB Disk • "
+                + allocation.retained().backupMiB() + " MiB Backup"));
+        if (poolPendingRestart(allocation)) {
+            builder.addRow(poolDetail("Restart", "Pending Restart Keeps Reserved Compute"));
+        }
+        if (activePoolProgress != null) {
+            builder.addRow(poolDetail("Progress", poolProgress(activePoolProgress)));
+        }
+        if (allocation.state() == ResourcePoolModels.AllocationState.ACTIVE) {
+            builder.addTitleAction("Disable", () -> {
+                popup[0].hide();
+                disablePoolResources(allocation);
+            }, "Disable Pool Resources", PopupWidget.TitleActionRole.DESTRUCTIVE);
+        }
+        popup[0] = builder.build();
+        popup[0].setX((width - popup[0].getWidth()) / 2);
+        popup[0].setY((height - popup[0].getHeight()) / 2);
+        addDrawableChild(popup[0]);
+        popup[0].show();
+    }
+
+    private PopupWidget.PopupRow poolDetail(String name, String value) {
+        AnimatedButton detail = new AnimatedButton.Builder().size(260, 22).label(value)
+                .accentType(ThemeManager.getAccent("calm")).build();
+        return new PopupWidget.PopupRow.Builder(name, detail).contentWidth().build();
+    }
+
+    private void disablePoolResources(ResourcePoolModels.Allocation allocation) {
+        Notification notice = new Notification.Builder().message("Submitting Disable").description(allocation.serverId())
+                .type(Notification.Type.INFO).loading(true).autoSlideOut(false).build();
+        resourcePoolController.disable(allocation).whenComplete((progress, failure) -> screenHost().application().execute(() -> {
+            if (failure != null) {
+                notice.update().message("Disable Needs Attention").description(ResourcePoolController.message(failure))
+                        .type(Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
+                resourcePoolController.refresh();
+                return;
+            }
+            boolean settled = progress.operation().state() == ResourcePoolModels.OperationState.SETTLED;
+            boolean review = progress.operation().state() == ResourcePoolModels.OperationState.UNKNOWN
+                    || progress.hosting() != null && progress.hosting().state() == ResourcePoolModels.HostingState.NEEDS_REVIEW;
+            notice.update().message(review ? "Disable Needs Review" : settled ? "Resources Disabled" : "Disable Submitted")
+                    .description(review && progress.hosting() != null && progress.hosting().reason() != null
+                            ? progress.hosting().reason() : settled ? allocation.serverId() : "Resources Stay Reserved Until Disable Settles")
+                    .type(review ? Notification.Type.WARN : settled ? Notification.Type.SUCCESS : Notification.Type.INFO)
+                    .loading(false).autoSlideOut(true).commit();
+            resourcePoolController.refresh();
+        }));
+    }
+
+    private static String poolCompute(ResourcePoolModels.Compute compute) {
+        return compute.ramMiB() + " MiB RAM / " + compute.cpuQuotaPercent() + "% CPU";
+    }
+
+    private static boolean poolPendingRestart(ResourcePoolModels.Allocation allocation) {
+        return allocation.state() == ResourcePoolModels.AllocationState.ACTIVE
+                && (!allocation.desired().ramMiB().equals(allocation.effective().ramMiB())
+                || !allocation.desired().cpuQuotaPercent().equals(allocation.effective().cpuQuotaPercent()));
+    }
+
+    private static String poolProgress(ResourcePoolModels.Progress progress) {
+        String value = poolTitle(progress.operation().state().name());
+        if (progress.hosting() != null) {
+            value += " • " + poolTitle(progress.hosting().state().name());
+            if (progress.hosting().reason() != null && !progress.hosting().reason().isBlank()) {
+                value += " • " + progress.hosting().reason();
+            }
+        }
+        return value;
+    }
+
+    private static String poolTitle(String value) {
+        StringBuilder result = new StringBuilder();
+        for (String word : value.toLowerCase(Locale.ROOT).split("_")) {
+            if (!result.isEmpty()) result.append(' ');
+            result.append(Character.toUpperCase(word.charAt(0))).append(word.substring(1));
+        }
+        return result.toString();
     }
 
     private void onTabClosed(TabsManager.Tab tab){
@@ -1383,8 +1597,18 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
                 && contextInfos.get(context) == info;
     }
 
+    private void onServerHealthAuthStateChanged() {
+        serverHealthAccountGeneration++;
+        screenHost().application().execute(() -> {
+            if (closed) return;
+            serverHealthRepairRequests.invalidate();
+            hideServerHealthPopup();
+        });
+    }
+
     private void hideServerHealthPopup() {
         if (serverHealthPopup != null) {
+            serverHealthRepairRequests.invalidatePopup(serverHealthPopup);
             serverHealthPopup.hide();
         }
         serverHealthPopup = null;
@@ -1393,6 +1617,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
 
     private void hideServerHealthPopup(PopupWidget popup) {
         if (popup != null) {
+            serverHealthRepairRequests.invalidatePopup(popup);
             popup.hide();
         }
         if (serverHealthPopup == popup) {
@@ -1505,7 +1730,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         return screenHost().localPortOpen(target);
     }
 
-    private void showServerHealthPopup(TabContext context, TerminalSession info, ServerScreenHost.ServerHealth status){
+    private void showServerHealthPopup(TabContext context, TerminalSession info, ServerHealth status){
         hideServerHealthPopup();
         if (context == null || status == null) return;
         ServerHealthPopupState state = new ServerHealthPopupState(context, info, status);
@@ -1519,54 +1744,51 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         private final TerminalSession info;
         private final String healthKey;
         private final PopupWidget popup;
-        private final IconButton eulaButton;
-        private final IconButton serverJarButton;
-        private final IconButton startScriptButton;
-        private final SquareButtonWidget eulaFixButton;
-        private final SquareButtonWidget serverJarFixButton;
-        private final SquareButtonWidget startScriptFixButton;
+        private final ServerHealth status;
+        private final List<HealthCheckControl> checks = new ArrayList<>();
         private final IconButton launchButton;
         private final IconButton launchAnywayButton;
-        private final ServerUiCapabilityProvider.Availability eulaRepairAvailability;
-        private final ServerUiCapabilityProvider.Availability serverJarRepairAvailability;
-        private final ServerUiCapabilityProvider.Availability startScriptRepairAvailability;
-        private ServerScreenHost.PrerequisiteState eulaState;
-        private ServerScreenHost.PrerequisiteState serverJarState;
-        private ServerScreenHost.PrerequisiteState startScriptState;
         private ServerHealthRepair repair = ServerHealthRepair.NONE;
+        private HealthRepairRequest repairRequest;
 
-        private ServerHealthPopupState(TabContext context, TerminalSession info, ServerScreenHost.ServerHealth status) {
+        private ServerHealthPopupState(TabContext context, TerminalSession info, ServerHealth status) {
             this.context = context;
             this.info = info;
+            this.status = status;
             healthKey = killKey(context.instance);
-            eulaState = status.eula();
-            serverJarState = status.serverJar();
-            startScriptState = status.startScript();
             ServerModels.ClientServerView server = screenHost().serverView(context.instance);
-            eulaRepairAvailability = screenHost().healthRepairAvailability(server, "eula");
-            serverJarRepairAvailability = screenHost().healthRepairAvailability(server, "server-jar");
-            startScriptRepairAvailability = screenHost().healthRepairAvailability(server, "start-script");
 
             PopupWidget.Builder builder = new PopupWidget.Builder("Server Health • " + detailsTarget(context.instance).name())
                     .width(350).setResizable(false).setAntiOutOfBound(true);
             popup = builder.getWidget();
-            eulaButton = new IconButton.Builder().size(0, 18).active(false).inClickableWhenInactive(true)
-                    .hint("Open Minecraft EULA").onClick(() -> screenHost().openExternal("https://www.minecraft.net/en-us/eula")).build();
-            serverJarButton = new IconButton.Builder().size(0, 18).active(false).build();
-            startScriptButton = new IconButton.Builder().size(0, 18).active(false).build();
-            eulaFixButton = healthFixButton("Fix EULA", this::acceptEula);
-            serverJarFixButton = healthFixButton("Fix Server Jar", this::downloadServerJar);
-            startScriptFixButton = healthFixButton("Fix Start Script", this::createStartScript);
+            if (status.launchAvailability() != ServerHealth.LaunchAvailability.AVAILABLE || status.launchChecks().isEmpty()) {
+                IconButton availability = new IconButton.Builder().size(0, 18).active(false).build();
+                availability.setMessage("Launch Checks • " + availabilityLabel(status.launchAvailability()));
+                builder.addRow(new PopupWidget.PopupRow.Builder("", availability).build());
+            }
+            for (ServerHealth.LaunchCheck check : status.launchChecks()) {
+                ServerHealthRepair target = repairFor(status.gameId(), check.id());
+                String action = healthRepairAction(status.gameId(), check.id());
+                ServerUiCapabilityProvider.Availability availability = target == ServerHealthRepair.NONE
+                        ? ServerUiCapabilityProvider.Availability.missing("Server Repair Is Unavailable")
+                        : screenHost().healthRepairAvailability(server, action);
+                IconButton checkButton = checkButton(status.gameId(), check);
+                SquareButtonWidget fixButton = target == ServerHealthRepair.NONE ? null
+                        : healthFixButton("Fix " + check.label(), () -> repair(target, check, action));
+                checks.add(new HealthCheckControl(check, target, availability, checkButton, fixButton));
+                PopupWidget.PopupRow.Builder row = fixButton == null
+                        ? new PopupWidget.PopupRow.Builder("", checkButton)
+                        : new PopupWidget.PopupRow.Builder("", checkButton, fixButton).gap(1);
+                builder.addRow(row.build());
+            }
             launchButton = new IconButton.Builder().size(0, 18).label("Launch Server").imagePath("start.png")
                     .accentType(ThemeManager.getAccent("nice")).onClick(() -> launch(false)).build();
             launchAnywayButton = new IconButton.Builder().size(0, 18).label("Launch Anyway").imagePath("report.png")
                     .accentType(ThemeManager.getAccent("danger")).onClick(() -> launch(true)).build();
-            builder.addRow(new PopupWidget.PopupRow.Builder("", eulaButton, eulaFixButton).gap(1).build());
-            builder.addRow(new PopupWidget.PopupRow.Builder("", serverJarButton, serverJarFixButton).gap(1).build());
-            builder.addRow(new PopupWidget.PopupRow.Builder("", startScriptButton, startScriptFixButton).gap(1).build());
             builder.addRow(new PopupWidget.PopupRow.Builder("", launchButton, launchAnywayButton).gap(1).build());
             builder.build();
             popup.onClose = () -> {
+                serverHealthRepairRequests.invalidatePopup(popup);
                 if (serverHealthPopup == popup) {
                     serverHealthPopup = null;
                     serverHealthPopupContext = null;
@@ -1581,13 +1803,8 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         }
 
         private void refresh() {
-            updateHealthButton(eulaButton, eulaFixButton, eulaState, ServerHealthRepair.EULA,
-                    "EULA", "Accepted", "Needs Agreement", "Saving Agreement...", "info.png", eulaRepairAvailability);
-            updateHealthButton(serverJarButton, serverJarFixButton, serverJarState, ServerHealthRepair.SERVER_JAR,
-                    "Server Jar", "Ready", "Missing", "Downloading...", "java.png", serverJarRepairAvailability);
-            updateHealthButton(startScriptButton, startScriptFixButton, startScriptState, ServerHealthRepair.START_SCRIPT,
-                    "Start Script", "Ready", "Missing", "Creating...", "script.png", startScriptRepairAvailability);
-            launchButton.setActive(repair == ServerHealthRepair.NONE && isHealthy());
+            checks.forEach(this::updateHealthButton);
+            launchButton.setActive(repair == ServerHealthRepair.NONE && status.healthy());
             launchAnywayButton.setActive(repair == ServerHealthRepair.NONE);
         }
 
@@ -1596,92 +1813,93 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
                     .hint(hint).accentType(ThemeManager.getAccent("nice")).onClick(action).build();
         }
 
-        private void updateHealthButton(IconButton button, SquareButtonWidget fixButton, ServerScreenHost.PrerequisiteState state,
-                                        ServerHealthRepair target, String name, String readyLabel, String missingLabel,
-                                        String progressLabel, String icon,
-                                        ServerUiCapabilityProvider.Availability availability) {
-            boolean repairing = repair == target;
-            boolean available = availability == null || availability.available();
-            String label = repairing ? progressLabel : switch (state) {
-                case VERIFIED -> readyLabel;
-                case FAILED -> missingLabel;
+        private void updateHealthButton(HealthCheckControl control) {
+            boolean repairing = healthRepairing(repair, control.repair());
+            boolean available = control.availability() != null && control.availability().available();
+            String label = repairing ? "Repairing..." : switch (control.check().state()) {
+                case VERIFIED -> "Verified";
+                case FAILED -> "Failed";
                 case NOT_APPLICABLE -> "Not Applicable";
                 case UNAVAILABLE -> "Unavailable";
             };
-            button.setMessage(name + " • " + label);
-            button.setIcon(icon);
-            button.setAccent(state == ServerScreenHost.PrerequisiteState.VERIFIED ? ThemeManager.getAccent("nice")
+            control.button().setMessage(control.check().label() + " • " + label);
+            control.button().setAccent(control.check().state() == ServerHealth.CheckState.VERIFIED ? ThemeManager.getAccent("nice")
                     : ThemeManager.getDefaultAccent());
-            fixButton.setHint(available ? "Fix " + name : availability.reason());
-            fixButton.setActive(state == ServerScreenHost.PrerequisiteState.FAILED
+            if (control.fixButton() == null) return;
+            control.fixButton().setHint(available ? "Fix " + control.check().label() : control.availability().reason());
+            control.fixButton().setActive(control.check().state() == ServerHealth.CheckState.FAILED
                     && repair == ServerHealthRepair.NONE && available);
         }
 
-        private void acceptEula() {
-            if (!beginRepair(ServerHealthRepair.EULA, eulaState)) return;
-            screenHost().repairServer(screenHost().serverView(context.instance), "eula")
-                    .whenComplete((ignored, error) -> completeRepair(ServerHealthRepair.EULA, error,
-                            () -> eulaState = ServerScreenHost.PrerequisiteState.VERIFIED, "EULA Agreement Failed"));
-        }
-
-        private void downloadServerJar() {
-            if (!beginRepair(ServerHealthRepair.SERVER_JAR, serverJarState)) return;
-            screenHost().repairServer(screenHost().serverView(context.instance), "server-jar")
-                    .whenComplete((ignored, error) -> completeRepair(ServerHealthRepair.SERVER_JAR, error,
-                            () -> serverJarState = ServerScreenHost.PrerequisiteState.VERIFIED, "Server Jar Download Failed"));
-        }
-
-        private void createStartScript() {
-            if (!beginRepair(ServerHealthRepair.START_SCRIPT, startScriptState)) return;
-            screenHost().repairServer(screenHost().serverView(context.instance), "start-script")
-                    .whenComplete((ignored, error) -> completeRepair(ServerHealthRepair.START_SCRIPT, error,
-                            () -> startScriptState = ServerScreenHost.PrerequisiteState.VERIFIED, "Start Script Creation Failed"));
-        }
-
-        private boolean beginRepair(ServerHealthRepair target, ServerScreenHost.PrerequisiteState state) {
+        private void repair(ServerHealthRepair target, ServerHealth.LaunchCheck check, String action) {
             if (!isServerContextAvailable(context, info)) {
                 hideServerHealthPopup(popup);
-                return false;
+                return;
             }
-            ServerUiCapabilityProvider.Availability availability = repairAvailability(target);
-            if (state != ServerScreenHost.PrerequisiteState.FAILED || repair != ServerHealthRepair.NONE || !availability.available()) {
-                if (state == ServerScreenHost.PrerequisiteState.FAILED && !availability.available()) {
-                    screenHost().application().notify("Repair Unavailable", availability.reason(), ReSyncNotificationLevel.WARN);
+            HealthCheckControl control = checks.stream().filter(value -> value.repair() == target).findFirst().orElse(null);
+            if (control == null || check.state() != ServerHealth.CheckState.FAILED || repair != ServerHealthRepair.NONE
+                    || !control.availability().available()) {
+                if (check.state() == ServerHealth.CheckState.FAILED && control != null && !control.availability().available()) {
+                    screenHost().application().notify("Repair Unavailable", control.availability().reason(), ReSyncNotificationLevel.WARN);
                 }
-                return false;
+                return;
             }
-            if (!serverHealthRepairsInFlight.add(healthKey)) return false;
+            ServerScreenHost.AccountIdentity account = screenHost().accountIdentity();
+            HealthRepairRequest request = serverHealthRepairRequests.tryStart(healthKey, serverHealthAccountKey(account),
+                    serverHealthAccountGeneration, context, popup);
+            if (request == null) return;
+            repairRequest = request;
             repair = target;
             refresh();
-            return true;
+            screenHost().repairServer(screenHost().serverView(context.instance), action)
+                    .whenComplete((ignored, error) -> screenHost().application().execute(
+                            () -> completeRepair(request, target, error, check.label() + " Repair Failed")));
         }
 
-        private ServerUiCapabilityProvider.Availability repairAvailability(ServerHealthRepair target) {
-            return switch (target) {
-                case EULA -> eulaRepairAvailability;
-                case SERVER_JAR -> serverJarRepairAvailability;
-                case START_SCRIPT -> startScriptRepairAvailability;
-                default -> ServerUiCapabilityProvider.Availability.missing("Server Repair Is Unavailable");
-            };
+        private void completeRepair(HealthRepairRequest request, ServerHealthRepair target, Throwable error, String title) {
+            if (!currentRepair(request, target)) return;
+            if (error == null) {
+                refreshAfterRepair(request, target);
+                return;
+            }
+            screenHost().application().notify(title, message(error), ReSyncNotificationLevel.ERROR);
+            finishRepair(request, target);
         }
 
-        private void completeRepair(ServerHealthRepair target, Throwable error, Runnable success, String title) {
-            screenHost().application().execute(() -> {
-                if (error == null) success.run();
-                else screenHost().application().notify(title, message(error), ReSyncNotificationLevel.ERROR);
-                finishRepair(target);
-            });
+        private void refreshAfterRepair(HealthRepairRequest request, ServerHealthRepair target) {
+            if (!currentRepair(request, target)) return;
+            ServerModels.ClientServerView server = screenHost().serverView(context.instance);
+            if (server == null) {
+                finishRepair(request, target);
+                return;
+            }
+            screenHost().serverHealth(server).whenComplete((updated, error) -> screenHost().application().execute(() -> {
+                if (!currentRepair(request, target)) return;
+                if (error != null || updated == null) {
+                    screenHost().application().notify("Health Refresh Failed",
+                            error == null ? "Server Health Unavailable" : message(error), ReSyncNotificationLevel.ERROR);
+                    finishRepair(request, target);
+                    return;
+                }
+                finishRepair(request, target);
+                hideServerHealthPopup(popup);
+                showServerHealthPopup(context, info, updated);
+            }));
         }
 
-        private void finishRepair(ServerHealthRepair target) {
-            if (repair != target) return;
-            serverHealthRepairsInFlight.remove(healthKey);
+        private boolean currentRepair(HealthRepairRequest request, ServerHealthRepair target) {
+            return repairRequest == request && repair == target && serverHealthPopup == popup
+                    && serverHealthPopupContext == context && isServerContextAvailable(context, info)
+                    && serverHealthRepairRequests.current(request, serverHealthAccountKey(screenHost().accountIdentity()),
+                    serverHealthAccountGeneration, context, popup);
+        }
+
+        private void finishRepair(HealthRepairRequest request, ServerHealthRepair target) {
+            if (!currentRepair(request, target)) return;
+            serverHealthRepairRequests.finish(request);
+            repairRequest = null;
             repair = ServerHealthRepair.NONE;
             refresh();
-        }
-
-        private boolean isHealthy() {
-            return eulaState.allowsStart() && serverJarState.allowsStart() && startScriptState.allowsStart();
         }
 
         private void launch(boolean anyway) {
@@ -1689,10 +1907,67 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
                 hideServerHealthPopup(popup);
                 return;
             }
-            if (repair != ServerHealthRepair.NONE || !anyway && !isHealthy()) return;
+            if (repair != ServerHealthRepair.NONE || !anyway && !status.healthy()) return;
             hideServerHealthPopup(popup);
             proceedWithServerStart(context, info);
         }
+
+        private record HealthCheckControl(ServerHealth.LaunchCheck check, ServerHealthRepair repair,
+                                          ServerUiCapabilityProvider.Availability availability, IconButton button,
+                                          SquareButtonWidget fixButton) {
+        }
+    }
+
+    private IconButton checkButton(String gameId, ServerHealth.LaunchCheck check) {
+        IconButton.Builder builder = new IconButton.Builder().size(0, 18).active(false);
+        if (!ServerHealth.MINECRAFT_JAVA.equals(gameId)) return builder.build();
+        return switch (check.id()) {
+            case "minecraft:eula" -> builder.inClickableWhenInactive(true).hint("Open Minecraft EULA")
+                    .imagePath("info.png").onClick(() -> screenHost().openExternal("https://www.minecraft.net/en-us/eula")).build();
+            case "minecraft:server-jar" -> builder.imagePath("java.png").build();
+            case "startup" -> builder.imagePath("script.png").build();
+            default -> builder.build();
+        };
+    }
+
+    private static ServerHealthRepair repairFor(String gameId, String checkId) {
+        if (!ServerHealth.MINECRAFT_JAVA.equals(gameId)) return ServerHealthRepair.NONE;
+        return switch (checkId) {
+            case "minecraft:eula" -> ServerHealthRepair.EULA;
+            case "minecraft:server-jar" -> ServerHealthRepair.SERVER_JAR;
+            case "startup" -> ServerHealthRepair.START_SCRIPT;
+            default -> ServerHealthRepair.NONE;
+        };
+    }
+
+    static boolean healthRepairing(ServerHealthRepair active, ServerHealthRepair target) {
+        return target != ServerHealthRepair.NONE && active == target;
+    }
+
+    static String serverHealthAccountKey(ServerScreenHost.AccountIdentity account) {
+        if (account == null || !account.authenticated()) return "anonymous";
+        return account.subjectId().isBlank() ? "account:" + account.displayName() : "subject:" + account.subjectId();
+    }
+
+    private static String repairAction(ServerHealthRepair repair) {
+        return switch (repair) {
+            case EULA -> "eula";
+            case SERVER_JAR -> "server-jar";
+            case START_SCRIPT -> "start-script";
+            case NONE -> "";
+        };
+    }
+
+    static String healthRepairAction(String gameId, String checkId) {
+        return repairAction(repairFor(gameId, checkId));
+    }
+
+    private static String availabilityLabel(ServerHealth.LaunchAvailability availability) {
+        return switch (availability) {
+            case AVAILABLE -> "Unavailable";
+            case UNSUPPORTED -> "Unsupported";
+            case ADAPTER_UNAVAILABLE -> "Adapter Unavailable";
+        };
     }
 
     private void proceedWithServerStart(TabContext context, TerminalSession info){
@@ -2418,7 +2693,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         if (target == null) return;
         String key = killKey(target);
         serverHealthChecksInFlight.remove(key);
-        serverHealthRepairsInFlight.remove(key);
+        serverHealthRepairRequests.invalidateServer(key);
         clearLocalControllerFailureNotice(target);
     }
 
@@ -2712,6 +2987,10 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
     @Override
     public void removed(){
         closed = true;
+        if (serverHealthAuthStateListenerRegistered) {
+            screenHost().removeAuthStateListener(serverHealthAuthStateListener);
+            serverHealthAuthStateListenerRegistered = false;
+        }
         cancelNewTerminalTargetRequest();
         Async<NewTerminalTargetProvider.State> restoreRequest = terminalRestoreRequest;
         terminalRestoreRequest = null;
@@ -2726,10 +3005,14 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
             networkSummaryPopup = null;
         }
         serverHealthChecksInFlight.clear();
-        serverHealthRepairsInFlight.clear();
+        serverHealthRepairRequests.invalidate();
         if (statusScheduler != null) {
             statusScheduler.cancel();
             statusScheduler = null;
+        }
+        if (resourcePoolController != null) {
+            resourcePoolController.dispose();
+            resourcePoolController = null;
         }
         if (developmentPanel != null) {
             developmentPanel.dispose();
