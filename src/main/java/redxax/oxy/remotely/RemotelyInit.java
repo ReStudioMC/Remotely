@@ -15,6 +15,7 @@ import restudio.rescreen.config.Config;
 import restudio.rescreen.logging.LogConsole;
 import restudio.rescreen.logging.LogSettings;
 import restudio.rescreen.logging.ReLog;
+import restudio.rescreen.platform.desktop.DesktopAwt;
 
 import java.io.IOException;
 import java.lang.management.ManagementFactory;
@@ -97,6 +98,7 @@ public class RemotelyInit {
         if (!ensureMacFirstThread(args)) {
             return;
         }
+        DesktopAwt.initialize();
         Main.setEntryClass(RemotelyEntry.class);
         initCommon();
         Main.main(args);
