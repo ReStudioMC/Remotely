@@ -340,15 +340,18 @@ public class RematrixScreen extends Screen {
         if (scaleScroll(keyEvent.key(), keyEvent.modifiers())) {
             return true;
         }
+        boolean handled = sm.keyPressedBeforeHostFallback(event);
+        if (handled) {
+            return true;
+        }
         if (event.key() == ReKey.ESCAPE && Config.desktopMode) {
             closeDesktopSuperScreen();
             return true;
         }
-        boolean handled = sm.keyPressed(event);
         if (event.key() == ReKey.ESCAPE) {
             return true;
         }
-        return handled || super.keyPressed(keyEvent);
+        return super.keyPressed(keyEvent);
     }
     //#else
     //$$ @Override
@@ -356,16 +359,19 @@ public class RematrixScreen extends Screen {
     //$$     if (scaleScroll(keyCode, modifiers)) {
     //$$         return true;
     //$$     }
-    //$$     if (keyCode == GLFW.GLFW_KEY_ESCAPE && Config.desktopMode) {
+    //$$     ReKeyEvent event = ReInputEventFactory.keyPressed(sm, sm.getCurrentScreen(), keyCode, scanCode, modifiers, false);
+    //$$     boolean handled = sm.keyPressedBeforeHostFallback(event);
+    //$$     if (handled) {
+    //$$         return true;
+    //$$     }
+    //$$     if (event.key() == ReKey.ESCAPE && Config.desktopMode) {
     //$$         closeDesktopSuperScreen();
     //$$         return true;
     //$$     }
-    //$$     ReKeyEvent event = ReInputEventFactory.keyPressed(sm, sm.getCurrentScreen(), keyCode, scanCode, modifiers, false);
-    //$$     boolean handled = sm.keyPressed(event);
-    //$$     if (keyCode == GLFW.GLFW_KEY_ESCAPE) {
+    //$$     if (event.key() == ReKey.ESCAPE) {
     //$$         return true;
     //$$     }
-    //$$     return handled || super.keyPressed(keyCode, scanCode, modifiers);
+    //$$     return super.keyPressed(keyCode, scanCode, modifiers);
     //$$ }
     //#endif
 
