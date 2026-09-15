@@ -113,7 +113,7 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
     private final ServerScheduleCapabilityClient scheduleClient;
     private final ResourcePoolClient resourcePools;
     private final Map<String, Consumer<DeveloperCapabilityProvider.JobProgress>> developerProgress = new LinkedHashMap<>();
-    private final Set<BrowserTerminalTransport> activeTerminalTransports = new HashSet<>();
+    private final Set<BrowserSshTerminalTransport> activeTerminalTransports = new HashSet<>();
     private final Set<UUID> activeConsoleSessions = new HashSet<>();
     private final Map<String, Long> missingReSyncServers = new LinkedHashMap<>();
     private final Map<String, Long> missingReSyncApiKeys = new LinkedHashMap<>();
@@ -1476,6 +1476,11 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         return post("/servers/" + path(serverId) + "/terminal/ticket", Map.of(), BrowserRemotelyServerApi::terminalTicket).thenApply(TerminalTicketView::toModel);
     }
 
+    Async<BrowserSshSession> browserSshSession(String serverId) {
+        return post("/servers/" + path(serverId) + "/terminal/ssh", Map.of(), BrowserRemotelyServerApi::browserSshSession)
+                .thenApply(session -> session.requireUsable(clock.millis()));
+    }
+
     public Async<BinaryWebSocket> openTerminal(String serverId, BinaryWebSocketListener listener) {
         return openTerminal(serverId, listener, true);
     }
@@ -1495,9 +1500,9 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         String resolvedServerId = requireServerId(serverId);
         return size -> {
             TerminalSize resolvedSize = size == null ? new TerminalSize(120, 32) : size;
-            BrowserTerminalTransport[] holder = new BrowserTerminalTransport[1];
-            BrowserTerminalTransport terminal = new BrowserTerminalTransport(
-                    listener -> openTerminal(resolvedServerId, listener),
+            BrowserSshTerminalTransport[] holder = new BrowserSshTerminalTransport[1];
+            BrowserSshTerminalTransport terminal = new BrowserSshTerminalTransport(
+                    () -> browserSshSession(resolvedServerId), resolvedSize,
                     () -> removeActiveTerminal(holder[0]));
             holder[0] = terminal;
             synchronized (activeTerminalTransports) {
@@ -1507,7 +1512,7 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         };
     }
 
-    private void removeActiveTerminal(BrowserTerminalTransport terminal) {
+    private void removeActiveTerminal(BrowserSshTerminalTransport terminal) {
         if (terminal == null) return;
         synchronized (activeTerminalTransports) {
             activeTerminalTransports.remove(terminal);
@@ -1515,12 +1520,12 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
     }
 
     public void closeAllTerminals() {
-        List<BrowserTerminalTransport> terminals;
+        List<BrowserSshTerminalTransport> terminals;
         synchronized (activeTerminalTransports) {
             terminals = new ArrayList<>(activeTerminalTransports);
             activeTerminalTransports.clear();
         }
-        terminals.forEach(BrowserTerminalTransport::close);
+        terminals.forEach(BrowserSshTerminalTransport::close);
         Set<UUID> consoleSessions;
         synchronized (activeConsoleSessions) {
             consoleSessions = Set.copyOf(activeConsoleSessions);
@@ -2946,6 +2951,14 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         result.scope = BrowserJson.string(value, "scope");
         result.expiresAt = BrowserJson.string(value, "expiresAt");
         return result;
+    }
+
+    private static BrowserSshSession browserSshSession(JsonObject value) {
+        String endpoint = BrowserJson.string(value, "endpoint");
+        Long expiresAt = IsoTimes.millis(BrowserJson.string(value, "expiresAt"));
+        return new BrowserSshSession(BrowserJson.integer(value, "version", 0), URI.create(endpoint),
+                BrowserJson.string(value, "grant"), BrowserJson.string(value, "username"), BrowserJson.string(value, "password"),
+                BrowserJson.string(value, "hostKey"), expiresAt == null ? 0 : expiresAt, BrowserJson.string(value, "scope"));
     }
 
     static ServerModels.CapabilityJob capabilityJob(JsonObject value) {

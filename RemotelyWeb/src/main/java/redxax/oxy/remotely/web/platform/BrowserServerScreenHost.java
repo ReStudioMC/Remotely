@@ -1078,14 +1078,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     @Override
     public void configureTerminalInput(RemotelyServerApi api, ServerModels.ClientServerView server, TerminalWidget terminal) {
         if (terminal == null) return;
-        if (api == null || server == null || serverId(server).isBlank()) {
-            terminal.disableFakeInput();
-            return;
-        }
-        terminal.enableFakeInput("> ", command -> api.sendServerCommand(serverId(server), command).whenComplete((ignored, failure) -> {
-            if (failure == null) return;
-            execute(() -> application.notify("Command Failed", failureMessage(failure), ReSyncNotificationLevel.ERROR));
-        }));
+        terminal.disableFakeInput();
     }
 
     @Override

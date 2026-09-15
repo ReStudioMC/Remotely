@@ -360,10 +360,19 @@ teavm {
     }
 }
 
+val browserSshAssets = layout.buildDirectory.dir("generated/browser-ssh")
+val buildBrowserSsh by tasks.registering(Exec::class) {
+    val output = browserSshAssets.get().asFile
+    inputs.files(fileTree("src/main/go/browser-ssh"))
+    inputs.file("scripts/build-ssh-wasm.sh")
+    outputs.files(output.resolve("restudio-ssh.wasm"), output.resolve("wasm_exec.js"))
+    commandLine("bash", file("scripts/build-ssh-wasm.sh"), output)
+}
+
 tasks.register<Sync>("browserDist") {
     val distribution = layout.buildDirectory.dir("generated/teavm/remotely")
     val atlasDirectory = layout.buildDirectory.dir("generated/icon-atlas")
-    dependsOn(tasks.named("generateJavaScript"), verifyBrowserGraph, tasks.named("verifyIconAtlas"))
+    dependsOn(tasks.named("generateJavaScript"), verifyBrowserGraph, buildBrowserSsh, tasks.named("verifyIconAtlas"))
     from(layout.projectDirectory.dir("src/main/resources"))
     from(layout.buildDirectory.dir("generated/teavm/js")) {
         into("js")
@@ -383,6 +392,9 @@ tasks.register<Sync>("browserDist") {
     from(layout.projectDirectory.dir("../src/main/resources/assets")) {
         into("assets")
     }
+    from(browserSshAssets) {
+        into("ssh")
+    }
     from(layout.projectDirectory.dir("../../Rebase/src/main/resources/assets")) {
         into("assets")
     }
@@ -394,10 +406,23 @@ tasks.register<Sync>("browserDist") {
         val root = distribution.get().asFile
         val bundle = root.resolve("js/remotely-browser.js")
         val index = root.resolve("index.html")
+        val sshWorker = root.resolve("ssh/restudio-ssh-worker.js")
+        val sshEngine = root.resolve("ssh/restudio-ssh.wasm")
+        val sshRuntime = root.resolve("ssh/wasm_exec.js")
         require(bundle.isFile && bundle.length() > 0) { "Remotely Web browser bundle is missing or empty: $bundle" }
         require(index.isFile) { "Remotely Web index is missing: $index" }
+        require(sshWorker.isFile && sshWorker.length() > 0) { "Remotely Web SSH worker is missing or empty: $sshWorker" }
+        require(sshEngine.isFile && sshEngine.length() > 0) { "Remotely Web SSH engine is missing or empty: $sshEngine" }
+        require(sshRuntime.isFile && sshRuntime.length() > 0) { "Remotely Web Go runtime is missing or empty: $sshRuntime" }
 
-        val buildId = MessageDigest.getInstance("SHA-256").digest(bundle.readBytes()).joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        val digest = MessageDigest.getInstance("SHA-256")
+        listOf(bundle, sshWorker, sshEngine, sshRuntime).forEach { artifact ->
+            digest.update(artifact.name.toByteArray())
+            digest.update(0.toByte())
+            digest.update(artifact.readBytes())
+            digest.update(0.toByte())
+        }
+        val buildId = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
         val markerPattern = Regex("""(<meta\s+name="remotely-build-id"\s+content=")[^"]*(">)""")
         val indexHtml = index.readText()
         require(markerPattern.containsMatchIn(indexHtml)) { "Remotely Web build marker meta tag is missing: $index" }
