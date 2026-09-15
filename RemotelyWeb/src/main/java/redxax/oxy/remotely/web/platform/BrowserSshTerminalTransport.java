@@ -432,8 +432,12 @@ final class BrowserSshTerminalTransport implements TerminalTransport {
             const state = window.__remotelySshWorkers;
             const worker = state && state[String(id)];
             if (!worker) return false;
-            worker.postMessage({type: 'input', data: bytes}, [bytes.buffer]);
-            return true;
+            try {
+                worker.postMessage({type: 'input', data: new Uint8Array(bytes)});
+                return true;
+            } catch (error) {
+                return false;
+            }
             """)
     private static native boolean inputWorker(int id, Uint8Array bytes);
 
