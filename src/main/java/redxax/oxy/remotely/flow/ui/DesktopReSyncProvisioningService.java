@@ -87,7 +87,7 @@ public final class DesktopReSyncProvisioningService {
             try {
                 Boolean pluginPresent = manager.isReSyncPluginInstalled(serverId).join();
                 if (Boolean.TRUE.equals(pluginPresent)) {
-                    Instance instance = manager.findInstanceByServerId(serverId, startupServer);
+                    Instance instance = (Instance) manager.findInstanceByServerId(serverId, startupServer);
                     if (instance != null && (instance.getState() == InstanceState.STARTING || instance.getState() == InstanceState.INSTALLING)) {
                         return new StartupProbeResult(StartupStatus.LOADING, false, false);
                     }
@@ -101,7 +101,7 @@ public final class DesktopReSyncProvisioningService {
             }
             return new StartupProbeResult(StartupStatus.SETUP, false);
         }
-        Instance instance = manager.getInstanceByServerId(serverId);
+        Instance instance = (Instance) manager.getInstanceByServerId(serverId);
         boolean isRunning = instance != null && (instance.getState() == InstanceState.RUNNING
             || instance.getState() == InstanceState.SAVING || instance.getState() == InstanceState.SAVED);
         if (instance != null && isReSyncResourcePresent(instance)) {
@@ -124,7 +124,7 @@ public final class DesktopReSyncProvisioningService {
             return isReSyncUpdateAvailableForReStudio(serverId);
         }
         FlowManager manager = FlowManager.getInstance();
-        Instance instance = manager != null ? manager.getInstanceByServerId(serverId) : null;
+        Instance instance = manager != null ? (Instance) manager.getInstanceByServerId(serverId) : null;
         return instance != null && isReSyncResourcePresent(instance) && isReSyncUpdateAvailable(instance);
     }
 
@@ -184,7 +184,7 @@ public final class DesktopReSyncProvisioningService {
 
     private Boolean isPluginCompatible(String serverId, ClientServerView startupServer, String loaderHint) {
         FlowManager manager = FlowManager.getInstance();
-        Instance instance = manager == null ? null : manager.getInstanceByServerId(serverId);
+        Instance instance = manager == null ? null : (Instance) manager.getInstanceByServerId(serverId);
         if (instance != null) {
             String backendType = resolveBackendType(instance);
             if (!instance.isServer()) {
@@ -364,7 +364,7 @@ public final class DesktopReSyncProvisioningService {
         if (manager == null) {
             return OperationResult.failed();
         }
-        Instance instance = manager.getInstanceByServerId(serverId);
+        Instance instance = (Instance) manager.getInstanceByServerId(serverId);
         if (instance == null) {
             return OperationResult.failed("Server Not Found");
         }
@@ -401,7 +401,7 @@ public final class DesktopReSyncProvisioningService {
         if (manager == null) {
             return OperationResult.failed();
         }
-        Instance instance = manager.getInstanceByServerId(serverId);
+        Instance instance = (Instance) manager.getInstanceByServerId(serverId);
         if (instance == null) {
             return OperationResult.failed("Server Not Found");
         }
@@ -524,7 +524,7 @@ public final class DesktopReSyncProvisioningService {
 
     private boolean isReStudioTarget(String serverId, ClientServerView startupServer) {
         FlowManager manager = FlowManager.getInstance();
-        Instance instance = manager == null ? null : manager.findInstanceByServerId(serverId, startupServer);
+        Instance instance = manager == null ? null : (Instance) manager.findInstanceByServerId(serverId, startupServer);
         if (instance != null) {
             BackendConfig backendConfig = instance.getBackendConfig();
             return backendConfig != null && "RESTUDIO".equalsIgnoreCase(safeText(backendConfig.type));

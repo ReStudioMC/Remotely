@@ -1,5 +1,7 @@
 package redxax.oxy.remotely.flow.data;
 
+import restudio.resync.flow.type.TypeReference;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -31,9 +33,23 @@ public final class FlowTypeRef {
         }
         if ("resource_reference".equals(typeId)) {
             return FlowDataType.fromString(typeId).isResolved() && arguments.size() <= 1
-                && (arguments.isEmpty() || arguments.getFirst().arguments.isEmpty());
+                && (arguments.isEmpty() || arguments.getFirst().arguments.isEmpty()
+                    && arguments.getFirst().isResourceIdentity());
         }
         return FlowDataType.fromString(typeId).isResolved() && arguments.stream().allMatch(FlowTypeRef::isResolved);
+    }
+
+    private boolean isResourceIdentity() {
+        int separator = typeId.indexOf(':');
+        if (separator < 0) {
+            return FlowDataType.fromString(typeId).isResolved();
+        }
+        try {
+            TypeReference.of(typeId.substring(0, separator), typeId.substring(separator + 1));
+            return true;
+        } catch (IllegalArgumentException exception) {
+            return false;
+        }
     }
 
     public boolean isAssignableFrom(FlowTypeRef source) {

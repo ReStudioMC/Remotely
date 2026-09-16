@@ -5,7 +5,6 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import redxax.oxy.remotely.flow.data.ReSyncResourceDragPayload;
 import redxax.oxy.remotely.flow.ui.studio.StudioScreen;
-import redxax.oxy.remotely.util.TextLines;
 import restudio.rebase.ui.widgets.editor.CodeEditorWidget;
 import restudio.rescreen.platform.IDrawContext;
 import restudio.rescreen.platform.input.ReKeyEvent;
@@ -283,8 +282,8 @@ public class TextTemplateDesignerScreen extends FocusedJsonResourceDesignerScree
     private void layoutContentEditor() {
         int left = Math.max(8, host != null ? host.studioContentBrowserWidth() : 0);
         int right = Math.max(left + 80, workspaceWidth - 8);
-        if (studioResourcePanel != null && !studioResourcePanel.isLeftAnchored()) {
-            right = Math.max(left + 80, workspaceWidth - 8 - studioResourcePanel.layoutWidth(0));
+        if (studioResourcePanel != null && studioResourcePanel.isVisible() && !studioResourcePanel.isLeftAnchored()) {
+            right = Math.max(left + 80, workspaceWidth - studioResourcePanel.getDesiredWidth() - 8);
         }
         int top = studioPanelTop();
         int bottom = Math.max(top + 80, workspaceHeight - studioPanelBottomReserve());
@@ -308,30 +307,51 @@ public class TextTemplateDesignerScreen extends FocusedJsonResourceDesignerScree
         if (syncingEditor) {
             return;
         }
+        if (deferResourceMutation(() -> writeCentralContent(value))) {
+            return;
+        }
         captureResourceSnapshot();
         String kind = jsonText("kind").toLowerCase(Locale.ROOT);
         if ("list".equals(kind)) {
             JsonArray values = new JsonArray();
-            TextLines.stream(value).map(String::trim).filter(line -> !line.isBlank()).forEach(values::add);
+            for (String line : textLines(value)) {
+                String trimmed = line.trim();
+                if (!trimmed.isBlank()) {
+                    values.add(trimmed);
+                }
+            }
             resource.add("values", values);
             return;
         }
         if ("map".equals(kind)) {
             JsonArray entries = new JsonArray();
-            TextLines.stream(value).map(String::trim).filter(line -> !line.isBlank()).forEach(line -> {
+            for (String raw : textLines(value)) {
+                String line = raw.trim();
+                if (line.isBlank()) {
+                    continue;
+                }
                 int separator = line.indexOf('=');
                 JsonObject entry = new JsonObject();
                 entry.addProperty("key", (separator < 0 ? line : line.substring(0, separator)).trim());
                 entry.addProperty("value", separator < 0 ? "" : line.substring(separator + 1).trim());
                 entries.add(entry);
-            });
+            }
             resource.add("entries", entries);
             return;
         }
         JsonArray frames = new JsonArray();
-        TextLines.stream(value).filter(line -> !line.isBlank()).forEach(frames::add);
+        String first = "";
+        for (String line : textLines(value)) {
+            if (line.isBlank()) {
+                continue;
+            }
+            frames.add(line);
+            if (first.isEmpty()) {
+                first = line;
+            }
+        }
         resource.add("frames", frames);
-        resource.addProperty("text", TextLines.stream(value).findFirst().orElse(""));
+        resource.addProperty("text", first);
     }
 
     private List<String> listValues() {
@@ -354,5 +374,9 @@ public class TextTemplateDesignerScreen extends FocusedJsonResourceDesignerScree
             }
         });
         return result;
+    }
+
+    private static String[] textLines(String value) {
+        return value.replace("\r\n", "\n").replace('\r', '\n').split("\n", -1);
     }
 }

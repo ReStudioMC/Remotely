@@ -23,10 +23,10 @@ if (extra["reStudioSourceDependencies"] as Boolean) {
             substitute(module("dev.restudio:rebase")).using(project(":"))
         }
     }
+}
 
-    includeBuild("../ReSync") {
-        dependencySubstitution {
-            substitute(module("restudio.resync:ReSyncCore")).using(project(":ReSyncCore"))
-        }
+includeBuild("../ReSync") {
+    dependencySubstitution {
+        substitute(module("restudio.resync:ReSyncCore")).using(project(":ReSyncCore"))
     }
 }

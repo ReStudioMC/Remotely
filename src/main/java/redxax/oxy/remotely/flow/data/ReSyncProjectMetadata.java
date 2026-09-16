@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
 
@@ -236,7 +237,7 @@ public class ReSyncProjectMetadata {
     }
 
     public static String resourceKey(String type, String id) {
-        return safe(type).toUpperCase() + ":" + safe(id);
+        return safe(type).toUpperCase(Locale.ROOT) + ":" + safe(id);
     }
 
     public static String bundleKey(String marketplaceSlug, String listingSlug) {

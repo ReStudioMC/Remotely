@@ -20,7 +20,7 @@ class WorldGenManagerTest {
         assertTrue(project.getTerrainGraph().getNodes().isEmpty());
         assertTrue(project.getSurfaceGraph().getNodes().isEmpty());
         assertTrue(project.getCaveGraph().getNodes().isEmpty());
-        assertTrue(project.getFeatureGraph().getNodes().values().stream().anyMatch(node -> "output_features".equals(node.getType())));
+        assertTrue(project.getFeatureGraph().getNodes().values().stream().anyMatch(node -> "worldgen:output_features".equals(node.getType())));
     }
 
     @Test

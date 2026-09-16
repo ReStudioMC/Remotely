@@ -1,30 +1,47 @@
 package redxax.oxy.remotely.flow.ui;
 
+import redxax.oxy.remotely.util.BrowserSafeState;
 import redxax.oxy.remotely.data.flow.FlowManager;
+import redxax.oxy.remotely.data.flow.CoreGraphEditorSession;
+import redxax.oxy.remotely.data.flow.CoreGraphUiProjection;
 import redxax.oxy.remotely.data.flow.ReSyncResourceType;
 import redxax.oxy.remotely.data.flow.OptionCatalogCache;
 import redxax.oxy.remotely.data.flow.OptionCatalogItem;
 import redxax.oxy.remotely.flow.data.FlowConnection;
 import redxax.oxy.remotely.flow.data.FlowDataType;
 import redxax.oxy.remotely.flow.data.FlowGraph;
-import redxax.oxy.remotely.flow.data.FlowJson;
 import redxax.oxy.remotely.flow.data.FlowNode;
-import redxax.oxy.remotely.flow.data.ReSyncProjectMetadata;
-import redxax.oxy.remotely.flow.data.ReSyncResourceDragPayload;
+import redxax.oxy.remotely.flow.data.FlowTypeRef;
 import restudio.rescreen.ui.widgets.CompactBindingWidget;
+import restudio.rescreen.util.Notification;
+import restudio.resync.flow.function.FunctionParameterContract;
+import restudio.resync.flow.function.FunctionSignature;
+import restudio.resync.flow.graph.GraphConnection;
+import restudio.resync.flow.graph.GraphDocument;
+import restudio.resync.flow.graph.GraphEndpoint;
+import restudio.resync.flow.graph.GraphNode;
+import restudio.resync.flow.identity.ConnectionId;
+import restudio.resync.flow.identity.FunctionParameterId;
+import restudio.resync.flow.identity.PinId;
+import restudio.resync.flow.type.TypeExpr;
+import restudio.resync.flow.type.TypedValue;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.Map;
 
 final class CompactBindingSupport {
     static final List<String> ACTION_MODES = List.of("None", "Run Flow", "Run Function", "Run Command");
     static final List<String> PREDICATE_MODES = List.of("None", "Function");
+    private static final long SELECTED_FUNCTION_CACHE_NANOS = ((250L) * 1_000_000L);
+    private static final Map<SelectedFunctionKey, SelectedFunction> SELECTED_FUNCTIONS = BrowserSafeState.map();
 
     private CompactBindingSupport() {
     }
@@ -36,10 +53,7 @@ final class CompactBindingSupport {
         }
         List<String> options = new ArrayList<>();
         options.add("none");
-        Set<String> functionIds = functionResourceIds(manager, serverId);
-        manager.getGraphsForServer(serverId, ReSyncResourceType.FLOW).entrySet().stream()
-            .filter(entry -> entry.getValue() != null && !functionIds.contains(entry.getKey()))
-            .map(Map.Entry::getKey)
+        manager.getCachedGraphIdsForServer(serverId, ReSyncResourceType.FLOW).stream()
             .sorted(String.CASE_INSENSITIVE_ORDER)
             .forEach(options::add);
         return options;
@@ -52,10 +66,7 @@ final class CompactBindingSupport {
         }
         List<String> options = new ArrayList<>();
         options.add("none");
-        Set<String> functionIds = functionResourceIds(manager, serverId);
-        manager.getGraphsForServer(serverId, ReSyncResourceType.FUNCTION).entrySet().stream()
-            .filter(entry -> entry.getValue() != null)
-            .map(Map.Entry::getKey)
+        manager.getCachedGraphIdsForServer(serverId, ReSyncResourceType.FUNCTION).stream()
             .sorted(String.CASE_INSENSITIVE_ORDER)
             .forEach(options::add);
         return options;
@@ -69,63 +80,343 @@ final class CompactBindingSupport {
         if (manager == null || serverId == null) {
             return null;
         }
+        SelectedFunctionKey key = new SelectedFunctionKey(serverId, functionId);
+        long now = System.nanoTime();
+        SelectedFunction cached = SELECTED_FUNCTIONS.get(key);
+        if (cached != null && now - cached.loadedAtNanos() < SELECTED_FUNCTION_CACHE_NANOS) {
+            return cached.function().isFunction() ? cached.function() : null;
+        }
         FlowGraph function = manager.getGraph(serverId, ReSyncResourceType.FUNCTION, functionId);
         if (function == null) {
+            SELECTED_FUNCTIONS.remove(key);
             return null;
         }
+        SELECTED_FUNCTIONS.put(key, new SelectedFunction(function, now));
         return function.isFunction() ? function : null;
     }
 
     static FlowGraph normalizeFunction(String serverId, FlowGraph function, FunctionShape shape) {
+        return normalizeFunction(serverId, function, shape, boundaryCatalog(serverId));
+    }
+
+    static boolean initializeFunction(String serverId, String functionId, FunctionShape shape) {
+        FlowManager manager = FlowManager.getInstance();
+        if (manager == null || serverId == null || serverId.isBlank() || functionId == null || functionId.isBlank()
+            || shape == null) {
+            return false;
+        }
+        SELECTED_FUNCTIONS.remove(new SelectedFunctionKey(serverId, functionId));
+        CoreGraphEditorSession session = manager.coreGraphEditorSession(serverId, ReSyncResourceType.FUNCTION,
+            functionId).orElse(null);
+        if (session != null && session.isFunction()) {
+            FunctionSignature signature = session.functionSourceDocument().signature();
+            session.setFunctionSignature(new FunctionSignature(signature.function(), signature.revision(),
+                coreParameters(functionId, "input", shape.inputs()),
+                coreParameters(functionId, "output", shape.outputs()), signature.unknown()));
+            if (!ensureCoreBoundaryConnection(session, boundaryCatalog(serverId), functionId)) {
+                new Notification("Function", "Function Boundary Connection Unavailable", Notification.Type.ERROR);
+                return false;
+            }
+            if (!manager.saveCoreGraph(serverId, ReSyncResourceType.FUNCTION, session)) {
+                new Notification("Function", "Function Signature Save Failed", Notification.Type.ERROR);
+                return false;
+            }
+            return true;
+        }
+        FlowGraph function = manager.getGraph(serverId, ReSyncResourceType.FUNCTION, functionId);
+        if (function == null) {
+            return false;
+        }
+        normalizeFunction(serverId, function, shape);
+        manager.saveGraph(serverId, ReSyncResourceType.FUNCTION, function);
+        return true;
+    }
+
+    static boolean ensureCoreBoundaryConnection(CoreGraphEditorSession session,
+                                                FlowNodeWidget.FunctionBoundaryCatalog catalog,
+                                                String functionId) {
+        if (session == null || catalog == null || !catalog.isComplete() || functionId == null || functionId.isBlank()) {
+            return false;
+        }
+        FlowNodeWidget.FunctionBoundaryIntent inputIntent = catalog.intent(FlowNodeWidget.FunctionBoundaryRole.INPUTS);
+        FlowNodeWidget.FunctionBoundaryIntent outputIntent = catalog.intent(FlowNodeWidget.FunctionBoundaryRole.OUTPUTS);
+        if (inputIntent == null || outputIntent == null || inputIntent.nodeIdentity() == null
+            || outputIntent.nodeIdentity() == null || inputIntent.flowPin().isBlank() || outputIntent.flowPin().isBlank()) {
+            return false;
+        }
+        GraphDocument document = session.functionSourceDocument().graph();
+        GraphNode input = document.nodes().stream()
+            .filter(node -> inputIntent.nodeIdentity().equals(node.definition()))
+            .findFirst().orElse(null);
+        GraphNode output = document.nodes().stream()
+            .filter(node -> outputIntent.nodeIdentity().equals(node.definition()))
+            .findFirst().orElse(null);
+        if (input == null || output == null) {
+            return false;
+        }
+        PinId inputPin = PinId.of(inputIntent.flowPin());
+        PinId outputPin = PinId.of(outputIntent.flowPin());
+        boolean inputConnected = document.connections().stream()
+            .anyMatch(connection -> connection.source().nodeId().equals(input.instanceId())
+                && connection.source().pinId().equals(inputPin));
+        boolean outputConnected = document.connections().stream()
+            .anyMatch(connection -> connection.target().nodeId().equals(output.instanceId())
+                && connection.target().pinId().equals(outputPin));
+        if (inputConnected || outputConnected) {
+            return true;
+        }
+        session.addConnection(new GraphConnection(ConnectionId.deterministic(functionId + "\0boundary-flow"),
+            new GraphEndpoint(input.instanceId(), inputPin), new GraphEndpoint(output.instanceId(), outputPin)));
+        return true;
+    }
+
+    static FunctionParameterContract coreParameter(String name, FlowTypeRef type, String widget,
+                                                   String optionsSource, String defaultValue) {
+        return coreParameter(FunctionParameterId.interactive(), name, type, widget, optionsSource, defaultValue);
+    }
+
+    private static List<FunctionParameterContract> coreParameters(String functionId, String direction,
+                                                                   List<FlowGraph.FunctionParameter> parameters) {
+        if (parameters == null || parameters.isEmpty()) {
+            return List.of();
+        }
+        List<FunctionParameterContract> result = new ArrayList<>(parameters.size());
+        for (FlowGraph.FunctionParameter parameter : parameters) {
+            if (parameter == null || parameter.getName() == null || parameter.getName().isBlank()) {
+                continue;
+            }
+            FunctionParameterId id = FunctionParameterId.deterministic(functionId + '\0' + direction + '\0'
+                + parameter.getName());
+            result.add(coreParameter(id, parameter.getName(), parameter.getTypeRef(), parameter.getWidget(),
+                parameter.getOptionsSource(), parameter.getDefaultValue()));
+        }
+        return List.copyOf(result);
+    }
+
+    private static FunctionParameterContract coreParameter(FunctionParameterId id, String name, FlowTypeRef type,
+                                                            String widget, String optionsSource, String defaultValue) {
+        FlowTypeRef exactType = type != null && type.isResolved() ? type : FlowTypeRef.simple("any");
+        TypeExpr expression = CoreGraphUiProjection.descriptorType(exactType);
+        Map<String, Object> unknown = new HashMap<>();
+        unknown.put("name", name);
+        if (widget != null && !widget.isBlank()) {
+            unknown.put("widget", widget);
+        }
+        if (optionsSource != null && !optionsSource.isBlank()) {
+            unknown.put("optionsSource", optionsSource);
+        }
+        TypedValue value = coreDefault(expression, exactType, defaultValue);
+        return new FunctionParameterContract(id, expression, value == null, value, unknown);
+    }
+
+    private static TypedValue coreDefault(TypeExpr type, FlowTypeRef typeRef, String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        String typeId = typeRef.getTypeId().toLowerCase(java.util.Locale.ROOT);
+        Object material = switch (typeId) {
+            case "string", "text" -> value;
+            case "boolean", "bool" -> {
+                if (!"true".equalsIgnoreCase(value) && !"false".equalsIgnoreCase(value)) {
+                    throw new IllegalArgumentException("Boolean defaults must be true or false");
+                }
+                yield Boolean.parseBoolean(value);
+            }
+            case "integer" -> new BigInteger(value);
+            case "number", "float", "double" -> new BigDecimal(value);
+            default -> throw new IllegalArgumentException("Defaults are unavailable for " + typeRef);
+        };
+        return TypedValue.value(type, material);
+    }
+
+    static FlowNodeWidget.FunctionBoundaryCatalog boundaryCatalog(String serverId) {
+        return FlowNodeWidget.boundaryCatalogForServer(serverId);
+    }
+
+    static FlowGraph normalizeFunction(String serverId, FlowGraph function, FunctionShape shape,
+                                       FlowNodeWidget.FunctionBoundaryCatalog boundaryCatalog) {
         if (function == null) {
             return null;
         }
-        boolean changed = false;
-        if (!function.isFunction()) {
-            function.setFunction(true);
-            changed = true;
+        FlowNodeWidget.FunctionBoundaryCatalog catalog = boundaryCatalog != null
+            ? boundaryCatalog : FlowNodeWidget.FunctionBoundaryCatalog.unavailable();
+        if (!catalog.isTypedProjectionAvailable()
+            || catalog.hasAmbiguousNode(function, FlowNodeWidget.FunctionBoundaryRole.INPUTS)
+            || catalog.hasAmbiguousNode(function, FlowNodeWidget.FunctionBoundaryRole.OUTPUTS)) {
+            return function;
         }
-        if (function.getNodes() == null) {
-            function.setNodes(new HashMap<>());
-            changed = true;
+        Map<String, FlowNode> existingNodes = function.getNodes();
+        List<FlowConnection> existingConnections = function.getConnections();
+        String startId = catalog.nodeId(function, FlowNodeWidget.FunctionBoundaryRole.INPUTS);
+        String endId = catalog.nodeId(function, FlowNodeWidget.FunctionBoundaryRole.OUTPUTS);
+        if (startId != null && startId.equals(endId)) {
+            return function;
         }
-        if (function.getConnections() == null) {
-            function.setConnections(new ArrayList<>());
-            changed = true;
+        List<BoundaryConnectionMigration> migrations = migrateBoundaryConnections(function, catalog, startId, endId);
+        if (migrations == null) {
+            return function;
         }
-        if (function.getLocalVariables() == null) {
-            function.setLocalVariables(new ArrayList<>());
-            changed = true;
-        }
-        if (function.getFunctionInputs() == null) {
-            function.setFunctionInputs(new ArrayList<>());
-            changed = true;
-        }
-        if (function.getFunctionOutputs() == null) {
-            function.setFunctionOutputs(new ArrayList<>());
-            changed = true;
-        }
-        String startId = findNode(function, "function_start", "function.start", "function.function_start");
-        String endId = findNode(function, "function_end", "function.end", "function.function_end");
+        Map<String, FlowNode> nodes = existingNodes != null ? existingNodes : new HashMap<>();
+        List<FlowConnection> connections = existingConnections != null ? existingConnections : new ArrayList<>();
+        boolean changed = !function.isFunction() || existingNodes == null || existingConnections == null
+            || function.getLocalVariables() == null || function.getFunctionInputs() == null || function.getFunctionOutputs() == null;
         if (startId == null) {
-            startId = UUID.randomUUID().toString();
-            function.getNodes().put(startId, new FlowNode("function_start", 120, 120, new HashMap<>()));
+            startId = uniqueNodeId(nodes);
+            nodes.put(startId, new FlowNode(catalog.nodeReference(FlowNodeWidget.FunctionBoundaryRole.INPUTS), 120, 120, new HashMap<>()));
             changed = true;
         }
         if (endId == null) {
-            endId = UUID.randomUUID().toString();
-            function.getNodes().put(endId, new FlowNode("function_end", 380, 120, new HashMap<>()));
+            endId = uniqueNodeId(nodes);
+            nodes.put(endId, new FlowNode(catalog.nodeReference(FlowNodeWidget.FunctionBoundaryRole.OUTPUTS), 380, 120, new HashMap<>()));
             changed = true;
         }
-        if (function.getConnections().isEmpty()) {
-            function.getConnections().add(new FlowConnection(startId, "flow", endId, "flow"));
+        if (!migrations.isEmpty()) {
+            for (BoundaryConnectionMigration migration : migrations) {
+                migration.apply();
+            }
             changed = true;
         }
+        FlowNodeWidget.FunctionBoundaryIntent inputs = catalog.intent(FlowNodeWidget.FunctionBoundaryRole.INPUTS);
+        FlowNodeWidget.FunctionBoundaryIntent outputs = catalog.intent(FlowNodeWidget.FunctionBoundaryRole.OUTPUTS);
+        if (!hasBoundaryPath(nodes, connections, startId, endId)) {
+            connections.add(new FlowConnection(startId, inputs.flowPin(), endId, outputs.flowPin()));
+            changed = true;
+        }
+        if (!function.isFunction()) {
+            function.setFunction(true);
+        }
+        if (existingNodes == null) {
+            function.setNodes(nodes);
+        }
+        if (existingConnections == null) {
+            function.setConnections(connections);
+        }
+        if (function.getLocalVariables() == null) {
+            function.setLocalVariables(new ArrayList<>());
+        }
+        if (function.getFunctionInputs() == null) {
+            function.setFunctionInputs(new ArrayList<>());
+        }
+        if (function.getFunctionOutputs() == null) {
+            function.setFunctionOutputs(new ArrayList<>());
+        }
+        migrateBoundaryNodeType(nodes, startId, catalog.intent(FlowNodeWidget.FunctionBoundaryRole.INPUTS));
+        migrateBoundaryNodeType(nodes, endId, catalog.intent(FlowNodeWidget.FunctionBoundaryRole.OUTPUTS));
         if (shape != null) {
             changed |= applyParameters(function.getFunctionInputs(), shape.inputs());
             changed |= applyParameters(function.getFunctionOutputs(), shape.outputs());
         }
         return function;
+    }
+
+    private static List<BoundaryConnectionMigration> migrateBoundaryConnections(FlowGraph function,
+                                                                                  FlowNodeWidget.FunctionBoundaryCatalog catalog,
+                                                                                  String startId, String endId) {
+        List<FlowConnection> connections = function.getConnections();
+        if (connections == null || connections.isEmpty() || startId == null && endId == null) {
+            return List.of();
+        }
+        List<BoundaryConnectionMigration> migrations = new ArrayList<>();
+        for (FlowConnection connection : connections) {
+            if (connection == null) {
+                return null;
+            }
+            if (startId != null && startId.equals(connection.getSourceNodeId())) {
+                String normalized = catalog.normalizeConnectionPin(function, FlowNodeWidget.FunctionBoundaryRole.INPUTS, connection.getSourcePin());
+                if (normalized == null) {
+                    return null;
+                }
+                if (!normalized.equals(connection.getSourcePin())) {
+                    migrations.add(new BoundaryConnectionMigration(connection, normalized, true));
+                }
+            }
+            if (endId != null && endId.equals(connection.getTargetNodeId())) {
+                String normalized = catalog.normalizeConnectionPin(function, FlowNodeWidget.FunctionBoundaryRole.OUTPUTS, connection.getTargetPin());
+                if (normalized == null) {
+                    return null;
+                }
+                if (!normalized.equals(connection.getTargetPin())) {
+                    migrations.add(new BoundaryConnectionMigration(connection, normalized, false));
+                }
+            }
+            if (endId != null && endId.equals(connection.getSourceNodeId()) || startId != null && startId.equals(connection.getTargetNodeId())) {
+                return null;
+            }
+        }
+        return migrations;
+    }
+
+    private static boolean hasBoundaryPath(Map<String, FlowNode> nodes, List<FlowConnection> connections,
+                                           String startId, String endId) {
+        if (nodes == null || connections == null || startId == null || endId == null
+            || nodes.get(startId) == null || nodes.get(endId) == null) {
+            return false;
+        }
+        Set<String> reachable = new HashSet<>();
+        List<String> pending = new ArrayList<>();
+        reachable.add(startId);
+        pending.add(startId);
+        for (int index = 0; index < pending.size(); index++) {
+            String currentId = pending.get(index);
+            if (endId.equals(currentId)) {
+                return true;
+            }
+            for (FlowConnection connection : connections) {
+                if (!isUsablePathConnection(nodes, connection) || !currentId.equals(connection.getSourceNodeId())) {
+                    continue;
+                }
+                String targetId = connection.getTargetNodeId();
+                if (reachable.add(targetId)) {
+                    pending.add(targetId);
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean isUsablePathConnection(Map<String, FlowNode> nodes, FlowConnection connection) {
+        if (connection == null || connection.getSourceNodeId() == null || connection.getSourceNodeId().isBlank()
+            || connection.getSourcePin() == null || connection.getSourcePin().isBlank()
+            || connection.getTargetNodeId() == null || connection.getTargetNodeId().isBlank()
+            || connection.getTargetPin() == null || connection.getTargetPin().isBlank()) {
+            return false;
+        }
+        return nodes.get(connection.getSourceNodeId()) != null && nodes.get(connection.getTargetNodeId()) != null;
+    }
+
+    private static void migrateBoundaryNodeType(Map<String, FlowNode> nodes, String nodeId,
+                                                FlowNodeWidget.FunctionBoundaryIntent intent) {
+        if (nodes == null || nodeId == null || intent == null || intent.nodeReference() == null) {
+            return;
+        }
+        FlowNode node = nodes.get(nodeId);
+        if (node != null && !intent.nodeReference().equals(node.getType())) {
+            node.setType(intent.nodeReference());
+        }
+    }
+
+    private static String uniqueNodeId(Map<String, FlowNode> nodes) {
+        String id;
+        do {
+            id = UUID.randomUUID().toString();
+        } while (nodes.containsKey(id));
+        return id;
+    }
+
+    private record BoundaryConnectionMigration(FlowConnection connection, String pin, boolean source) {
+        private void apply() {
+            if (source) {
+                connection.setSourcePin(pin);
+            } else {
+                connection.setTargetPin(pin);
+            }
+        }
+    }
+
+    private record SelectedFunctionKey(String serverId, String functionId) {
+    }
+
+    private record SelectedFunction(FlowGraph function, long loadedAtNanos) {
     }
 
     static FunctionShape playerActionShape() {
@@ -174,7 +465,7 @@ final class CompactBindingSupport {
     static FunctionShape playerPredicateShape() {
         return new FunctionShape(
             List.of(new FlowGraph.FunctionParameter("player", FlowDataType.PLAYER)),
-            List.of(new FlowGraph.FunctionParameter("result", FlowDataType.BOOLEAN, "boolean", "", "false"))
+            List.of(new FlowGraph.FunctionParameter("result", FlowDataType.BOOLEAN, "toggle", "", "false"))
         );
     }
 
@@ -186,7 +477,7 @@ final class CompactBindingSupport {
                 new FlowGraph.FunctionParameter("source", FlowDataType.ITEM),
                 new FlowGraph.FunctionParameter("recipe", FlowDataType.STRING)
             ),
-            List.of(new FlowGraph.FunctionParameter("result", FlowDataType.BOOLEAN, "boolean", "", "false"))
+            List.of(new FlowGraph.FunctionParameter("result", FlowDataType.BOOLEAN, "toggle", "", "false"))
         );
     }
 
@@ -262,7 +553,7 @@ final class CompactBindingSupport {
                 }
                 Object aliases = item.getMetadata().get("aliases");
                 String searchTerms = String.join(" ", item.getValue(), item.getLabel(), item.getDescription(), item.getGroup(),
-                    aliases != null ? FlowJson.text(aliases) : "");
+                    aliases != null ? aliases.toString() : "");
                 choices.add(new CompactBindingWidget.BindingChoice(item.getValue(), item.getLabel(), item.getDescription(), item.getIcon(),
                     item.getGroup(), searchTerms));
             }
@@ -357,15 +648,21 @@ final class CompactBindingSupport {
     }
 
     private static boolean applyParameters(List<FlowGraph.FunctionParameter> target, List<FlowGraph.FunctionParameter> required) {
+        if (target == null || required == null) {
+            return false;
+        }
         boolean changed = false;
         for (FlowGraph.FunctionParameter parameter : required) {
             if (parameter == null || parameter.getName() == null || parameter.getName().isBlank()) {
                 continue;
             }
-            FlowGraph.FunctionParameter existing = target.stream()
+            List<FlowGraph.FunctionParameter> matches = target.stream()
                 .filter(value -> value != null && parameter.getName().equals(value.getName()))
-                .findFirst()
-                .orElse(null);
+                .toList();
+            if (matches.size() > 1) {
+                continue;
+            }
+            FlowGraph.FunctionParameter existing = matches.isEmpty() ? null : matches.getFirst();
             if (existing == null) {
                 target.add(new FlowGraph.FunctionParameter(parameter.getName(), parameter.getType(), parameter.getWidget(), parameter.getOptionsSource(), parameter.getDefaultValue()));
                 changed = true;
@@ -388,34 +685,7 @@ final class CompactBindingSupport {
                 changed = true;
             }
         }
-        target.sort(Comparator.comparing(parameter -> parameter != null && parameter.getName() != null ? parameter.getName() : "", String.CASE_INSENSITIVE_ORDER));
         return changed;
-    }
-
-    private static String findNode(FlowGraph graph, String... types) {
-        for (Map.Entry<String, FlowNode> entry : graph.getNodes().entrySet()) {
-            FlowNode node = entry.getValue();
-            if (node == null || node.getType() == null) {
-                continue;
-            }
-            for (String type : types) {
-                if (type.equals(node.getType())) {
-                    return entry.getKey();
-                }
-            }
-        }
-        return null;
-    }
-
-    private static Set<String> functionResourceIds(FlowManager manager, String serverId) {
-        Set<String> ids = new HashSet<>();
-        ReSyncProjectMetadata metadata = manager.getProjectMetadata(serverId);
-        for (ReSyncProjectMetadata.ResourceEntry entry : metadata.getResources()) {
-            if (entry != null && ReSyncResourceDragPayload.FUNCTION.equals(entry.getType()) && entry.getId() != null && !entry.getId().isBlank()) {
-                ids.add(entry.getId());
-            }
-        }
-        return ids;
     }
 
     record FunctionShape(List<FlowGraph.FunctionParameter> inputs, List<FlowGraph.FunctionParameter> outputs) {

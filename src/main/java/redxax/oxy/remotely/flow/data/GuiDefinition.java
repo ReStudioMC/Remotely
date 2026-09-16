@@ -10,6 +10,11 @@ public class GuiDefinition {
     private int rows;
     private boolean extendToPlayerInventory;
     private List<GuiElement> elements;
+    private String clickSound;
+    private String openFlowId;
+    private String closeFlowId;
+    private int updateIntervalTicks;
+    private String updateFlowId;
 
     public GuiDefinition() {
         this.elements = new ArrayList<>();
@@ -38,4 +43,40 @@ public class GuiDefinition {
 
     public List<GuiElement> getElements() { return elements; }
     public void setElements(List<GuiElement> elements) { this.elements = elements; }
+
+    public String getClickSound() { return clickSound; }
+    public void setClickSound(String clickSound) { this.clickSound = clickSound; }
+
+    public String getOpenFlowId() { return openFlowId; }
+    public void setOpenFlowId(String openFlowId) { this.openFlowId = openFlowId; }
+
+    public String getCloseFlowId() { return closeFlowId; }
+    public void setCloseFlowId(String closeFlowId) { this.closeFlowId = closeFlowId; }
+
+    public int getUpdateIntervalTicks() { return updateIntervalTicks; }
+    public void setUpdateIntervalTicks(int updateIntervalTicks) { this.updateIntervalTicks = updateIntervalTicks; }
+
+    public String getUpdateFlowId() { return updateFlowId; }
+    public void setUpdateFlowId(String updateFlowId) { this.updateFlowId = updateFlowId; }
+
+    public GuiDefinition copy() {
+        GuiDefinition copy = new GuiDefinition(id, title, rows);
+        copy.setEnabled(enabled);
+        copy.setExtendToPlayerInventory(extendToPlayerInventory);
+        copy.setClickSound(clickSound);
+        copy.setOpenFlowId(openFlowId);
+        copy.setCloseFlowId(closeFlowId);
+        copy.setUpdateIntervalTicks(updateIntervalTicks);
+        copy.setUpdateFlowId(updateFlowId);
+        List<GuiElement> copiedElements = new ArrayList<>();
+        if (elements != null) {
+            for (GuiElement element : elements) {
+                if (element != null) {
+                    copiedElements.add(element.copy());
+                }
+            }
+        }
+        copy.setElements(copiedElements);
+        return copy;
+    }
 }

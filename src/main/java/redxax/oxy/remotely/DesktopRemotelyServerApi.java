@@ -25,6 +25,10 @@ public final class DesktopRemotelyServerApi implements RemotelyServerApi {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
     }
 
+    public ReStudioApiClient studioApi() {
+        return delegate;
+    }
+
     @Override
     public Async<List<ServerModels.ClientServerView>> getServers() {
         return JvmAsyncBridge.fromFuture(delegate.getServers());

@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 import redxax.oxy.remotely.flow.data.FlowDataType;
 import redxax.oxy.remotely.flow.data.FlowTypeRef;
 import restudio.resync.flow.contract.FlowTypeMetadata;
+import restudio.resync.protocol.ReSyncProtocolContract;
 import redxax.oxy.remotely.flow.sync.FlowConversionRule;
 import redxax.oxy.remotely.flow.sync.FlowResourceMetadata;
 import redxax.oxy.remotely.flow.sync.NodePluginPayload;
@@ -164,7 +165,7 @@ class NodeRegistryTypeIsolationTest {
         registry.applySnapshot("server-a", restored);
 
         assertTrue(registry.getUnresolvedPluginIds("server-a").isEmpty());
-        assertNotNull(registry.getAllDefinitions("server-a").get("request:quest_info"));
+        assertNotNull(registry.getAllDefinitions("server-a").get("builtin:request:quest_info"));
     }
 
     @Test
@@ -206,8 +207,20 @@ class NodeRegistryTypeIsolationTest {
     }
 
     private void compatible(NodeRegistrySnapshot snapshot) {
-        snapshot.setContractVersion(NodeRegistrySnapshot.CURRENT_CONTRACT_VERSION);
-        snapshot.setMinimumClientContractVersion(NodeRegistrySnapshot.MINIMUM_SUPPORTED_CONTRACT_VERSION);
+        snapshot.setContractVersion(ReSyncProtocolContract.FLOW_CONTRACT.version());
+        snapshot.setMinimumClientContractVersion(ReSyncProtocolContract.FLOW_CONTRACT.minimumClientVersion());
+        snapshot.setCapabilities(ReSyncProtocolContract.FLOW_CONTRACT.requiredCapabilities());
+    }
+
+    @Test
+    void rejectsVersionTwoSnapshotMissingRequiredFlowCapabilityBeforeActivation() {
+        NodeRegistry registry = new NodeRegistry();
+        NodeRegistrySnapshot snapshot = new NodeRegistrySnapshot();
+        snapshot.setContractVersion(ReSyncProtocolContract.FLOW_CONTRACT.version());
+        snapshot.setMinimumClientContractVersion(ReSyncProtocolContract.FLOW_CONTRACT.minimumClientVersion());
+        snapshot.setCapabilities(List.of("nodes"));
+
+        assertNull(registry.stageSnapshot("server-a", snapshot, null));
     }
 
     private FlowResourceMetadata resource(String type, boolean available, List<String> operations) {

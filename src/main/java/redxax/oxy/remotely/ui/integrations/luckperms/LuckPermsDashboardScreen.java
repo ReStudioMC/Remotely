@@ -60,6 +60,7 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Objects;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -167,6 +168,11 @@ public final class LuckPermsDashboardScreen extends ReScreen {
         this.client = client;
         this.serverIcons = serverIcons == null ? new LuckPermsServerIcons() : serverIcons;
         networkClient = client.network();
+    }
+
+    public static Async<LuckPermsDashboardScreen> prepare(Screen parent, ReSyncLuckPermsClient client) {
+        Objects.requireNonNull(client, "client");
+        return Async.completed(new LuckPermsDashboardScreen(parent, client));
     }
 
     @Override

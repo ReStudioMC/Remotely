@@ -25,7 +25,7 @@ class CustomContentDesignerContractTest {
         String editor = Files.readString(Path.of("src/main/java/redxax/oxy/remotely/flow/ui/GraphEditorScreen.java"));
 
         assertFalse(editor.contains("isAllowedInCurrentEditor"));
-        assertTrue(editor.contains("if (def.isHidden())"));
-        assertTrue(editor.contains("definitions.removeIf(NodeDefinition::isHidden)"));
+        assertTrue(editor.contains(".filter(definition -> definition != null && !definition.isHidden())"));
+        assertFalse(editor.contains("definitions.removeIf(NodeDefinition::isHidden)"));
     }
 }

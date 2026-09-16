@@ -13,6 +13,10 @@ import java.util.Map;
 import java.util.UUID;
 
 public interface RemotelyServerApi {
+    default Object studioApi() {
+        return null;
+    }
+
     Async<List<ServerModels.ClientServerView>> getServers();
 
     default Async<ServerCapabilities> getServerCapabilities(String serverId) {

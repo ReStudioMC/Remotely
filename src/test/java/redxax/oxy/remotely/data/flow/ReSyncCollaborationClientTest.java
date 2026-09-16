@@ -15,9 +15,13 @@ class ReSyncCollaborationClientTest {
     void distinguishesCursorMotionFromResourceActivityChanges() {
         ReSyncCollaborationClient client = new ReSyncCollaborationClient(new Gson(), "remotely-device");
 
-        assertTrue(client.applySnapshot(snapshot("session", "remote-device", "flow", "welcome", 0.1, 0.2)));
-        assertFalse(client.applySnapshot(snapshot("session", "remote-device", "flow", "welcome", 0.8, 0.7)));
-        assertTrue(client.applySnapshot(snapshot("session", "remote-device", "gui", "menu", 0.8, 0.7)));
+        assertTrue(client.applySnapshot(snapshot("session", "remote-device", "flow", "welcome", 0.1, 0.2, 1L)));
+        long initialRevision = client.activityRevision();
+        assertFalse(client.applySnapshot(snapshot("session", "remote-device", "flow", "welcome", 0.8, 0.7, 2L)));
+        assertEquals(initialRevision, client.activityRevision());
+        assertEquals(2L, client.snapshot().getFirst().updatedAt());
+        assertTrue(client.applySnapshot(snapshot("session", "remote-device", "gui", "menu", 0.8, 0.7, 3L)));
+        assertTrue(client.activityRevision() > initialRevision);
     }
 
     @Test
@@ -111,9 +115,18 @@ class ReSyncCollaborationClientTest {
         return snapshot("", sessionId, clientId, type, resourceId, x, y);
     }
 
+    private String snapshot(String sessionId, String clientId, String type, String resourceId, double x, double y, long updatedAt) {
+        return snapshot("", sessionId, clientId, type, resourceId, x, y, updatedAt);
+    }
+
     private String snapshot(String selfSessionId, String sessionId, String clientId, String type, String resourceId, double x, double y) {
+        return snapshot(selfSessionId, sessionId, clientId, type, resourceId, x, y, 1L);
+    }
+
+    private String snapshot(String selfSessionId, String sessionId, String clientId, String type, String resourceId,
+                            double x, double y, long updatedAt) {
         return """
-            {"selfSessionId":"%s","collaborators":[{"sessionId":"%s","clientId":"%s","identity":{"subjectId":"user","displayName":"Alex","avatar":"","source":"restudio"},"resourceType":"%s","resourceId":"%s","viewId":"Studio","x":%s,"y":%s,"active":true,"color":-1,"updatedAt":1}]}
-            """.formatted(selfSessionId, sessionId, clientId, type, resourceId, x, y);
+            {"selfSessionId":"%s","collaborators":[{"sessionId":"%s","clientId":"%s","identity":{"subjectId":"user","displayName":"Alex","avatar":"","source":"restudio"},"resourceType":"%s","resourceId":"%s","viewId":"Studio","x":%s,"y":%s,"active":true,"color":-1,"updatedAt":%s}]}
+            """.formatted(selfSessionId, sessionId, clientId, type, resourceId, x, y, updatedAt);
     }
 }

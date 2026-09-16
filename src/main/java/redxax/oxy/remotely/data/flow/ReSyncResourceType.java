@@ -1,8 +1,8 @@
 package redxax.oxy.remotely.data.flow;
 
+import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import redxax.oxy.remotely.flow.data.FlowGraph;
-import redxax.oxy.remotely.flow.data.FlowJson;
 import redxax.oxy.remotely.flow.data.FlowSerializer;
 import redxax.oxy.remotely.flow.data.CustomContentDefinition;
 import redxax.oxy.remotely.flow.data.GuiDefinition;
@@ -11,6 +11,7 @@ import redxax.oxy.remotely.flow.data.ScoreboardDefinition;
 import redxax.oxy.remotely.flow.data.TabDefinition;
 import restudio.resync.protocol.ReSyncProtocolContract;
 
+import java.util.List;
 import java.util.Locale;
 import java.util.function.BiConsumer;
 
@@ -92,10 +93,9 @@ public enum ReSyncResourceType {
     ),
 
     PROJECT_METADATA(
-            item -> FlowJson.write(FlowJson.projectMetadata((ReSyncProjectMetadata) item)),
-            json -> FlowJson.projectMetadata(FlowJson.parse(json).getAsJsonObject()),
+            item -> new Gson().toJson(item instanceof ProjectMetadataSnapshot snapshot ? snapshot.materialize() : item), json -> new Gson().fromJson(json, ReSyncProjectMetadata.class),
             (item, newId) -> ((ReSyncProjectMetadata) item).setServerId(newId),
-            item -> ((ReSyncProjectMetadata) item).getServerId() == null || ((ReSyncProjectMetadata) item).getServerId().isBlank() ? "project" : ((ReSyncProjectMetadata) item).getServerId(),
+            item -> item instanceof ProjectMetadataSnapshot snapshot ? snapshot.serverId() : ((ReSyncProjectMetadata) item).getServerId() == null || ((ReSyncProjectMetadata) item).getServerId().isBlank() ? "project" : ((ReSyncProjectMetadata) item).getServerId(),
             item -> "Project"
     ),
 
@@ -237,26 +237,43 @@ public enum ReSyncResourceType {
     public String extractId(Object item) { return idExtractor.extract(item); }
     public String extractName(Object item) { return nameExtractor.extract(item); }
     public boolean isGraph() { return this == FLOW || this == FUNCTION || this == COMMAND; }
+    public boolean acceptsCorePayloadKind(String payloadKind) {
+        return switch (payloadKind) {
+            case "graph-document" -> this == FLOW || this == COMMAND;
+            case "function-source" -> this == FUNCTION;
+            default -> false;
+        };
+    }
 
     public static ReSyncResourceType byDataResponse(byte packetId) {
         for (ReSyncResourceType rt : values()) {
-            if (rt.enabled && rt.dataResponseByte == packetId) return rt;
+            if (rt.enabled && !rt.isGraph() && rt.dataResponseByte == packetId) return rt;
         }
         return null;
     }
 
     public static ReSyncResourceType byListResponse(byte packetId) {
         for (ReSyncResourceType rt : values()) {
-            if (rt.enabled && rt.listResponseByte == packetId) return rt;
+            if (rt.enabled && !rt.isGraph() && rt.listResponseByte == packetId) return rt;
         }
         return null;
     }
 
     public static ReSyncResourceType bySaveAck(byte packetId) {
         for (ReSyncResourceType rt : values()) {
-            if (rt.enabled && rt.saveAckByte == packetId) return rt;
+            if (rt.enabled && !rt.isGraph() && rt.saveAckByte == packetId) return rt;
         }
         return null;
+    }
+
+    public static boolean isLegacyGraphResponse(byte packetId) {
+        for (ReSyncResourceType type : List.of(FLOW, FUNCTION, COMMAND)) {
+            if (type.enabled && (type.dataResponseByte == packetId || type.listResponseByte == packetId
+                || type.saveAckByte == packetId)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public static ReSyncResourceType byTypeId(String typeId) {
@@ -290,11 +307,11 @@ public enum ReSyncResourceType {
     }
 
     private static String serializeJsonObject(Object item) {
-        return item instanceof JsonObject json ? FlowJson.write(json) : FlowJson.write(FlowJson.value(item));
+        return new Gson().toJson(item);
     }
 
     private static Object deserializeJsonObject(String json) {
-        return FlowJson.parse(json).getAsJsonObject();
+        return new Gson().fromJson(json, JsonObject.class);
     }
 
     private static void renameJsonObject(Object item, String newId) {

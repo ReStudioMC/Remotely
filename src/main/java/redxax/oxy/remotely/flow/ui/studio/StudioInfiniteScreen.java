@@ -7,9 +7,11 @@ import restudio.rescreen.platform.input.ReKey;
 import restudio.rescreen.platform.input.ReKeyEvent;
 import restudio.rescreen.platform.input.ReModifierState;
 import restudio.rescreen.ui.core.InfiniteScreen;
+import restudio.rescreen.ui.core.ScreenManager;
 import restudio.rescreen.ui.core.Widget;
 import restudio.rescreen.ui.rescreen.SidePanel;
 import restudio.rescreen.ui.widgets.ItemSelectorWidget;
+import restudio.rescreen.ui.widgets.PopupWidget;
 import restudio.rescreen.ui.widgets.TextInputWidget;
 
 import java.util.ArrayList;
@@ -73,6 +75,18 @@ public class StudioInfiniteScreen extends InfiniteScreen {
 
     protected boolean isStudioKeyboardInputFocused() {
         Widget focused = getFocusedDescendant();
+        if (keyboardInput(focused)) {
+            return true;
+        }
+        Widget overlayFocused = ScreenManager.getInstance().getPopupOverlay().getFocusedDescendant();
+        if (keyboardInput(overlayFocused)) {
+            return true;
+        }
+        PopupWidget popup = ScreenManager.getInstance().getPopupOverlay().getActivePopup();
+        return popup != null && popup.hasFocusedWidget() && keyboardInput(popup.getFocusedDescendant());
+    }
+
+    private static boolean keyboardInput(Widget focused) {
         return focused instanceof TextInputWidget
             || focused instanceof TextAreaWidget
             || focused instanceof CodeEditorWidget
@@ -136,7 +150,6 @@ public class StudioInfiniteScreen extends InfiniteScreen {
         panel.update();
         panel.container().render(context, mouseX, mouseY, delta);
         panel.renderHeader(context, mouseX, mouseY);
-        panel.renderSeam(context, mouseX, mouseY);
     }
 
     protected void renderStudioPanel(StudioPanel panel, IDrawContext context, int mouseX, int mouseY, float delta) {

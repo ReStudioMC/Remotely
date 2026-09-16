@@ -1,11 +1,13 @@
 package redxax.oxy.remotely.flow.ui;
 
 import redxax.oxy.remotely.util.BrowserSafeState;
-
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import redxax.oxy.remotely.host.ApplicationHostRegistry;
+import com.google.gson.JsonParser;
+import redxax.oxy.remotely.RemotelyClient;
 import redxax.oxy.remotely.data.flow.DesignerSaveNotifications;
 import redxax.oxy.remotely.data.flow.FlowManager;
 import redxax.oxy.remotely.data.flow.OptionCatalogCache;
@@ -14,7 +16,6 @@ import redxax.oxy.remotely.data.flow.OptionCatalogLoader;
 import redxax.oxy.remotely.data.flow.ReSyncResourceType;
 import redxax.oxy.remotely.flow.data.FlowDataType;
 import redxax.oxy.remotely.flow.data.FlowGraph;
-import redxax.oxy.remotely.flow.data.FlowJson;
 import redxax.oxy.remotely.flow.data.FlowWorkspaceDocument;
 import redxax.oxy.remotely.flow.data.ReSyncResourceDragPayload;
 import redxax.oxy.remotely.flow.ui.studio.ReSyncCollaborativeView;
@@ -22,6 +23,7 @@ import redxax.oxy.remotely.flow.ui.studio.ReSyncStudioPanelState;
 import redxax.oxy.remotely.flow.ui.studio.ReSyncResourceCreator;
 import redxax.oxy.remotely.flow.ui.studio.StudioPanel;
 import redxax.oxy.remotely.flow.ui.studio.StudioResourceRenameAware;
+import redxax.oxy.remotely.flow.ui.studio.StudioSaveProvider;
 import redxax.oxy.remotely.flow.ui.studio.StudioScreen;
 import restudio.rescreen.game.MinecraftAssetReference;
 import restudio.rescreen.game.MinecraftGameAssets;
@@ -48,7 +50,7 @@ import restudio.rescreen.ui.widgets.TextInputWidget;
 import restudio.rescreen.ui.widgets.TitledRowWidget;
 import restudio.rescreen.ui.widgets.ToggleWidget;
 import restudio.rescreen.util.Identifier;
-import restudio.rescreen.util.JsonTreeParser;
+import restudio.rescreen.util.Notification;
 import restudio.resync.flow.workspace.WorkspacePatch;
 import java.util.List;
 import java.util.Map;
@@ -63,7 +65,7 @@ import java.util.function.Supplier;
 
 import static restudio.rescreen.config.Config.desktopMode;
 
-public class AdvancementDesignerScreen extends StudioScreen implements DesktopWindowBehaviorProvider, StudioCloseHandledScreen, StudioResourceRenameAware, ReSyncCollaborativeView {
+public class AdvancementDesignerScreen extends StudioScreen implements DesktopWindowBehaviorProvider, StudioCloseHandledScreen, StudioResourceRenameAware, ReSyncCollaborativeView, StudioSaveProvider {
     private static final Set<AdvancementDesignerScreen> OPEN_SCREENS = BrowserSafeState.set();
     private static final String BLOCK_CATALOG = "server:minecraft:block";
     private static final String BIOME_CATALOG = "server:minecraft:biome";
@@ -101,16 +103,24 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
     private static final int DRAG_AUTO_PAN_EDGE = 18;
     private static final double DRAG_AUTO_PAN_SPEED = 4.0;
     private static final int[] DESCRIPTION_SPLIT_OFFSETS = {0, 10, -10, 25, -25};
+    private final Gson gson = new GsonBuilder().setPrettyPrinting().create();
     private JsonObject tree;
+    private final VersionedEditorDraft<JsonObject> treeDraft;
     private final String serverId;
     private final Object parent;
     private final boolean forceSuperScreen;
     private final boolean animateTopHeader;
     private final ReSyncStudioPanelState panelState = new ReSyncStudioPanelState();
-    private final History<String> history = history(() -> JsonTreeParser.write(tree), this::restore);
+    private final History<String> history = history(() -> gson.toJson(tree), this::restore);
+    private final HistoryRebaseCoordinator<String> historyRebase;
+    private volatile long collaborationLifecycle = 1L;
 
     @Override
     public void resourceRenamed(String type, String oldId, String newId) {
+        if (treeDraft.defer(() -> resourceRenamed(type, oldId, newId))) {
+            return;
+        }
+        treeDraft.markMutation();
         if (oldId.equals(ReSyncResourceType.ADVANCEMENT_TREE.extractId(tree))) {
             ReSyncResourceType.ADVANCEMENT_TREE.applyRename(tree, newId);
         }
@@ -197,8 +207,74 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
     }
 
     @Override
+    public long collaborationLifecycle() {
+        return collaborationLifecycle;
+    }
+
+    @Override
+    public long collaborationEditVersion() {
+        return treeDraft.editVersion();
+    }
+
+    @Override
+    public boolean requestCollaborationDocument(Consumer<CollaborationDocumentSnapshot> completion) {
+        if (completion == null) {
+            return false;
+        }
+        long lifecycle = collaborationLifecycle;
+        return treeDraft.requestProjection(ReSyncResourceType.ADVANCEMENT_TREE.typeId(),
+            ReSyncResourceType.ADVANCEMENT_TREE.extractId(tree), this::collaborationDocument,
+            projection -> completion.accept(collaborationSnapshot(lifecycle, projection)));
+    }
+
+    private CollaborationDocumentSnapshot collaborationSnapshot(long lifecycle,
+                                                                 VersionedEditorDraft.ProjectionSnapshot projection) {
+        RuntimeException failure = projection.failure();
+        JsonObject document = null;
+        if (failure == null) {
+            try {
+                document = gson.fromJson(projection.payload(), JsonObject.class);
+                if (document == null) {
+                    failure = new IllegalStateException("Collaboration Snapshot Is Empty");
+                }
+            } catch (RuntimeException | Error exception) {
+                failure = exception instanceof RuntimeException runtime ? runtime : new IllegalStateException(exception);
+            }
+        }
+        if (failure == null && lifecycle != collaborationLifecycle) {
+            document = null;
+            failure = new IllegalStateException("Collaboration Snapshot Expired");
+        }
+        return new CollaborationDocumentSnapshot(this, lifecycle, projection.editVersion(), document, failure);
+    }
+
+    @Override
+    public boolean applyCollaborationDocument(JsonObject document, List<WorkspacePatch<JsonElement>> patches,
+                                              Consumer<CollaborationDocumentApplyResult> completion) {
+        if (completion == null) {
+            return false;
+        }
+        long lifecycle = collaborationLifecycle;
+        return treeDraft.runMutation(() -> {
+            if (document == null) {
+                throw new IllegalArgumentException("Collaboration Document Is Required");
+            }
+            if (tree == null) {
+                throw new IllegalStateException("Advancement Tree Is Unavailable");
+            }
+            applyCollaborationDocument(document, patches);
+        }, result ->
+            completion.accept(new CollaborationDocumentApplyResult(this, lifecycle, result.beforeEditVersion(),
+                result.afterEditVersion(), result.successful(), result.failure())));
+    }
+
+    @Override
     public void applyCollaborationDocument(JsonObject document, List<WorkspacePatch<JsonElement>> patches) {
-        restore(JsonTreeParser.write(document));
+        if (treeDraft.defer(() -> applyCollaborationDocument(document, patches))) {
+            return;
+        }
+        treeDraft.markMutation();
+        restore(gson.toJson(document));
     }
 
     @Override
@@ -206,28 +282,23 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
         if (patches == null || patches.isEmpty()) {
             return;
         }
-        history.rebase(snapshot -> {
-            JsonObject historic = JsonTreeParser.parse(snapshot).getAsJsonObject();
-            FlowWorkspaceDocument.apply(historic, patches);
-            return JsonTreeParser.write(historic);
+        historyRebase.request(patches, copiedPatches -> snapshot -> {
+            JsonObject historic = gson.fromJson(gson.toJson(snapshot), JsonObject.class);
+            if (historic == null) {
+                historic = new JsonObject();
+            }
+            FlowWorkspaceDocument.apply(historic, copiedPatches);
+            return gson.toJson(gson.fromJson(gson.toJson(historic), JsonObject.class));
         });
     }
 
     private record TooltipLayout(String id, JsonObject node, int nodeX, int nodeY, int boxX, int titleY, int boxWidth, int titleHeight, int descriptionY, int descriptionTextY, int descriptionHeight, boolean flippedLeft, List<String> titleLines, List<String> descriptionLines) {
-        @Override
-        public String toString() {
-            return "TooltipLayout[id=" + id + ", node=" + FlowJson.write(node) + ", nodeX=" + nodeX + ", nodeY=" + nodeY + "]";
-        }
     }
 
     private record DynamicPanelMount(AnimatedWidget anchor, AnimatedWidget widget) {
     }
 
     private record LayoutNode(String id, JsonObject node, String parentId, List<LayoutNode> children, int depth, int x, float y, int childIndex, LayoutNode parent, LayoutNode previousSibling) {
-        @Override
-        public String toString() {
-            return "LayoutNode[id=" + id + ", node=" + FlowJson.write(node) + ", parentId=" + parentId + ", depth=" + depth + "]";
-        }
     }
 
     private record AdvancementLayout(Map<String, LayoutNode> nodes, int minX, int minY, int maxX, int maxY) {
@@ -271,7 +342,7 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
     }
 
     public AdvancementDesignerScreen(JsonObject tree, String serverId, Object parent, boolean forceSuperScreen, boolean animateTopHeader) {
-        this.tree = tree;
+        this.tree = tree != null ? tree : new JsonObject();
         this.serverId = serverId;
         this.parent = parent;
         this.forceSuperScreen = forceSuperScreen;
@@ -279,6 +350,12 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
         autoResizeContainers = false;
         preserveStateOnDisplay = true;
         OPEN_SCREENS.add(this);
+        treeDraft = new VersionedEditorDraft<>(this.tree, JsonObject::toString,
+            payload -> JsonParser.parseString(payload).getAsJsonObject(), this::rebindTree, this::failSnapshot,
+            () -> new Notification("Editor Busy", "Try Again", Notification.Type.WARN));
+        historyRebase = new HistoryRebaseCoordinator<>(history,
+            () -> serverId + ":" + ReSyncResourceType.ADVANCEMENT_TREE.extractId(tree), () -> collaborationLifecycle,
+            () -> new Notification("Editor Busy", "Try Again", Notification.Type.WARN));
     }
 
     public String getDesktopAppId() {
@@ -354,7 +431,9 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
         closeCompleted = false;
         studioCloseNotified = false;
         header().reset();
-        header().addRight("close.png", this::requestClose, "Back");
+        if (shouldShowBackButton()) {
+            header().addRight("close.png", this::requestClose, "Back");
+        }
         header().addRight("save.png", this::save, "Save");
         header().addRight("delete.png", this::deleteSelected, "Delete Node");
         header().addRight("add.png", this::addNode, "Add Node");
@@ -365,6 +444,10 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
         preloadCatalogs();
         ensureInspectorPanel();
         applyInspectorSelection();
+    }
+
+    private boolean shouldShowBackButton() {
+        return !desktopMode || shouldForceSuperScreen();
     }
 
     private void onOptionCatalogRefreshed() {
@@ -429,6 +512,8 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
 
     @Override
     public void renderHandler(IDrawContext context, int mouseX, int mouseY, float delta) {
+        historyRebase.drain();
+        treeDraft.drain();
         super.renderHandler(context, mouseX, mouseY, delta);
         if (shouldRenderInspectorPanel()) {
             renderStudioPanel(inspectorPanel, context, mouseX, mouseY, delta);
@@ -548,7 +633,6 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
             int y = nodeY(layout, entry.getKey(), contentY, viewPanY);
             int frameX = x + FRAME_X;
             if (mouseX >= frameX && mouseX <= frameX + NODE_WIDTH && mouseY >= y && mouseY <= y + NODE_HEIGHT) {
-                snapshot();
                 selectNode(entry.getKey());
                 draggedNode = entry.getKey();
                 dragOffsetX = mouseX - x;
@@ -641,6 +725,9 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
 
     @Override
     public boolean keyPressed(ReKeyEvent event) {
+        if (handleStudioSaveShortcut(event)) {
+            return true;
+        }
         if (activeSearchSelector != null && activeSearchSelector.visible && activeSearchSelector.keyPressed(event.retarget(activeSearchSelector))) {
             return true;
         }
@@ -677,6 +764,11 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
     @Override
     public void setStudioCloseHandler(Runnable closeHandler) {
         this.studioCloseHandler = closeHandler;
+    }
+
+    @Override
+    public boolean isStudioCloseAnimationFinished() {
+        return closeCompleted;
     }
 
     private void requestClose() {
@@ -725,7 +817,10 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
             return;
         }
         closeCompleted = true;
+        collaborationLifecycle++;
         commitInspectorEdits(inspectorEditNodeId);
+        historyRebase.close();
+        treeDraft.close();
         OPEN_SCREENS.remove(this);
         closeActiveSearchSelector();
         super.close();
@@ -737,12 +832,22 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
             return;
         }
         if (parent != null) {
-            if (ApplicationHostRegistry.current() != null) {
-                ApplicationHostRegistry.current().openParentScreen(this, parent);
+            if (RemotelyClient.INSTANCE != null && RemotelyClient.INSTANCE.getHost() != null) {
+                RemotelyClient.INSTANCE.getHost().openParentScreen(this, parent);
             } else if (parent instanceof Screen screen) {
                 ScreenManager.getInstance().setScreen(screen);
             }
         }
+    }
+
+    @Override
+    public void removed() {
+        collaborationLifecycle++;
+        historyRebase.close();
+        treeDraft.close();
+        OPEN_SCREENS.remove(this);
+        closeActiveSearchSelector();
+        super.removed();
     }
 
     private void updateInspectorLayout() {
@@ -761,7 +866,6 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
     private void ensureInspectorPanel() {
         if (inspector == null) {
             inspectorPanel = rightStudioPanel("advancement_inspector")
-                .collapsible("Advancement Inspector")
                 .show();
             inspector = inspectorPanel.sidePanel();
             inspectorPanel.padding(panelState.padding());
@@ -1673,9 +1777,9 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
                 return;
             }
             updateQuestCompletionPredicateFunction(node, functionId);
-            openFlowGraph(functionId);
+            openGraphResource(functionId, ReSyncResourceType.FUNCTION);
         } else if ("Flow".equals(mode)) {
-            openFlowGraph(questCompletionValue(node, "flowId"));
+            openGraphResource(questCompletionValue(node, "flowId"), ReSyncResourceType.FLOW);
         }
     }
 
@@ -1692,7 +1796,7 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
                 return;
             }
             updateFirstCriterionPredicateFunction(node, functionId);
-            openFlowGraph(functionId);
+            openGraphResource(functionId, ReSyncResourceType.FUNCTION);
         }
     }
 
@@ -1709,9 +1813,9 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
                 return;
             }
             updateCompletionFunction(node, functionId);
-            openFlowGraph(functionId);
+            openGraphResource(functionId, ReSyncResourceType.FUNCTION);
         } else if ("Run Flow".equals(mode)) {
-            openFlowGraph(completionValue(node, "flowId"));
+            openGraphResource(completionValue(node, "flowId"), ReSyncResourceType.FLOW);
         }
     }
 
@@ -1729,7 +1833,7 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
                     normalizeBindingFunction(id, CompactBindingSupport.playerPredicateShape());
                     updateQuestCompletionPredicateFunction(current, id);
                     refreshDynamicSection();
-                    openFlowGraph(id);
+                    openGraphResource(id, ReSyncResourceType.FUNCTION);
                 }
             });
         } else if ("Flow".equals(mode)) {
@@ -1739,7 +1843,7 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
                     snapshot();
                     updateQuestCompletionString(current, "flowId", id);
                     refreshDynamicSection();
-                    openFlowGraph(id);
+                    openGraphResource(id, ReSyncResourceType.FLOW);
                 }
             });
         }
@@ -1759,7 +1863,7 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
                     normalizeBindingFunction(id, CompactBindingSupport.playerPredicateShape());
                     updateFirstCriterionPredicateFunction(current, id);
                     refreshDynamicSection();
-                    openFlowGraph(id);
+                    openGraphResource(id, ReSyncResourceType.FUNCTION);
                 }
             });
         }
@@ -1779,7 +1883,7 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
                     normalizeBindingFunction(id, CompactBindingSupport.playerActionShape());
                     updateCompletionFunction(current, id);
                     refreshDynamicSection();
-                    openFlowGraph(id);
+                    openGraphResource(id, ReSyncResourceType.FUNCTION);
                 }
             });
         } else if ("Run Flow".equals(mode)) {
@@ -1789,7 +1893,7 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
                     snapshot();
                     updateCompletionString(current, "flowId", id);
                     refreshDynamicSection();
-                    openFlowGraph(id);
+                    openGraphResource(id, ReSyncResourceType.FLOW);
                 }
             });
         }
@@ -1811,9 +1915,7 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
     }
 
     private void normalizeBindingFunction(String functionId, CompactBindingSupport.FunctionShape shape) {
-        FlowManager manager = FlowManager.getInstance();
-        FlowGraph function = manager != null && serverId != null ? manager.getGraph(serverId, ReSyncResourceType.FUNCTION, functionId) : null;
-        CompactBindingSupport.normalizeFunction(serverId, function, shape);
+        CompactBindingSupport.initializeFunction(serverId, functionId, shape);
     }
 
     private String ownedFunctionId(String purpose) {
@@ -1824,13 +1926,13 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
         return id.isBlank() ? "advancement_function" : id;
     }
 
-    private void openFlowGraph(String flowId) {
+    private void openGraphResource(String flowId, ReSyncResourceType type) {
         if (flowId == null || flowId.isBlank() || "none".equalsIgnoreCase(flowId) || "No Flow".equals(flowId) || "No Function".equals(flowId)) {
             return;
         }
         FlowManager manager = FlowManager.getInstance();
         if (manager != null && serverId != null) {
-            manager.openFlowEditor(serverId, null, flowId);
+            manager.openGraphEditor(serverId, null, type, flowId);
         }
     }
 
@@ -2242,6 +2344,9 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
             .maxVisibleItems(8)
             .entranceAnimation(false)
             .onSelectionChanged(value -> {
+                if (syncingInspector) {
+                    return;
+                }
                 snapshot();
                 onChange.accept(value);
             })
@@ -2259,7 +2364,9 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
             .maxVisibleItems(8)
             .entranceAnimation(false)
             .onSelectionChanged(value -> {
-                snapshot();
+                if (syncingInspector) {
+                    return;
+                }
                 onChange.accept(value);
                 if (rebuildDynamic) {
                     applyDynamicStructure();
@@ -2284,7 +2391,9 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
             .toggled(value)
             .size(42, ReSyncStudioPanelState.FIELD_HEIGHT)
             .onChange(next -> {
-                snapshot();
+                if (syncingInspector) {
+                    return;
+                }
                 onChange.accept(next);
             })
             .entranceAnimation(false)
@@ -2436,9 +2545,16 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
     }
 
     private void addNode() {
+        String parentId = selectedNode != null && nodes().has(selectedNode) ? selectedNode : "root";
+        if (treeDraft.defer(() -> addNode(parentId))) {
+            return;
+        }
+        addNode(parentId);
+    }
+
+    private void addNode(String parentId) {
         snapshot();
         String id = nextNodeId();
-        String parentId = selectedNode != null && nodes().has(selectedNode) ? selectedNode : "root";
         JsonObject node = new JsonObject();
         node.addProperty("enabled", true);
         node.addProperty("parent", parentId);
@@ -2465,10 +2581,20 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
     }
 
     private void deleteSelected() {
-        if (selectedNode == null || "root".equals(selectedNode)) {
+        String removedId = selectedNode;
+        if (removedId == null || "root".equals(removedId)) {
             return;
         }
-        String removedId = selectedNode;
+        if (treeDraft.defer(() -> deleteNode(removedId))) {
+            return;
+        }
+        deleteNode(removedId);
+    }
+
+    private void deleteNode(String removedId) {
+        if (!nodes().has(removedId) || "root".equals(removedId)) {
+            return;
+        }
         snapshot();
         nodes().remove(removedId);
         for (Map.Entry<String, JsonElement> entry : nodes().entrySet()) {
@@ -2485,21 +2611,78 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
 
     private void save() {
         commitInspectorEdits(inspectorEditNodeId);
-        sanitizeTree();
+        ensureTreeIdentity();
         FlowManager manager = FlowManager.getInstance();
         String id = text(tree, "id");
         String name = text(tree, "displayName");
-        DesignerSaveNotifications.start(serverId, ReSyncResourceType.ADVANCEMENT_TREE, id, name.isBlank() ? id : name);
+        DesignerSaveNotifications.SaveTicket ticket = DesignerSaveNotifications.startExact(serverId,
+            ReSyncResourceType.ADVANCEMENT_TREE, id, name.isBlank() ? id : name);
+        observeSave(ticket);
         if (manager != null && serverId != null) {
-            manager.saveJsonResource(serverId, ReSyncResourceType.ADVANCEMENT_TREE, tree);
+            if (!treeDraft.capture(ReSyncResourceType.ADVANCEMENT_TREE.typeId(), id, ticket,
+                snapshot -> manager.saveJsonResource(serverId, ReSyncResourceType.ADVANCEMENT_TREE,
+                    snapshot.serialize(payload -> sanitizeTree(JsonParser.parseString(payload).getAsJsonObject())), ticket))) {
+                DesignerSaveNotifications.failExact(ticket, "Save Snapshot Rejected");
+            }
         } else {
-            DesignerSaveNotifications.failResource(serverId, ReSyncResourceType.ADVANCEMENT_TREE, id, "ReSync Offline");
+            DesignerSaveNotifications.failExact(ticket, "ReSync Offline");
         }
     }
 
-    private void sanitizeTree() {
-        ensureTreeIdentity();
-        for (Map.Entry<String, JsonElement> entry : nodes().entrySet()) {
+    @Override
+    public boolean requestStudioSave() {
+        save();
+        return true;
+    }
+
+    private void rebindTree(JsonObject previous, JsonObject replacement) {
+        JsonObject currentTree = tree;
+        String currentLastInspectorNode = lastInspectorNode;
+        String currentLastDynamicStructure = lastDynamicStructure;
+        try {
+            tree = replacement;
+            lastInspectorNode = "";
+            lastDynamicStructure = "";
+            applyInspectorSelection();
+        } catch (RuntimeException | Error exception) {
+            tree = currentTree;
+            lastInspectorNode = currentLastInspectorNode;
+            lastDynamicStructure = currentLastDynamicStructure;
+            throw exception;
+        }
+    }
+
+    private void failSnapshot(VersionedEditorDraft.Failure failure) {
+        if (failure.stage() == VersionedEditorDraft.Stage.REBASE) {
+            new Notification("Save Refresh Failed", "Save Paused", Notification.Type.ERROR);
+            return;
+        }
+        if (failure.request() instanceof DesignerSaveNotifications.SaveTicket ticket) {
+            DesignerSaveNotifications.failExact(ticket, "Save Snapshot Failed");
+        }
+    }
+
+    private void observeSave(DesignerSaveNotifications.SaveTicket ticket) {
+        if (ticket == null) {
+            return;
+        }
+        ticket.whenFinished((saved, current) -> ScreenManager.getInstance().execute(() -> {
+            if (!saved || !current) {
+                treeDraft.discard(ticket);
+                return;
+            }
+            FlowManager manager = FlowManager.getInstance();
+            FlowManager.ResourceReadLease lease = manager != null
+                ? manager.snapshotResource(serverId, ReSyncResourceType.ADVANCEMENT_TREE.typeId(), ticket.id()) : null;
+            if (lease == null || !treeDraft.acknowledge(ticket, lease::materialize)) {
+                treeDraft.discard(ticket);
+            }
+        }));
+    }
+
+    private JsonObject sanitizeTree(JsonObject detached) {
+        ensureTreeIdentity(detached);
+        for (Map.Entry<String, JsonElement> entry : nodes(detached).entrySet()) {
             if (!entry.getValue().isJsonObject()) {
                 continue;
             }
@@ -2538,14 +2721,15 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
             removeIfEmpty(node, "onComplete");
             removeIfEmpty(node, "questCompletion");
         }
-        reorderTreeNodesParentFirst();
+        reorderTreeNodesParentFirst(detached);
+        return detached;
     }
 
-    private void reorderTreeNodesParentFirst() {
-        JsonObject source = nodes();
+    private void reorderTreeNodesParentFirst(JsonObject detached) {
+        JsonObject source = nodes(detached);
         List<String> ordered = new ArrayList<>();
         for (String nodeId : new ArrayList<>(source.keySet())) {
-            appendNodeWithParents(source, nodeId, ordered, new HashSet<>());
+            appendNodeWithParents(source, nodeId, text(detached, "id"), ordered, new HashSet<>());
         }
         JsonObject reordered = new JsonObject();
         for (String nodeId : ordered) {
@@ -2559,13 +2743,13 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
         }
     }
 
-    private void appendNodeWithParents(JsonObject nodes, String nodeId, List<String> ordered, Set<String> visiting) {
+    private void appendNodeWithParents(JsonObject nodes, String nodeId, String treeId, List<String> ordered, Set<String> visiting) {
         if (nodeId == null || nodeId.isBlank() || ordered.contains(nodeId) || !nodes.has(nodeId) || !nodes.get(nodeId).isJsonObject() || !visiting.add(nodeId)) {
             return;
         }
-        String parent = localParentId(text(nodes.getAsJsonObject(nodeId), "parent"), text(tree, "id"));
+        String parent = localParentId(text(nodes.getAsJsonObject(nodeId), "parent"), treeId);
         if (!parent.isBlank()) {
-            appendNodeWithParents(nodes, parent, ordered, visiting);
+            appendNodeWithParents(nodes, parent, treeId, ordered, visiting);
         }
         ordered.add(nodeId);
         visiting.remove(nodeId);
@@ -2592,12 +2776,13 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
     }
 
     private void snapshot() {
+        treeDraft.markMutation();
         history.capture();
     }
 
     private void restore(String json) {
         commitInspectorEdits(inspectorEditNodeId);
-        JsonObject restored = JsonTreeParser.parse(json).getAsJsonObject();
+        JsonObject restored = JsonParser.parseString(json).getAsJsonObject();
         tree.keySet().clear();
         for (Map.Entry<String, JsonElement> entry : restored.entrySet()) {
             tree.add(entry.getKey(), entry.getValue());
@@ -2615,21 +2800,29 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
     }
 
     private void ensureTreeIdentity() {
-        String id = text(tree, "id");
+        ensureTreeIdentity(tree);
+    }
+
+    private void ensureTreeIdentity(JsonObject target) {
+        String id = text(target, "id");
         if (id.isBlank()) {
             id = "advancement";
-            tree.addProperty("id", id);
+            target.addProperty("id", id);
         }
-        if (text(tree, "displayName").isBlank()) {
-            tree.addProperty("displayName", id);
+        if (text(target, "displayName").isBlank()) {
+            target.addProperty("displayName", id);
         }
     }
 
     private JsonObject nodes() {
-        if (!tree.has("nodes") || !tree.get("nodes").isJsonObject()) {
-            tree.add("nodes", new JsonObject());
+        return nodes(tree);
+    }
+
+    private JsonObject nodes(JsonObject target) {
+        if (!target.has("nodes") || !target.get("nodes").isJsonObject()) {
+            target.add("nodes", new JsonObject());
         }
-        return tree.getAsJsonObject("nodes");
+        return target.getAsJsonObject("nodes");
     }
 
     private List<String> parentOptions() {
@@ -3414,19 +3607,28 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
     }
 
     private void commitDragBranchChange() {
-        if (!nodeDragMoved || draggedNode == null || draggedNode.isBlank() || "root".equals(draggedNode)) {
+        String movedNode = draggedNode;
+        String targetNode = dragTargetNode;
+        if (!nodeDragMoved || movedNode == null || movedNode.isBlank() || "root".equals(movedNode)) {
             return;
         }
-        JsonObject node = nodeById(draggedNode);
+        commitDragBranchChange(movedNode, targetNode);
+    }
+
+    private void commitDragBranchChange(String movedNode, String targetNode) {
+        if (treeDraft.defer(() -> commitDragBranchChange(movedNode, targetNode))) {
+            return;
+        }
+        JsonObject node = nodeById(movedNode);
         if (node == null) {
             return;
         }
-        String nextParent = dragTargetNode != null && !dragTargetNode.isBlank() ? dragTargetNode : parentValue(node);
-        if (isDescendant(nextParent, draggedNode)) {
-            commitDescendantSwap(draggedNode, nextParent);
+        String nextParent = targetNode != null && !targetNode.isBlank() ? targetNode : parentValue(node);
+        if (isDescendant(nextParent, movedNode)) {
+            commitDescendantSwap(movedNode, nextParent);
             return;
         }
-        if (!canReparent(draggedNode, nextParent)) {
+        if (!canReparent(movedNode, nextParent)) {
             return;
         }
         String previousParent = parentValue(node);
@@ -3434,8 +3636,9 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
         if (!parentChanged) {
             return;
         }
+        snapshot();
         node.addProperty("parent", nextParent);
-        reorderNodeEntries(draggedNode, nextParent);
+        reorderNodeEntries(movedNode, nextParent);
         lastInspectorNode = "";
         applyInspectorSelection();
         refreshJson();
@@ -3451,6 +3654,7 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
         if (movedParent.equals(targetNode)) {
             return;
         }
+        snapshot();
         target.addProperty("parent", movedParent);
         moved.addProperty("parent", targetNode);
         reorderNodeEntries(targetNode, movedParent);
@@ -4020,7 +4224,7 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
         }
         StringBuilder current = new StringBuilder();
         for (String word : paragraph.split("\\s+")) {
-            String next = current.length() == 0 ? word : current.toString() + " " + word;
+            String next = current.length() == 0 ? word : current + " " + word;
             if (textWidth(next) <= maxWidth) {
                 current.setLength(0);
                 current.append(next);
@@ -4143,7 +4347,13 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
     }
 
     private MinecraftGameAssets getGameAssets() {
-        return ApplicationHostRegistry.gameAssets();
+        if (RemotelyClient.INSTANCE != null && RemotelyClient.INSTANCE.getHost() != null) {
+            MinecraftGameAssets gameAssets = RemotelyClient.INSTANCE.getHost().getGameAssets();
+            if (gameAssets != null) {
+                return gameAssets;
+            }
+        }
+        return MinecraftGameAssets.EMPTY;
     }
 
     private MinecraftAssetReference assetReference(String value, String fallbackPath) {

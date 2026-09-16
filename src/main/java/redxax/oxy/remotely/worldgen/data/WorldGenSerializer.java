@@ -1,304 +1,262 @@
 package redxax.oxy.remotely.worldgen.data;
 
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonPrimitive;
-import redxax.oxy.remotely.flow.data.FlowJson;
-import restudio.rescreen.util.JsonTreeParser;
+import com.google.gson.JsonParser;
 
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
+import java.util.Collection;
+import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Map;
+import java.util.Set;
 
 public final class WorldGenSerializer {
+    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
+    private static final Set<String> OWNED_GRAPH_FIELDS = graphFields("");
+    private static final Set<String> OWNED_PROJECT_FIELDS = projectFields();
+    private static final Set<String> GRAPH_MAP_PATHS = Set.of(
+        "nodes", "nodes[].inputValues", "terrainGraph.nodes", "terrainGraph.nodes[].inputValues",
+        "biomeGraph.nodes", "biomeGraph.nodes[].inputValues", "surfaceGraph.nodes", "surfaceGraph.nodes[].inputValues",
+        "caveGraph.nodes", "caveGraph.nodes[].inputValues", "featureGraph.nodes", "featureGraph.nodes[].inputValues",
+        "structureGraph.nodes", "structureGraph.nodes[].inputValues", "spawnGraph.nodes", "spawnGraph.nodes[].inputValues",
+        "settings.biomeVanillaFeatureOverrides");
+
+    private WorldGenSerializer() {
+    }
+
     public static String serialize(WorldGenGraph graph) {
-        return JsonTreeParser.write(graph(graph));
+        if (graph == null) {
+            return GSON.toJson(null);
+        }
+        JsonObject serialized = ownedGraph(graph);
+        return GSON.toJson(mergePayload(graph.opaquePayload(), serialized, OWNED_GRAPH_FIELDS));
     }
 
     public static WorldGenGraph deserialize(String json) {
-        return graph(object(json));
-    }
-
-    public static String serializeProject(WorldGenProject project) {
-        return JsonTreeParser.write(project(project));
-    }
-
-    public static WorldGenProject deserializeProject(String json) {
-        return project(object(json));
-    }
-
-    private static JsonObject project(WorldGenProject value) {
-        WorldGenProject project = value == null ? new WorldGenProject() : value;
-        JsonObject json = new JsonObject();
-        put(json, "id", project.getId());
-        put(json, "version", project.getVersion());
-        json.add("terrainGraph", graph(project.getTerrainGraph()));
-        json.add("biomeGraph", graph(project.getBiomeGraph()));
-        json.add("surfaceGraph", graph(project.getSurfaceGraph()));
-        json.add("caveGraph", graph(project.getCaveGraph()));
-        json.add("featureGraph", graph(project.getFeatureGraph()));
-        json.add("structureGraph", graph(project.getStructureGraph()));
-        json.add("spawnGraph", graph(project.getSpawnGraph()));
-        json.add("settings", settings(project.getSettings()));
-        JsonArray profiles = new JsonArray();
-        project.getBiomeProfiles().forEach(profile -> profiles.add(profile(profile)));
-        json.add("biomeProfiles", profiles);
-        return json;
-    }
-
-    private static WorldGenProject project(JsonObject json) {
-        WorldGenProject project = new WorldGenProject();
-        project.setId(string(json, "id", project.getId()));
-        project.setVersion(integer(json, "version", project.getVersion()));
-        project.setTerrainGraph(graph(child(json, "terrainGraph")));
-        project.setBiomeGraph(graph(child(json, "biomeGraph")));
-        project.setSurfaceGraph(graph(child(json, "surfaceGraph")));
-        project.setCaveGraph(graph(child(json, "caveGraph")));
-        project.setFeatureGraph(graph(child(json, "featureGraph")));
-        project.setStructureGraph(graph(child(json, "structureGraph")));
-        project.setSpawnGraph(graph(child(json, "spawnGraph")));
-        project.setSettings(settings(child(json, "settings")));
-        List<WorldGenBiomeProfile> profiles = new ArrayList<>();
-        array(json, "biomeProfiles").forEach(value -> {
-            if (value.isJsonObject()) profiles.add(profile(value.getAsJsonObject()));
-        });
-        project.setBiomeProfiles(profiles);
-        return project;
-    }
-
-    private static JsonObject graph(WorldGenGraph value) {
-        WorldGenGraph graph = value == null ? new WorldGenGraph() : value;
-        JsonObject json = new JsonObject();
-        put(json, "id", graph.getId());
-        put(json, "version", graph.getVersion());
-        JsonObject nodes = new JsonObject();
-        graph.getNodes().forEach((id, node) -> nodes.add(id, node(node)));
-        json.add("nodes", nodes);
-        JsonArray connections = new JsonArray();
-        graph.getConnections().forEach(connection -> connections.add(connection(connection)));
-        json.add("connections", connections);
-        return json;
-    }
-
-    private static WorldGenGraph graph(JsonObject json) {
-        WorldGenGraph graph = new WorldGenGraph();
-        if (json == null) return graph;
-        graph.setId(string(json, "id", graph.getId()));
-        graph.setVersion(integer(json, "version", graph.getVersion()));
-        Map<String, WorldGenNode> nodes = new LinkedHashMap<>();
-        JsonObject encodedNodes = child(json, "nodes");
-        if (encodedNodes != null) encodedNodes.entrySet().forEach(entry -> {
-            if (entry.getValue().isJsonObject()) nodes.put(entry.getKey(), node(entry.getValue().getAsJsonObject()));
-        });
-        graph.setNodes(nodes);
-        List<WorldGenConnection> connections = new ArrayList<>();
-        array(json, "connections").forEach(value -> {
-            if (value.isJsonObject()) connections.add(connection(value.getAsJsonObject()));
-        });
-        graph.setConnections(connections);
+        if (json == null || json.isBlank()) {
+            return null;
+        }
+        WorldGenGraph graph = GSON.fromJson(json, WorldGenGraph.class);
+        if (graph != null) {
+            JsonElement parsed = JsonParser.parseString(json);
+            if (parsed.isJsonObject()) {
+                graph.setOpaquePayload(logicalPayload(parsed.getAsJsonObject()));
+            }
+        }
         return graph;
     }
 
-    private static JsonObject node(WorldGenNode node) {
-        JsonObject json = new JsonObject();
-        put(json, "type", node.getType());
-        put(json, "x", node.getX());
-        put(json, "y", node.getY());
-        JsonObject inputs = new JsonObject();
-        node.getInputValues().forEach((key, value) -> inputs.add(key, value(value)));
-        json.add("inputValues", inputs);
-        return json;
-    }
-
-    private static WorldGenNode node(JsonObject json) {
-        Map<String, Object> inputs = new LinkedHashMap<>();
-        JsonObject encoded = child(json, "inputValues");
-        if (encoded != null) encoded.entrySet().forEach(entry -> inputs.put(entry.getKey(), value(entry.getValue())));
-        return new WorldGenNode(string(json, "type", ""), decimal(json, "x", 0.0), decimal(json, "y", 0.0), inputs);
-    }
-
-    private static JsonObject connection(WorldGenConnection value) {
-        JsonObject json = new JsonObject();
-        put(json, "sourceNodeId", value.getSourceNodeId());
-        put(json, "sourcePin", value.getSourcePin());
-        put(json, "targetNodeId", value.getTargetNodeId());
-        put(json, "targetPin", value.getTargetPin());
-        return json;
-    }
-
-    private static WorldGenConnection connection(JsonObject json) {
-        return new WorldGenConnection(string(json, "sourceNodeId", ""), string(json, "sourcePin", ""),
-            string(json, "targetNodeId", ""), string(json, "targetPin", ""));
-    }
-
-    private static JsonObject settings(WorldGenProjectSettings value) {
-        WorldGenProjectSettings settings = value == null ? new WorldGenProjectSettings() : value;
-        JsonObject json = new JsonObject();
-        put(json, "seedPolicy", settings.getSeedPolicy());
-        put(json, "minY", settings.getMinY());
-        put(json, "maxY", settings.getMaxY());
-        put(json, "seaLevel", settings.getSeaLevel());
-        put(json, "defaultBlock", settings.getDefaultBlock());
-        put(json, "defaultFluid", settings.getDefaultFluid());
-        put(json, "datapackNamespace", settings.getDatapackNamespace());
-        put(json, "generatorBackend", settings.getGeneratorBackend());
-        put(json, "generationMode", settings.getGenerationMode());
-        put(json, "targetVersion", settings.getTargetVersion());
-        put(json, "worldPreset", settings.getWorldPreset());
-        put(json, "terrainTemplate", settings.getTerrainTemplate());
-        put(json, "vanillaBiomesEnabled", settings.isVanillaBiomesEnabled());
-        put(json, "vanillaFeaturesEnabled", settings.isVanillaFeaturesEnabled());
-        put(json, "vanillaStructuresEnabled", settings.isVanillaStructuresEnabled());
-        put(json, "vanillaSpawnsEnabled", settings.isVanillaSpawnsEnabled());
-        put(json, "vanillaStructureTerrainSafety", settings.isVanillaStructureTerrainSafety());
-        put(json, "vanillaStructureSampleRadius", settings.getVanillaStructureSampleRadius());
-        put(json, "vanillaStructureMaxHeightDelta", settings.getVanillaStructureMaxHeightDelta());
-        JsonObject overrides = new JsonObject();
-        settings.getBiomeVanillaFeatureOverrides().forEach(overrides::addProperty);
-        json.add("biomeVanillaFeatureOverrides", overrides);
-        put(json, "previewEnvironment", settings.getPreviewEnvironment());
-        put(json, "activePreviewPlayer", settings.getActivePreviewPlayer());
-        return json;
-    }
-
-    private static WorldGenProjectSettings settings(JsonObject json) {
-        WorldGenProjectSettings settings = new WorldGenProjectSettings();
-        if (json == null) return settings;
-        settings.setSeedPolicy(string(json, "seedPolicy", settings.getSeedPolicy()));
-        settings.setMinY(integer(json, "minY", settings.getMinY()));
-        settings.setMaxY(integer(json, "maxY", settings.getMaxY()));
-        settings.setSeaLevel(integer(json, "seaLevel", settings.getSeaLevel()));
-        settings.setDefaultBlock(string(json, "defaultBlock", settings.getDefaultBlock()));
-        settings.setDefaultFluid(string(json, "defaultFluid", settings.getDefaultFluid()));
-        settings.setDatapackNamespace(string(json, "datapackNamespace", settings.getDatapackNamespace()));
-        settings.setGeneratorBackend(string(json, "generatorBackend", settings.getGeneratorBackend()));
-        settings.setGenerationMode(string(json, "generationMode", settings.getGenerationMode()));
-        settings.setTargetVersion(string(json, "targetVersion", settings.getTargetVersion()));
-        settings.setWorldPreset(string(json, "worldPreset", settings.getWorldPreset()));
-        settings.setTerrainTemplate(string(json, "terrainTemplate", settings.getTerrainTemplate()));
-        settings.setVanillaBiomesEnabled(bool(json, "vanillaBiomesEnabled", settings.isVanillaBiomesEnabled()));
-        settings.setVanillaFeaturesEnabled(bool(json, "vanillaFeaturesEnabled", settings.isVanillaFeaturesEnabled()));
-        settings.setVanillaStructuresEnabled(bool(json, "vanillaStructuresEnabled", settings.isVanillaStructuresEnabled()));
-        settings.setVanillaSpawnsEnabled(bool(json, "vanillaSpawnsEnabled", settings.isVanillaSpawnsEnabled()));
-        settings.setVanillaStructureTerrainSafety(bool(json, "vanillaStructureTerrainSafety", settings.isVanillaStructureTerrainSafety()));
-        settings.setVanillaStructureSampleRadius(integer(json, "vanillaStructureSampleRadius", settings.getVanillaStructureSampleRadius()));
-        settings.setVanillaStructureMaxHeightDelta(integer(json, "vanillaStructureMaxHeightDelta", settings.getVanillaStructureMaxHeightDelta()));
-        Map<String, Boolean> overrides = new LinkedHashMap<>();
-        JsonObject encodedOverrides = child(json, "biomeVanillaFeatureOverrides");
-        if (encodedOverrides != null) encodedOverrides.entrySet().forEach(entry -> overrides.put(entry.getKey(), entry.getValue().getAsBoolean()));
-        settings.setBiomeVanillaFeatureOverrides(overrides);
-        settings.setPreviewEnvironment(string(json, "previewEnvironment", settings.getPreviewEnvironment()));
-        settings.setActivePreviewPlayer(string(json, "activePreviewPlayer", settings.getActivePreviewPlayer()));
-        return settings;
-    }
-
-    private static JsonObject profile(WorldGenBiomeProfile value) {
-        JsonObject json = new JsonObject();
-        put(json, "id", value.getId());
-        put(json, "displayName", value.getDisplayName());
-        put(json, "mode", value.getMode().name());
-        put(json, "vanillaBaseBiome", value.getVanillaBaseBiome());
-        put(json, "temperature", value.getTemperature());
-        put(json, "humidity", value.getHumidity());
-        put(json, "continentalness", value.getContinentalness());
-        put(json, "erosion", value.getErosion());
-        put(json, "weirdness", value.getWeirdness());
-        put(json, "surfaceReference", value.getSurfaceReference());
-        put(json, "keepVanillaFeatures", value.isKeepVanillaFeatures());
-        put(json, "keepVanillaStructures", value.isKeepVanillaStructures());
-        put(json, "keepVanillaSpawns", value.isKeepVanillaSpawns());
-        JsonArray rules = new JsonArray();
-        value.getSpawnRules().forEach(rule -> rules.add(rule(rule)));
-        json.add("spawnRules", rules);
-        return json;
-    }
-
-    private static WorldGenBiomeProfile profile(JsonObject json) {
-        WorldGenBiomeProfile profile = new WorldGenBiomeProfile();
-        profile.setId(string(json, "id", ""));
-        profile.setDisplayName(string(json, "displayName", ""));
-        try { profile.setMode(WorldGenBiomeProfileMode.valueOf(string(json, "mode", WorldGenBiomeProfileMode.CUSTOM.name()))); }
-        catch (IllegalArgumentException ignored) { profile.setMode(WorldGenBiomeProfileMode.CUSTOM); }
-        profile.setVanillaBaseBiome(string(json, "vanillaBaseBiome", "minecraft:plains"));
-        profile.setTemperature((float) decimal(json, "temperature", 0.5));
-        profile.setHumidity((float) decimal(json, "humidity", 0.5));
-        profile.setContinentalness((float) decimal(json, "continentalness", 0.0));
-        profile.setErosion((float) decimal(json, "erosion", 0.0));
-        profile.setWeirdness((float) decimal(json, "weirdness", 0.0));
-        profile.setSurfaceReference(string(json, "surfaceReference", ""));
-        profile.setKeepVanillaFeatures(bool(json, "keepVanillaFeatures", false));
-        profile.setKeepVanillaStructures(bool(json, "keepVanillaStructures", false));
-        profile.setKeepVanillaSpawns(bool(json, "keepVanillaSpawns", false));
-        List<WorldGenSpawnRule> rules = new ArrayList<>();
-        array(json, "spawnRules").forEach(value -> { if (value.isJsonObject()) rules.add(rule(value.getAsJsonObject())); });
-        profile.setSpawnRules(rules);
-        return profile;
-    }
-
-    private static JsonObject rule(WorldGenSpawnRule value) {
-        JsonObject json = new JsonObject();
-        put(json, "entityType", value.getEntityType()); put(json, "weight", value.getWeight()); put(json, "minGroup", value.getMinGroup());
-        put(json, "maxGroup", value.getMaxGroup()); put(json, "category", value.getCategory());
-        JsonArray filters = new JsonArray(); value.getBiomeFilters().forEach(filters::add); json.add("biomeFilters", filters);
-        put(json, "minY", value.getMinY()); put(json, "maxY", value.getMaxY()); put(json, "blockBelow", value.getBlockBelow());
-        put(json, "minLight", value.getMinLight()); put(json, "maxLight", value.getMaxLight()); put(json, "time", value.getTime()); put(json, "weather", value.getWeather());
-        return json;
-    }
-
-    private static WorldGenSpawnRule rule(JsonObject json) {
-        WorldGenSpawnRule rule = new WorldGenSpawnRule();
-        rule.setEntityType(string(json, "entityType", rule.getEntityType())); rule.setWeight(integer(json, "weight", rule.getWeight()));
-        rule.setMinGroup(integer(json, "minGroup", rule.getMinGroup())); rule.setMaxGroup(integer(json, "maxGroup", rule.getMaxGroup()));
-        rule.setCategory(string(json, "category", rule.getCategory()));
-        List<String> filters = new ArrayList<>(); array(json, "biomeFilters").forEach(value -> filters.add(value.getAsString())); rule.setBiomeFilters(filters);
-        rule.setMinY(integer(json, "minY", rule.getMinY())); rule.setMaxY(integer(json, "maxY", rule.getMaxY()));
-        rule.setBlockBelow(string(json, "blockBelow", rule.getBlockBelow())); rule.setMinLight(integer(json, "minLight", rule.getMinLight()));
-        rule.setMaxLight(integer(json, "maxLight", rule.getMaxLight())); rule.setTime(string(json, "time", rule.getTime()));
-        rule.setWeather(string(json, "weather", rule.getWeather()));
-        return rule;
-    }
-
-    private static JsonElement value(Object value) {
-        if (value == null) return JsonNull.INSTANCE;
-        if (value instanceof JsonElement json) return json.deepCopy();
-        if (value instanceof String text) return new JsonPrimitive(text);
-        if (value instanceof Number number) return new JsonPrimitive(number);
-        if (value instanceof Boolean bool) return new JsonPrimitive(bool);
-        if (value instanceof Map<?, ?> map) {
-            JsonObject json = new JsonObject();
-            map.forEach((key, item) -> json.add(FlowJson.text(key), value(item)));
-            return json;
+    public static String serializeProject(WorldGenProject project) {
+        if (project == null) {
+            return GSON.toJson(null);
         }
-        if (value instanceof Iterable<?> items) {
-            JsonArray json = new JsonArray(); items.forEach(item -> json.add(value(item))); return json;
+        JsonObject serialized = ownedProject(project);
+        return GSON.toJson(mergePayload(project.opaquePayload(), serialized, OWNED_PROJECT_FIELDS));
+    }
+
+    public static String serializeProjectOwned(WorldGenProject project) {
+        return GSON.toJson(project);
+    }
+
+    public static WorldGenProject deserializeProject(String json) {
+        if (json == null || json.isBlank()) {
+            return null;
         }
-        return FlowJson.value(value);
+        WorldGenProject project = GSON.fromJson(json, WorldGenProject.class);
+        if (project != null) {
+            JsonElement parsed = JsonParser.parseString(json);
+            if (parsed.isJsonObject()) {
+                project.setOpaquePayload(logicalPayload(parsed.getAsJsonObject()));
+            }
+        }
+        return project;
     }
 
-    private static Object value(JsonElement value) {
-        if (value == null || value.isJsonNull()) return null;
-        if (value.isJsonObject()) { Map<String, Object> map = new LinkedHashMap<>(); value.getAsJsonObject().entrySet().forEach(entry -> map.put(entry.getKey(), value(entry.getValue()))); return map; }
-        if (value.isJsonArray()) { List<Object> list = new ArrayList<>(); value.getAsJsonArray().forEach(item -> list.add(value(item))); return list; }
-        JsonPrimitive primitive = value.getAsJsonPrimitive();
-        if (primitive.isBoolean()) return primitive.getAsBoolean();
-        if (primitive.isNumber()) return primitive.getAsDouble();
-        return primitive.getAsString();
+    private static JsonObject ownedGraph(WorldGenGraph graph) {
+        return GSON.toJsonTree(graph).getAsJsonObject();
     }
 
-    private static JsonObject object(String json) { JsonElement value = JsonTreeParser.parse(json); return value.isJsonObject() ? value.getAsJsonObject() : new JsonObject(); }
-    private static JsonObject child(JsonObject json, String key) { JsonElement value = json == null ? null : json.get(key); return value != null && value.isJsonObject() ? value.getAsJsonObject() : null; }
-    private static JsonArray array(JsonObject json, String key) { JsonElement value = json == null ? null : json.get(key); return value != null && value.isJsonArray() ? value.getAsJsonArray() : new JsonArray(); }
-    private static String string(JsonObject json, String key, String fallback) { try { JsonElement value = json == null ? null : json.get(key); return value != null && !value.isJsonNull() ? value.getAsString() : fallback; } catch (RuntimeException ignored) { return fallback; } }
-    private static int integer(JsonObject json, String key, int fallback) { try { JsonElement value = json == null ? null : json.get(key); return value != null ? value.getAsInt() : fallback; } catch (RuntimeException ignored) { return fallback; } }
-    private static double decimal(JsonObject json, String key, double fallback) { try { JsonElement value = json == null ? null : json.get(key); return value != null ? value.getAsDouble() : fallback; } catch (RuntimeException ignored) { return fallback; } }
-    private static boolean bool(JsonObject json, String key, boolean fallback) { try { JsonElement value = json == null ? null : json.get(key); return value != null ? value.getAsBoolean() : fallback; } catch (RuntimeException ignored) { return fallback; } }
-    private static void put(JsonObject json, String key, String value) { if (value == null) json.add(key, JsonNull.INSTANCE); else json.addProperty(key, value); }
-    private static void put(JsonObject json, String key, Number value) { json.addProperty(key, value); }
-    private static void put(JsonObject json, String key, Boolean value) { json.addProperty(key, value); }
+    private static JsonObject ownedProject(WorldGenProject project) {
+        return GSON.toJsonTree(project).getAsJsonObject();
+    }
 
-    private WorldGenSerializer() {
+    private static JsonObject logicalPayload(JsonObject source) {
+        return source.deepCopy();
+    }
+
+    private static JsonObject mergePayload(JsonObject existing, JsonObject serialized, Collection<String> ownedFields) {
+        Set<String> owned = ownedFields == null ? Set.of() : Set.copyOf(ownedFields);
+        return mergeObject(existing, serialized, "", owned);
+    }
+
+    private static JsonObject mergeObject(JsonObject existing, JsonObject serialized, String path, Set<String> ownedFields) {
+        JsonObject merged = existing == null ? new JsonObject() : existing.deepCopy();
+        for (String field : directOwnedFields(path, ownedFields)) {
+            if (!serialized.has(field)) {
+                merged.remove(field);
+            }
+        }
+        for (var entry : serialized.entrySet()) {
+            String childPath = path.isBlank() ? entry.getKey() : path + "." + entry.getKey();
+            JsonElement previous = existing != null ? existing.get(entry.getKey()) : null;
+            merged.add(entry.getKey(), mergeElement(previous, entry.getValue(), childPath, ownedFields));
+        }
+        return merged;
+    }
+
+    private static JsonElement mergeElement(JsonElement existing, JsonElement serialized, String path, Set<String> ownedFields) {
+        if (serialized == null || serialized.isJsonNull()) {
+            return serialized == null ? JsonNull.INSTANCE : serialized.deepCopy();
+        }
+        if (serialized.isJsonObject()) {
+            if (isGraphMapPath(path)) {
+                return mergeMap(existing != null && existing.isJsonObject() ? existing.getAsJsonObject() : null,
+                    serialized.getAsJsonObject(), path, ownedFields);
+            }
+            return mergeObject(existing != null && existing.isJsonObject() ? existing.getAsJsonObject() : null,
+                serialized.getAsJsonObject(), path, ownedFields);
+        }
+        if (!serialized.isJsonArray() || existing == null || !existing.isJsonArray()) {
+            return serialized.deepCopy();
+        }
+        JsonArray merged = new JsonArray();
+        List<JsonElement> oldValues = existing.getAsJsonArray().asList();
+        Set<Integer> matched = new LinkedHashSet<>();
+        List<JsonElement> newValues = serialized.getAsJsonArray().asList();
+        for (int index = 0; index < newValues.size(); index++) {
+            JsonElement current = newValues.get(index);
+            int oldIndex = matchingArrayIndex(current, oldValues, matched, index);
+            JsonElement previous = oldIndex >= 0 ? oldValues.get(oldIndex) : null;
+            if (oldIndex >= 0) {
+                matched.add(oldIndex);
+            }
+            merged.add(mergeElement(previous, current, path + "[]", ownedFields));
+        }
+        return merged;
+    }
+
+    private static JsonObject mergeMap(JsonObject existing, JsonObject serialized, String path, Set<String> ownedFields) {
+        JsonObject merged = new JsonObject();
+        for (var entry : serialized.entrySet()) {
+            JsonElement previous = existing == null ? null : existing.get(entry.getKey());
+            String childPath = path + "." + entry.getKey();
+            merged.add(entry.getKey(), mergeElement(previous, entry.getValue(), childPath, ownedFields));
+        }
+        return merged;
+    }
+
+    private static boolean isGraphMapPath(String path) {
+        List<String> actual = pathParts(path);
+        return GRAPH_MAP_PATHS.stream().map(WorldGenSerializer::pathParts)
+            .anyMatch(candidate -> candidate.size() == actual.size() && matchesPath(candidate, actual));
+    }
+
+    private static int matchingArrayIndex(JsonElement current, List<JsonElement> oldValues, Set<Integer> matched, int fallback) {
+        if (current != null && current.isJsonObject()) {
+            JsonObject object = current.getAsJsonObject();
+            for (String identity : List.of("id", "key", "name", "uuid", "type")) {
+                if (!object.has(identity) || object.get(identity).isJsonNull()) {
+                    continue;
+                }
+                String value = object.get(identity).toString();
+                for (int index = 0; index < oldValues.size(); index++) {
+                    JsonElement previous = oldValues.get(index);
+                    if (matched.contains(index) || previous == null || !previous.isJsonObject()) {
+                        continue;
+                    }
+                    JsonObject previousObject = previous.getAsJsonObject();
+                    if (previousObject.has(identity) && value.equals(previousObject.get(identity).toString())) {
+                        return index;
+                    }
+                }
+            }
+        }
+        return fallback < oldValues.size() && !matched.contains(fallback) ? fallback : -1;
+    }
+
+    private static Set<String> directOwnedFields(String path, Set<String> ownedFields) {
+        Set<String> direct = new LinkedHashSet<>();
+        List<String> actual = pathParts(path);
+        for (String owned : ownedFields) {
+            if (owned == null || owned.isBlank()) {
+                continue;
+            }
+            List<String> candidate = pathParts(owned);
+            if (candidate.size() != actual.size() + 1 || !matchesPath(candidate, actual)) {
+                continue;
+            }
+            String field = candidate.getLast();
+            if (!"*".equals(field)) {
+                direct.add(field);
+            }
+        }
+        return direct;
+    }
+
+    private static List<String> pathParts(String path) {
+        if (path == null || path.isBlank()) {
+            return List.of();
+        }
+        List<String> parts = new ArrayList<>();
+        for (String raw : path.split("\\.")) {
+            if (raw.endsWith("[]")) {
+                parts.add(raw.substring(0, raw.length() - 2));
+                parts.add("*");
+            } else if (raw.chars().allMatch(Character::isDigit)) {
+                parts.add("*");
+            } else {
+                parts.add(raw);
+            }
+        }
+        return parts;
+    }
+
+    private static boolean matchesPath(List<String> candidate, List<String> actual) {
+        for (int index = 0; index < actual.size(); index++) {
+            String expected = candidate.get(index);
+            if (!"*".equals(expected) && !expected.equals(actual.get(index))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static Set<String> graphFields(String prefix) {
+        String base = prefix == null || prefix.isBlank() ? "" : prefix + ".";
+        return Set.of(
+            base + "id", base + "version", base + "nodes", base + "connections",
+            base + "nodes[].type", base + "nodes[].x", base + "nodes[].y", base + "nodes[].inputValues",
+            base + "connections[].sourceNodeId", base + "connections[].sourcePin",
+            base + "connections[].targetNodeId", base + "connections[].targetPin");
+    }
+
+    private static Set<String> projectFields() {
+        LinkedHashSet<String> fields = new LinkedHashSet<>(List.of(
+            "id", "version", "terrainGraph", "biomeGraph", "surfaceGraph", "caveGraph", "featureGraph",
+            "structureGraph", "spawnGraph", "settings", "biomeProfiles"));
+        for (String graph : List.of("terrainGraph", "biomeGraph", "surfaceGraph", "caveGraph", "featureGraph", "structureGraph", "spawnGraph")) {
+            fields.addAll(graphFields(graph));
+        }
+        fields.addAll(List.of(
+            "settings.seedPolicy", "settings.minY", "settings.maxY", "settings.seaLevel", "settings.defaultBlock",
+            "settings.defaultFluid", "settings.datapackNamespace", "settings.generatorBackend", "settings.generationMode",
+            "settings.targetVersion", "settings.worldPreset", "settings.terrainTemplate", "settings.vanillaBiomesEnabled",
+            "settings.vanillaFeaturesEnabled", "settings.vanillaStructuresEnabled", "settings.vanillaSpawnsEnabled",
+            "settings.vanillaStructureTerrainSafety", "settings.vanillaStructureSampleRadius", "settings.vanillaStructureMaxHeightDelta",
+            "settings.biomeVanillaFeatureOverrides", "settings.previewEnvironment", "settings.activePreviewPlayer",
+            "biomeProfiles[].id", "biomeProfiles[].displayName", "biomeProfiles[].mode", "biomeProfiles[].vanillaBaseBiome",
+            "biomeProfiles[].temperature", "biomeProfiles[].humidity", "biomeProfiles[].continentalness", "biomeProfiles[].erosion",
+            "biomeProfiles[].weirdness", "biomeProfiles[].surfaceReference", "biomeProfiles[].keepVanillaFeatures",
+            "biomeProfiles[].keepVanillaStructures", "biomeProfiles[].keepVanillaSpawns", "biomeProfiles[].spawnRules",
+            "biomeProfiles[].spawnRules[].entityType", "biomeProfiles[].spawnRules[].weight", "biomeProfiles[].spawnRules[].minGroup",
+            "biomeProfiles[].spawnRules[].maxGroup", "biomeProfiles[].spawnRules[].category", "biomeProfiles[].spawnRules[].biomeFilters",
+            "biomeProfiles[].spawnRules[].minY", "biomeProfiles[].spawnRules[].maxY", "biomeProfiles[].spawnRules[].blockBelow",
+            "biomeProfiles[].spawnRules[].minLight", "biomeProfiles[].spawnRules[].maxLight", "biomeProfiles[].spawnRules[].time",
+            "biomeProfiles[].spawnRules[].weather"));
+        return Set.copyOf(fields);
     }
 }

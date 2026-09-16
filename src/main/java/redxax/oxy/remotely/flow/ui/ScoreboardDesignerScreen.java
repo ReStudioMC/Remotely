@@ -2,22 +2,23 @@ package redxax.oxy.remotely.flow.ui;
 
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import redxax.oxy.remotely.host.ApplicationHostRegistry;
+import redxax.oxy.remotely.RemotelyClient;
 import redxax.oxy.remotely.data.flow.DesignerSaveNotifications;
 import redxax.oxy.remotely.data.flow.FlowManager;
 import redxax.oxy.remotely.data.flow.ReSyncResourceType;
 import redxax.oxy.remotely.flow.data.FlowWorkspaceDocument;
+import redxax.oxy.remotely.flow.data.FlowSerializer;
 import redxax.oxy.remotely.flow.data.ScoreboardDefinition;
 import redxax.oxy.remotely.flow.ui.studio.ReSyncCollaborationDocuments;
 import redxax.oxy.remotely.flow.ui.studio.ReSyncCollaborativeView;
 import redxax.oxy.remotely.flow.ui.studio.ReSyncStudioPanelState;
 import redxax.oxy.remotely.flow.ui.studio.StudioPanel;
 import redxax.oxy.remotely.flow.ui.studio.StudioResourceRenameAware;
+import redxax.oxy.remotely.flow.ui.studio.StudioSaveProvider;
 import redxax.oxy.remotely.flow.ui.studio.StudioScreen;
 import restudio.resync.flow.workspace.WorkspacePatch;
 import restudio.rebase.ui.widgets.editor.CodeEditorWidget;
 import restudio.rescreen.platform.IDrawContext;
-import restudio.rescreen.platform.ITextRenderer;
 import restudio.rescreen.platform.input.ReKey;
 import restudio.rescreen.platform.input.ReKeyEvent;
 import restudio.rescreen.platform.input.ReMouseEvent;
@@ -29,6 +30,7 @@ import restudio.rescreen.ui.desktop.DesktopWindowBehaviorProvider;
 import restudio.rescreen.ui.rescreen.Container;
 import restudio.rescreen.ui.rescreen.SidePanel;
 import restudio.rescreen.ui.widgets.TextInputWidget;
+import restudio.rescreen.util.Notification;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -36,10 +38,11 @@ import java.util.List;
 import java.util.Objects;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.function.Consumer;
 
 import static restudio.rescreen.config.Config.desktopMode;
 
-public class ScoreboardDesignerScreen extends StudioScreen implements DesktopWindowBehaviorProvider, StudioCloseHandledScreen, StudioResourceRenameAware, ReSyncCollaborativeView {
+public class ScoreboardDesignerScreen extends StudioScreen implements DesktopWindowBehaviorProvider, StudioCloseHandledScreen, StudioResourceRenameAware, ReSyncCollaborativeView, StudioSaveProvider {
     private static final int PANEL_PADDING = 8;
     private static final int PREVIEW_ROW_BG = 0x7F101010;
     private static final int TITLE_COLOR = 0xFFFFFFFF;
@@ -47,7 +50,8 @@ public class ScoreboardDesignerScreen extends StudioScreen implements DesktopWin
     private static final int SCORE_COLOR = 0xFFFF5555;
     private static final Pattern MINI_HEX_PATTERN = Pattern.compile("<#([0-9a-fA-F]{6})>");
 
-    private final ScoreboardDefinition scoreboard;
+    private ScoreboardDefinition scoreboard;
+    private final VersionedEditorDraft<ScoreboardDefinition> scoreboardDraft;
     private final String serverId;
     private final Object parent;
     private final boolean forceSuperScreen;
@@ -56,6 +60,10 @@ public class ScoreboardDesignerScreen extends StudioScreen implements DesktopWin
 
     @Override
     public void resourceRenamed(String type, String oldId, String newId) {
+        if (scoreboardDraft.defer(() -> resourceRenamed(type, oldId, newId))) {
+            return;
+        }
+        scoreboardDraft.markMutation();
         if (oldId.equals(scoreboard.getId())) {
             ReSyncResourceType.SCOREBOARD.applyRename(scoreboard, newId);
         }
@@ -75,6 +83,8 @@ public class ScoreboardDesignerScreen extends StudioScreen implements DesktopWin
     private boolean studioCloseNotified;
     private boolean applyingCollaboration;
     private final History<JsonObject> history = history(() -> collaborationDocument().deepCopy(), this::restoreCollaborationDocument);
+    private final HistoryRebaseCoordinator<JsonObject> historyRebase;
+    private volatile long collaborationLifecycle = 1L;
 
     @Override
     public JsonObject collaborationDocument() {
@@ -82,7 +92,87 @@ public class ScoreboardDesignerScreen extends StudioScreen implements DesktopWin
     }
 
     @Override
+    public long collaborationLifecycle() {
+        return collaborationLifecycle;
+    }
+
+    @Override
+    public long collaborationEditVersion() {
+        return scoreboardDraft.editVersion();
+    }
+
+    @Override
+    public boolean requestCollaborationDocument(Consumer<CollaborationDocumentSnapshot> completion) {
+        if (completion == null) {
+            return false;
+        }
+        long lifecycle = collaborationLifecycle;
+        return scoreboardDraft.requestProjection(ReSyncResourceType.SCOREBOARD.typeId(),
+            ReSyncResourceType.SCOREBOARD.extractId(scoreboard), this::collaborationSource,
+            projection -> completion.accept(collaborationSnapshot(lifecycle, projection)));
+    }
+
+    private ScoreboardDefinition collaborationSource() {
+        ScoreboardDefinition source = new ScoreboardDefinition();
+        source.setId(scoreboard.getId());
+        source.setEnabled(scoreboard.isEnabled());
+        source.setTitle(scoreboard.getTitle());
+        source.setObjectiveId(scoreboard.getObjectiveId());
+        source.setDisplaySlot(scoreboard.getDisplaySlot());
+        source.setLines(scoreboard.getLines() != null ? new ArrayList<>(scoreboard.getLines()) : new ArrayList<>());
+        return source;
+    }
+
+    private CollaborationDocumentSnapshot collaborationSnapshot(long lifecycle,
+                                                                 VersionedEditorDraft.ProjectionSnapshot projection) {
+        RuntimeException failure = projection.failure();
+        JsonObject document = null;
+        if (failure == null) {
+            try {
+                document = gson.fromJson(projection.payload(), JsonObject.class);
+                if (document == null) {
+                    failure = new IllegalStateException("Collaboration Snapshot Is Empty");
+                }
+            } catch (RuntimeException | Error exception) {
+                failure = exception instanceof RuntimeException runtime ? runtime : new IllegalStateException(exception);
+            }
+        }
+        if (failure == null && collaborationLifecycle != lifecycle) {
+            document = null;
+            failure = new IllegalStateException("Collaboration Snapshot Expired");
+        }
+        return new CollaborationDocumentSnapshot(this, lifecycle, projection.editVersion(), document, failure);
+    }
+
+    @Override
+    public boolean applyCollaborationDocument(JsonObject document, List<WorkspacePatch<JsonElement>> patches,
+                                              Consumer<CollaborationDocumentApplyResult> completion) {
+        if (completion == null) {
+            return false;
+        }
+        long lifecycle = collaborationLifecycle;
+        return scoreboardDraft.runMutation(() -> {
+            if (document == null) {
+                throw new IllegalArgumentException("Collaboration Document Is Required");
+            }
+            if (scoreboard == null) {
+                throw new IllegalStateException("Scoreboard Is Unavailable");
+            }
+            if (ReSyncCollaborationDocuments.to(document, ScoreboardDefinition.class) == null) {
+                throw new IllegalArgumentException("Collaboration Document Is Invalid");
+            }
+            applyCollaborationDocument(document, patches);
+        }, result ->
+            completion.accept(new CollaborationDocumentApplyResult(this, lifecycle, result.beforeEditVersion(),
+                result.afterEditVersion(), result.successful(), result.failure())));
+    }
+
+    @Override
     public void applyCollaborationDocument(JsonObject document, List<WorkspacePatch<JsonElement>> patches) {
+        if (scoreboardDraft.defer(() -> applyCollaborationDocument(document, patches))) {
+            return;
+        }
+        scoreboardDraft.markMutation();
         applyingCollaboration = true;
         try {
             restoreCollaborationDocument(document);
@@ -96,15 +186,18 @@ public class ScoreboardDesignerScreen extends StudioScreen implements DesktopWin
         if (patches == null || patches.isEmpty()) {
             return;
         }
-        history.rebase(snapshot -> {
-            JsonObject rebased = snapshot.deepCopy();
-            FlowWorkspaceDocument.apply(rebased, patches);
-            return rebased;
+        historyRebase.request(patches, copiedPatches -> snapshot -> {
+            JsonObject rebased = gson.fromJson(gson.toJson(snapshot), JsonObject.class);
+            if (rebased == null) {
+                rebased = new JsonObject();
+            }
+            FlowWorkspaceDocument.apply(rebased, copiedPatches);
+            return gson.fromJson(gson.toJson(rebased), JsonObject.class);
         });
     }
 
     private void restoreCollaborationDocument(JsonObject document) {
-        ScoreboardDefinition incoming = ReSyncCollaborationDocuments.toScoreboard(document);
+        ScoreboardDefinition incoming = ReSyncCollaborationDocuments.to(document, ScoreboardDefinition.class);
         ReSyncCollaborationDocuments.copy(scoreboard, incoming);
         buildInspectorPanel();
         refreshPreviewText();
@@ -112,6 +205,7 @@ public class ScoreboardDesignerScreen extends StudioScreen implements DesktopWin
 
     private void captureHistory() {
         if (!applyingCollaboration) {
+            scoreboardDraft.markMutation();
             history.capture();
         }
     }
@@ -136,6 +230,11 @@ public class ScoreboardDesignerScreen extends StudioScreen implements DesktopWin
         this.animateTopHeader = animateTopHeader;
         this.autoResizeContainers = false;
         ensureDefaults();
+        this.scoreboardDraft = new VersionedEditorDraft<>(this.scoreboard, FlowSerializer::serializeScoreboard, FlowSerializer::deserializeScoreboard,
+            this::rebindScoreboard, this::failSnapshot, () -> new Notification("Editor Busy", "Try Again", Notification.Type.WARN));
+        this.historyRebase = new HistoryRebaseCoordinator<>(history,
+            () -> serverId + ":" + (scoreboard != null ? scoreboard.getId() : ""), () -> collaborationLifecycle,
+            () -> new Notification("Editor Busy", "Try Again", Notification.Type.WARN));
     }
 
     public String getDesktopAppId() {
@@ -224,6 +323,9 @@ public class ScoreboardDesignerScreen extends StudioScreen implements DesktopWin
             return;
         }
         closeCompleted = true;
+        collaborationLifecycle++;
+        historyRebase.close();
+        scoreboardDraft.close();
         if (studioCloseHandler != null) {
             if (!studioCloseNotified) {
                 studioCloseNotified = true;
@@ -233,8 +335,8 @@ public class ScoreboardDesignerScreen extends StudioScreen implements DesktopWin
         }
         super.close();
         if (parent != null) {
-            if (ApplicationHostRegistry.current() != null) {
-                ApplicationHostRegistry.current().openParentScreen(this, parent);
+            if (RemotelyClient.INSTANCE != null && RemotelyClient.INSTANCE.getHost() != null) {
+                RemotelyClient.INSTANCE.getHost().openParentScreen(this, parent);
             } else if (parent instanceof Screen screen) {
                 ScreenManager.getInstance().setScreen(screen);
             }
@@ -242,9 +344,17 @@ public class ScoreboardDesignerScreen extends StudioScreen implements DesktopWin
     }
 
     @Override
+    public void removed() {
+        collaborationLifecycle++;
+        historyRebase.close();
+        scoreboardDraft.close();
+        super.removed();
+    }
+
+    @Override
     public void renderHandler(IDrawContext context, int mouseX, int mouseY, float delta) {
         super.renderHandler(context, mouseX, mouseY, delta);
-        if (inspectorStudioPanel != null && inspectorPanel != null && inspectorPanel.isVisible()) {
+        if (inspectorStudioPanel != null && inspectorPanel != null && (inspectorPanel.isVisible() || inspectorPanel.getAnimatedWidth() > 1f)) {
             renderStudioPanel(inspectorStudioPanel, context, mouseX, mouseY, delta);
         }
     }
@@ -255,7 +365,14 @@ public class ScoreboardDesignerScreen extends StudioScreen implements DesktopWin
     }
 
     @Override
+    public boolean isStudioCloseAnimationFinished() {
+        return closeCompleted;
+    }
+
+    @Override
     public void render(IDrawContext context, int mouseX, int mouseY, float delta) {
+        historyRebase.drain();
+        scoreboardDraft.drain();
         updateTopHeaderAnimation();
         updateLayout();
         updateCloseAnimation();
@@ -308,6 +425,9 @@ public class ScoreboardDesignerScreen extends StudioScreen implements DesktopWin
 
     @Override
     public boolean keyPressed(ReKeyEvent event) {
+        if (handleStudioSaveShortcut(event)) {
+            return true;
+        }
         if (inspectorPanel != null && inspectorPanel.keyPressed(event.retarget(inspectorPanel))) {
             return true;
         }
@@ -332,15 +452,20 @@ public class ScoreboardDesignerScreen extends StudioScreen implements DesktopWin
 
     private void buildHeader() {
         header().reset();
-        header().addRight("close.png", this::close, "Back");
+        if (shouldShowBackButton()) {
+            header().addRight("close.png", this::close, "Back");
+        }
         header().addRight("save.png", this::saveScoreboard, "Save Scoreboard");
         header().build();
+    }
+
+    private boolean shouldShowBackButton() {
+        return !desktopMode || shouldForceSuperScreen();
     }
 
     private void buildInspectorPanel() {
         if (inspectorPanel == null) {
             inspectorStudioPanel = rightStudioPanel("scoreboard_inspector")
-                .collapsible("Scoreboard Inspector")
                 .show();
             inspectorPanel = inspectorStudioPanel.sidePanel();
         }
@@ -365,15 +490,7 @@ public class ScoreboardDesignerScreen extends StudioScreen implements DesktopWin
             .placeholder("Title")
             .forcePlaceholder(false)
             .size(rowWidth, ReSyncStudioPanelState.FIELD_HEIGHT)
-            .onChange(text -> {
-                String value = text != null ? text : "";
-                if (Objects.equals(scoreboard.getTitle(), value)) {
-                    return;
-                }
-                captureHistory();
-                scoreboard.setTitle(value);
-                refreshPreviewText();
-            })
+            .onChange(this::updateTitle)
             .build();
         ReSyncStudioPanelState.disableEntrance(titleInput);
         container.addWidget(panelState.row("Title", titleInput, rowWidth, scoreboardPanelDescription("Title")));
@@ -495,8 +612,10 @@ public class ScoreboardDesignerScreen extends StudioScreen implements DesktopWin
 
     private int textWidth(String text) {
         String clean = stripSectionCodes(text);
-        ITextRenderer textRenderer = ScreenManager.getInstance().runtime().textRenderer();
-        return textRenderer == null ? clean.length() * 6 : textRenderer.getWidth(clean);
+        if (RemotelyClient.tr != null) {
+            return RemotelyClient.tr.getWidth(clean);
+        }
+        return clean.length() * 6;
     }
 
     private String stripSectionCodes(String text) {
@@ -587,6 +706,10 @@ public class ScoreboardDesignerScreen extends StudioScreen implements DesktopWin
     }
 
     private void updateObjective(String value) {
+        String source = value != null ? value : "";
+        if (scoreboardDraft.defer(() -> updateObjective(source))) {
+            return;
+        }
         String normalized = value != null ? value.trim() : "";
         if (normalized.length() > 16) {
             normalized = normalized.substring(0, 16);
@@ -603,9 +726,13 @@ public class ScoreboardDesignerScreen extends StudioScreen implements DesktopWin
     }
 
     private void updateLines(String value) {
+        String source = value != null ? value : "";
+        if (scoreboardDraft.defer(() -> updateLines(source))) {
+            return;
+        }
         List<String> lines = new ArrayList<>();
-        if (value != null) {
-            String normalized = value.replace("\r", "");
+        if (!source.isEmpty()) {
+            String normalized = source.replace("\r", "");
             if (!normalized.isEmpty()) {
                 Collections.addAll(lines, normalized.split("\n", -1));
             }
@@ -615,6 +742,19 @@ public class ScoreboardDesignerScreen extends StudioScreen implements DesktopWin
         }
         captureHistory();
         scoreboard.setLines(lines);
+        refreshPreviewText();
+    }
+
+    private void updateTitle(String value) {
+        String next = value != null ? value : "";
+        if (scoreboardDraft.defer(() -> updateTitle(next))) {
+            return;
+        }
+        if (Objects.equals(scoreboard.getTitle(), next)) {
+            return;
+        }
+        captureHistory();
+        scoreboard.setTitle(next);
         refreshPreviewText();
     }
 
@@ -668,12 +808,69 @@ public class ScoreboardDesignerScreen extends StudioScreen implements DesktopWin
         FlowManager flowManager = FlowManager.getInstance();
         String id = scoreboard.getId();
         String title = scoreboard.getTitle() != null ? scoreboard.getTitle() : id;
-        DesignerSaveNotifications.start(serverId, ReSyncResourceType.SCOREBOARD, id, title);
+        DesignerSaveNotifications.SaveTicket ticket = DesignerSaveNotifications.startExact(serverId, ReSyncResourceType.SCOREBOARD, id, title);
+        observeSave(ticket);
         if (flowManager != null && serverId != null) {
-            flowManager.saveScoreboard(serverId, scoreboard);
+            if (!scoreboardDraft.capture(ReSyncResourceType.SCOREBOARD.typeId(), id, ticket,
+                snapshot -> flowManager.saveScoreboard(serverId, snapshot.serialize(FlowSerializer::deserializeScoreboard), ticket))) {
+                DesignerSaveNotifications.failExact(ticket, "Save Snapshot Rejected");
+            }
         } else {
-            DesignerSaveNotifications.failResource(serverId, ReSyncResourceType.SCOREBOARD, id, "ReSync Offline");
+            DesignerSaveNotifications.failExact(ticket, "ReSync Offline");
         }
+    }
+
+    @Override
+    public boolean requestStudioSave() {
+        saveScoreboard();
+        return true;
+    }
+
+    private void rebindScoreboard(ScoreboardDefinition previous, ScoreboardDefinition replacement) {
+        ScoreboardDefinition currentScoreboard = scoreboard;
+        String currentPreviewTitle = previewTitle;
+        List<String> currentPreviewLines = previewLines;
+        int currentPreviewRequestRevision = previewRequestRevision;
+        try {
+            scoreboard = replacement;
+            buildInspectorPanel();
+            refreshPreviewText();
+        } catch (RuntimeException | Error exception) {
+            scoreboard = currentScoreboard;
+            previewTitle = currentPreviewTitle;
+            previewLines = currentPreviewLines;
+            previewRequestRevision = currentPreviewRequestRevision >= Integer.MAX_VALUE - 2
+                ? 0 : currentPreviewRequestRevision + 2;
+            throw exception;
+        }
+    }
+
+    private void failSnapshot(VersionedEditorDraft.Failure failure) {
+        if (failure.stage() == VersionedEditorDraft.Stage.REBASE) {
+            new Notification("Save Refresh Failed", "Save Paused", Notification.Type.ERROR);
+            return;
+        }
+        if (failure.request() instanceof DesignerSaveNotifications.SaveTicket ticket) {
+            DesignerSaveNotifications.failExact(ticket, "Save Snapshot Failed");
+        }
+    }
+
+    private void observeSave(DesignerSaveNotifications.SaveTicket ticket) {
+        if (ticket == null) {
+            return;
+        }
+        ticket.whenFinished((saved, current) -> ScreenManager.getInstance().execute(() -> {
+            if (!saved || !current) {
+                scoreboardDraft.discard(ticket);
+                return;
+            }
+            FlowManager manager = FlowManager.getInstance();
+            FlowManager.ResourceReadLease lease = manager != null
+                ? manager.snapshotResource(serverId, ReSyncResourceType.SCOREBOARD.typeId(), ticket.id()) : null;
+            if (lease == null || !scoreboardDraft.acknowledge(ticket, lease::materialize)) {
+                scoreboardDraft.discard(ticket);
+            }
+        }));
     }
 
     private void ensureDefaults() {

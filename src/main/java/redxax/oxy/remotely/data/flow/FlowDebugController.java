@@ -1,7 +1,7 @@
 package redxax.oxy.remotely.data.flow;
 
 import redxax.oxy.remotely.util.BrowserSafeState;
-
+import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -9,7 +9,6 @@ import redxax.oxy.remotely.flow.data.FlowGraph;
 import redxax.oxy.remotely.flow.ui.FlowGraphDesignerScreen;
 import restudio.rescreen.ui.core.Screen;
 import restudio.rescreen.ui.core.ScreenManager;
-import restudio.rescreen.util.JsonTreeParser;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -17,9 +16,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.Map;
 
 public class FlowDebugController {
     private final FlowManager flowManager;
+    private final Gson gson = new Gson();
     private final Map<String, Set<String>> breakpoints = BrowserSafeState.map();
     private final List<DebugRecord> recentRecords = new ArrayList<>();
     private final Map<String, DebugSession> sessions = BrowserSafeState.map();
@@ -63,7 +64,9 @@ public class FlowDebugController {
     }
 
     public void clear(String serverId) {
-        recentRecords.clear();
+        synchronized (recentRecords) {
+            recentRecords.clear();
+        }
         send(serverId, "clear", Map.of());
         notifyEditor(serverId);
     }
@@ -170,8 +173,7 @@ public class FlowDebugController {
     public void applyTraceSnapshot(String serverId, String json) {
         synchronized (recentRecords) {
             recentRecords.clear();
-            JsonElement parsed = JsonTreeParser.parse(json);
-            JsonArray array = parsed.isJsonArray() ? parsed.getAsJsonArray() : null;
+            JsonArray array = gson.fromJson(json, JsonArray.class);
             if (array != null) {
                 for (JsonElement element : array) {
                     DebugRecord record = parseRecord(element);
@@ -186,7 +188,7 @@ public class FlowDebugController {
     }
 
     public void applyTraceEvent(String serverId, String json) {
-        DebugRecord record = parseRecord(JsonTreeParser.parse(json));
+        DebugRecord record = parseRecord(gson.fromJson(json, JsonElement.class));
         if (record == null) {
             return;
         }
@@ -201,8 +203,7 @@ public class FlowDebugController {
     }
 
     public void applyDebugSnapshot(String serverId, String json) {
-            JsonElement parsed = JsonTreeParser.parse(json);
-        JsonObject root = parsed.isJsonObject() ? parsed.getAsJsonObject() : null;
+        JsonObject root = gson.fromJson(json, JsonObject.class);
         if (root == null) {
             return;
         }

@@ -1,39 +1,39 @@
 package redxax.oxy.remotely.flow.ui.studio;
 
-import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
+import redxax.oxy.remotely.util.BrowserWork;
+
+import redxax.oxy.remotely.util.BrowserSafeState;
+import redxax.oxy.remotely.util.TaskIdentities;
+import com.google.gson.Gson;
 import com.google.gson.JsonObject;
+import redxax.oxy.remotely.data.flow.AutomationDefinitionDraft;
 import redxax.oxy.remotely.data.flow.DesignerSaveNotifications;
 import redxax.oxy.remotely.data.flow.FlowManager;
 import redxax.oxy.remotely.data.flow.OptionCatalogLoader;
 import redxax.oxy.remotely.data.flow.ReSyncCollaborationClient;
 import redxax.oxy.remotely.data.flow.ReSyncFlowClient;
+import redxax.oxy.remotely.data.flow.ReSyncLifecycleDiagnostics;
 import redxax.oxy.remotely.data.flow.ReSyncResourceType;
 import redxax.oxy.remotely.flow.data.CustomContentGraphAdapter;
 import redxax.oxy.remotely.flow.data.CustomContentDefinition;
 import redxax.oxy.remotely.flow.data.FlowGraph;
 import redxax.oxy.remotely.flow.data.FlowSerializer;
-import redxax.oxy.remotely.flow.data.FlowJson;
-import redxax.oxy.remotely.flow.data.GuiDefinition;
 import redxax.oxy.remotely.flow.data.ReSyncProjectMetadata;
+import redxax.oxy.remotely.flow.ui.AsyncTaskWorker;
 import redxax.oxy.remotely.flow.data.ReSyncResourceDragPayload;
-import redxax.oxy.remotely.flow.data.ScoreboardDefinition;
-import redxax.oxy.remotely.flow.data.TabDefinition;
-import redxax.oxy.remotely.flow.data.TriggerBinding;
 import redxax.oxy.remotely.flow.ui.ContentDesignerScreen;
 import redxax.oxy.remotely.flow.ui.OptionCatalogSelector;
 import redxax.oxy.remotely.ui.collaboration.CollaborationVisuals;
 import redxax.oxy.remotely.worldgen.WorldGenManager;
 import redxax.oxy.remotely.worldgen.data.WorldGenProject;
-import redxax.oxy.remotely.worldgen.data.WorldGenSerializer;
 import restudio.rebase.backend.RemoteFileSystemProvider;
 import restudio.rebase.backend.RemotePath;
 import restudio.rebase.backend.TransferSink;
 import restudio.rebase.backend.TransferSource;
-import restudio.rescreen.platform.Async;
 import restudio.rebase.ui.screens.editor.CompactWorkspaceBrowserWidget;
 import restudio.rebase.ui.screens.editor.WorkspaceTreeExplorer;
 import restudio.rebase.ui.widgets.FileEntryWidget;
+import restudio.rescreen.platform.Async;
 import restudio.rescreen.platform.IDrawContext;
 import restudio.rescreen.platform.input.ReKey;
 import restudio.rescreen.platform.input.ReKeyEvent;
@@ -60,7 +60,7 @@ import restudio.rescreen.ui.widgets.TextInputWidget;
 import restudio.rescreen.util.Notification;
 import restudio.rescreen.util.Identifier;
 
-import java.time.Duration;
+import java.lang.ref.WeakReference;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -75,13 +75,18 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.Map;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
 
 public class ReSyncContentBrowserWidget extends AnimatedWidget {
     private static final int BROWSER_HISTORY_LIMIT = 30;
-    private static final Duration CONTENT_CATALOG_READY_TIMEOUT = Duration.ofSeconds(5);
+    private static final AsyncTaskWorker BROWSER_HISTORY = new AsyncTaskWorker(1, 1, 16);
     private static final OptionCatalogLoader.Profile CONTENT_CATALOGS = OptionCatalogLoader.profile(
         "server:custom_content:provider", "server:minecraft:material");
+    private final Gson gson = new Gson();
     private final StudioScreen screen;
     private static final int STUDIO_CONTENT_BROWSER_DEFAULT_WIDTH = 190;
     private static final int STUDIO_CONTENT_BROWSER_MIN_WIDTH = 150;
@@ -90,7 +95,8 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
     public static final int STUDIO_CONTENT_BROWSER_GAP = 4;
     private static final int STUDIO_CONTENT_BROWSER_ENTRY_HEIGHT = 16;
     private static final int STUDIO_CONTENT_BROWSER_TOOL_SIZE = 16;
-    private final RemotePath projectRoot = RemotePath.of("ReSync");
+    private static final int MAX_REBUILD_RETRIES = 2;
+    private final RemotePath projectRoot;
     private String currentFolder = "";
     private final Deque<String> backHistory = new ArrayDeque<>();
     private final Deque<String> forwardHistory = new ArrayDeque<>();
@@ -100,12 +106,14 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
     private BrowserClipboard clipboard;
     private final Deque<BrowserHistoryEntry> undoHistory = new ArrayDeque<>();
     private final Deque<BrowserHistoryEntry> redoHistory = new ArrayDeque<>();
+    private final Map<BrowserHistoryEntry, Set<String>> settledHistoryDeleteKeys = new HashMap<>();
+    private boolean browserHistoryReplayPending;
     private int lastMouseX;
     private int lastMouseY;
     private final Container treeContainer;
     private final TextInputWidget nameInput;
     private final TextInputWidget searchInput;
-    private final ReSyncProjectTreeProvider treeProvider;
+    private ReSyncProjectTreeProvider treeProvider;
     private final WorkspaceTreeExplorer treeExplorer;
     private final CompactWorkspaceBrowserWidget browser;
     private final SidePanel sidePanel;
@@ -116,16 +124,331 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
     private ItemSelectorWidget createSelector;
     private ItemSelectorWidget createContentSelector;
     private AssetBrowserSnapshot lastAssetBrowserSnapshot;
-    private final Map<String, String> resourceIconPaths = new HashMap<>();
+    private final RebuildPublicationGate rebuildPublicationGate = new RebuildPublicationGate();
+    private final LatestRequestDrain<BrowserRebuildRequest> rebuildDrain;
+    private final CreationVisibilityGate<PendingCreatedResource> creationVisibilityGate = new CreationVisibilityGate<>();
+    private long lastProjectMetadataStamp = Long.MIN_VALUE;
+    private long lastPublishedBrowserGeneration = -1L;
+    private volatile long scheduledProjectMetadataStamp = Long.MIN_VALUE;
+    private volatile long scheduledDecorationRevision = Long.MIN_VALUE;
+    private volatile long failedProjectMetadataStamp = Long.MIN_VALUE;
+    private volatile long failedDecorationRevision = Long.MIN_VALUE;
+    private long lastCollaborationRevision;
+    private long collaborationDecorationRevision;
+    private Map<String, String> resourceIconPaths = Map.of();
     private final Map<String, CollaborationChatHighlight> collaborationChatHighlights = new HashMap<>();
     private final Map<String, BrowserAvatarWidget> collaborationAvatars = new HashMap<>();
     private boolean treeInitialized;
+    private List<RemotePath> expandedTreePaths = List.of();
+    private long expandedTreeRevision;
+    private final BrowserLayoutGate layoutGate = new BrowserLayoutGate();
+    private BrowserSelectionState pendingSelectionRestore = BrowserSelectionState.empty();
     private boolean temporarilyHidden;
     private boolean shortcutFocused;
-    private Async<ReSyncFlowClient.ReadinessState> catalogReadiness;
-    private long catalogPreloadGeneration;
+    private volatile boolean disposed;
+    private final Set<String> pendingDeleteKeys = BrowserSafeState.set();
+    private final Set<String> pendingDeleteFolders = BrowserSafeState.set();
 
-    private record AssetBrowserSnapshot(List<String> folders, List<String> resources, String collaboration) {
+    private record AssetBrowserSnapshot(List<String> folders, List<String> resources, long collaborationRevision) {
+    }
+
+    static record BrowserFolder(String path, String parentPath, String name, int sortOrder, boolean collapsed) {
+        BrowserFolder {
+            path = ReSyncProjectMetadata.normalizePath(path);
+            parentPath = ReSyncProjectMetadata.normalizePath(parentPath);
+            name = name != null ? name : "";
+        }
+
+        private ReSyncProjectMetadata.FolderEntry materialize() {
+            ReSyncProjectMetadata.FolderEntry folder = new ReSyncProjectMetadata.FolderEntry();
+            folder.setPath(path);
+            folder.setParentPath(parentPath);
+            folder.setName(name);
+            folder.setSortOrder(sortOrder);
+            folder.setCollapsed(collapsed);
+            return folder;
+        }
+    }
+
+    static record BrowserResource(String type, String id, String displayName, String path, int sortOrder,
+                                  String iconPath, boolean enabled) {
+        BrowserResource {
+            type = type != null ? type : "";
+            id = id != null ? id : "";
+            displayName = displayName != null ? displayName : "";
+            path = ReSyncProjectMetadata.normalizePath(path);
+            iconPath = iconPath != null ? iconPath : "";
+        }
+
+        private String key() {
+            return resourceKey(type, id);
+        }
+
+        private ReSyncProjectMetadata.ResourceEntry materialize() {
+            ReSyncProjectMetadata.ResourceEntry resource = new ReSyncProjectMetadata.ResourceEntry();
+            resource.setType(type);
+            resource.setId(id);
+            resource.setDisplayName(displayName);
+            resource.setPath(path);
+            resource.setSortOrder(sortOrder);
+            return resource;
+        }
+    }
+
+    private record PreparedBrowserRebuild(long generation, long metadataStamp, RemotePath revealPath,
+                                          ReSyncProjectTreeProvider provider, List<RemotePath> expandedPaths,
+                                          boolean expandAll, Map<String, String> iconPaths,
+                                          AssetBrowserSnapshot snapshot, long expandedTreeRevision,
+                                          int folderCount, int resourceCount, int attempt,
+                                          long startedAtNanos) {
+    }
+
+    private record BrowserRebuildRequest(long generation, long metadataStamp, long decorationRevision,
+                                         RemotePath revealPath, int attempt, boolean expandAll,
+                                         List<RemotePath> expandedPaths, long expandedTreeRevision,
+                                         long startedAtNanos) {
+        private BrowserRebuildRequest {
+            expandedPaths = List.copyOf(expandedPaths);
+        }
+    }
+
+    private record PendingCreatedResource(ReSyncResourceCreator.Result result, String targetFolder,
+                                          long startedAtNanos, String resourceKey, RemotePath folderPath,
+                                          RemotePath revealPath, OneShotCreationPublication publication) {
+        private String pendingKey() {
+            return resourceKey != null ? resourceKey : "folder\u0000" + folderPath;
+        }
+
+        private boolean visibleIn(ReSyncProjectTreeProvider provider) {
+            return resourceKey != null ? provider.containsResourceKey(resourceKey)
+                : provider.containsFolderPath(folderPath);
+        }
+    }
+
+    static final class OneShotCreationPublication {
+        private boolean openAttempted;
+        private boolean openCompleted;
+        private boolean diagnosticAttempted;
+
+        synchronized void publish(Runnable opener, Runnable diagnostic) {
+            Objects.requireNonNull(opener, "Creation opener is required");
+            Objects.requireNonNull(diagnostic, "Creation diagnostic is required");
+            if (!openAttempted) {
+                openAttempted = true;
+                opener.run();
+                openCompleted = true;
+            }
+            if (!openCompleted || diagnosticAttempted) {
+                return;
+            }
+            diagnosticAttempted = true;
+            diagnostic.run();
+        }
+
+        synchronized boolean openCompleted() {
+            return openCompleted;
+        }
+    }
+
+    static record BrowserSelectionState(Set<String> resourceKeys, Set<String> folderPaths, boolean projectRoot,
+                                        float scrollOffset) {
+        BrowserSelectionState {
+            resourceKeys = resourceKeys != null ? Set.copyOf(resourceKeys) : Set.of();
+            folderPaths = folderPaths != null ? folderPaths.stream().map(ReSyncProjectMetadata::normalizePath)
+                .collect(Collectors.toUnmodifiableSet()) : Set.of();
+        }
+
+        static BrowserSelectionState empty() {
+            return new BrowserSelectionState(Set.of(), Set.of(), false, 0.0F);
+        }
+
+        int size() {
+            return resourceKeys.size() + folderPaths.size() + (projectRoot ? 1 : 0);
+        }
+    }
+
+    static final class BrowserLayoutGate {
+        private int x = Integer.MIN_VALUE;
+        private int y = Integer.MIN_VALUE;
+        private int width = Integer.MIN_VALUE;
+        private int height = Integer.MIN_VALUE;
+        private boolean dirty;
+
+        boolean update(int x, int y, int width, int height) {
+            if (this.x == x && this.y == y && this.width == width && this.height == height) {
+                return false;
+            }
+            this.x = x;
+            this.y = y;
+            this.width = width;
+            this.height = height;
+            dirty = true;
+            return true;
+        }
+
+        void invalidate() {
+            dirty = true;
+        }
+
+        boolean drain() {
+            if (!dirty) {
+                return false;
+            }
+            dirty = false;
+            return true;
+        }
+    }
+
+    static final class RebuildPublicationGate {
+        private long generation;
+
+        synchronized long next() {
+            return ++generation;
+        }
+
+        synchronized boolean current(long candidate) {
+            return candidate == generation;
+        }
+
+        synchronized boolean publish(long candidate, Runnable publication) {
+            if (!current(candidate)) {
+                return false;
+            }
+            publication.run();
+            return true;
+        }
+
+        synchronized void invalidate() {
+            generation++;
+        }
+    }
+
+    static final class LatestRequestDrain<T> {
+        private final Consumer<Runnable> executor;
+        private final Consumer<T> preparation;
+        private final BiConsumer<T, RuntimeException> failure;
+        private T pending;
+        private boolean draining;
+
+        LatestRequestDrain(Consumer<Runnable> executor, Consumer<T> preparation,
+                           BiConsumer<T, RuntimeException> failure) {
+            this.executor = Objects.requireNonNull(executor, "Rebuild executor is required");
+            this.preparation = Objects.requireNonNull(preparation, "Rebuild preparation is required");
+            this.failure = Objects.requireNonNull(failure, "Rebuild failure handler is required");
+        }
+
+        void submit(T request) {
+            boolean dispatch;
+            synchronized (this) {
+                pending = Objects.requireNonNull(request, "Rebuild request is required");
+                dispatch = !draining;
+                if (dispatch) {
+                    draining = true;
+                }
+            }
+            if (!dispatch) {
+                return;
+            }
+            try {
+                executor.accept(this::drain);
+            } catch (RuntimeException exception) {
+                T rejected;
+                synchronized (this) {
+                    rejected = pending;
+                    pending = null;
+                    draining = false;
+                }
+                if (rejected != null) {
+                    failure.accept(rejected, exception);
+                }
+            }
+        }
+
+        private void drain() {
+            while (true) {
+                T request;
+                synchronized (this) {
+                    request = pending;
+                    pending = null;
+                    if (request == null) {
+                        draining = false;
+                        return;
+                    }
+                }
+                try {
+                    preparation.accept(request);
+                } catch (RuntimeException exception) {
+                    try {
+                        failure.accept(request, exception);
+                    } catch (RuntimeException ignored) {
+                    }
+                }
+            }
+        }
+
+        synchronized boolean quiescent() {
+            return !draining && pending == null;
+        }
+
+        synchronized int pendingCount() {
+            return pending == null ? 0 : 1;
+        }
+
+        synchronized void clear() {
+            pending = null;
+        }
+    }
+
+    static final class CreationVisibilityGate<T> {
+        private final Map<String, T> pending = new LinkedHashMap<>();
+        private boolean closed;
+
+        private record Delivery<T>(String key, T value) {
+        }
+
+        synchronized boolean await(String key, T value) {
+            Objects.requireNonNull(key, "Creation resource key is required");
+            Objects.requireNonNull(value, "Pending creation is required");
+            if (closed) {
+                return false;
+            }
+            pending.put(key, value);
+            return true;
+        }
+
+        synchronized void publish(Predicate<T> visible, Consumer<T> publisher) {
+            Objects.requireNonNull(visible, "Published provider lookup is required");
+            Objects.requireNonNull(publisher, "Creation publisher is required");
+            if (closed) {
+                return;
+            }
+            List<Delivery<T>> deliveries = pending.entrySet().stream()
+                .map(entry -> new Delivery<>(entry.getKey(), entry.getValue()))
+                .toList();
+            for (Delivery<T> delivery : deliveries) {
+                T value = pending.get(delivery.key());
+                if (value != delivery.value() || !visible.test(value)) {
+                    continue;
+                }
+                publisher.accept(value);
+                acknowledge(delivery.key(), value);
+            }
+        }
+
+        private void acknowledge(String key, T value) {
+            if (pending.get(key) == value) {
+                pending.remove(key);
+            }
+        }
+
+        synchronized int pendingCount() {
+            return pending.size();
+        }
+
+        synchronized void close() {
+            closed = true;
+            pending.clear();
+        }
     }
 
     private record CollaborationChatHighlight(int color, long expiresAt) {
@@ -212,10 +535,24 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
     private record ResourceSnapshot(String type, String id, String payload, String context) {
     }
 
-    private record BrowserEditStart(String label, String metadata, Map<String, ResourceSnapshot> resources) {
+    private record BrowserEditStart(String label, FlowManager.ResourceReadLease metadata, Map<String, FlowManager.ResourceReadLease> resources) {
+    }
+
+    private record WorldGenCopyRequest(String serverId, String sourceId, String targetId, String destination,
+                                       WorldGenManager.WorldGenMetadataIntent metadataIntent, BrowserEditStart edit) {
     }
 
     private record BrowserHistoryEntry(String label, String beforeMetadata, String afterMetadata, Map<String, ResourceSnapshot> beforeResources, Map<String, ResourceSnapshot> afterResources, Set<String> affectedKeys) {
+    }
+
+    private record BrowserStateResult(boolean restored, Set<String> deletedKeys) {
+        private BrowserStateResult {
+            deletedKeys = Set.copyOf(deletedKeys);
+        }
+
+        private static BrowserStateResult failed() {
+            return new BrowserStateResult(false, Set.of());
+        }
     }
 
     private static class CommandBindingContext {
@@ -227,6 +564,9 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
     public ReSyncContentBrowserWidget(StudioScreen screen, int x, int y, int width, int height) {
         super(x, y, width, height, "");
         this.screen = screen;
+        this.projectRoot = RemotePath.of("ReSync");
+        rebuildDrain = new LatestRequestDrain<>(BROWSER_HISTORY::execute, this::prepareRebuild,
+            this::handleRebuildFailure);
         animateElevation = false;
         entranceAnimationEnabled = false;
         enableHoverColors = false;
@@ -234,7 +574,7 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             .placeholder("Selected")
             .size(110, 18)
             .build();
-        treeProvider = new ReSyncProjectTreeProvider();
+        treeProvider = ReSyncProjectTreeProvider.empty(projectRoot);
         createButton = new SquareButtonWidget.Builder()
             .imagePath("add.png")
             .size(STUDIO_CONTENT_BROWSER_TOOL_SIZE, STUDIO_CONTENT_BROWSER_TOOL_SIZE)
@@ -260,6 +600,12 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             .onClick(screen::updateReSyncFromContentBrowser)
             .build();
         updateButton.setVisible(false);
+        SquareButtonWidget switchBrowser = new SquareButtonWidget.Builder()
+            .imagePath("resources.png")
+            .size(STUDIO_CONTENT_BROWSER_TOOL_SIZE, STUDIO_CONTENT_BROWSER_TOOL_SIZE)
+            .hint("Variables")
+            .onClick(() -> screen.openDefinitions(AutomationDefinitionDraft.VARIABLE))
+            .build();
         browser = new CompactWorkspaceBrowserWidget(
             screen,
             "studioContentBrowser",
@@ -273,12 +619,12 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             false,
             SidePanel.Anchor.LEFT,
             updateButton,
+            switchBrowser,
             permissionsButton,
             marketplaceButton,
             createButton
         );
         sidePanel = browser.sidePanel();
-        sidePanel.collapsible("Content Browser");
         searchInput = browser.searchInput();
         treeContainer = browser.treeContainer();
         treeExplorer = browser.treeExplorer();
@@ -288,65 +634,16 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         treeExplorer.setOnNodeRightClick(this::rightClickTreeNode);
         treeExplorer.setOnNodeDragStarted(this::startResourceDrag);
         treeExplorer.setOnNodePrepared(this::prepareTreeNode);
-        sidePanel.show();
-        deferCatalogPreload();
-        updateContainers();
-        rebuild();
-    }
-
-    private void deferCatalogPreload() {
-        long generation = ++catalogPreloadGeneration;
-        Async<ReSyncFlowClient.ReadinessState> previous = catalogReadiness;
-        if (previous != null && !previous.isDone()) {
-            previous.cancel();
-        }
-        catalogReadiness = null;
-        FlowManager manager = FlowManager.getInstance();
-        String serverId = screen.studioServerId();
-        if (manager == null || serverId == null || serverId.isBlank()) {
-            return;
-        }
-        ReSyncFlowClient client = manager.existingFlowClient(serverId);
-        if (client != null && !client.isIncompatible()) {
-            CONTENT_CATALOGS.preload(serverId);
-            return;
-        }
-        Async<ReSyncFlowClient.ReadinessState> readiness = client != null
-            ? client.awaitReady(CONTENT_CATALOG_READY_TIMEOUT)
-            : manager.awaitFlowClientConnected(serverId, false);
-        catalogReadiness = readiness;
-        readiness.whenComplete((state, failure) -> {
-            if (!isCatalogPreloadCurrent(generation, serverId) || failure != null
-                || state != ReSyncFlowClient.ReadinessState.READY) {
-                return;
-            }
-            preloadCatalogs(generation, serverId);
+        treeExplorer.setOnExpandedStateChanged(paths -> {
+            expandedTreePaths = List.copyOf(paths);
+            expandedTreeRevision++;
         });
-    }
-
-    private void preloadCatalogs(long generation, String serverId) {
-        if (!isCatalogPreloadCurrent(generation, serverId)) {
-            return;
-        }
+        sidePanel.show();
+        CONTENT_CATALOGS.preload(screen.studioServerId());
+        layoutGate.update(getX(), getY(), getWidth(), getHeight());
+        layoutContainersIfDirty();
         FlowManager manager = FlowManager.getInstance();
-        ReSyncFlowClient client = manager == null ? null : manager.existingFlowClient(serverId);
-        if (client == null || !client.isReady()) {
-            return;
-        }
-        CONTENT_CATALOGS.preload(serverId);
-    }
-
-    private boolean isCatalogPreloadCurrent(long generation, String serverId) {
-        return generation == catalogPreloadGeneration && Objects.equals(serverId, screen.studioServerId());
-    }
-
-    public void cancelCatalogPreload() {
-        ++catalogPreloadGeneration;
-        Async<ReSyncFlowClient.ReadinessState> readiness = catalogReadiness;
-        catalogReadiness = null;
-        if (readiness != null && !readiness.isDone()) {
-            readiness.cancel();
-        }
+        scheduleRebuild(manager != null ? manager.projectMetadataStamp(screen.studioServerId()) : Long.MIN_VALUE);
     }
 
     @Override
@@ -364,10 +661,14 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
     }
 
     public int visibleLayoutWidth() {
-        if (temporarilyHidden || sidePanel == null) {
+        if (temporarilyHidden || sidePanel == null || !sidePanel.isVisible()) {
             return 0;
         }
-        return sidePanel.layoutWidth(8);
+        int renderedWidth = Math.max(sidePanel.getDesiredWidth(), (int) Math.ceil(sidePanel.getAnimatedWidth()));
+        if (sidePanel.container() != null) {
+            renderedWidth = Math.max(renderedWidth, sidePanel.container().getWidth());
+        }
+        return renderedWidth + 8;
     }
 
     public void updateShortcutFocus(ReMouseEvent event) {
@@ -388,6 +689,10 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             return false;
         }
         boolean handled = sidePanel.mouseClicked(event.retarget(sidePanel, event.x(), event.y()));
+        if (handled) {
+            pendingSelectionRestore = captureTreeSelection();
+            applySelection(pendingSelectionRestore);
+        }
         return handled || event.button() == ReMouseButton.RIGHT && sidePanel.isMouseOver(event.x(), event.y());
     }
 
@@ -396,10 +701,12 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             return false;
         }
         if (button == 3) {
-            return navigateHistoryBack();
+            navigateHistoryBack();
+            return true;
         }
         if (button == 4) {
-            return navigateHistoryForward();
+            navigateHistoryForward();
+            return true;
         }
         return false;
     }
@@ -409,10 +716,12 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             return false;
         }
         if (event.button() == ReMouseButton.BACK) {
-            return navigateHistoryBack();
+            navigateHistoryBack();
+            return true;
         }
         if (event.button() == ReMouseButton.FORWARD) {
-            return navigateHistoryForward();
+            navigateHistoryForward();
+            return true;
         }
         return handleHistoryMouseButton(event.nativeButton());
     }
@@ -422,10 +731,12 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             return false;
         }
         if (button == ReMouseButton.BACK) {
-            return navigateHistoryBack();
+            navigateHistoryBack();
+            return true;
         }
         if (button == ReMouseButton.FORWARD) {
-            return navigateHistoryForward();
+            navigateHistoryForward();
+            return true;
         }
         return false;
     }
@@ -436,7 +747,8 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             return false;
         }
         if (sidePanel != null && sidePanel.mouseReleased(event.retarget(sidePanel, event.x(), event.y()))) {
-            updateContainers();
+            layoutGate.invalidate();
+            layoutContainersIfDirty();
             return true;
         }
         return false;
@@ -448,7 +760,8 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             return false;
         }
         if (sidePanel != null && sidePanel.mouseDragged(event.retarget(sidePanel, event.x(), event.y(), event.deltaX(), event.deltaY()))) {
-            updateContainers();
+            layoutGate.invalidate();
+            layoutContainersIfDirty();
             return true;
         }
         return false;
@@ -512,45 +825,89 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
     }
 
     private BrowserEditStart beginBrowserEdit(String label, List<ReSyncProjectMetadata.ResourceEntry> resources) {
+        if (browserHistoryReplayPending) return null;
         FlowManager manager = FlowManager.getInstance();
         if (manager == null) return null;
-        Map<String, ResourceSnapshot> snapshots = new LinkedHashMap<>();
+        FlowManager.ResourceReadLease metadata = manager.snapshotProjectMetadata(screen.studioServerId());
+        if (metadata == null) return null;
+        Map<String, FlowManager.ResourceReadLease> snapshots = new LinkedHashMap<>();
         for (ReSyncProjectMetadata.ResourceEntry resource : resources) {
-            ResourceSnapshot snapshot = snapshotResource(manager, resource);
+            FlowManager.ResourceReadLease snapshot = manager.snapshotResource(screen.studioServerId(), resource.getType(), resource.getId());
             if (snapshot != null) snapshots.put(resource.key(), snapshot);
         }
-        return new BrowserEditStart(label, FlowJson.write(FlowJson.projectMetadata(manager.getProjectMetadata(screen.studioServerId()))), Map.copyOf(snapshots));
+        return new BrowserEditStart(label, metadata, Map.copyOf(snapshots));
     }
 
-    private void commitBrowserEdit(BrowserEditStart edit) {
+    private void commitBrowserEdit(BrowserEditStart edit, Set<String> affectedKeys) {
         if (edit == null) return;
         FlowManager manager = FlowManager.getInstance();
         if (manager == null) return;
-        String afterMetadata = FlowJson.write(FlowJson.projectMetadata(manager.getProjectMetadata(screen.studioServerId())));
-        if (edit.metadata().equals(afterMetadata)) return;
-        ReSyncProjectMetadata before = FlowJson.projectMetadata(FlowJson.parse(edit.metadata()).getAsJsonObject());
-        ReSyncProjectMetadata after = FlowJson.projectMetadata(FlowJson.parse(afterMetadata).getAsJsonObject());
-        Map<String, ReSyncProjectMetadata.ResourceEntry> beforeEntries = resourceEntries(before);
-        Map<String, ReSyncProjectMetadata.ResourceEntry> afterEntries = resourceEntries(after);
-        Set<String> affectedKeys = new HashSet<>(beforeEntries.keySet());
-        affectedKeys.addAll(afterEntries.keySet());
-        affectedKeys.removeIf(key -> beforeEntries.containsKey(key) && afterEntries.containsKey(key));
-        Map<String, ResourceSnapshot> afterSnapshots = new LinkedHashMap<>();
+        FlowManager.ResourceReadLease afterMetadata = manager.snapshotProjectMetadata(screen.studioServerId());
+        if (afterMetadata == null) return;
+        Map<String, FlowManager.ResourceReadLease> afterResources = new LinkedHashMap<>();
         for (String key : affectedKeys) {
-            ReSyncProjectMetadata.ResourceEntry resource = afterEntries.get(key);
+            ReSyncProjectMetadata.ResourceEntry resource = manager.getProjectResource(screen.studioServerId(), key);
             if (resource == null) continue;
-            ResourceSnapshot snapshot = snapshotResource(manager, resource);
-            if (snapshot != null) afterSnapshots.put(key, snapshot);
+            FlowManager.ResourceReadLease snapshot = manager.snapshotResource(screen.studioServerId(), resource.getType(), resource.getId());
+            if (snapshot != null) afterResources.put(resource.key(), snapshot);
         }
-        boolean reversible = affectedKeys.stream().allMatch(key -> !beforeEntries.containsKey(key) || edit.resources().containsKey(key))
-            && affectedKeys.stream().allMatch(key -> !afterEntries.containsKey(key) || afterSnapshots.containsKey(key));
+        try {
+            BROWSER_HISTORY.execute(() -> materializeBrowserEdit(edit, afterMetadata, Map.copyOf(afterResources), Set.copyOf(affectedKeys)));
+        } catch (IllegalStateException exception) {
+            undoHistory.clear();
+            redoHistory.clear();
+            settledHistoryDeleteKeys.clear();
+        }
+    }
+
+    private void materializeBrowserEdit(BrowserEditStart edit, FlowManager.ResourceReadLease afterMetadata,
+                                        Map<String, FlowManager.ResourceReadLease> afterResourceLeases, Set<String> affectedKeys) {
+        try {
+            String beforePayload = edit.metadata().materialize();
+            String afterPayload = afterMetadata.materialize();
+            if (Objects.equals(beforePayload, afterPayload)) return;
+            ReSyncProjectMetadata before = gson.fromJson(beforePayload, ReSyncProjectMetadata.class);
+            ReSyncProjectMetadata after = gson.fromJson(afterPayload, ReSyncProjectMetadata.class);
+            Map<String, ReSyncProjectMetadata.ResourceEntry> beforeEntries = resourceEntries(before);
+            Map<String, ReSyncProjectMetadata.ResourceEntry> afterEntries = resourceEntries(after);
+            Map<String, ResourceSnapshot> beforeResources = materializeResources(edit.resources(), affectedKeys);
+            Map<String, ResourceSnapshot> afterResources = materializeResources(afterResourceLeases, affectedKeys);
+            boolean reversible = affectedKeys.stream().allMatch(key -> !beforeEntries.containsKey(key) || beforeResources.containsKey(key))
+                && affectedKeys.stream().allMatch(key -> !afterEntries.containsKey(key) || afterResources.containsKey(key));
+            ScreenManager.getInstance().execute(() -> finishBrowserEdit(edit.label(), beforePayload, afterPayload,
+                beforeResources, afterResources, affectedKeys, reversible));
+        } catch (RuntimeException exception) {
+            ScreenManager.getInstance().execute(() -> {
+                undoHistory.clear();
+                redoHistory.clear();
+                settledHistoryDeleteKeys.clear();
+            });
+        }
+    }
+
+    private Map<String, ResourceSnapshot> materializeResources(Map<String, FlowManager.ResourceReadLease> leases, Set<String> affectedKeys) {
+        Map<String, ResourceSnapshot> snapshots = new LinkedHashMap<>();
+        for (String key : affectedKeys) {
+            FlowManager.ResourceReadLease lease = leases.get(key);
+            if (lease == null) continue;
+            String payload = lease.materialize();
+            if (payload != null) snapshots.put(key, new ResourceSnapshot(lease.type(), lease.id(), payload, lease.context()));
+        }
+        return Map.copyOf(snapshots);
+    }
+
+    private void finishBrowserEdit(String label, String beforeMetadata, String afterMetadata,
+                                   Map<String, ResourceSnapshot> beforeResources, Map<String, ResourceSnapshot> afterResources,
+                                   Set<String> affectedKeys, boolean reversible) {
         if (!reversible) {
             undoHistory.clear();
             redoHistory.clear();
+            settledHistoryDeleteKeys.clear();
             return;
         }
-        undoHistory.addLast(new BrowserHistoryEntry(edit.label(), edit.metadata(), afterMetadata, edit.resources(), Map.copyOf(afterSnapshots), Set.copyOf(affectedKeys)));
+        undoHistory.addLast(new BrowserHistoryEntry(label, beforeMetadata, afterMetadata, beforeResources, afterResources, Set.copyOf(affectedKeys)));
         while (undoHistory.size() > BROWSER_HISTORY_LIMIT) undoHistory.removeFirst();
+        settledHistoryDeleteKeys.keySet().removeAll(redoHistory);
         redoHistory.clear();
     }
 
@@ -562,153 +919,215 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         return entries;
     }
 
-    private ResourceSnapshot snapshotResource(FlowManager manager, ReSyncProjectMetadata.ResourceEntry resource) {
+    private Async<Boolean> restoreResourceSettled(FlowManager manager, ResourceSnapshot snapshot) {
+        ReSyncResourceType type = snapshot != null ? ReSyncResourceType.byTypeId(snapshot.type()) : null;
+        if (type == null) return Async.completed(false);
         String serverId = screen.studioServerId();
-        String payload = switch (resource.getType()) {
-            case ReSyncResourceDragPayload.FLOW, ReSyncResourceDragPayload.FUNCTION -> {
-                FlowGraph graph = manager.getGraph(serverId, ReSyncResourceType.byTypeId(resource.getType()), resource.getId());
-                yield graph == null ? null : FlowSerializer.serialize(graph);
-            }
-            case ReSyncResourceDragPayload.COMMAND -> {
-                FlowGraph graph = manager.resolveCommandFlowGraph(serverId, resource.getId());
-                yield graph == null ? null : FlowSerializer.serialize(graph);
-            }
-            case ReSyncResourceDragPayload.CUSTOM_CONTENT -> {
-                CustomContentDefinition content = manager.getCustomContentForServer(serverId).get(resource.getId());
-                yield content == null ? null : FlowSerializer.serializeCustomContent(content);
-            }
-            case ReSyncResourceDragPayload.GUI -> {
-                GuiDefinition gui = manager.getGuisForServer(serverId).get(resource.getId());
-                yield gui == null ? null : FlowSerializer.serializeGui(gui);
-            }
-            case ReSyncResourceDragPayload.SCOREBOARD -> {
-                ScoreboardDefinition scoreboard = manager.getScoreboardsForServer(serverId).get(resource.getId());
-                yield scoreboard == null ? null : FlowSerializer.serializeScoreboard(scoreboard);
-            }
-            case ReSyncResourceDragPayload.TAB -> {
-                TabDefinition tab = manager.getTabsForServer(serverId).get(resource.getId());
-                yield tab == null ? null : FlowSerializer.serializeTab(tab);
-            }
-            case ReSyncResourceDragPayload.WORLDGEN -> {
-                WorldGenProject project = WorldGenManager.getInstance().getCachedProject(serverId, resource.getId());
-                yield project == null ? null : WorldGenSerializer.serializeProject(project);
-            }
-            case ReSyncResourceDragPayload.WORLD -> null;
-            default -> {
-                ReSyncResourceType type = ReSyncResourceType.byTypeId(resource.getType());
-                JsonObject json = type == null ? null : manager.getJsonResourcesForServer(serverId, type).get(resource.getId());
-                yield json == null ? null : FlowJson.write(json);
-            }
-        };
-        if (payload == null) return null;
-        TriggerBinding binding = ReSyncResourceDragPayload.COMMAND.equals(resource.getType()) ? manager.getCommandBinding(serverId, resource.getId()) : null;
-        return new ResourceSnapshot(resource.getType(), resource.getId(), payload, binding == null || binding.getContext() == null ? "" : binding.getContext());
-    }
-
-    private boolean restoreResource(FlowManager manager, ResourceSnapshot snapshot) {
-        return DesignerSaveNotifications.withoutAutomaticNotifications(() -> {
-            String serverId = screen.studioServerId();
-            switch (snapshot.type()) {
-                case ReSyncResourceDragPayload.FLOW, ReSyncResourceDragPayload.FUNCTION -> manager.saveFlow(serverId, FlowSerializer.deserialize(snapshot.payload()));
-                case ReSyncResourceDragPayload.COMMAND -> {
-                    manager.saveFlow(serverId, FlowSerializer.deserialize(snapshot.payload()));
-                    manager.setCommandBinding(serverId, snapshot.id(), snapshot.context().isBlank() ? snapshot.id() : snapshot.context());
+        DesignerSaveNotifications.SaveTicket ticket = DesignerSaveNotifications.startExact(serverId, type, snapshot.id(), snapshot.id());
+        if (ticket == null) return Async.completed(false);
+        Async<Boolean> completion = Async.pending();
+        ticket.whenFinished((saved, current) -> completion.complete(Boolean.TRUE.equals(saved) && Boolean.TRUE.equals(current)));
+        try {
+            DesignerSaveNotifications.withoutAutomaticNotifications(() -> {
+                switch (type) {
+                    case FLOW, FUNCTION, COMMAND -> manager.saveGraph(serverId, type, FlowSerializer.deserialize(snapshot.payload()), ticket);
+                    case CUSTOM_CONTENT -> manager.saveCustomContent(serverId, FlowSerializer.deserializeCustomContent(snapshot.payload()), ticket);
+                    case GUI -> manager.saveGui(serverId, FlowSerializer.deserializeGui(snapshot.payload()), ticket);
+                    case SCOREBOARD -> manager.saveScoreboard(serverId, FlowSerializer.deserializeScoreboard(snapshot.payload()), ticket);
+                    case TAB -> manager.saveTab(serverId, FlowSerializer.deserializeTab(snapshot.payload()), ticket);
+                    default -> manager.saveJsonResource(serverId, type, gson.fromJson(snapshot.payload(), JsonObject.class), ticket);
                 }
-                case ReSyncResourceDragPayload.CUSTOM_CONTENT -> manager.saveCustomContent(serverId, FlowSerializer.deserializeCustomContent(snapshot.payload()));
-                case ReSyncResourceDragPayload.GUI -> manager.saveGui(serverId, FlowSerializer.deserializeGui(snapshot.payload()));
-                case ReSyncResourceDragPayload.SCOREBOARD -> manager.saveScoreboard(serverId, FlowSerializer.deserializeScoreboard(snapshot.payload()));
-                case ReSyncResourceDragPayload.TAB -> manager.saveTab(serverId, FlowSerializer.deserializeTab(snapshot.payload()));
-                case ReSyncResourceDragPayload.WORLDGEN -> WorldGenManager.getInstance().saveWorldGen(serverId, WorldGenSerializer.deserializeProject(snapshot.payload()), false);
-                case ReSyncResourceDragPayload.WORLD -> {
-                    return false;
-                }
-                default -> {
-                    ReSyncResourceType type = ReSyncResourceType.byTypeId(snapshot.type());
-                    if (type == null) return false;
-                    manager.saveJsonResource(serverId, type, FlowJson.parse(snapshot.payload()).getAsJsonObject());
-                }
-            }
-            return true;
-        });
+                return true;
+            });
+        } catch (RuntimeException exception) {
+            DesignerSaveNotifications.failExact(ticket, "History Restore Failed");
+        }
+        if (type != ReSyncResourceType.COMMAND) return completion;
+        return completion.thenCompose(saved -> saved
+            ? manager.setCommandBindingAwait(serverId, snapshot.id(), snapshot.context().isBlank() ? snapshot.id() : snapshot.context())
+            : Async.completed(false));
     }
 
     private void undoBrowserEdit() {
-        if (undoHistory.isEmpty()) return;
-        BrowserHistoryEntry edit = undoHistory.removeLast();
-        if (restoreBrowserEdit(edit, true)) {
-            redoHistory.addLast(edit);
-            new Notification("Undo", edit.label(), Notification.Type.SUCCESS);
-        } else {
-            undoHistory.addLast(edit);
-        }
+        if (browserHistoryReplayPending || undoHistory.isEmpty()) return;
+        BrowserHistoryEntry edit = undoHistory.peekLast();
+        browserHistoryReplayPending = true;
+        restoreBrowserEdit(edit, true);
     }
 
     private void redoBrowserEdit() {
-        if (redoHistory.isEmpty()) return;
-        BrowserHistoryEntry edit = redoHistory.removeLast();
-        if (restoreBrowserEdit(edit, false)) {
-            undoHistory.addLast(edit);
-            new Notification("Redo", edit.label(), Notification.Type.SUCCESS);
-        } else {
-            redoHistory.addLast(edit);
+        if (browserHistoryReplayPending || redoHistory.isEmpty()) return;
+        BrowserHistoryEntry edit = redoHistory.peekLast();
+        browserHistoryReplayPending = true;
+        restoreBrowserEdit(edit, false);
+    }
+
+    private void restoreBrowserEdit(BrowserHistoryEntry edit, boolean before) {
+        FlowManager manager = FlowManager.getInstance();
+        if (manager == null) {
+            restoreHistoryEntry(edit, before, false);
+            return;
+        }
+        FlowManager.ResourceReadLease currentMetadata = manager.snapshotProjectMetadata(screen.studioServerId());
+        if (currentMetadata == null) {
+            restoreHistoryEntry(edit, before, false);
+            return;
+        }
+        Map<String, ReSyncProjectMetadata.ResourceEntry> currentEntries = new LinkedHashMap<>();
+        Map<String, FlowManager.ResourceReadLease> currentSnapshots = new LinkedHashMap<>();
+        Map<String, ResourceSnapshot> expectedCurrentResources = before ? edit.afterResources() : edit.beforeResources();
+        for (String key : edit.affectedKeys()) {
+            ReSyncProjectMetadata.ResourceEntry entry = manager.getProjectResource(screen.studioServerId(), key);
+            if (entry != null) currentEntries.put(key, entry);
+            ResourceSnapshot expected = expectedCurrentResources.get(key);
+            String type = expected != null ? expected.type() : entry != null ? entry.getType() : null;
+            String id = expected != null ? expected.id() : entry != null ? entry.getId() : null;
+            FlowManager.ResourceReadLease snapshot = type != null && id != null
+                ? manager.snapshotResource(screen.studioServerId(), type, id) : null;
+            if (snapshot != null) currentSnapshots.put(key, snapshot);
+        }
+        if (worldGenHistoryAffected(edit, currentEntries)) {
+            browserHistoryReplayPending = false;
+            new Notification(before ? "Undo Unavailable" : "Redo Unavailable", "World Generation Changes", Notification.Type.WARN);
+            return;
+        }
+        Set<String> settledDeleteKeys = settledHistoryDeleteKeys.getOrDefault(edit, Set.of());
+        try {
+            BROWSER_HISTORY.execute(() -> {
+                try {
+                    ReSyncProjectMetadata target = gson.fromJson(before ? edit.beforeMetadata() : edit.afterMetadata(), ReSyncProjectMetadata.class);
+                    Map<String, ResourceSnapshot> targetSnapshots = before ? edit.beforeResources() : edit.afterResources();
+                    if (!currentMetadata.isCurrent() || currentSnapshots.values().stream().anyMatch(snapshot -> !snapshot.isCurrent())) {
+                        ScreenManager.getInstance().execute(() -> restoreHistoryEntry(edit, before, false));
+                        return;
+                    }
+                    applyBrowserState(manager, currentMetadata, target, Map.copyOf(currentEntries),
+                        Map.copyOf(currentSnapshots), expectedCurrentResources, targetSnapshots, edit.affectedKeys(),
+                        settledDeleteKeys)
+                        .whenComplete((result, failure) -> {
+                            BrowserStateResult restored = failure == null && result != null ? result : BrowserStateResult.failed();
+                            ScreenManager.getInstance().execute(() -> restoreHistoryEntry(edit, before, restored));
+                        });
+                } catch (RuntimeException exception) {
+                    ScreenManager.getInstance().execute(() -> restoreHistoryEntry(edit, before, false));
+                }
+            });
+        } catch (IllegalStateException exception) {
+            restoreHistoryEntry(edit, before, false);
         }
     }
 
-    private boolean restoreBrowserEdit(BrowserHistoryEntry edit, boolean before) {
-        FlowManager manager = FlowManager.getInstance();
-        if (manager == null) return false;
-        ReSyncProjectMetadata target = FlowJson.projectMetadata(FlowJson.parse(before ? edit.beforeMetadata() : edit.afterMetadata()).getAsJsonObject());
-        Map<String, ResourceSnapshot> targetSnapshots = before ? edit.beforeResources() : edit.afterResources();
-        if (!applyBrowserState(manager, target, targetSnapshots, edit.affectedKeys())) return false;
-        Map<String, ReSyncProjectMetadata.ResourceEntry> targetEntries = resourceEntries(target);
-        screen.studioDocuments.removeIf(document -> edit.affectedKeys().contains(document.key()) && !targetEntries.containsKey(document.key()));
-        screen.syncStudioDocumentTabs();
+    private boolean worldGenHistoryAffected(BrowserHistoryEntry edit,
+                                            Map<String, ReSyncProjectMetadata.ResourceEntry> currentEntries) {
+        return currentEntries.values().stream().anyMatch(entry -> ReSyncResourceDragPayload.WORLDGEN.equals(entry.getType()))
+            || edit.beforeResources().values().stream().anyMatch(snapshot -> ReSyncResourceDragPayload.WORLDGEN.equals(snapshot.type()))
+            || edit.afterResources().values().stream().anyMatch(snapshot -> ReSyncResourceDragPayload.WORLDGEN.equals(snapshot.type()));
+    }
+
+    private void restoreHistoryEntry(BrowserHistoryEntry edit, boolean before, boolean restored) {
+        restoreHistoryEntry(edit, before, new BrowserStateResult(restored, Set.of()));
+    }
+
+    private void restoreHistoryEntry(BrowserHistoryEntry edit, boolean before, BrowserStateResult result) {
+        browserHistoryReplayPending = false;
+        if (!result.deletedKeys().isEmpty()) {
+            Set<String> settled = new LinkedHashSet<>(settledHistoryDeleteKeys.getOrDefault(edit, Set.of()));
+            settled.addAll(result.deletedKeys());
+            settledHistoryDeleteKeys.put(edit, Set.copyOf(settled));
+            screen.removeStudioDocuments(result.deletedKeys());
+        }
+        Deque<BrowserHistoryEntry> source = before ? undoHistory : redoHistory;
+        Deque<BrowserHistoryEntry> destination = before ? redoHistory : undoHistory;
+        boolean restored = result.restored() && source.peekLast() == edit;
+        if (!restored) {
+            new Notification(before ? "Undo Failed" : "Redo Failed", "Changes Not Restored", Notification.Type.ERROR);
+            return;
+        }
+        source.removeLast();
+        destination.addLast(edit);
+        settledHistoryDeleteKeys.remove(edit);
         selectedResource = null;
         selectedFolder = null;
         selectedProjectRoot = false;
         rebuild();
-        return true;
+        new Notification(before ? "Undo" : "Redo", edit.label(), Notification.Type.SUCCESS);
     }
 
-    private boolean applyBrowserState(FlowManager manager, ReSyncProjectMetadata target, Map<String, ResourceSnapshot> targetSnapshots, Set<String> affectedKeys) {
-        ReSyncProjectMetadata current = FlowJson.projectMetadata(FlowJson.projectMetadata(manager.getProjectMetadata(screen.studioServerId())));
-        Map<String, ReSyncProjectMetadata.ResourceEntry> currentEntries = resourceEntries(current);
+    private Async<BrowserStateResult> applyBrowserState(FlowManager manager,
+                                      FlowManager.ResourceReadLease currentMetadata, ReSyncProjectMetadata target,
+                                      Map<String, ReSyncProjectMetadata.ResourceEntry> currentEntries,
+                                      Map<String, FlowManager.ResourceReadLease> currentSnapshots,
+                                      Map<String, ResourceSnapshot> currentStateSnapshots,
+                                      Map<String, ResourceSnapshot> targetSnapshots, Set<String> affectedKeys,
+                                      Set<String> settledDeleteKeys) {
         Map<String, ReSyncProjectMetadata.ResourceEntry> targetEntries = resourceEntries(target);
-        Map<String, ResourceSnapshot> currentSnapshots = new LinkedHashMap<>();
-        for (String key : affectedKeys) {
-            ReSyncProjectMetadata.ResourceEntry entry = currentEntries.get(key);
-            if (entry == null) continue;
-            ResourceSnapshot snapshot = snapshotResource(manager, entry);
-            if (snapshot == null) return false;
-            currentSnapshots.put(key, snapshot);
+        if (!currentMetadata.isCurrent() || currentSnapshots.values().stream().anyMatch(snapshot -> !snapshot.isCurrent())) {
+            return Async.completed(BrowserStateResult.failed());
         }
-        StudioMutationTransaction transaction = new StudioMutationTransaction();
+        Map<String, Async<Boolean>> payloadSettlements = new LinkedHashMap<>();
+        Set<String> deleteKeys = new LinkedHashSet<>();
         for (String key : affectedKeys) {
             ReSyncProjectMetadata.ResourceEntry currentEntry = currentEntries.get(key);
             ReSyncProjectMetadata.ResourceEntry targetEntry = targetEntries.get(key);
-            ResourceSnapshot currentSnapshot = currentSnapshots.get(key);
+            FlowManager.ResourceReadLease currentSnapshot = currentSnapshots.get(key);
+            ResourceSnapshot sourceSnapshot = currentStateSnapshots.get(key);
             ResourceSnapshot targetSnapshot = targetSnapshots.get(key);
-            if (currentEntry != null && targetEntry == null) {
-                transaction.add(() -> deleteResource(manager, currentEntry), () -> restoreResource(manager, currentSnapshot));
-            } else if (targetEntry != null && targetSnapshot != null) {
-                transaction.add(
-                    () -> restoreResource(manager, targetSnapshot),
-                    () -> currentSnapshot != null ? restoreResource(manager, currentSnapshot) : deleteResource(manager, targetEntry)
-                );
+            if (targetEntry == null && settledDeleteKeys.contains(key)) {
+                deleteKeys.add(key);
+                payloadSettlements.put(key, Async.completed(true));
+            } else if (targetEntry == null && sourceSnapshot != null) {
+                if (currentSnapshot != null && (!sourceSnapshot.type().equals(currentSnapshot.type())
+                    || !sourceSnapshot.id().equals(currentSnapshot.id()))) {
+                    return Async.completed(BrowserStateResult.failed());
+                }
+                ReSyncResourceType type = ReSyncResourceType.byTypeId(sourceSnapshot.type());
+                if (type == null) return Async.completed(BrowserStateResult.failed());
+                deleteKeys.add(key);
+                payloadSettlements.put(key, manager.deleteResourceSettled(screen.studioServerId(), type, sourceSnapshot.id())
+                    .thenApply(result -> result != null && result.deleted()));
+            } else if (targetEntry == null && currentEntry != null) {
+                return Async.completed(BrowserStateResult.failed());
             } else if (targetEntry != null) {
-                return false;
+                if (targetSnapshot == null || !targetEntry.getType().equals(targetSnapshot.type())
+                    || !targetEntry.getId().equals(targetSnapshot.id())) {
+                    return Async.completed(BrowserStateResult.failed());
+                }
+                payloadSettlements.put(key, restoreResourceSettled(manager, targetSnapshot));
             }
         }
-        transaction.add(
-            () -> saveProjectMetadata(manager, target),
-            () -> saveProjectMetadata(manager, current)
-        );
-        return transaction.execute();
+        Async<?>[] settlements = payloadSettlements.values().toArray(new Async<?>[0]);
+        return Async.allOf(settlements).handle((ignored, failure) -> {
+            Set<String> deleted = deleteKeys.stream()
+                .filter(key -> terminalSuccess(payloadSettlements.get(key))).collect(Collectors.toUnmodifiableSet());
+            boolean payloadsSettled = failure == null && payloadSettlements.values().stream().allMatch(ReSyncContentBrowserWidget::terminalSuccess);
+            return new BrowserStateResult(payloadsSettled, deleted);
+        }).thenCompose(payloadResult -> {
+            if (!payloadResult.restored()) {
+                return Async.completed(new BrowserStateResult(false, payloadResult.deletedKeys()));
+            }
+            return saveProjectMetadataSettled(manager, target)
+                .handle((saved, failure) -> new BrowserStateResult(failure == null && Boolean.TRUE.equals(saved), payloadResult.deletedKeys()));
+        });
     }
 
-    private boolean saveProjectMetadata(FlowManager manager, ReSyncProjectMetadata metadata) {
-        manager.saveProjectMetadata(screen.studioServerId(), metadata);
-        return true;
+    private Async<Boolean> saveProjectMetadataSettled(FlowManager manager, ReSyncProjectMetadata metadata) {
+        String serverId = screen.studioServerId();
+        DesignerSaveNotifications.SaveTicket ticket = DesignerSaveNotifications.startExact(serverId,
+            ReSyncResourceType.PROJECT_METADATA, serverId, "Project Metadata");
+        if (ticket == null) return Async.completed(false);
+        Async<Boolean> completion = Async.pending();
+        ticket.whenFinished((saved, current) -> completion.complete(Boolean.TRUE.equals(saved) && Boolean.TRUE.equals(current)));
+        try {
+            manager.saveProjectMetadata(serverId, metadata, true, ticket);
+        } catch (RuntimeException exception) {
+            DesignerSaveNotifications.failExact(ticket, "History Presentation Restore Failed");
+        }
+        return completion;
+    }
+
+    private static boolean terminalSuccess(Async<Boolean> settlement) {
+        return settlement != null && settlement.isDone() && !BrowserWork.failed(settlement)
+            && !settlement.isCancelled() && Boolean.TRUE.equals(settlement.getNow(false));
     }
 
     @Override
@@ -726,127 +1145,494 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
     public void tick() {
         super.tick();
         updateButton.setVisible(screen.hasReSyncUpdateAvailable() && !screen.isReSyncUpdateRunning());
-        updateContainers();
+        layoutContainersIfDirty();
         long now = System.currentTimeMillis();
+        FlowManager manager = FlowManager.getInstance();
+        long metadataStamp = manager != null ? manager.projectMetadataStamp(screen.studioServerId()) : Long.MIN_VALUE;
         if (collaborationChatHighlights.entrySet().removeIf(entry -> entry.getValue().expiresAt() <= now)) {
-            lastAssetBrowserSnapshot = null;
+            collaborationDecorationRevision++;
+            scheduleRebuild(metadataStamp);
         }
-        String collaboration = collaborationSignature();
-        if (lastAssetBrowserSnapshot == null || !Objects.equals(lastAssetBrowserSnapshot.collaboration(), collaboration)) {
-            rebuild();
+        if (lastProjectMetadataStamp != metadataStamp) scheduleRebuild(metadataStamp);
+        long collaborationRevision = collaborationRevision();
+        if (lastCollaborationRevision != collaborationRevision) {
+            collaborationDecorationRevision = nextDecorationRevision(lastCollaborationRevision, collaborationRevision,
+                collaborationDecorationRevision);
+            lastCollaborationRevision = collaborationRevision;
+            scheduleRebuild(metadataStamp);
         }
+    }
+
+    static long nextDecorationRevision(long previousActivityRevision, long activityRevision, long decorationRevision) {
+        return previousActivityRevision == activityRevision ? decorationRevision : decorationRevision + 1L;
+    }
+
+    static boolean retryRebuild(int attempt) {
+        return attempt < MAX_REBUILD_RETRIES;
     }
 
     @Override
     public void setPosition(int x, int y) {
+        if (getX() == x && getY() == y) {
+            return;
+        }
         super.setPosition(x, y);
-        updateContainers();
+        if (layoutGate != null) {
+            layoutGate.update(getX(), getY(), getWidth(), getHeight());
+        }
     }
 
     @Override
     public void setSize(int width, int height) {
+        if (getWidth() == width && getHeight() == height) {
+            return;
+        }
         super.setSize(width, height);
-        updateContainers();
+        if (layoutGate != null) {
+            layoutGate.update(getX(), getY(), getWidth(), getHeight());
+        }
     }
 
     public void rebuild() {
-        rebuild(null);
+        FlowManager manager = FlowManager.getInstance();
+        scheduledProjectMetadataStamp = Long.MIN_VALUE;
+        scheduledDecorationRevision = Long.MIN_VALUE;
+        failedProjectMetadataStamp = Long.MIN_VALUE;
+        failedDecorationRevision = Long.MIN_VALUE;
+        scheduleRebuild(manager != null ? manager.projectMetadataStamp(screen.studioServerId()) : Long.MIN_VALUE);
     }
 
-    private void rebuild(RemotePath revealPath) {
-        List<ReSyncProjectMetadata.FolderEntry> folders = screen.studioAllFolders();
-        List<ReSyncProjectMetadata.ResourceEntry> resources = screen.studioAllResources();
-        rebuildResourceIconPaths(resources);
-        AssetBrowserSnapshot snapshot = assetBrowserSnapshot(folders, resources);
-        if (snapshot.equals(lastAssetBrowserSnapshot)) {
-            if (revealPath != null) {
-                treeExplorer.expandToPath(revealPath);
+    void dispose() {
+        disposed = true;
+        rebuildPublicationGate.invalidate();
+        rebuildDrain.clear();
+        creationVisibilityGate.close();
+        scheduledProjectMetadataStamp = Long.MIN_VALUE;
+        scheduledDecorationRevision = Long.MIN_VALUE;
+        failedProjectMetadataStamp = Long.MIN_VALUE;
+        failedDecorationRevision = Long.MIN_VALUE;
+    }
+
+    private void scheduleRebuild(long metadataStamp) {
+        scheduleRebuild(metadataStamp, null);
+    }
+
+    private void scheduleRebuild(long metadataStamp, RemotePath revealPath) {
+        scheduleRebuild(metadataStamp, revealPath, 0);
+    }
+
+    private void scheduleRebuild(long metadataStamp, RemotePath revealPath, int attempt) {
+        if (disposed) {
+            if (ReSyncLifecycleDiagnostics.enabled()) {
+                ReSyncFlowClient.traceLifecycle(screen.studioServerId(), "browser_rebuild_suppressed", "serverId",
+                    screen.studioServerId(), "resourceKey", "browser:catalog", "requestId", "projection",
+                    "mutationId", null, "generation", -1L, "authorityEpoch", 0L, "revision", metadataStamp,
+                    "attempt", attempt, "reason", "disposed");
             }
             return;
         }
-        lastAssetBrowserSnapshot = snapshot;
-        rebuildTree(folders, resources, revealPath);
+        long collaborationRevision = collaborationDecorationRevision;
+        long startedAtNanos = ReSyncFlowClient.TEMP_LIFECYCLE_DEBUG ? System.nanoTime() : 0L;
+        if (failedProjectMetadataStamp == metadataStamp && failedDecorationRevision == collaborationRevision) {
+            if (ReSyncLifecycleDiagnostics.enabled()) {
+                ReSyncFlowClient.traceLifecycle(screen.studioServerId(), "browser_rebuild_suppressed", "serverId",
+                    screen.studioServerId(), "resourceKey", "browser:catalog", "requestId", "projection",
+                    "mutationId", null, "generation", -1L, "authorityEpoch", 0L, "revision", metadataStamp,
+                    "attempt", attempt, "decorationRevision", collaborationRevision, "reason", "previous_failure");
+            }
+            return;
+        }
+        if (scheduledProjectMetadataStamp == metadataStamp && scheduledDecorationRevision == collaborationRevision) {
+            return;
+        }
+        long generation = rebuildPublicationGate.next();
+        boolean expandAll = !treeInitialized;
+        List<RemotePath> expandedPaths = expandedTreePaths;
+        long expansionRevision = expandedTreeRevision;
+        scheduledProjectMetadataStamp = metadataStamp;
+        scheduledDecorationRevision = collaborationRevision;
+        if (ReSyncLifecycleDiagnostics.enabled()) {
+            ReSyncFlowClient.traceLifecycle(screen.studioServerId(), "browser_rebuild_scheduled", "serverId",
+                screen.studioServerId(), "resourceKey", "browser:catalog", "requestId", "projection", "mutationId",
+                null, "generation", generation, "authorityEpoch", 0L, "revision", metadataStamp, "attempt", attempt,
+                "decorationRevision", collaborationRevision, "expandAll", expandAll, "expandedTreeRevision",
+                expansionRevision, "reason", revealPath == null ? "catalog_refresh" : "reveal_path");
+        }
+        rebuildDrain.submit(new BrowserRebuildRequest(generation, metadataStamp, collaborationRevision, revealPath,
+            attempt, expandAll, expandedPaths, expansionRevision, startedAtNanos));
     }
 
-    private void rebuildResourceIconPaths(List<ReSyncProjectMetadata.ResourceEntry> resources) {
-        resourceIconPaths.clear();
+    private void prepareRebuild(BrowserRebuildRequest request) {
+        if (disposed || !rebuildPublicationGate.current(request.generation())) {
+            if (ReSyncLifecycleDiagnostics.enabled()) {
+                ReSyncFlowClient.traceLifecycle(screen.studioServerId(), "browser_rebuild_suppressed", "serverId",
+                    screen.studioServerId(), "resourceKey", "browser:catalog", "requestId", "projection",
+                    "mutationId", null, "generation", request.generation(), "authorityEpoch", 0L, "revision",
+                    request.metadataStamp(), "attempt", request.attempt(), "reason",
+                    disposed ? "disposed" : "stale_generation");
+            }
+            return;
+        }
+        Set<String> hiddenResourceKeys = Set.copyOf(pendingDeleteKeys);
+        Set<String> hiddenFolders = Set.copyOf(pendingDeleteFolders);
+        List<BrowserFolder> folders = browserFolders(screen.studioAllFolders()).stream()
+            .filter(folder -> !insidePendingFolder(folder.path(), hiddenFolders)).toList();
+        List<ReSyncProjectMetadata.ResourceEntry> projectedResources = screen.studioAllResources().stream()
+            .filter(resource -> !AutomationDefinitionDraft.supports(resource.getType()))
+            .filter(resource -> !hiddenResourceKeys.contains(resource.key()))
+            .filter(resource -> !insidePendingFolder(resource.getPath(), hiddenFolders)).toList();
         FlowManager manager = FlowManager.getInstance();
-        Map<String, CustomContentDefinition> customContent = manager != null ? manager.getCustomContentForServer(screen.studioServerId()) : Map.of();
-        for (ReSyncProjectMetadata.ResourceEntry resource : resources) {
-            String iconPath = ReSyncResourceDragPayload.CUSTOM_CONTENT.equals(resource.getType())
-                ? customContentIconPath(customContent.get(resource.getId()))
-                : screen.studioResourceIconPath(resource.getType(), resource.getId());
-            resourceIconPaths.put(resource.key(), iconPath);
+        Map<String, Boolean> activations = manager != null
+            ? manager.cachedResourceActivationSnapshot(screen.studioServerId(), projectedResources) : Map.of();
+        List<BrowserResource> resources = browserResources(projectedResources, activations);
+        Map<String, String> iconPaths = resourceIconPaths(resources);
+        AssetBrowserSnapshot snapshot = assetBrowserSnapshot(folders, resources, request.decorationRevision());
+        ReSyncProjectTreeProvider provider = prepareTreeProvider(projectRoot, folders, resources);
+        List<RemotePath> preparedExpandedPaths = prepareExpandedPaths(provider, request.expandedPaths(),
+            request.revealPath(), request.expandAll());
+        PreparedBrowserRebuild prepared = new PreparedBrowserRebuild(request.generation(), request.metadataStamp(),
+            request.revealPath(), provider, preparedExpandedPaths, request.expandAll(), iconPaths, snapshot,
+            request.expandedTreeRevision(), folders.size(), resources.size(), request.attempt(), request.startedAtNanos());
+        if (ReSyncLifecycleDiagnostics.enabled()) {
+            ReSyncFlowClient.traceLifecycle(screen.studioServerId(), "browser_rebuild_prepared", "serverId",
+                screen.studioServerId(), "resourceKey", "browser:catalog", "requestId", "projection", "mutationId",
+                null, "generation", request.generation(), "authorityEpoch", 0L, "revision", request.metadataStamp(),
+                "attempt", request.attempt(), "decorationRevision", request.decorationRevision(), "folderCount",
+                folders.size(), "memberCount", resources.size(), "expandedTreeRevision", request.expandedTreeRevision(),
+                "elapsedMs", request.startedAtNanos() == 0L ? -1L : ((
+                    System.nanoTime() - request.startedAtNanos()) / 1_000_000L), "reason", "prepared");
+        }
+        ScreenManager.getInstance().execute(() -> {
+            try {
+                applyPreparedRebuild(prepared);
+            } catch (RuntimeException exception) {
+                finishRebuildFailure(request.generation(), request.metadataStamp(), request.decorationRevision(),
+                    request.revealPath(), request.attempt(), exception);
+            }
+        });
+    }
+
+    private void handleRebuildFailure(BrowserRebuildRequest request, RuntimeException exception) {
+        Runnable failure = () -> finishRebuildFailure(request.generation(), request.metadataStamp(),
+            request.decorationRevision(), request.revealPath(), request.attempt(), exception);
+        try {
+            ScreenManager.getInstance().execute(failure);
+        } catch (RuntimeException ignored) {
+            failure.run();
         }
     }
 
-    private AssetBrowserSnapshot assetBrowserSnapshot(List<ReSyncProjectMetadata.FolderEntry> folders, List<ReSyncProjectMetadata.ResourceEntry> resources) {
-        List<String> folderSnapshots = new ArrayList<>();
+    private void finishRebuildFailure(long generation, long metadataStamp, long decorationRevision,
+                                      RemotePath revealPath, int attempt, RuntimeException exception) {
+        if (disposed || !rebuildPublicationGate.publish(generation, () -> {
+            scheduledProjectMetadataStamp = Long.MIN_VALUE;
+            scheduledDecorationRevision = Long.MIN_VALUE;
+        })) return;
+        if (ReSyncLifecycleDiagnostics.enabled()) {
+            try {
+                ReSyncFlowClient.traceLifecycle(screen.studioServerId(), "browser_projection_failed", "serverId",
+                    screen.studioServerId(), "resourceKey", "browser:catalog", "requestId", "projection", "mutationId", null,
+                    "generation", generation, "authorityEpoch", 0L, "revision", metadataStamp, "attempt", attempt + 1,
+                    "reason", exception != null ? TaskIdentities.failureName(exception) : "rejected");
+            } catch (RuntimeException ignored) {
+            }
+        }
+        if (retryRebuild(attempt)) {
+            scheduleRebuild(metadataStamp, revealPath, attempt + 1);
+        } else {
+            failedProjectMetadataStamp = metadataStamp;
+            failedDecorationRevision = decorationRevision;
+        }
+    }
+
+    private void applyPreparedRebuild(PreparedBrowserRebuild prepared) {
+        FlowManager manager = FlowManager.getInstance();
+        String rejectionReason = disposed ? "disposed" : manager == null ? "manager_missing"
+            : !rebuildPublicationGate.current(prepared.generation()) ? "stale_generation"
+            : prepared.metadataStamp() != manager.projectMetadataStamp(screen.studioServerId()) ? "metadata_changed"
+            : prepared.metadataStamp() != scheduledProjectMetadataStamp ? "scheduled_metadata_changed"
+            : prepared.snapshot().collaborationRevision() != scheduledDecorationRevision ? "decoration_changed" : "";
+        if (!rejectionReason.isEmpty()) {
+            if (ReSyncLifecycleDiagnostics.enabled()) {
+                ReSyncFlowClient.traceLifecycle(screen.studioServerId(), "browser_rebuild_prepared_rejected", "serverId",
+                    screen.studioServerId(), "resourceKey", "browser:catalog", "requestId", "projection", "mutationId",
+                    null, "generation", prepared.generation(), "authorityEpoch", 0L, "revision", prepared.metadataStamp(),
+                    "expectedMetadataStamp", scheduledProjectMetadataStamp, "expectedDecorationRevision",
+                    scheduledDecorationRevision, "actualDecorationRevision", prepared.snapshot().collaborationRevision(),
+                    "elapsedMs", prepared.startedAtNanos() == 0L ? -1L : ((
+                    System.nanoTime() - prepared.startedAtNanos()) / 1_000_000L), "reason", rejectionReason);
+            }
+            if ("manager_missing".equals(rejectionReason)) {
+                finishRebuildFailure(prepared.generation(), prepared.metadataStamp(),
+                    prepared.snapshot().collaborationRevision(), prepared.revealPath(), prepared.attempt(),
+                    new IllegalStateException("Flow manager unavailable during browser publication"));
+            }
+            return;
+        }
+        if (prepared.expandedTreeRevision() != expandedTreeRevision) {
+            boolean published = rebuildPublicationGate.publish(prepared.generation(), () -> {
+                scheduledProjectMetadataStamp = Long.MIN_VALUE;
+                scheduledDecorationRevision = Long.MIN_VALUE;
+            });
+            if (!published) {
+                if (ReSyncLifecycleDiagnostics.enabled()) {
+                    ReSyncFlowClient.traceLifecycle(screen.studioServerId(), "browser_rebuild_prepared_rejected", "serverId",
+                        screen.studioServerId(), "resourceKey", "browser:catalog", "requestId", "projection",
+                        "mutationId", null, "generation", prepared.generation(), "authorityEpoch", 0L,
+                        "revision", prepared.metadataStamp(), "expectedExpandedTreeRevision", expandedTreeRevision,
+                        "actualExpandedTreeRevision", prepared.expandedTreeRevision(), "reason", "stale_generation");
+                }
+                return;
+            }
+            if (ReSyncLifecycleDiagnostics.enabled()) {
+                ReSyncFlowClient.traceLifecycle(screen.studioServerId(), "browser_rebuild_prepared_rejected", "serverId",
+                    screen.studioServerId(), "resourceKey", "browser:catalog", "requestId", "projection", "mutationId",
+                    null, "generation", prepared.generation(), "authorityEpoch", 0L, "revision", prepared.metadataStamp(),
+                    "expectedExpandedTreeRevision", expandedTreeRevision, "actualExpandedTreeRevision",
+                    prepared.expandedTreeRevision(), "reason", "expanded_tree_changed");
+            }
+            scheduleRebuild(prepared.metadataStamp(), prepared.revealPath());
+            return;
+        }
+        if (!rebuildPublicationGate.publish(prepared.generation(), () -> publishPreparedRebuild(prepared))) {
+            if (ReSyncLifecycleDiagnostics.enabled()) {
+                ReSyncFlowClient.traceLifecycle(screen.studioServerId(), "browser_rebuild_prepared_rejected", "serverId",
+                    screen.studioServerId(), "resourceKey", "browser:catalog", "requestId", "projection", "mutationId",
+                    null, "generation", prepared.generation(), "authorityEpoch", 0L, "revision", prepared.metadataStamp(),
+                    "reason", "stale_generation");
+            }
+            return;
+        }
+        if (ReSyncLifecycleDiagnostics.enabled()) {
+            ReSyncFlowClient.traceLifecycle(screen.studioServerId(), "browser_projection_applied", "serverId",
+                screen.studioServerId(), "resourceKey", "browser:catalog", "requestId", "projection", "mutationId", null,
+                "generation", prepared.generation(), "authorityEpoch", 0L, "revision", prepared.metadataStamp(), "folderCount",
+                prepared.folderCount(), "memberCount", prepared.resourceCount(), "elapsedMs",
+                prepared.startedAtNanos() == 0L ? -1L : ((
+                    System.nanoTime() - prepared.startedAtNanos()) / 1_000_000L), "publication", "committed");
+        }
+    }
+
+    private void publishPreparedRebuild(PreparedBrowserRebuild prepared) {
+        scheduledProjectMetadataStamp = Long.MIN_VALUE;
+        scheduledDecorationRevision = Long.MIN_VALUE;
+        failedProjectMetadataStamp = Long.MIN_VALUE;
+        failedDecorationRevision = Long.MIN_VALUE;
+        RemotePath revealPath = prepared.revealPath();
+        lastProjectMetadataStamp = prepared.metadataStamp();
+        lastPublishedBrowserGeneration = prepared.generation();
+        resourceIconPaths = prepared.iconPaths();
+        expandedTreePaths = prepared.expandedPaths();
+        if (prepared.snapshot().equals(lastAssetBrowserSnapshot)) {
+            if (revealPath != null) treeExplorer.expandToPath(revealPath);
+            publishVisibleCreatedResources(treeProvider, prepared.generation(), prepared.metadataStamp());
+            return;
+        }
+        lastAssetBrowserSnapshot = prepared.snapshot();
+        BrowserSelectionState selection = retainSelection(captureSelection(), prepared.provider(), projectRoot);
+        treeProvider = prepared.provider();
+        pendingSelectionRestore = selection;
+        applySelection(selection);
+        browser.setWorkspace(projectRoot, treeProvider, prepared.expandAll(), expandedTreePaths);
+        treeContainer.setScrollOffset(selection.scrollOffset());
+        treeContainer.setTargetScrollOffset(selection.scrollOffset());
+        layoutGate.invalidate();
+        layoutContainersIfDirty();
+        treeInitialized = true;
+        publishVisibleCreatedResources(treeProvider, prepared.generation(), prepared.metadataStamp());
+    }
+
+    private BrowserSelectionState captureSelection() {
+        BrowserSelectionState selected = captureTreeSelection();
+        if (selected.size() > 0) {
+            return selected;
+        }
+        if (pendingSelectionRestore.size() > 0) {
+            return new BrowserSelectionState(pendingSelectionRestore.resourceKeys(), pendingSelectionRestore.folderPaths(),
+                pendingSelectionRestore.projectRoot(), treeContainer.getScrollOffset());
+        }
+        Set<String> resourceKeys = new LinkedHashSet<>();
+        Set<String> folderPaths = new LinkedHashSet<>();
+        if (selectedResource != null) {
+            resourceKeys.add(selectedResource.key());
+        }
+        if (selectedFolder != null) {
+            folderPaths.add(selectedFolder.getPath());
+        }
+        return new BrowserSelectionState(resourceKeys, folderPaths, selectedProjectRoot, treeContainer.getScrollOffset());
+    }
+
+    private BrowserSelectionState captureTreeSelection() {
+        Set<String> resourceKeys = new LinkedHashSet<>();
+        Set<String> folderPaths = new LinkedHashSet<>();
+        boolean projectSelected = false;
+        for (WorkspaceTreeExplorer.NodeRef ref : treeExplorer.selectedNodeRefs()) {
+            if (ref == null || ref.path() == null) {
+                continue;
+            }
+            if (ref.directory()) {
+                String folderPath = treeProvider.folderPath(ref.path());
+                if (folderPath != null) {
+                    if (projectRoot.equals(ref.path())) {
+                        projectSelected = true;
+                    } else {
+                        folderPaths.add(folderPath);
+                    }
+                }
+                continue;
+            }
+            ReSyncProjectMetadata.ResourceEntry resource = treeProvider.resource(ref.path());
+            if (resource != null) {
+                resourceKeys.add(resource.key());
+            }
+        }
+        return new BrowserSelectionState(resourceKeys, folderPaths, projectSelected, treeContainer.getScrollOffset());
+    }
+
+    static BrowserSelectionState retainSelection(BrowserSelectionState selection, ReSyncProjectTreeProvider provider,
+                                                  RemotePath root) {
+        if (selection == null || provider == null || root == null) {
+            return BrowserSelectionState.empty();
+        }
+        Set<String> resources = selection.resourceKeys().stream().filter(key -> provider.resourcePath(key) != null)
+            .collect(Collectors.toUnmodifiableSet());
+        Set<String> folders = selection.folderPaths().stream()
+            .filter(path -> provider.folder(pathForFolder(root, path)) != null)
+            .collect(Collectors.toUnmodifiableSet());
+        return new BrowserSelectionState(resources, folders, selection.projectRoot(), selection.scrollOffset());
+    }
+
+    private void applySelection(BrowserSelectionState selection) {
+        selectedResource = null;
+        selectedFolder = null;
+        selectedProjectRoot = false;
+        nameInput.setText("");
+        if (selection == null || selection.size() != 1) {
+            return;
+        }
+        if (!selection.resourceKeys().isEmpty()) {
+            RemotePath path = treeProvider.resourcePath(selection.resourceKeys().iterator().next());
+            selectedResource = path != null ? treeProvider.resource(path) : null;
+            if (selectedResource != null) {
+                nameInput.setText(selectedResource.getId());
+            }
+            return;
+        }
+        if (!selection.folderPaths().isEmpty()) {
+            selectedFolder = treeProvider.folder(pathForFolder(projectRoot, selection.folderPaths().iterator().next()));
+            if (selectedFolder != null) {
+                nameInput.setText(selectedFolder.getName());
+            }
+            return;
+        }
+        selectedProjectRoot = selection.projectRoot();
+    }
+
+    private void rebuild(RemotePath revealPath) {
+        FlowManager manager = FlowManager.getInstance();
+        scheduledProjectMetadataStamp = Long.MIN_VALUE;
+        scheduledDecorationRevision = Long.MIN_VALUE;
+        scheduleRebuild(manager != null ? manager.projectMetadataStamp(screen.studioServerId()) : Long.MIN_VALUE, revealPath);
+    }
+
+    private List<BrowserFolder> browserFolders(List<ReSyncProjectMetadata.FolderEntry> folders) {
+        List<BrowserFolder> snapshots = new ArrayList<>(folders.size());
         for (ReSyncProjectMetadata.FolderEntry folder : folders) {
+            snapshots.add(new BrowserFolder(folder.getPath(), folder.getParentPath(), folder.getName(), folder.getSortOrder(), folder.isCollapsed()));
+        }
+        return List.copyOf(snapshots);
+    }
+
+    static boolean insidePendingFolder(String path, Set<String> folders) {
+        if (path == null || path.isBlank() || folders == null || folders.isEmpty()) {
+            return false;
+        }
+        return folders.stream().anyMatch(folder -> path.equals(folder) || path.startsWith(folder + "/"));
+    }
+
+    private List<BrowserResource> browserResources(List<ReSyncProjectMetadata.ResourceEntry> resources,
+                                                   Map<String, Boolean> activations) {
+        List<BrowserResource> snapshots = new ArrayList<>(resources.size());
+        FlowManager manager = FlowManager.getInstance();
+        for (ReSyncProjectMetadata.ResourceEntry resource : resources) {
+            String iconPath = ReSyncResourceDragPayload.CUSTOM_CONTENT.equals(resource.getType())
+                ? customContentIconPath(manager != null ? manager.getCustomContentType(screen.studioServerId(), resource.getId()) : "")
+                : screen.studioResourceIconPath(resource.getType(), resource.getId());
+            snapshots.add(new BrowserResource(resource.getType(), resource.getId(), resource.getDisplayName(), resource.getPath(),
+                resource.getSortOrder(), iconPath, resourceEnabled(resource, activations)));
+        }
+        return List.copyOf(snapshots);
+    }
+
+    private Map<String, String> resourceIconPaths(List<BrowserResource> resources) {
+        Map<String, String> paths = new HashMap<>();
+        for (BrowserResource resource : resources) {
+            paths.put(resource.key(), resource.iconPath());
+        }
+        return Map.copyOf(paths);
+    }
+
+    private AssetBrowserSnapshot assetBrowserSnapshot(List<BrowserFolder> folders,
+                                                       List<BrowserResource> resources,
+                                                       long collaborationRevision) {
+        List<String> folderSnapshots = new ArrayList<>();
+        for (BrowserFolder folder : folders) {
             folderSnapshots.add(String.join("\u0001",
-                folder.getPath(),
-                folder.getParentPath(),
-                folder.getName(),
-                String.valueOf(folder.getSortOrder()),
-                String.valueOf(folder.isCollapsed())));
+                folder.path(),
+                folder.parentPath(),
+                folder.name(),
+                String.valueOf(folder.sortOrder()),
+                String.valueOf(folder.collapsed())));
         }
         Collections.sort(folderSnapshots);
         List<String> resourceSnapshots = new ArrayList<>();
-        for (ReSyncProjectMetadata.ResourceEntry resource : resources) {
+        for (BrowserResource resource : resources) {
             resourceSnapshots.add(String.join("\u0001",
-                resource.getType(),
-                resource.getId(),
-                resource.getDisplayName(),
-                resource.getPath(),
-                String.valueOf(resource.getSortOrder()),
-                iconPathFor(resource),
-                String.valueOf(resourceEnabled(resource))));
+                resource.type(),
+                resource.id(),
+                resource.displayName(),
+                resource.path(),
+                String.valueOf(resource.sortOrder()),
+                resource.iconPath(),
+                String.valueOf(resource.enabled())));
         }
         Collections.sort(resourceSnapshots);
-        return new AssetBrowserSnapshot(folderSnapshots, resourceSnapshots, collaborationSignature());
+        return new AssetBrowserSnapshot(folderSnapshots, resourceSnapshots, collaborationRevision);
+    }
+
+    private static List<RemotePath> prepareExpandedPaths(ReSyncProjectTreeProvider provider,
+                                                         List<RemotePath> currentExpandedPaths,
+                                                         RemotePath revealPath, boolean expandAll) {
+        if (expandAll) {
+            return provider.folderDirectoryPaths();
+        }
+        if (revealPath == null || provider.folderPath(revealPath) == null || currentExpandedPaths.contains(revealPath)) {
+            return currentExpandedPaths;
+        }
+        List<RemotePath> expandedPaths = new ArrayList<>(currentExpandedPaths.size() + 1);
+        expandedPaths.addAll(currentExpandedPaths);
+        expandedPaths.add(revealPath);
+        return List.copyOf(expandedPaths);
     }
 
     public void highlightCollaborationChat(String type, String resourceId, int color) {
         collaborationChatHighlights.put(resourceKey(type, resourceId),
             new CollaborationChatHighlight(color, System.currentTimeMillis() + 8000L));
-        lastAssetBrowserSnapshot = null;
-        rebuild();
+        collaborationDecorationRevision++;
+        FlowManager manager = FlowManager.getInstance();
+        scheduleRebuild(manager != null ? manager.projectMetadataStamp(screen.studioServerId()) : Long.MIN_VALUE);
     }
 
-    private String collaborationSignature() {
+    private long collaborationRevision() {
         FlowManager manager = FlowManager.getInstance();
         if (manager == null) {
-            return "";
+            return 0L;
         }
         ReSyncFlowClient client = manager.existingFlowClient(screen.studioServerId());
         if (client == null) {
-            return "";
+            return 0L;
         }
-        ReSyncCollaborationClient collaboration = client.collaboration();
-        List<String> activity = new ArrayList<>();
-        Set<String> sessions = new HashSet<>();
-        for (ReSyncCollaborationClient.Presence presence : collaboration.snapshot()) {
-            if (collaboration.isSelf(presence) || presence.identity() == null) {
-                continue;
-            }
-            sessions.add(presence.sessionId());
-            Identifier avatar = screen.collaborationAvatar(presence);
-            ReSyncCollaborationClient.Identity identity = presence.identity();
-            activity.add(String.join("\u0000",
-                presence.sessionId(),
-                presence.resourceType(),
-                presence.resourceId(),
-                String.valueOf(presence.active()),
-                String.valueOf(screen.collaborationColor(presence)),
-                identity.subjectId(),
-                identity.displayName(),
-                identity.avatar(),
-                identity.source(),
-                avatar != null ? avatar.toString() : ""));
-        }
-        collaborationAvatars.keySet().retainAll(sessions);
-        activity.sort(String.CASE_INSENSITIVE_ORDER);
-        return String.join("\u0001", activity);
+        return client.collaboration().activityRevision();
     }
 
     private void prepareTreeNode(WorkspaceTreeExplorer.NodeRef ref, FileEntryWidget widget) {
@@ -855,6 +1641,9 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         widget.setGradientEnabled(false);
         widget.setTrailingWidgets(List.of());
         ReSyncProjectMetadata.ResourceEntry resource = treeProvider.resource(ref.path());
+        if (restoreSelection(ref, resource)) {
+            widget.setSelected(true);
+        }
         List<AnimatedWidget> accessories = new ArrayList<>();
         List<ReSyncCollaborationClient.Presence> editors = resource != null ? resourceEditors(resource) : collapsedFolderEditors(ref);
         CollaborationChatHighlight chatHighlight = resource != null
@@ -888,6 +1677,23 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         }
         accessories.addAll(avatars);
         widget.setTrailingWidgets(accessories);
+    }
+
+    private boolean restoreSelection(WorkspaceTreeExplorer.NodeRef ref, ReSyncProjectMetadata.ResourceEntry resource) {
+        if (ref == null || ref.path() == null) {
+            return false;
+        }
+        if (resource != null) {
+            return pendingSelectionRestore.resourceKeys().contains(resource.key());
+        }
+        if (!ref.directory()) {
+            return false;
+        }
+        if (projectRoot.equals(ref.path())) {
+            return pendingSelectionRestore.projectRoot();
+        }
+        String folderPath = treeProvider.folderPath(ref.path());
+        return folderPath != null && pendingSelectionRestore.folderPaths().contains(folderPath);
     }
 
     private List<ReSyncCollaborationClient.Presence> collapsedFolderEditors(WorkspaceTreeExplorer.NodeRef ref) {
@@ -946,36 +1752,16 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             .toList();
     }
 
-    private String resourceKey(String type, String resourceId) {
+    private static String resourceKey(String type, String resourceId) {
         return (type != null ? type : "") + '\u0000' + (resourceId != null ? resourceId : "");
     }
 
-    private boolean resourceEnabled(ReSyncProjectMetadata.ResourceEntry resource) {
-        FlowManager manager = FlowManager.getInstance();
-        return resource == null || manager == null || !manager.supportsResourceActivation(resource.getType())
-            || manager.isResourceEnabled(screen.studioServerId(), resource.getType(), resource.getId());
-    }
-
-    private void rebuildTree(List<ReSyncProjectMetadata.FolderEntry> folders, List<ReSyncProjectMetadata.ResourceEntry> resources) {
-        rebuildTree(folders, resources, null);
-    }
-
-    private void rebuildTree(List<ReSyncProjectMetadata.FolderEntry> folders, List<ReSyncProjectMetadata.ResourceEntry> resources, RemotePath revealPath) {
-        List<RemotePath> expandedPaths = new ArrayList<>(treeExplorer.getExpandedDirectories());
-        treeProvider.rebuild(folders, resources);
-        if (revealPath != null && treeProvider.folderPath(revealPath) != null && !expandedPaths.contains(revealPath)) {
-            expandedPaths.add(revealPath);
-        }
-        boolean expandAll = !treeInitialized;
-        browser.setWorkspace(projectRoot, treeProvider, expandAll, expandedPaths);
-        treeInitialized = true;
+    private boolean resourceEnabled(ReSyncProjectMetadata.ResourceEntry resource, Map<String, Boolean> activations) {
+        return resource == null || activations == null || activations.getOrDefault(resource.key(), true);
     }
 
     private void rebuildCurrentFolderView() {
-        List<ReSyncProjectMetadata.FolderEntry> folders = screen.studioAllFolders();
-        List<ReSyncProjectMetadata.ResourceEntry> resources = screen.studioAllResources();
-        rebuildResourceIconPaths(resources);
-        rebuildTree(folders, resources);
+        rebuild();
     }
 
     private void selectFolder(String path) {
@@ -996,25 +1782,24 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         rebuildCurrentFolderView();
     }
 
-    private boolean navigateHistoryBack() {
+    private void navigateHistoryBack() {
         if (!backHistory.isEmpty()) {
             forwardHistory.push(currentFolder);
             selectFolder(backHistory.pop(), false);
-            return true;
+            return;
         }
         String parentFolder = parentFolder(currentFolder);
-        if (parentFolder == null) return false;
-        selectFolder(parentFolder, false);
-        return true;
+        if (parentFolder != null) {
+            selectFolder(parentFolder, false);
+        }
     }
 
-    private boolean navigateHistoryForward() {
+    private void navigateHistoryForward() {
         if (forwardHistory.isEmpty()) {
-            return false;
+            return;
         }
         backHistory.push(currentFolder);
         selectFolder(forwardHistory.pop(), false);
-        return true;
     }
 
     private String parentFolder(String path) {
@@ -1031,10 +1816,17 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         if (resource == null) {
             return;
         }
+        pendingSelectionRestore = BrowserSelectionState.empty();
         selectedResource = resource;
         selectedFolder = null;
         selectedProjectRoot = false;
         nameInput.setText(resource.getId());
+        if (ReSyncLifecycleDiagnostics.enabled()) {
+            ReSyncFlowClient.traceLifecycle(screen.studioServerId(), "browser_open_dispatched", "serverId",
+                screen.studioServerId(), "resourceKey", resource.getType() + ":" + resource.getId(), "requestId",
+                "browser", "mutationId", null, "generation", -1L, "authorityEpoch", 0L, "revision", -1L,
+                "browserPath", path.toString());
+        }
         screen.openStudioResource(resource);
     }
 
@@ -1056,6 +1848,7 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         if (ref == null) {
             return;
         }
+        pendingSelectionRestore = BrowserSelectionState.empty();
         if (ref.directory()) {
             selectedResource = null;
             selectedFolder = treeProvider.folder(ref.path());
@@ -1084,13 +1877,13 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         if (resource == null) {
             return;
         }
-        FileEntryWidget source = treeContainer.getWidgets().stream()
-            .<FileEntryWidget>mapMulti((widget, sink) -> {
-                if (widget instanceof FileEntryWidget entry) sink.accept(entry);
-            })
-            .filter(entry -> ref.path().equals(entry.getFileEntry().path))
-            .findFirst()
-            .orElse(null);
+        FileEntryWidget source = null;
+        for (Object widget : treeContainer.getWidgets()) {
+            if (widget instanceof FileEntryWidget entry && ref.path().equals(entry.getFileEntry().path)) {
+                source = entry;
+                break;
+            }
+        }
         if (source == null) {
             return;
         }
@@ -1117,6 +1910,7 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
     }
 
     private void rightClickTreeNode(WorkspaceTreeExplorer.NodeRef ref) {
+        pendingSelectionRestore = BrowserSelectionState.empty();
         selectedFolder = null;
         selectedResource = null;
         selectedProjectRoot = false;
@@ -1137,7 +1931,7 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         showExplorerMenu(lastMouseX, lastMouseY);
     }
 
-    private boolean showExplorerMenu(int mouseX, int mouseY) {
+    protected boolean showExplorerMenu(int mouseX, int mouseY) {
         BrowserSelection selection = browserSelection();
         if (selection.size() == 0 && !selection.projectRoot()) {
             return false;
@@ -1176,7 +1970,7 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
     }
 
     private void showCreateMenu() {
-        showCreateMenu(createButton.getX(), createButton.getY() + createButton.getHeight() + 2, createTargetFolder());
+        showCreateMenu(createButton.getX(), createButton.getY() + createButton.getHeight() + 2, selectedCreateTargetFolder());
     }
 
     private void showCreateMenu(int mouseX, int mouseY, String targetFolder) {
@@ -1205,9 +1999,6 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             .addItem("New Folder", "folder.png", "Create Folder", "folder directory", () -> showCreateResourcePopup(ReSyncResourceDragPayload.FOLDER, targetFolder))
             .addItem("New Flow", "graph.png", "Create Flow", "flow graph", () -> showCreateResourcePopup(ReSyncResourceDragPayload.FLOW, targetFolder))
             .addItem("New Function", "snippets.png", "Create Function", "function mcfunction", () -> showCreateResourcePopup(ReSyncResourceDragPayload.FUNCTION, targetFolder))
-            .addItem("New Variable", "edit.png", "Create Variable", "variable automation value", () -> showCreateResourcePopup(ReSyncResourceDragPayload.VARIABLE_DEFINITION, targetFolder))
-            .addItem("New Timer", "history.png", "Create Timer", "timer automation duration", () -> showCreateResourcePopup(ReSyncResourceDragPayload.TIMER_DEFINITION, targetFolder))
-            .addItem("New Schedule", "calendar.png", "Create Schedule", "schedule automation task", () -> showCreateResourcePopup(ReSyncResourceDragPayload.SCHEDULE_DEFINITION, targetFolder))
             .addItem("New Command", "terminal.png", "Create Command", "command terminal", () -> showCreateResourcePopup(ReSyncResourceDragPayload.COMMAND, targetFolder))
             .addItem("New Content", "resources.png", "Create Content", "content item block armor", () -> showCreateResourcePopup(ReSyncResourceDragPayload.CUSTOM_CONTENT, targetFolder))
             .addItem("New GUI", "fullPanel.png", "Create GUI", "gui interface inventory", () -> showCreateResourcePopup(ReSyncResourceDragPayload.GUI, targetFolder))
@@ -1256,22 +2047,53 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
     }
 
     private void showCreateWorldPopup(String targetFolder) {
-        WorldResourceCreator.showCreatePopup(screen, screen.studioServerId(), targetFolder, worldName -> {
-            rebuild(pathForFolder(targetFolder));
-            screen.openStudioWorldDocument(worldName, worldName);
+        String destination = createDestination(ReSyncResourceDragPayload.WORLD, targetFolder);
+        long startedAtNanos = ReSyncFlowClient.TEMP_LIFECYCLE_DEBUG ? System.nanoTime() : 0L;
+        WorldResourceCreator.showCreatePopup(screen, screen.studioServerId(), destination, worldName -> {
+            if (ReSyncLifecycleDiagnostics.enabled()) {
+                ReSyncFlowClient.traceLifecycle(screen.studioServerId(), "browser_create_callback", "serverId",
+                    screen.studioServerId(), "resourceKey", ReSyncResourceDragPayload.WORLD + ":" + worldName,
+                    "requestId", "create", "mutationId", null, "generation", -1L, "authorityEpoch", 0L,
+                    "revision", -1L, "expectedResult", worldName != null && !worldName.isBlank(),
+                    "resourcePresent", worldName != null && !worldName.isBlank(), "targetFolder", destination,
+                    "elapsedMs", startedAtNanos == 0L ? -1L : ((
+                        System.nanoTime() - startedAtNanos) / 1_000_000L), "reason", "settled_callback");
+            }
+            awaitCreatedResourceVisibility(new ReSyncResourceCreator.Result(ReSyncResourceDragPayload.WORLD,
+                worldName, worldName), destination, startedAtNanos);
         });
     }
 
-    private void showCreateResourcePopup(String type) {
-        showCreateResourcePopup(type, selectedCreateTargetFolder());
-    }
-
     private void showCreateResourcePopup(String type, String targetFolder) {
+        String destination = createDestination(type, targetFolder);
         if (ReSyncResourceDragPayload.CUSTOM_CONTENT.equals(type)) {
-            showCreateContentPopup(targetFolder);
+            showCreateContentPopup(destination);
             return;
         }
-        ReSyncResourceCreator.showCreatePopup(screen, screen.studioServerId(), type, targetFolder, null, result -> openCreatedResource(result, targetFolder));
+        WeakReference<ReSyncContentBrowserWidget> widgetReference = new WeakReference<>(this);
+        long startedAtNanos = ReSyncFlowClient.TEMP_LIFECYCLE_DEBUG ? System.nanoTime() : 0L;
+        ReSyncResourceCreator.showCreatePopup(screen, screen.studioServerId(), type, destination, null, result -> {
+            traceCreateCallback(type, null, result, destination, startedAtNanos);
+            ReSyncContentBrowserWidget widget = widgetReference.get();
+            if (widget != null) {
+                widget.awaitCreatedResourceVisibility(result, destination, startedAtNanos);
+            }
+        });
+    }
+
+    private String createDestination(String type, String targetFolder) {
+        if (targetFolder != null) {
+            return ReSyncProjectMetadata.normalizePath(targetFolder);
+        }
+        if (ReSyncResourceDragPayload.FOLDER.equals(type)) {
+            return ReSyncProjectMetadata.normalizePath(currentFolder);
+        }
+        return ReSyncProjectMetadata.normalizePath(ReSyncResourceType.defaultFolderFor(type));
+    }
+
+    private String selectedCreateTargetFolder() {
+        String destination = selectionDestination(browserSelection());
+        return destination != null ? destination : ReSyncProjectMetadata.normalizePath(currentFolder);
     }
 
     private void showCreateContentPopup(String targetFolder) {
@@ -1334,11 +2156,14 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
                 if (name.isBlank()) {
                     name = id;
                 }
-                if (createContentResource(id, name, selectedType[0], selectedProvider[0], selectedAsset[0], targetFolder)) {
+                if (createContentResource(id, name, selectedType[0], selectedProvider[0], selectedAsset[0], targetFolder,
+                    () -> {
                     closeCreateContentSearchSelector();
                     if (popupRef[0] != null) {
                         popupRef[0].hide();
                     }
+                })) {
+                    return;
                 }
             };
         builder.addTitleAction("Create", create, PopupWidget.TitleActionRole.PRIMARY);
@@ -1491,29 +2316,70 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         return "vanilla".equalsIgnoreCase(provider) ? "Material" : "External ID";
     }
 
-    private void openCreatedResource(ReSyncResourceCreator.Result result, String targetFolder) {
-        if (result == null) {
+    private void awaitCreatedResourceVisibility(ReSyncResourceCreator.Result result, String targetFolder,
+                                                long startedAtNanos) {
+        if (disposed || result == null || result.type() == null || result.type().isBlank()
+            || result.id() == null || result.id().isBlank()) {
             return;
         }
+        if (AutomationDefinitionDraft.supports(ReSyncResourceType.byTypeId(result.type()))) {
+            rebuild(pathForFolder(targetFolder));
+            return;
+        }
+        boolean folder = ReSyncResourceDragPayload.FOLDER.equals(result.type());
+        RemotePath folderPath = folder ? pathForFolder(targetFolder).resolve(result.id()) : null;
+        PendingCreatedResource pending = new PendingCreatedResource(result, targetFolder, startedAtNanos,
+            folder ? null : resourceKey(result.type(), result.id()), folderPath,
+            folder ? folderPath : pathForFolder(targetFolder), new OneShotCreationPublication());
+        if (!creationVisibilityGate.await(pending.pendingKey(), pending)) {
+            return;
+        }
+        rebuild(pending.revealPath());
+        try {
+            publishVisibleCreatedResources(treeProvider, lastPublishedBrowserGeneration, lastProjectMetadataStamp);
+        } catch (RuntimeException ignored) {
+        }
+    }
+
+    private void publishVisibleCreatedResources(ReSyncProjectTreeProvider provider, long generation,
+                                                long metadataStamp) {
+        creationVisibilityGate.publish(pending -> !disposed && pending.visibleIn(provider), pending -> {
+            if (disposed) {
+                throw new IllegalStateException("Browser disposed during creation publication");
+            }
+            publishVisibleCreatedResource(pending, generation, metadataStamp);
+        });
+    }
+
+    private void publishVisibleCreatedResource(PendingCreatedResource pending, long generation,
+                                               long metadataStamp) {
+        pending.publication().publish(() -> openCreatedResourceEditor(pending.result()),
+            () -> traceVisibleCreatedResource(pending, generation, metadataStamp));
+    }
+
+    private void openCreatedResourceEditor(ReSyncResourceCreator.Result result) {
         String type = result.type();
         String id = result.id();
         Object resource = result.resource();
-        rebuild(pathForFolder(targetFolder));
         switch (type) {
-            case ReSyncResourceDragPayload.FLOW, ReSyncResourceDragPayload.FUNCTION, ReSyncResourceDragPayload.COMMAND -> {
-                if (resource instanceof FlowGraph graph) {
-                    screen.openStudioGraphDocument(type, id, id, graph);
-                }
-            }
+            case ReSyncResourceDragPayload.FLOW, ReSyncResourceDragPayload.FUNCTION,
+                 ReSyncResourceDragPayload.COMMAND -> screen.openWorkspaceResource(type, id);
             case ReSyncResourceDragPayload.GUI, ReSyncResourceDragPayload.SCOREBOARD, ReSyncResourceDragPayload.TAB, ReSyncResourceDragPayload.ADVANCEMENT_TREE,
                  ReSyncResourceDragPayload.DIALOG, ReSyncResourceDragPayload.TRADE_PROFILE, ReSyncResourceDragPayload.NPC_DEFINITION,
                  ReSyncResourceDragPayload.LOOT_TABLE -> screen.openStudioDesigner(type, id);
+            case ReSyncResourceDragPayload.CUSTOM_CONTENT -> {
+                if (resource instanceof CustomContentDefinition definition && definition.getGraph() != null) {
+                    FlowGraph graph = definition.getGraph();
+                    screen.openStudioViewDocument(type, id, id, graph,
+                        new ScreenBackedStudioView(screen, new ContentDesignerScreen(screen.studioServerId(), graph, screen)));
+                }
+            }
             case ReSyncResourceDragPayload.CHAT, ReSyncResourceDragPayload.MOTD_PROFILE, ReSyncResourceDragPayload.MESSAGE_RULE,
                  ReSyncResourceDragPayload.RECIPE_DEFINITION, ReSyncResourceDragPayload.TEXT_TEMPLATE,
                  ReSyncResourceDragPayload.VARIABLE_DEFINITION, ReSyncResourceDragPayload.TIMER_DEFINITION,
                  ReSyncResourceDragPayload.SCHEDULE_DEFINITION -> {
                 if (resource instanceof JsonObject json) {
-                    screen.openFocusedResourceDocument(type, id, id, json);
+                    screen.openFocusedResourceDocumentOwned(type, id, id, json);
                 }
             }
             case ReSyncResourceDragPayload.WORLDGEN -> {
@@ -1527,13 +2393,29 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         }
     }
 
-    private boolean createContentResource(String id, String name, String contentType, String provider, String asset, String targetFolder) {
+    private void traceVisibleCreatedResource(PendingCreatedResource pending, long generation, long metadataStamp) {
+        ReSyncResourceCreator.Result result = pending.result();
+        String type = result.type();
+        String id = result.id();
+        Object resource = result.resource();
+        if (ReSyncLifecycleDiagnostics.enabled()) {
+            ReSyncFlowClient.traceLifecycle(screen.studioServerId(), "browser_create_visible", "serverId",
+                screen.studioServerId(), "resourceKey", type + ":" + id, "requestId", "create", "mutationId", null,
+                "generation", generation, "authorityEpoch", 0L, "revision", metadataStamp, "targetFolder",
+                pending.targetFolder(), "resourcePresent", resource != null, "expectedKeyPresent", true,
+                "elapsedMs", pending.startedAtNanos() == 0L ? -1L : ((
+                    System.nanoTime() - pending.startedAtNanos()) / 1_000_000L), "publication", "committed");
+        }
+    }
+
+    private boolean createContentResource(String id, String name, String contentType, String provider, String asset,
+                                          String targetFolder, Runnable completed) {
         FlowManager manager = FlowManager.getInstance();
         if (manager == null) {
             return false;
         }
         String normalizedTargetFolder = ReSyncProjectMetadata.normalizePath(targetFolder);
-        if (manager.getProjectMetadata(screen.studioServerId()).findResource(ReSyncResourceDragPayload.CUSTOM_CONTENT, id) != null || resourceExists(manager, ReSyncResourceDragPayload.CUSTOM_CONTENT, id)) {
+        if (manager.getProjectResource(screen.studioServerId(), ReSyncResourceDragPayload.CUSTOM_CONTENT, id) != null || resourceExists(manager, ReSyncResourceDragPayload.CUSTOM_CONTENT, id)) {
             new Notification("Error", "Content ID already exists", Notification.Type.ERROR);
             return false;
         }
@@ -1543,34 +2425,61 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             default -> "item";
         };
         String selectedProvider = provider == null || provider.isBlank() ? "vanilla" : provider;
-        FlowGraph contentGraph = manager.createContentFlow(screen.studioServerId(), id, normalizedType, name);
-        CustomContentGraphAdapter.setContentProperty(contentGraph, "content_id", id);
-        CustomContentGraphAdapter.setContentProperty(contentGraph, "name", name);
-        CustomContentGraphAdapter.setContentProperty(contentGraph, "provider", selectedProvider);
-        if ("vanilla".equalsIgnoreCase(selectedProvider)) {
-            CustomContentGraphAdapter.setContentProperty(contentGraph, "material", asset == null || asset.isBlank() ? defaultContentMaterial(normalizedType) : asset.toUpperCase(Locale.ROOT));
-            CustomContentGraphAdapter.setContentProperty(contentGraph, "external_id", "");
-        } else {
-            CustomContentGraphAdapter.setContentProperty(contentGraph, "material", defaultContentMaterial(normalizedType));
-            CustomContentGraphAdapter.setContentProperty(contentGraph, "external_id", asset == null ? "" : asset);
+        FlowManager.ProjectMetadataEdit metadata = manager.editProjectMetadata(screen.studioServerId());
+        FlowManager.ProjectResource existing = metadata.resource(ReSyncResourceDragPayload.CUSTOM_CONTENT, id);
+        FlowManager.CreationMetadataIntent intent = new FlowManager.CreationMetadataIntent(
+            ReSyncResourceDragPayload.CUSTOM_CONTENT, id, name, canonicalResourcePath(normalizedTargetFolder, id), "",
+            existing != null ? existing.sortOrder() : metadata.nextResourceSortOrder(), false);
+        JsonObject template = new JsonObject();
+        template.addProperty("type", normalizedType);
+        template.addProperty("name", name);
+        template.addProperty("provider", selectedProvider);
+        template.addProperty("asset", asset == null ? "" : asset);
+        long startedAtNanos = ReSyncFlowClient.TEMP_LIFECYCLE_DEBUG ? System.nanoTime() : 0L;
+        FlowManager.CreationAdmission admission = manager.beginResourceCreation(screen.studioServerId(),
+            ReSyncResourceType.CUSTOM_CONTENT, id, gson.toJson(template), intent, null, result -> {
+                traceCreateCallback(ReSyncResourceDragPayload.CUSTOM_CONTENT, id, result, normalizedTargetFolder,
+                    startedAtNanos);
+                if (result == null || !ReSyncResourceDragPayload.CUSTOM_CONTENT.equals(result.type())
+                    || !id.equals(result.id()) || !(result.resource() instanceof CustomContentDefinition definition)) {
+                    new Notification("Create", "Creation Result Invalid", Notification.Type.ERROR);
+                    return;
+                }
+                awaitCreatedResourceVisibility(new ReSyncResourceCreator.Result(ReSyncResourceDragPayload.CUSTOM_CONTENT, id,
+                    definition), normalizedTargetFolder, startedAtNanos);
+                if (completed != null) {
+                    completed.run();
+                }
+            });
+        if (admission.rejected()) {
+            new Notification("Create", admission.message(), Notification.Type.ERROR);
+            return false;
         }
-        ReSyncProjectMetadata metadata = manager.getProjectMetadata(screen.studioServerId());
-        ReSyncProjectMetadata.ResourceEntry entry = metadata.ensureResource(ReSyncResourceDragPayload.CUSTOM_CONTENT, id, name, normalizedTargetFolder);
-        entry.setPath(normalizedTargetFolder);
-        manager.saveProjectMetadata(screen.studioServerId(), metadata);
-        rebuild(pathForFolder(normalizedTargetFolder));
-        screen.openStudioViewDocument(ReSyncResourceDragPayload.CUSTOM_CONTENT, id, name, contentGraph, new ScreenBackedStudioView(screen, new ContentDesignerScreen(screen.studioServerId(), contentGraph, screen)));
-        return true;
+        return admission.queued();
     }
 
-    private String createTargetFolder() {
-        String destination = selectionDestination(browserSelection());
-        if (destination != null) return destination;
-        return ReSyncProjectMetadata.normalizePath(currentFolder);
+    private void traceCreateCallback(String expectedType, String expectedId, ReSyncResourceCreator.Result result,
+                                     String targetFolder, long startedAtNanos) {
+        if (!ReSyncLifecycleDiagnostics.enabled()) {
+            return;
+        }
+        boolean expectedResult = result != null && Objects.equals(expectedType, result.type())
+            && (expectedId == null ? result.id() != null && !result.id().isBlank() : Objects.equals(expectedId, result.id()));
+        ReSyncFlowClient.traceLifecycle(screen.studioServerId(), "browser_create_callback", "serverId",
+            screen.studioServerId(), "resourceKey", (expectedType == null ? "unknown" : expectedType) + ":"
+                + (expectedId == null ? "unknown" : expectedId), "requestId", "create", "mutationId", null,
+            "generation", -1L, "authorityEpoch", 0L, "revision", -1L, "expectedResult", expectedResult,
+            "callbackType", result != null ? result.type() : "none", "callbackId", result != null ? result.id() : "none",
+            "resourcePresent", result != null && result.resource() != null, "targetFolder", targetFolder,
+            "elapsedMs", startedAtNanos == 0L ? -1L : ((
+                System.nanoTime() - startedAtNanos) / 1_000_000L), "reason", expectedResult ? "settled_callback" : "unexpected_result");
     }
 
-    private String selectedCreateTargetFolder() {
-        return createTargetFolder();
+    private void traceCreateCallback(String expectedType, String expectedId, FlowManager.CreationResult result,
+                                     String targetFolder, long startedAtNanos) {
+        traceCreateCallback(expectedType, expectedId,
+            result == null ? null : new ReSyncResourceCreator.Result(result.type(), result.id(), result.resource()),
+            targetFolder, startedAtNanos);
     }
 
     private BrowserSelection browserSelection() {
@@ -1598,7 +2507,7 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             if (rootFolders.stream().noneMatch(parent -> folder.getPath().startsWith(parent.getPath() + "/"))) rootFolders.add(folder);
         });
         List<ReSyncProjectMetadata.ResourceEntry> rootResources = resources.values().stream()
-            .filter(resource -> rootFolders.stream().noneMatch(folder -> resource.getPath().equals(folder.getPath()) || resource.getPath().startsWith(folder.getPath() + "/")))
+            .filter(resource -> rootFolders.stream().noneMatch(folder -> resourceWithinFolder(resource.getPath(), resource.getId(), folder.getPath())))
             .toList();
         int selectedCount = !selectedRefs.isEmpty() ? selectedRefs.size() : rootResources.size() + rootFolders.size() + (rootSelected ? 1 : 0);
         return new BrowserSelection(rootResources, List.copyOf(rootFolders), rootSelected && rootResources.isEmpty() && rootFolders.isEmpty(), selectedCount);
@@ -1608,13 +2517,19 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         if (selection.projectRoot()) return "";
         if (selection.selectedCount() != 1 || selection.size() != 1) return null;
         if (!selection.folders().isEmpty()) return selection.folders().getFirst().getPath();
-        return selection.resources().getFirst().getPath();
+        return resourceSelectionDestination(selection.resources().getFirst());
+    }
+
+    static String resourceSelectionDestination(ReSyncProjectMetadata.ResourceEntry resource) {
+        return resource == null ? "" : resourceFolderPath(resource.getPath(), resource.getId());
     }
 
     private boolean canRename(BrowserSelection selection) {
         if (selection.selectedCount() != 1 || selection.size() != 1) return false;
         if (!selection.folders().isEmpty()) return true;
-        return switch (selection.resources().getFirst().getType()) {
+        ReSyncProjectMetadata.ResourceEntry resource = selection.resources().getFirst();
+        if (coreRenameBlocked(resource)) return false;
+        return switch (resource.getType()) {
             case ReSyncResourceDragPayload.FLOW, ReSyncResourceDragPayload.FUNCTION, ReSyncResourceDragPayload.COMMAND,
                  ReSyncResourceDragPayload.CUSTOM_CONTENT, ReSyncResourceDragPayload.GUI, ReSyncResourceDragPayload.SCOREBOARD,
                  ReSyncResourceDragPayload.TAB, ReSyncResourceDragPayload.CHAT, ReSyncResourceDragPayload.MOTD_PROFILE,
@@ -1626,6 +2541,14 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
                  ReSyncResourceDragPayload.SCHEDULE_DEFINITION -> true;
             default -> false;
         };
+    }
+
+    private boolean coreRenameBlocked(ReSyncProjectMetadata.ResourceEntry resource) {
+        if (resource == null) return false;
+        ReSyncResourceType type = ReSyncResourceType.byTypeId(resource.getType());
+        FlowManager manager = FlowManager.getInstance();
+        return manager != null && type != null && type.isGraph()
+            && manager.isCoreGraphAuthorityEnabled(screen.studioServerId(), type);
     }
 
     private boolean canDelete(BrowserSelection selection) {
@@ -1650,8 +2573,11 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         for (ReSyncProjectMetadata.ResourceEntry resource : selection.resources()) resources.put(resource.key(), resource);
         FlowManager manager = FlowManager.getInstance();
         if (manager == null) return List.copyOf(resources.values());
-        for (ReSyncProjectMetadata.ResourceEntry resource : manager.getProjectMetadata(screen.studioServerId()).getResources()) {
-            if (selection.folders().stream().anyMatch(folder -> resource.getPath().equals(folder.getPath()) || resource.getPath().startsWith(folder.getPath() + "/"))) {
+        for (ReSyncProjectMetadata.ResourceEntry resource : manager.getProjectResources(screen.studioServerId())) {
+            if (!screen.isVisibleStudioResource(resource)) {
+                continue;
+            }
+            if (selection.folders().stream().anyMatch(folder -> resourceWithinFolder(resource.getPath(), resource.getId(), folder.getPath()))) {
                 resources.put(resource.key(), resource);
             }
         }
@@ -1678,7 +2604,7 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         BrowserSelection selection = browserSelection();
         List<String> folders = selection.folders().stream().map(ReSyncProjectMetadata.FolderEntry::getPath).toList();
         List<ClipboardResource> resources = selection.resources().stream()
-            .filter(resource -> folders.stream().noneMatch(folder -> resource.getPath().equals(folder) || resource.getPath().startsWith(folder + "/")))
+            .filter(resource -> folders.stream().noneMatch(folder -> resourceWithinFolder(resource.getPath(), resource.getId(), folder)))
             .map(resource -> new ClipboardResource(resource.getType(), resource.getId(), resource.getPath()))
             .toList();
         return resources.isEmpty() && folders.isEmpty() ? null : new BrowserClipboard(resources, folders, cut);
@@ -1700,16 +2626,28 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             return;
         }
         BrowserClipboard activeClipboard = clipboard;
+        if (containsWorldGen(manager, activeClipboard)) {
+            if (activeClipboard.cut() || !activeClipboard.folderPaths().isEmpty()
+                || activeClipboard.resources().stream().anyMatch(resource -> !ReSyncResourceDragPayload.WORLDGEN.equals(resource.type()))) {
+                new Notification("Paste", activeClipboard.cut() ? "Move World Generation Unsupported" : "Copy World Generation Separately",
+                    Notification.Type.ERROR);
+                return;
+            }
+            pasteWorldGenResources(manager, activeClipboard.resources(), destination);
+            return;
+        }
         BrowserEditStart edit = beginBrowserEdit(activeClipboard.cut() ? "Move" : "Paste", List.of());
+        FlowManager.ProjectMetadataEdit metadata = manager.editProjectMetadata(screen.studioServerId());
+        Set<String> affectedKeys = new HashSet<>();
         List<ClipboardResource> failedResources = new ArrayList<>();
         List<String> failedFolders = new ArrayList<>();
         int pasted = 0;
         for (ClipboardResource resource : activeClipboard.resources()) {
-            if (pasteResource(manager, resource, destination, activeClipboard.cut())) pasted++;
+            if (pasteResource(manager, metadata, resource, destination, activeClipboard.cut(), affectedKeys)) pasted++;
             else failedResources.add(resource);
         }
         for (String folder : activeClipboard.folderPaths()) {
-            if (pasteFolder(manager, folder, destination, activeClipboard.cut())) pasted++;
+            if (pasteFolder(manager, metadata, folder, destination, activeClipboard.cut(), affectedKeys)) pasted++;
             else failedFolders.add(folder);
         }
         if (pasted == 0) {
@@ -1718,38 +2656,150 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         if (activeClipboard.cut()) {
             clipboard = failedResources.isEmpty() && failedFolders.isEmpty() ? null : new BrowserClipboard(failedResources, failedFolders, true);
         }
-        manager.saveProjectMetadata(screen.studioServerId(), manager.getProjectMetadata(screen.studioServerId()));
-        commitBrowserEdit(edit);
+        manager.saveProjectMetadata(metadata, true);
+        commitBrowserEdit(edit, affectedKeys);
         rebuild(pathForFolder(destination));
         new Notification(activeClipboard.cut() ? "Moved" : "Pasted", pasted + " Items", Notification.Type.SUCCESS);
     }
 
-    private boolean pasteResource(FlowManager manager, ClipboardResource source, String destination, boolean cut) {
-        ReSyncProjectMetadata metadata = manager.getProjectMetadata(screen.studioServerId());
-        ReSyncProjectMetadata.ResourceEntry entry = metadata.findResource(source.type(), source.id());
+    private boolean containsWorldGen(FlowManager manager, BrowserClipboard clipboard) {
+        if (clipboard.resources().stream().anyMatch(resource -> ReSyncResourceDragPayload.WORLDGEN.equals(resource.type()))) {
+            return true;
+        }
+        if (clipboard.folderPaths().isEmpty()) {
+            return false;
+        }
+        return manager.getProjectResources(screen.studioServerId()).stream()
+            .anyMatch(resource -> ReSyncResourceDragPayload.WORLDGEN.equals(resource.getType())
+                && clipboard.folderPaths().stream().anyMatch(folder -> resourceWithinFolder(resource.getPath(), resource.getId(), folder)));
+    }
+
+    private void pasteWorldGenResources(FlowManager manager, List<ClipboardResource> resources, String destination) {
+        String serverId = screen.studioServerId();
+        WorldGenManager worldGen = WorldGenManager.getInstance();
+        FlowManager.ProjectMetadataEdit metadata = manager.editProjectMetadata(serverId);
+        Set<String> reserved = new HashSet<>();
+        List<WorldGenCopyRequest> requests = new ArrayList<>();
+        for (ClipboardResource resource : resources) {
+            FlowManager.ProjectResource source = metadata.resource(resource.type(), resource.id());
+            if (source == null) {
+                new Notification("Copy", "Resource Missing", Notification.Type.ERROR);
+                continue;
+            }
+            String targetId = nextWorldGenCopyId(manager, source.id(), destination, reserved);
+            reserved.add(ReSyncProjectMetadata.resourceKey(ReSyncResourceDragPayload.WORLDGEN, targetId));
+            BrowserEditStart edit = beginBrowserEdit("Paste", List.of());
+            if (edit == null) {
+                new Notification("Copy", "World Generation Copy Failed", Notification.Type.ERROR);
+                continue;
+            }
+            requests.add(new WorldGenCopyRequest(serverId, source.id(), targetId, destination,
+                new WorldGenManager.WorldGenMetadataIntent(targetId, canonicalResourcePath(destination, targetId), -1), edit));
+        }
+        WeakReference<ReSyncContentBrowserWidget> widgetReference = new WeakReference<>(this);
+        for (WorldGenCopyRequest request : requests) {
+            WorldGenManager.ProjectSaveSubmission[] submission = new WorldGenManager.ProjectSaveSubmission[1];
+            submission[0] = worldGen.duplicateProject(serverId, request.sourceId(), request.targetId(), false,
+                request.metadataIntent(),
+                settlement -> {
+                    ReSyncContentBrowserWidget widget = widgetReference.get();
+                    if (widget != null) {
+                        widget.completeWorldGenCopy(request, submission[0], settlement);
+                    } else if (settlement != null && submission[0] != null
+                        && submission[0].equals(settlement.submission()) && settlement.committed()) {
+                        worldGen.reconcileWorldGenProjectMetadata(settlement,
+                            request.metadataIntent().displayName(), request.metadataIntent().path(),
+                            request.metadataIntent().sortOrder(), null);
+                    }
+                });
+            if (submission[0] == null) {
+                new Notification("Copy", "World Generation Copy Failed", Notification.Type.ERROR);
+            }
+        }
+    }
+
+    private void completeWorldGenCopy(WorldGenCopyRequest request, WorldGenManager.ProjectSaveSubmission expected,
+                                      WorldGenManager.ProjectSaveSubmissionSettlement settlement) {
+        String serverId = request.serverId();
+        if (settlement == null || expected == null || !expected.equals(settlement.submission())
+            || !settlement.committed() || !serverId.equals(settlement.submission().serverId())
+            || !request.targetId().equals(settlement.submission().projectId()) || settlement.project() == null
+            || !request.targetId().equals(settlement.project().getId())) {
+            if (serverId.equals(screen.studioServerId())) {
+                new Notification("Copy", "World Generation Copy Failed", Notification.Type.ERROR);
+            }
+            return;
+        }
+        String operationId = settlement.submission().operationId();
+        Set<String> affectedKeys = Set.of(ReSyncProjectMetadata.resourceKey(ReSyncResourceDragPayload.WORLDGEN,
+            request.targetId()));
+        WeakReference<ReSyncContentBrowserWidget> widgetReference = new WeakReference<>(this);
+        boolean admitted = WorldGenManager.getInstance().reconcileWorldGenProjectMetadata(settlement,
+            request.metadataIntent().displayName(), request.metadataIntent().path(), request.metadataIntent().sortOrder(), result -> {
+                ReSyncContentBrowserWidget widget = widgetReference.get();
+                if (widget == null) {
+                    return;
+                }
+                FlowManager currentManager = FlowManager.getInstance();
+                WorldGenManager currentWorldGen = WorldGenManager.getInstance();
+                if (result == null || !operationId.equals(result.operationId()) || !serverId.equals(widget.screen.studioServerId())
+                    || !serverId.equals(result.serverId())
+                    || !request.targetId().equals(result.projectId()) || !result.add() || !result.successful()
+                    || currentManager == null || currentWorldGen == null || result.connection() == null
+                    || !currentManager.isCurrentServerConnection(result.connection())
+                    || currentWorldGen.authorityEpoch(serverId) != result.authorityEpoch()) {
+                    if (result != null && !result.successful()) {
+                        new Notification("Copy", "World Generation Copy Failed", Notification.Type.ERROR);
+                    }
+                    return;
+                }
+                widget.commitBrowserEdit(request.edit(), affectedKeys);
+                widget.rebuild(widget.pathForFolder(request.destination()));
+                new Notification("Pasted", "World Generation", Notification.Type.SUCCESS);
+            });
+        if (!admitted) {
+            new Notification("Copy", "World Generation Copy Failed", Notification.Type.ERROR);
+        }
+    }
+
+    private String nextWorldGenCopyId(FlowManager manager, String sourceId, String folder, Set<String> reserved) {
+        String base = sourceId + "_copy";
+        String candidate = base;
+        int suffix = 2;
+        while (reserved.contains(ReSyncProjectMetadata.resourceKey(ReSyncResourceDragPayload.WORLDGEN, candidate))
+            || ReSyncResourceCreator.exists(manager, screen.studioServerId(), ReSyncResourceDragPayload.WORLDGEN, candidate, folder)) {
+            candidate = base + "_" + suffix++;
+        }
+        return candidate;
+    }
+
+    private boolean pasteResource(FlowManager manager, FlowManager.ProjectMetadataEdit metadata, ClipboardResource source, String destination,
+                                  boolean cut, Set<String> affectedKeys) {
+        FlowManager.ProjectResource entry = metadata.resource(source.type(), source.id());
         if (entry == null) {
             new Notification("Paste", "Resource Missing", Notification.Type.ERROR);
             return false;
         }
         String targetFolder = ReSyncProjectMetadata.normalizePath(destination);
         if (cut) {
-            if (entry.getPath().equals(targetFolder)) {
+            String targetPath = canonicalResourcePath(targetFolder, entry.id());
+            if (entry.path().equals(targetPath)) {
                 return true;
             }
-            if (folderContainsId(metadata, targetFolder, entry.getId(), entry.key())) {
+            if (folderContainsId(metadata, targetFolder, entry.id(), entry.key())) {
                 new Notification("Move", "ID Exists In Folder", Notification.Type.ERROR);
                 return false;
             }
-            entry.setPath(targetFolder);
+            metadata.putResource(entry.type(), entry.id(), entry.displayName(), targetPath, entry.sortOrder());
             return true;
         }
-        String copyId = nextCopyId(manager, entry.getType(), entry.getId(), targetFolder);
-        if (!duplicateResource(manager, entry, copyId)) {
+        String copyId = nextCopyId(manager, entry.type(), entry.id(), targetFolder);
+        if (!duplicateResource(manager, entry.type(), entry.id(), copyId)) {
             new Notification("Copy", "Resource Cannot Be Copied", Notification.Type.ERROR);
             return false;
         }
-        ReSyncProjectMetadata.ResourceEntry copy = metadata.ensureResource(entry.getType(), copyId, copyId, targetFolder);
-        copy.setPath(targetFolder);
+        metadata.putResource(entry.type(), copyId, copyId, canonicalResourcePath(targetFolder, copyId), metadata.nextResourceSortOrder());
+        affectedKeys.add(ReSyncProjectMetadata.resourceKey(entry.type(), copyId));
         return true;
     }
 
@@ -1765,9 +2815,9 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         screen.refreshStudioResourcePanel();
     }
 
-    private boolean pasteFolder(FlowManager manager, String sourcePath, String destination, boolean cut) {
-        ReSyncProjectMetadata metadata = manager.getProjectMetadata(screen.studioServerId());
-        ReSyncProjectMetadata.FolderEntry source = metadata.findFolder(sourcePath);
+    private boolean pasteFolder(FlowManager manager, FlowManager.ProjectMetadataEdit metadata, String sourcePath, String destination,
+                                boolean cut, Set<String> affectedKeys) {
+        FlowManager.ProjectFolder source = metadata.folder(sourcePath);
         if (source == null) {
             new Notification("Paste", "Folder Missing", Notification.Type.ERROR);
             return false;
@@ -1778,12 +2828,12 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             return false;
         }
         if (cut) {
-            String oldPath = source.getPath();
-            String targetPath = targetParent.isBlank() ? source.getName() : targetParent + "/" + source.getName();
+            String oldPath = source.path();
+            String targetPath = targetParent.isBlank() ? source.name() : targetParent + "/" + source.name();
             if (targetPath.equals(oldPath)) {
                 return true;
             }
-            if (metadata.findFolder(targetPath) != null) {
+            if (metadata.folder(targetPath) != null) {
                 new Notification("Move", "Folder Already Exists", Notification.Type.ERROR);
                 return false;
             }
@@ -1793,68 +2843,73 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             }
             return true;
         }
-        copyFolder(manager, metadata, source, targetParent);
+        copyFolder(manager, metadata, source, targetParent, affectedKeys);
         return true;
     }
 
-    private void relocateFolder(ReSyncProjectMetadata metadata, String oldPath, String newPath, String newParent) {
-        for (ReSyncProjectMetadata.FolderEntry folder : metadata.getFolders()) {
-            if (folder.getPath().equals(oldPath)) {
-                folder.setPath(newPath);
-                folder.setParentPath(newParent);
-            } else if (folder.getPath().startsWith(oldPath + "/")) {
-                folder.setPath(newPath + folder.getPath().substring(oldPath.length()));
+    private void relocateFolder(FlowManager.ProjectMetadataEdit metadata, String oldPath, String newPath, String newParent) {
+        for (FlowManager.ProjectFolder folder : metadata.folders()) {
+            String path = folder.path();
+            String parent = folder.parentPath();
+            if (path.equals(oldPath)) {
+                path = newPath;
+                parent = newParent;
+            } else if (path.startsWith(oldPath + "/")) {
+                path = newPath + path.substring(oldPath.length());
             }
-            if (folder.getParentPath().equals(oldPath)) {
-                folder.setParentPath(newPath);
-            } else if (folder.getParentPath().startsWith(oldPath + "/")) {
-                folder.setParentPath(newPath + folder.getParentPath().substring(oldPath.length()));
-            }
+            if (parent.equals(oldPath)) parent = newPath;
+            else if (parent.startsWith(oldPath + "/")) parent = newPath + parent.substring(oldPath.length());
+            if (!path.equals(folder.path())) metadata.removeFolder(folder.path());
+            metadata.putFolder(path, parent, folder.name(), folder.sortOrder(), folder.collapsed());
         }
-        for (ReSyncProjectMetadata.ResourceEntry resource : metadata.getResources()) {
-            if (resource.getPath().equals(oldPath) || resource.getPath().startsWith(oldPath + "/")) {
-                resource.setPath(newPath + resource.getPath().substring(oldPath.length()));
+        for (FlowManager.ProjectResource resource : metadata.resources()) {
+            String resourceFolder = resourceFolderPath(resource.path(), resource.id());
+            if (resourceWithinFolder(resource.path(), resource.id(), oldPath)) {
+                String relocatedFolder = newPath + resourceFolder.substring(oldPath.length());
+                metadata.putResource(resource.type(), resource.id(), resource.displayName(),
+                    canonicalResourcePath(relocatedFolder, resource.id()), resource.sortOrder());
             }
         }
     }
 
-    private void copyFolder(FlowManager manager, ReSyncProjectMetadata metadata, ReSyncProjectMetadata.FolderEntry source, String targetParent) {
-        String copyName = nextFolderCopyName(metadata, targetParent, source.getName());
+    private void copyFolder(FlowManager manager, FlowManager.ProjectMetadataEdit metadata, FlowManager.ProjectFolder source,
+                            String targetParent, Set<String> affectedKeys) {
+        String copyName = nextFolderCopyName(metadata, targetParent, source.name());
         String copyRoot = targetParent.isBlank() ? copyName : targetParent + "/" + copyName;
-        String sourceRoot = source.getPath();
-        List<ReSyncProjectMetadata.FolderEntry> folders = metadata.getFolders().stream()
-            .filter(folder -> folder.getPath().equals(sourceRoot) || folder.getPath().startsWith(sourceRoot + "/"))
-            .sorted((left, right) -> Integer.compare(left.getPath().length(), right.getPath().length()))
+        String sourceRoot = source.path();
+        List<FlowManager.ProjectFolder> folders = metadata.folders().stream()
+            .filter(folder -> folder.path().equals(sourceRoot) || folder.path().startsWith(sourceRoot + "/"))
+            .sorted((left, right) -> Integer.compare(left.path().length(), right.path().length()))
             .toList();
-        for (ReSyncProjectMetadata.FolderEntry folder : folders) {
-            String path = copyRoot + folder.getPath().substring(sourceRoot.length());
+        for (FlowManager.ProjectFolder folder : folders) {
+            String path = copyRoot + folder.path().substring(sourceRoot.length());
             String parent = path.equals(copyRoot) ? targetParent : parentFolder(path);
-            metadata.ensureFolder(path, parent, metadata.getFolders().size());
+            metadata.putFolder(path, parent, folder.name(), metadata.nextFolderSortOrder(), false);
         }
-        List<ReSyncProjectMetadata.ResourceEntry> resources = metadata.getResources().stream()
-            .filter(resource -> resource.getPath().equals(sourceRoot) || resource.getPath().startsWith(sourceRoot + "/"))
+        List<FlowManager.ProjectResource> resources = metadata.resources().stream()
+            .filter(resource -> resourceWithinFolder(resource.path(), resource.id(), sourceRoot))
             .toList();
-        for (ReSyncProjectMetadata.ResourceEntry resource : resources) {
-            String folder = copyRoot + resource.getPath().substring(sourceRoot.length());
-            String copyId = nextCopyId(manager, resource.getType(), resource.getId(), folder);
-            if (duplicateResource(manager, resource, copyId)) {
-                ReSyncProjectMetadata.ResourceEntry copy = metadata.ensureResource(resource.getType(), copyId, copyId, folder);
-                copy.setPath(folder);
+        for (FlowManager.ProjectResource resource : resources) {
+            String resourceFolder = resourceFolderPath(resource.path(), resource.id());
+            String folder = copyRoot + resourceFolder.substring(sourceRoot.length());
+            String copyId = nextCopyId(manager, resource.type(), resource.id(), folder);
+            if (duplicateResource(manager, resource.type(), resource.id(), copyId)) {
+                metadata.putResource(resource.type(), copyId, copyId, canonicalResourcePath(folder, copyId), metadata.nextResourceSortOrder());
+                affectedKeys.add(ReSyncProjectMetadata.resourceKey(resource.type(), copyId));
             }
         }
     }
 
-    private boolean duplicateResource(FlowManager manager, ReSyncProjectMetadata.ResourceEntry source, String copyId) {
-        if (ReSyncResourceDragPayload.WORLDGEN.equals(source.getType())) {
-            WorldGenManager.getInstance().duplicateProject(screen.studioServerId(), source.getId(), copyId, false);
-            return true;
+    private boolean duplicateResource(FlowManager manager, String type, String id, String copyId) {
+        if (ReSyncResourceDragPayload.WORLDGEN.equals(type)) {
+            return false;
         }
-        if (ReSyncResourceDragPayload.WORLD.equals(source.getType())) {
+        if (ReSyncResourceDragPayload.WORLD.equals(type)) {
             manager.suppressNextWorldSuccessNotification(screen.studioServerId(), "cloneWorld");
-            manager.cloneWorld(screen.studioServerId(), source.getId(), copyId, false);
+            manager.cloneWorld(screen.studioServerId(), id, copyId, false);
             return true;
         }
-        return DesignerSaveNotifications.withoutAutomaticNotifications(() -> manager.duplicateResource(screen.studioServerId(), source.getType(), source.getId(), copyId));
+        return DesignerSaveNotifications.withoutAutomaticNotifications(() -> manager.duplicateResource(screen.studioServerId(), type, id, copyId));
     }
 
     private String nextCopyId(FlowManager manager, String type, String sourceId, String folder) {
@@ -1867,25 +2922,26 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         return candidate;
     }
 
-    private String nextFolderCopyName(ReSyncProjectMetadata metadata, String parent, String sourceName) {
+    private String nextFolderCopyName(FlowManager.ProjectMetadataEdit metadata, String parent, String sourceName) {
         String base = sourceName + " Copy";
         String candidate = base;
         int suffix = 2;
-        while (metadata.findFolder(parent.isBlank() ? candidate : parent + "/" + candidate) != null) {
+        while (metadata.folder(parent.isBlank() ? candidate : parent + "/" + candidate) != null) {
             candidate = base + " " + suffix++;
         }
         return candidate;
     }
 
-    private boolean folderContainsId(ReSyncProjectMetadata metadata, String folder, String id, String ignoredKey) {
-        return metadata.getResources().stream().anyMatch(resource -> resource.getPath().equals(folder) && resource.getId().equals(id) && !resource.key().equals(ignoredKey));
+    private boolean folderContainsId(FlowManager.ProjectMetadataEdit metadata, String folder, String id, String ignoredKey) {
+        return metadata.resources().stream().anyMatch(resource -> resourceFolderPath(resource.path(), resource.id()).equals(folder)
+            && resource.id().equals(id) && !resource.key().equals(ignoredKey));
     }
 
     private boolean resourceExists(FlowManager manager, String type, String id) {
         return ReSyncResourceCreator.exists(manager, screen.studioServerId(), type, id, selectedCreateTargetFolder());
     }
 
-    private String resourceTypeName(String type) {
+    private static String resourceTypeName(String type) {
         return ReSyncResourceCreator.resourceTypeName(type);
     }
 
@@ -1942,20 +2998,23 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         if (selectedResource == null || newId.isBlank() || selectedResource.getId().equals(newId)) {
             return true;
         }
-        if (ReSyncResourceCreator.exists(manager, screen.studioServerId(), selectedResource.getType(), newId, selectedResource.getPath())) {
+        String resourceFolder = resourceFolderPath(selectedResource.getPath(), selectedResource.getId());
+        if (ReSyncResourceCreator.exists(manager, screen.studioServerId(), selectedResource.getType(), newId, resourceFolder)) {
             new Notification("Error", resourceTypeName(selectedResource.getType()) + " ID already exists", Notification.Type.ERROR);
             return false;
         }
         String oldType = selectedResource.getType();
         String oldId = selectedResource.getId();
-        ReSyncProjectMetadata metadata = manager.getProjectMetadata(screen.studioServerId());
-        metadata.deduplicateResources();
-        ReSyncProjectMetadata.ResourceEntry entry = metadata.findResource(oldType, oldId);
-        String oldDisplayName = entry != null ? entry.getDisplayName() : oldId;
+        if (coreRenameBlocked(selectedResource)) {
+            new Notification("Explorer", "Core Rename Unsupported", Notification.Type.ERROR);
+            return false;
+        }
+        FlowManager.ProjectMetadataEdit metadata = manager.editProjectMetadata(screen.studioServerId());
+        FlowManager.ProjectResource entry = metadata.resource(oldType, oldId);
+        String oldDisplayName = entry != null ? entry.displayName() : oldId;
         if (entry != null) {
-            entry.setId(newId);
-            entry.setDisplayName(newId);
-            manager.saveProjectMetadata(screen.studioServerId(), metadata, false);
+            metadata.renameResource(entry.key(), oldType, newId, newId, canonicalResourcePath(resourceFolder, newId), entry.sortOrder());
+            manager.saveProjectMetadata(metadata, false);
         }
         boolean renamed = switch (selectedResource.getType()) {
             case ReSyncResourceDragPayload.FLOW, ReSyncResourceDragPayload.FUNCTION -> manager.renameFlow(screen.studioServerId(), oldId, newId);
@@ -1976,15 +3035,15 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         };
         if (!renamed) {
             if (entry != null) {
-                entry.setId(oldId);
-                entry.setDisplayName(oldDisplayName);
-                manager.saveProjectMetadata(screen.studioServerId(), metadata, false);
+                FlowManager.ProjectMetadataEdit rollback = manager.editProjectMetadata(screen.studioServerId());
+                rollback.renameResource(ReSyncProjectMetadata.resourceKey(oldType, newId), oldType, oldId, oldDisplayName,
+                    entry.path(), entry.sortOrder());
+                manager.saveProjectMetadata(rollback, false);
             }
             new Notification("Explorer", "Rename Failed", Notification.Type.ERROR);
             return false;
         }
         screen.renameStudioDocument(oldType, oldId, newId);
-        manager.saveProjectMetadata(screen.studioServerId(), metadata);
         rebuild();
         return true;
     }
@@ -1994,6 +3053,10 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         BrowserSelection selection = browserSelection();
         if (manager == null || !canDelete(selection)) return;
         List<ReSyncProjectMetadata.ResourceEntry> resources = selectedResources(selection);
+        if (resources.stream().anyMatch(resource -> AutomationDefinitionDraft.supports(resource.getType()))) {
+            new Notification("Delete", "This Folder Contains Automation Definitions. Delete Them From Their Type Screen First", Notification.Type.WARN);
+            return;
+        }
         List<ReSyncProjectMetadata.ResourceEntry> worlds = resources.stream().filter(resource -> ReSyncResourceDragPayload.WORLD.equals(resource.getType())).toList();
         if (!worlds.isEmpty()) {
             if (worlds.size() == 1 && resources.size() == 1 && selection.folders().isEmpty()) {
@@ -2003,69 +3066,242 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             }
             return;
         }
+        List<ReSyncProjectMetadata.ResourceEntry> worldGenResources = resources.stream()
+            .filter(resource -> ReSyncResourceDragPayload.WORLDGEN.equals(resource.getType())).toList();
+        if (!worldGenResources.isEmpty()) {
+            if (worldGenResources.size() == 1 && resources.size() == 1 && selection.folders().isEmpty()) {
+                deleteWorldGenResource(manager, worldGenResources.getFirst());
+            } else {
+                new Notification("Delete", "Delete World Generation Separately", Notification.Type.ERROR);
+            }
+            return;
+        }
         BrowserEditStart edit = beginBrowserEdit("Delete", resources);
         if (edit == null) return;
-        ReSyncProjectMetadata metadata = FlowJson.projectMetadata(FlowJson.parse(edit.metadata()).getAsJsonObject());
-        Set<String> deletedKeys = new HashSet<>(resources.stream().map(ReSyncProjectMetadata.ResourceEntry::key).toList());
+        Set<String> requestedKeys = new HashSet<>(resources.stream().map(ReSyncProjectMetadata.ResourceEntry::key).toList());
         Set<String> deletedFolders = new HashSet<>();
         for (ReSyncProjectMetadata.FolderEntry folder : selection.folders()) {
             deletedFolders.add(folder.getPath());
         }
-        metadata.getResources().removeIf(resource -> deletedKeys.contains(resource.key()));
-        metadata.getFolders().removeIf(folder -> deletedFolders.stream().anyMatch(path -> folder.getPath().equals(path) || folder.getPath().startsWith(path + "/")));
-        if (!applyBrowserState(manager, metadata, Map.of(), deletedKeys)) {
-            new Notification("Delete", "Delete Failed", Notification.Type.ERROR);
+        if (requestedKeys.stream().anyMatch(pendingDeleteKeys::contains)
+            || deletedFolders.stream().anyMatch(pendingDeleteFolders::contains)) {
+            new Notification("Delete", "Delete Already Pending", Notification.Type.WARN);
             return;
         }
-        String deletedCurrentFolder = deletedFolders.stream().filter(path -> currentFolder.equals(path) || currentFolder.startsWith(path + "/")).findFirst().orElse(null);
+        pendingDeleteKeys.addAll(requestedKeys);
+        pendingDeleteFolders.addAll(deletedFolders);
+        rebuild();
+        Map<String, Async<FlowManager.ResourceDeleteResult>> settlements = new LinkedHashMap<>();
+        for (ReSyncProjectMetadata.ResourceEntry resource : resources) {
+            settlements.put(resource.key(), deleteResource(manager, resource));
+        }
+        Async<?>[] futures = settlements.values().toArray(new Async<?>[0]);
+        WeakReference<ReSyncContentBrowserWidget> widgetReference = new WeakReference<>(this);
+        Async.allOf(futures).whenComplete((ignored, exception) -> {
+            ReSyncContentBrowserWidget widget = widgetReference.get();
+            if (widget == null) return;
+            try {
+                ScreenManager.getInstance().execute(() -> widget.finishDelete(edit, requestedKeys, deletedFolders,
+                    settlements, exception));
+            } catch (RuntimeException rejected) {
+                widget.pendingDeleteKeys.removeAll(requestedKeys);
+                widget.pendingDeleteFolders.removeAll(deletedFolders);
+            }
+        });
+    }
+
+    private void finishDelete(BrowserEditStart edit, Set<String> requestedKeys, Set<String> requestedFolders,
+                              Map<String, Async<FlowManager.ResourceDeleteResult>> settlements,
+                              Throwable exception) {
+        if (disposed) {
+            pendingDeleteKeys.removeAll(requestedKeys);
+            pendingDeleteFolders.removeAll(requestedFolders);
+            return;
+        }
+        Set<String> deletedKeys = settledDeleteKeys(settlements);
+        boolean allResourcesDeleted = exception == null && deletedKeys.size() == requestedKeys.size();
+        FlowManager manager = FlowManager.getInstance();
+        if (manager != null && allResourcesDeleted && !requestedFolders.isEmpty()) {
+            FlowManager.ProjectMetadataEdit metadata = manager.editProjectMetadata(screen.studioServerId());
+            Set<String> deletedFolders = new LinkedHashSet<>();
+            metadata.folders().stream().filter(folder -> requestedFolders.stream()
+                .anyMatch(path -> folder.path().equals(path) || folder.path().startsWith(path + "/")))
+                .map(FlowManager.ProjectFolder::path).forEach(path -> {
+                    metadata.removeFolder(path);
+                    deletedFolders.add(path);
+                });
+            if (!deletedFolders.isEmpty()) {
+                WeakReference<ReSyncContentBrowserWidget> widgetReference = new WeakReference<>(this);
+                manager.saveProjectMetadataSettled(metadata, true).whenComplete((saved, metadataFailure) -> {
+                    ReSyncContentBrowserWidget widget = widgetReference.get();
+                    if (widget == null) return;
+                    Runnable finish = () -> widget.publishDeleteResult(edit, requestedKeys, requestedFolders,
+                        settlements, deletedKeys, Boolean.TRUE.equals(saved) && metadataFailure == null
+                            ? deletedFolders : Set.of(), metadataFailure);
+                    try {
+                        ScreenManager.getInstance().execute(finish);
+                    } catch (RuntimeException rejected) {
+                        widget.pendingDeleteKeys.removeAll(requestedKeys);
+                        widget.pendingDeleteFolders.removeAll(requestedFolders);
+                    }
+                });
+                return;
+            }
+        }
+        publishDeleteResult(edit, requestedKeys, requestedFolders, settlements, deletedKeys, Set.of(), exception);
+    }
+
+    private void publishDeleteResult(BrowserEditStart edit, Set<String> requestedKeys, Set<String> requestedFolders,
+                                     Map<String, Async<FlowManager.ResourceDeleteResult>> settlements,
+                                     Set<String> deletedKeys, Set<String> deletedFolders, Throwable exception) {
+        pendingDeleteKeys.removeAll(requestedKeys);
+        pendingDeleteFolders.removeAll(requestedFolders);
+        if (disposed) return;
+        boolean foldersDeleted = requestedFolders.isEmpty() || !deletedFolders.isEmpty();
+        String deletedCurrentFolder = deletedFolders.stream()
+            .filter(path -> currentFolder.equals(path) || currentFolder.startsWith(path + "/"))
+            .findFirst().orElse(null);
         if (deletedCurrentFolder != null) currentFolder = parentFolder(deletedCurrentFolder);
-        commitBrowserEdit(edit);
-        screen.studioDocuments.removeIf(document -> deletedKeys.contains(document.key()));
-        screen.syncStudioDocumentTabs();
+        commitBrowserEdit(edit, deletedKeys);
+        screen.removeStudioDocuments(deletedKeys);
+        Set<String> failedKeys = new LinkedHashSet<>(requestedKeys);
+        failedKeys.removeAll(deletedKeys);
+        Set<String> retainedFolders = foldersDeleted ? Set.of() : Set.copyOf(requestedFolders);
+        pendingSelectionRestore = new BrowserSelectionState(failedKeys, retainedFolders, false,
+            treeContainer.getScrollOffset());
         selectedResource = null;
         selectedFolder = null;
         selectedProjectRoot = false;
         rebuild();
-        int deleted = deletedKeys.size() + deletedFolders.size();
-        if (deleted > 0) new Notification("Deleted", deleted + " Items", Notification.Type.SUCCESS);
+        int deleted = deletedKeys.size() + (foldersDeleted ? requestedFolders.size() : 0);
+        int failed = requestedKeys.size() - deletedKeys.size() + (foldersDeleted ? 0 : requestedFolders.size());
+        if (deleted > 0 && failed == 0) {
+            new Notification("Deleted", deleted + " Items", Notification.Type.SUCCESS);
+        } else if (deleted > 0) {
+            new Notification("Delete", deleted + " Deleted · " + failed + " Failed", Notification.Type.WARN);
+        } else {
+            String message = settlements.values().stream().map(ReSyncContentBrowserWidget::settledDeleteResult)
+                .map(FlowManager.ResourceDeleteResult::message).filter(value -> !value.isBlank()).findFirst()
+                .orElse(exception != null ? "Delete Failed" : "Project Metadata Delete Failed");
+            new Notification("Delete", message, Notification.Type.ERROR);
+        }
     }
 
-    private boolean deleteResource(FlowManager manager, ReSyncProjectMetadata.ResourceEntry resource) {
-        switch (resource.getType()) {
-            case ReSyncResourceDragPayload.FLOW, ReSyncResourceDragPayload.FUNCTION -> {
-                return manager.deleteGraph(screen.studioServerId(), ReSyncResourceType.byTypeId(resource.getType()), resource.getId());
+    static Set<String> settledDeleteKeys(
+        Map<String, Async<FlowManager.ResourceDeleteResult>> settlements) {
+        if (settlements == null || settlements.isEmpty()) return Set.of();
+        return settlements.entrySet().stream()
+            .filter(entry -> settledDeleteResult(entry.getValue()).deleted())
+            .map(Map.Entry::getKey)
+            .collect(Collectors.toUnmodifiableSet());
+    }
+
+    private static FlowManager.ResourceDeleteResult settledDeleteResult(
+        Async<FlowManager.ResourceDeleteResult> settlement) {
+        if (settlement == null || !settlement.isDone() || BrowserWork.failed(settlement)
+            || settlement.isCancelled()) {
+            return new FlowManager.ResourceDeleteResult("", "", false, "Delete Failed");
+        }
+        try {
+            return settlement.getNow(new FlowManager.ResourceDeleteResult("", "", false, "Delete Failed"));
+        } catch (RuntimeException exception) {
+            return new FlowManager.ResourceDeleteResult("", "", false, "Delete Failed");
+        }
+    }
+
+    private void deleteWorldGenResource(FlowManager manager, ReSyncProjectMetadata.ResourceEntry resource) {
+        String serverId = screen.studioServerId();
+        String projectId = resource.getId();
+        BrowserEditStart edit = beginBrowserEdit("Delete", List.of(resource));
+        if (edit == null) {
+            new Notification("Delete", "World Generation Delete Failed", Notification.Type.ERROR);
+            return;
+        }
+        WeakReference<ReSyncContentBrowserWidget> widgetReference = new WeakReference<>(this);
+        WorldGenManager.WorldGenMetadataIntent metadataIntent = new WorldGenManager.WorldGenMetadataIntent(
+            resource.getDisplayName(), resource.getPath(), resource.getSortOrder());
+        WorldGenManager.ProjectDeleteSubmission[] submission = new WorldGenManager.ProjectDeleteSubmission[1];
+        submission[0] = WorldGenManager.getInstance().deleteProject(serverId, projectId,
+            metadataIntent,
+            settlement -> {
+            if (settlement == null || submission[0] == null || !submission[0].equals(settlement.submission())
+                || !settlement.committed() || !serverId.equals(settlement.submission().serverId())
+                || !projectId.equals(settlement.submission().projectId()) || settlement.authoritativeRevision() < 1L
+                || settlement.connection() == null || settlement.authorityEpoch() < 1L) {
+                ReSyncContentBrowserWidget widget = widgetReference.get();
+                if (widget != null && serverId.equals(widget.screen.studioServerId())) {
+                    new Notification("Delete", "World Generation Delete Failed", Notification.Type.ERROR);
+                }
+                return;
             }
-            case ReSyncResourceDragPayload.COMMAND -> {
-                return manager.deleteGraph(screen.studioServerId(), ReSyncResourceType.COMMAND, resource.getId());
+            String key = ReSyncProjectMetadata.resourceKey(ReSyncResourceDragPayload.WORLDGEN, projectId);
+            String operationId = settlement.submission().operationId();
+            boolean admitted = WorldGenManager.getInstance().reconcileWorldGenProjectMetadata(settlement,
+                metadataIntent.displayName(), metadataIntent.path(), metadataIntent.sortOrder(), result -> {
+                    ReSyncContentBrowserWidget widget = widgetReference.get();
+                    if (widget == null) {
+                        return;
+                    }
+                    FlowManager currentManager = FlowManager.getInstance();
+                    WorldGenManager currentWorldGen = WorldGenManager.getInstance();
+                    if (result == null || !operationId.equals(result.operationId())
+                        || !serverId.equals(widget.screen.studioServerId()) || !serverId.equals(result.serverId())
+                        || !projectId.equals(result.projectId())
+                        || result.add() || !result.successful() || currentManager == null || currentWorldGen == null
+                        || result.connection() == null || !currentManager.isCurrentServerConnection(result.connection())
+                        || currentWorldGen.authorityEpoch(serverId) != result.authorityEpoch()) {
+                        if (result != null && !result.successful()) {
+                            new Notification("Delete", "World Generation Delete Failed", Notification.Type.ERROR);
+                        }
+                        return;
+                    }
+                    widget.finishWorldGenDelete(edit, key, metadataIntent.path());
+                });
+            if (!admitted) {
+                new Notification("Delete", "World Generation Delete Failed", Notification.Type.ERROR);
             }
-            case ReSyncResourceDragPayload.CUSTOM_CONTENT -> manager.deleteCustomContent(screen.studioServerId(), resource.getId());
-            case ReSyncResourceDragPayload.GUI -> manager.deleteGui(screen.studioServerId(), resource.getId());
-            case ReSyncResourceDragPayload.SCOREBOARD -> manager.deleteScoreboard(screen.studioServerId(), resource.getId());
-            case ReSyncResourceDragPayload.TAB -> manager.deleteTab(screen.studioServerId(), resource.getId());
-            case ReSyncResourceDragPayload.CHAT, ReSyncResourceDragPayload.MOTD_PROFILE, ReSyncResourceDragPayload.MESSAGE_RULE,
-                 ReSyncResourceDragPayload.RECIPE_DEFINITION, ReSyncResourceDragPayload.TEXT_TEMPLATE, ReSyncResourceDragPayload.ADVANCEMENT_TREE,
-                 ReSyncResourceDragPayload.DIALOG, ReSyncResourceDragPayload.TRADE_PROFILE, ReSyncResourceDragPayload.NPC_DEFINITION,
-                 ReSyncResourceDragPayload.LOOT_TABLE, ReSyncResourceDragPayload.VARIABLE_DEFINITION,
-                 ReSyncResourceDragPayload.TIMER_DEFINITION, ReSyncResourceDragPayload.SCHEDULE_DEFINITION -> {
-                ReSyncResourceType resourceType = ReSyncResourceType.byTypeId(resource.getType());
-                if (resourceType == null) return false;
-                manager.deleteJsonResource(screen.studioServerId(), resourceType, resource.getId());
-            }
-            case ReSyncResourceDragPayload.WORLDGEN -> WorldGenManager.getInstance().deleteProject(screen.studioServerId(), resource.getId());
-            case ReSyncResourceDragPayload.WORLD -> {
+        });
+        if (submission[0] == null) {
+            new Notification("Delete", "World Generation Delete Failed", Notification.Type.ERROR);
+        }
+    }
+
+    private void finishWorldGenDelete(BrowserEditStart edit, String key, String path) {
+        String normalizedPath = ReSyncProjectMetadata.normalizePath(path);
+        String deletedCurrentFolder = normalizedPath.isBlank() ? null
+            : (currentFolder.equals(normalizedPath) || currentFolder.startsWith(normalizedPath + "/")
+                ? normalizedPath : null);
+        if (deletedCurrentFolder != null) {
+            currentFolder = parentFolder(deletedCurrentFolder);
+        }
+        commitBrowserEdit(edit, Set.of(key));
+        screen.removeStudioDocuments(Set.of(key));
+        if (selectedResource != null && selectedResource.key().equals(key)) {
+            selectedResource = null;
+        }
+        selectedFolder = null;
+        selectedProjectRoot = false;
+        rebuild();
+        new Notification("Deleted", "World Generation", Notification.Type.SUCCESS);
+    }
+
+    private Async<FlowManager.ResourceDeleteResult> deleteResource(FlowManager manager,
+                                                                               ReSyncProjectMetadata.ResourceEntry resource) {
+        if (ReSyncResourceDragPayload.WORLD.equals(resource.getType())) {
                 WorldResourceCreator.showDeletePopup(screen, screen.studioServerId(), resource.getId(), () -> {
-                    screen.studioDocuments.removeIf(document -> document.key().equals(resource.key()));
-                    screen.syncStudioDocumentTabs();
+                    screen.removeStudioDocuments(Set.of(resource.key()));
                     if (selectedResource != null && selectedResource.key().equals(resource.key())) selectedResource = null;
                     rebuild();
                 });
-                return false;
-            }
-            default -> {
-                return false;
-            }
+            return Async.completed(new FlowManager.ResourceDeleteResult(resource.getType(),
+                resource.getId(), false, "World Delete Pending"));
         }
-        return true;
+        ReSyncResourceType type = ReSyncResourceType.byTypeId(resource.getType());
+        if (type == null) {
+            return Async.completed(new FlowManager.ResourceDeleteResult(resource.getType(),
+                resource.getId(), false, "Resource Delete Unsupported"));
+        }
+        return manager.deleteResourceSettled(screen.studioServerId(), type, resource.getId());
     }
 
     private boolean renameCommandResource(FlowManager manager, String oldId, String newId) {
@@ -2080,12 +3316,10 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         }
         if (trimmed.startsWith("{")) {
             try {
-                JsonObject decoded = FlowJson.parse(trimmed).getAsJsonObject();
-                parsed.command = jsonText(decoded, "command");
-                parsed.subcommands = jsonStrings(decoded, "subcommands");
-                JsonElement structured = decoded.get("structured");
-                parsed.structured = structured != null && !structured.isJsonNull() && structured.getAsBoolean();
-                return parsed;
+                CommandBindingContext decoded = new Gson().fromJson(trimmed, CommandBindingContext.class);
+                if (decoded != null) {
+                    return decoded;
+                }
             } catch (RuntimeException ignored) {
             }
         }
@@ -2096,28 +3330,7 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
     }
 
     private String encodeCommandContext(CommandBindingContext command) {
-        JsonObject encoded = new JsonObject();
-        encoded.addProperty("command", command.command);
-        JsonArray subcommands = new JsonArray();
-        if (command.subcommands != null) command.subcommands.forEach(subcommands::add);
-        encoded.add("subcommands", subcommands);
-        encoded.addProperty("structured", command.structured != null && command.structured);
-        return FlowJson.write(encoded);
-    }
-
-    private static String jsonText(JsonObject value, String name) {
-        JsonElement element = value.get(name);
-        return element == null || element.isJsonNull() ? "" : element.getAsString();
-    }
-
-    private static List<String> jsonStrings(JsonObject value, String name) {
-        JsonElement element = value.get(name);
-        if (element == null || !element.isJsonArray()) return new ArrayList<>();
-        List<String> result = new ArrayList<>();
-        element.getAsJsonArray().forEach(item -> {
-            if (item.isJsonPrimitive()) result.add(item.getAsString());
-        });
-        return result;
+        return new Gson().toJson(command);
     }
 
     private boolean renameSelectedFolder(FlowManager manager, String newName) {
@@ -2126,48 +3339,32 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             new Notification("Explorer", "Invalid Name", Notification.Type.ERROR);
             return false;
         }
-        ReSyncProjectMetadata metadata = manager.getProjectMetadata(screen.studioServerId());
+        FlowManager.ProjectMetadataEdit metadata = manager.editProjectMetadata(screen.studioServerId());
         String oldPath = selectedFolder.getPath();
         String parent = selectedFolder.getParentPath();
         String newPath = parent.isBlank() ? name : parent + "/" + name;
-        if (!oldPath.equals(newPath) && metadata.findFolder(newPath) != null) {
+        if (!oldPath.equals(newPath) && metadata.folder(newPath) != null) {
             new Notification("Explorer", "Folder Already Exists", Notification.Type.ERROR);
             return false;
         }
-        for (ReSyncProjectMetadata.FolderEntry folder : metadata.getFolders()) {
-            if (folder.getPath().equals(oldPath)) {
-                folder.setPath(newPath);
-                folder.setName(name);
-            } else if (folder.getPath().startsWith(oldPath + "/")) {
-                folder.setPath(newPath + folder.getPath().substring(oldPath.length()));
-            }
-            if (folder.getParentPath().equals(oldPath)) {
-                folder.setParentPath(newPath);
-            } else if (folder.getParentPath().startsWith(oldPath + "/")) {
-                folder.setParentPath(newPath + folder.getParentPath().substring(oldPath.length()));
-            }
-        }
-        for (ReSyncProjectMetadata.ResourceEntry resource : metadata.getResources()) {
-            if (resource.getPath().equals(oldPath)) {
-                resource.setPath(newPath);
-            } else if (resource.getPath().startsWith(oldPath + "/")) {
-                resource.setPath(newPath + resource.getPath().substring(oldPath.length()));
-            }
-        }
+        relocateFolder(metadata, oldPath, newPath, parent);
+        FlowManager.ProjectFolder renamed = metadata.folder(newPath);
+        if (renamed != null) metadata.putFolder(newPath, renamed.parentPath(), name, renamed.sortOrder(), renamed.collapsed());
         if (currentFolder.equals(oldPath) || currentFolder.startsWith(oldPath + "/")) {
             currentFolder = newPath + currentFolder.substring(oldPath.length());
         }
-        manager.saveProjectMetadata(screen.studioServerId(), metadata);
+        manager.saveProjectMetadata(metadata, true);
         rebuild();
         return true;
     }
 
     private String iconPathFor(ReSyncProjectMetadata.ResourceEntry resource) {
-        return resourceIconPaths.getOrDefault(resource.key(), screen.studioResourceIconPath(resource.getType(), resource.getId()));
+        String iconPath = resourceIconPaths.get(resource.key());
+        return iconPath != null ? iconPath : screen.studioResourceIconPath(resource.getType(), resource.getId());
     }
 
-    private String customContentIconPath(CustomContentDefinition content) {
-        return switch (content != null && content.getType() != null ? content.getType().toLowerCase(Locale.ROOT) : "") {
+    private String customContentIconPath(String contentType) {
+        return switch (contentType != null ? contentType.toLowerCase(Locale.ROOT) : "") {
             case "armor" -> "armor.png";
             case "block" -> "block.png";
             case "item" -> "item.png";
@@ -2176,11 +3373,23 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         };
     }
 
-    private void updateContainers() {
-        if (browser == null) {
+    private void layoutContainersIfDirty() {
+        if (browser == null || !layoutGate.drain()) {
             return;
         }
         browser.layout();
+    }
+
+    private void applyBounds(int x, int y, int width, int height) {
+        boolean positionChanged = getX() != x || getY() != y;
+        boolean sizeChanged = getWidth() != width || getHeight() != height;
+        if (positionChanged) {
+            super.setPosition(x, y);
+        }
+        if (sizeChanged) {
+            super.setSize(width, height);
+        }
+        layoutGate.update(x, y, width, height);
     }
 
     public int browserHeight() {
@@ -2243,9 +3452,9 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
     }
 
     public void layoutInScreen() {
-        setPosition(0, STUDIO_CONTENT_BROWSER_TOP);
-        setSize(sidePanel != null ? sidePanel.getConfiguredWidth() : STUDIO_CONTENT_BROWSER_DEFAULT_WIDTH, defaultHeight());
-        updateContainers();
+        applyBounds(0, STUDIO_CONTENT_BROWSER_TOP,
+            sidePanel != null ? sidePanel.getDesiredWidth() : STUDIO_CONTENT_BROWSER_DEFAULT_WIDTH, defaultHeight());
+        layoutContainersIfDirty();
     }
 
     public int editorHeight() {
@@ -2256,63 +3465,83 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         return 0;
     }
 
-    private class ReSyncProjectTreeProvider implements RemoteFileSystemProvider {
-        private final Map<RemotePath, String> folderPaths = new HashMap<>();
-        private final Map<RemotePath, ReSyncProjectMetadata.FolderEntry> folders = new HashMap<>();
-        private final Map<RemotePath, ReSyncProjectMetadata.ResourceEntry> resources = new HashMap<>();
-        private final Map<String, RemotePath> resourcePaths = new HashMap<>();
-        private final Map<RemotePath, List<RemoteFileSystemProvider.FileEntry>> entriesByFolder = new HashMap<>();
+    static ReSyncProjectTreeProvider prepareTreeProvider(RemotePath projectRoot, List<BrowserFolder> allFolders,
+                                                         List<BrowserResource> allResources) {
+        Map<RemotePath, String> folderPaths = new HashMap<>();
+        Map<RemotePath, BrowserFolder> folders = new HashMap<>();
+        Map<RemotePath, BrowserResource> resources = new HashMap<>();
+        Map<String, RemotePath> resourcePaths = new HashMap<>();
+        Map<RemotePath, List<RemoteFileSystemProvider.FileEntry>> entriesByFolder = new HashMap<>();
+        folderPaths.put(projectRoot, "");
+        for (BrowserFolder folder : allFolders) {
+            RemotePath path = pathForFolder(projectRoot, folder.path());
+            folderPaths.put(path, folder.path());
+            folders.put(path, folder);
+            RemotePath parent = folder.parentPath().isBlank() ? projectRoot : pathForFolder(projectRoot, folder.parentPath());
+            RemoteFileSystemProvider.FileEntry entry = new RemoteFileSystemProvider.FileEntry(path, true, "-", "", folder.name());
+            entry.metadata.put("icon", "explorer.png");
+            entriesByFolder.computeIfAbsent(parent, ignored -> new ArrayList<>()).add(entry);
+        }
+        for (BrowserResource resource : allResources) {
+            String folder = resourceFolderPath(resource.path(), resource.id());
+            RemotePath path = pathForFolder(projectRoot, folder).resolve(resource.type()).resolve(resource.id());
+            resources.put(path, resource);
+            resourcePaths.put(resource.key(), path);
+            RemotePath parent = folder.isBlank() ? projectRoot : pathForFolder(projectRoot, folder);
+            String label = !resource.id().isBlank() ? resource.id() : resource.displayName();
+            RemoteFileSystemProvider.FileEntry entry = new RemoteFileSystemProvider.FileEntry(path, false, "", "", label);
+            entry.metadata.put("icon", resource.iconPath());
+            if (!resource.enabled()) {
+                entry.metadata.put("metaText", "●");
+                entry.metadata.put("metaAccent", "danger");
+                entry.metadata.put("textAccent", "calm");
+            }
+            entriesByFolder.computeIfAbsent(parent, ignored -> new ArrayList<>()).add(entry);
+        }
+        Map<RemotePath, List<RemoteFileSystemProvider.FileEntry>> preparedEntries = new HashMap<>();
+        for (Map.Entry<RemotePath, List<RemoteFileSystemProvider.FileEntry>> folderEntries : entriesByFolder.entrySet()) {
+            List<RemoteFileSystemProvider.FileEntry> entries = folderEntries.getValue();
+            entries.sort((left, right) -> Boolean.compare(!left.isDirectory, !right.isDirectory) != 0
+                ? Boolean.compare(!left.isDirectory, !right.isDirectory)
+                : left.displayName.compareToIgnoreCase(right.displayName));
+            for (RemoteFileSystemProvider.FileEntry entry : entries) {
+                if (entry.isDirectory) {
+                    entry.metadata.put("hasChildren", String.valueOf(!entriesByFolder.getOrDefault(entry.path, List.of()).isEmpty()));
+                }
+            }
+            preparedEntries.put(folderEntries.getKey(), List.copyOf(entries));
+        }
+        List<RemotePath> directoryPaths = folders.keySet().stream().sorted(Comparator.comparing(RemotePath::toString)).toList();
+        return new ReSyncProjectTreeProvider(Map.copyOf(folderPaths), Map.copyOf(folders), Map.copyOf(resources),
+            Map.copyOf(resourcePaths), Map.copyOf(preparedEntries), directoryPaths, allFolders.size() + allResources.size());
+    }
 
-        private void rebuild(List<ReSyncProjectMetadata.FolderEntry> allFolders, List<ReSyncProjectMetadata.ResourceEntry> allResources) {
-            folderPaths.clear();
-            folders.clear();
-            resources.clear();
-            resourcePaths.clear();
-            entriesByFolder.clear();
-            folderPaths.put(projectRoot, "");
-            for (ReSyncProjectMetadata.FolderEntry folder : allFolders) {
-                RemotePath path = pathForFolder(folder.getPath());
-                folderPaths.put(path, folder.getPath());
-                folders.put(path, folder);
-                String parentPath = folder.getParentPath();
-                RemotePath parent = parentPath.isBlank() ? projectRoot : pathForFolder(parentPath);
-                Map<String, String> metadata = Map.of("icon", "explorer.png");
-                RemoteFileSystemProvider.FileEntry entry = new RemoteFileSystemProvider.FileEntry(path, true, "-", "", folder.getName(), metadata);
-                entriesByFolder.computeIfAbsent(parent, ignored -> new ArrayList<>()).add(entry);
-            }
-            for (ReSyncProjectMetadata.ResourceEntry resource : allResources) {
-                RemotePath path = pathForResource(resource);
-                resources.put(path, resource);
-                resourcePaths.put(resourceKey(resource.getType(), resource.getId()), path);
-                String folder = ReSyncProjectMetadata.normalizePath(resource.getPath());
-                RemotePath parent = folder.isBlank() ? projectRoot : pathForFolder(folder);
-                Map<String, String> metadata = new LinkedHashMap<>();
-                metadata.put("icon", iconPathFor(resource));
-                if (!resourceEnabled(resource)) {
-                    metadata.put("metaText", "●");
-                    metadata.put("metaAccent", "danger");
-                    metadata.put("textAccent", "neutral");
-                }
-                RemoteFileSystemProvider.FileEntry entry = new RemoteFileSystemProvider.FileEntry(path, false, "", "", resourceBrowserLabel(resource), metadata);
-                entriesByFolder.computeIfAbsent(parent, ignored -> new ArrayList<>()).add(entry);
-            }
-            for (List<RemoteFileSystemProvider.FileEntry> entries : entriesByFolder.values()) {
-                entries.sort((left, right) -> Boolean.compare(!left.isDirectory(), !right.isDirectory()) != 0
-                    ? Boolean.compare(!left.isDirectory(), !right.isDirectory())
-                    : left.displayName().compareToIgnoreCase(right.displayName()));
-                for (int index = 0; index < entries.size(); index++) {
-                    RemoteFileSystemProvider.FileEntry entry = entries.get(index);
-                    if (entry.isDirectory()) {
-                        Map<String, String> metadata = new LinkedHashMap<>(entry.metadata());
-                        metadata.put("hasChildren", String.valueOf(!entriesByFolder.getOrDefault(entry.path(), List.of()).isEmpty()));
-                        entries.set(index, new RemoteFileSystemProvider.FileEntry(entry.path(), true, entry.size(), entry.created(), entry.displayName(), metadata));
-                    }
-                }
-            }
+    static final class ReSyncProjectTreeProvider implements RemoteFileSystemProvider {
+        private final Map<RemotePath, String> folderPaths;
+        private final Map<RemotePath, BrowserFolder> folders;
+        private final Map<RemotePath, BrowserResource> resources;
+        private final Map<String, RemotePath> resourcePaths;
+        private final Map<RemotePath, List<RemoteFileSystemProvider.FileEntry>> entriesByFolder;
+        private final List<RemotePath> folderDirectoryPaths;
+        private final int entryCount;
+
+        private ReSyncProjectTreeProvider(Map<RemotePath, String> folderPaths,
+                                          Map<RemotePath, BrowserFolder> folders,
+                                          Map<RemotePath, BrowserResource> resources,
+                                          Map<String, RemotePath> resourcePaths,
+                                          Map<RemotePath, List<RemoteFileSystemProvider.FileEntry>> entriesByFolder,
+                                          List<RemotePath> folderDirectoryPaths, int entryCount) {
+            this.folderPaths = folderPaths;
+            this.folders = folders;
+            this.resources = resources;
+            this.resourcePaths = resourcePaths;
+            this.entriesByFolder = entriesByFolder;
+            this.folderDirectoryPaths = folderDirectoryPaths;
+            this.entryCount = entryCount;
         }
 
-        private List<RemoteFileSystemProvider.FileEntry> entries(RemotePath path) {
-            return entriesByFolder.getOrDefault(path, List.of());
+        private static ReSyncProjectTreeProvider empty(RemotePath root) {
+            return new ReSyncProjectTreeProvider(Map.of(root, ""), Map.of(), Map.of(), Map.of(), Map.of(), List.of(), 0);
         }
 
         private String folderPath(RemotePath path) {
@@ -2320,11 +3549,13 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         }
 
         private ReSyncProjectMetadata.FolderEntry folder(RemotePath path) {
-            return folders.get(path);
+            BrowserFolder folder = folders.get(path);
+            return folder != null ? folder.materialize() : null;
         }
 
         private ReSyncProjectMetadata.ResourceEntry resource(RemotePath path) {
-            return resources.get(path);
+            BrowserResource resource = resources.get(path);
+            return resource != null ? resource.materialize() : null;
         }
 
         private RemotePath resourcePath(String type, String id) {
@@ -2335,9 +3566,29 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             return resourcePaths.get(key);
         }
 
+        boolean containsResourceKey(String key) {
+            return resourcePaths.containsKey(key);
+        }
+
+        boolean containsFolderPath(RemotePath path) {
+            return folderPaths.containsKey(path);
+        }
+
+        private List<RemotePath> folderDirectoryPaths() {
+            return folderDirectoryPaths;
+        }
+
+        int entryCount() {
+            return entryCount;
+        }
+
         @Override
         public Async<List<RemoteFileSystemProvider.FileEntry>> ls(RemotePath path) {
-            return Async.completed(entries(path));
+            String folder = folderPaths.get(path);
+            if (folder == null) {
+                return Async.completed(List.of());
+            }
+            return Async.completed(entriesByFolder.getOrDefault(path, List.of()));
         }
 
         @Override
@@ -2366,12 +3617,12 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         }
 
         @Override
-        public Async<Void> upload(List<TransferSource> sources, RemotePath remotePath) {
+        public Async<Void> upload(List<TransferSource> sources, RemotePath destination) {
             return Async.completed(null);
         }
 
         @Override
-        public Async<Void> download(List<RemotePath> remotePaths, TransferSink destination) {
+        public Async<Void> download(List<RemotePath> sources, TransferSink destination) {
             return Async.completed(null);
         }
 
@@ -2406,20 +3657,55 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
     }
 
     private RemotePath pathForFolder(String path) {
-        if (path == null || path.isBlank()) return projectRoot;
+        return pathForFolder(projectRoot, path);
+    }
+
+    private static RemotePath pathForFolder(RemotePath projectRoot, String path) {
+        if (path == null || path.isBlank()) {
+            return projectRoot;
+        }
         RemotePath result = projectRoot;
         for (String part : path.split("/")) {
-            if (!part.isBlank()) result = result.resolve(part);
+            if (!part.isBlank()) {
+                result = result.resolve(part);
+            }
         }
         return result;
     }
 
     private RemotePath pathForResource(ReSyncProjectMetadata.ResourceEntry resource) {
-        return pathForFolder(resource.getPath()).resolve(resource.getType()).resolve(resource.getId());
+        return pathForFolder(resourceFolderPath(resource.getPath(), resource.getId()))
+            .resolve(resource.getType()).resolve(resource.getId());
     }
 
-    private String resourceBrowserLabel(ReSyncProjectMetadata.ResourceEntry resource) {
-        String id = resource.getId();
-        return id != null && !id.isBlank() ? id : resource.getDisplayName();
+    static String resourceFolderPath(String path, String id) {
+        String normalized = ReSyncProjectMetadata.normalizePath(path);
+        String resourceId = id != null ? id.trim() : "";
+        if (normalized.isBlank() || resourceId.isBlank()) {
+            return normalized;
+        }
+        int separator = normalized.lastIndexOf('/');
+        String name = separator >= 0 ? normalized.substring(separator + 1) : normalized;
+        if (!name.equals(resourceId + ".json")) {
+            return normalized;
+        }
+        return separator >= 0 ? normalized.substring(0, separator) : "";
     }
+
+    static String canonicalResourcePath(String folder, String id) {
+        String normalizedFolder = ReSyncProjectMetadata.normalizePath(folder);
+        String resourceId = id != null ? id.trim() : "";
+        if (resourceId.isBlank()) {
+            return normalizedFolder;
+        }
+        return normalizedFolder.isBlank() ? resourceId + ".json" : normalizedFolder + "/" + resourceId + ".json";
+    }
+
+    static boolean resourceWithinFolder(String path, String id, String folder) {
+        String resourceFolder = resourceFolderPath(path, id);
+        String normalizedFolder = ReSyncProjectMetadata.normalizePath(folder);
+        return resourceFolder.equals(normalizedFolder)
+            || !normalizedFolder.isBlank() && resourceFolder.startsWith(normalizedFolder + "/");
+    }
+
 }

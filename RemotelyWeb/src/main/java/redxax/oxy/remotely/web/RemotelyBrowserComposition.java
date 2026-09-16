@@ -17,6 +17,7 @@ import redxax.oxy.remotely.host.ApplicationHost;
 import redxax.oxy.remotely.host.ApplicationHostRegistry;
 import redxax.oxy.remotely.web.platform.BrowserApplicationHost;
 import redxax.oxy.remotely.web.platform.BrowserClock;
+import redxax.oxy.remotely.util.TaskIdentities;
 import redxax.oxy.remotely.web.platform.BrowserCommunityProvider;
 import redxax.oxy.remotely.web.platform.BrowserDiagnosticsClient;
 import redxax.oxy.remotely.web.platform.BrowserDeveloperCapabilityAdapter;
@@ -107,6 +108,7 @@ public final class RemotelyBrowserComposition {
         OptionCatalogCache previousOptionCatalogCache = null;
         try {
             boolean demo = metadata.demo();
+            TaskIdentities.install(TaskIdentities.Access.BROWSER);
             previousOptionCatalogCache = OptionCatalogCache.install(BrowserReSyncStorage.fromKey("remotely.option-catalogs"),
                 new BrowserReSyncClock());
             host = new BrowserApplicationHost(canvasId, metadata);

@@ -1,19 +1,38 @@
 package redxax.oxy.remotely.flow.ui;
 
+import java.util.HashMap;
+import java.util.Deque;
+import java.util.Set;
+import java.util.List;
 import redxax.oxy.remotely.util.BrowserSafeState;
-
+import redxax.oxy.remotely.util.TaskIdentities;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import redxax.oxy.remotely.flow.data.FlowJson;
-import redxax.oxy.remotely.ui.collaboration.ItemSelectorCollaborationJson;
+import com.google.gson.JsonParser;
+import com.google.gson.JsonPrimitive;
+import com.google.gson.Gson;
+import redxax.oxy.remotely.RemotelyClient;
+import redxax.oxy.remotely.data.flow.FlowManagerUiAdapter;
+import redxax.oxy.remotely.host.ApplicationHost;
+import redxax.oxy.remotely.data.flow.CoreGraphAuthoringAdapter;
+import redxax.oxy.remotely.data.flow.CoreGraphEditorSession;
+import redxax.oxy.remotely.data.flow.CoreGraphUiProjection;
+import redxax.oxy.remotely.data.flow.CoreGraphWorkspacePatch;
+import redxax.oxy.remotely.data.flow.CoreRepeatableUiProjection;
 import redxax.oxy.remotely.data.flow.DesignerSaveNotifications;
 import redxax.oxy.remotely.data.flow.FlowManager;
+import redxax.oxy.remotely.data.flow.ReSyncCatalogPublicationProjection;
+import redxax.oxy.remotely.data.flow.ReSyncFlowClient;
+import redxax.oxy.remotely.data.flow.ReSyncLifecycleDiagnostics;
+import redxax.oxy.remotely.data.flow.ReSyncGenericDescriptorProjection;
+import redxax.oxy.remotely.data.flow.ReSyncGenericWidgetCapabilities;
+import redxax.oxy.remotely.data.flow.ReSyncOpaqueCatalogInspector;
+import redxax.oxy.remotely.data.flow.ReSyncTypedCatalogConsumer;
+import redxax.oxy.remotely.data.flow.ReSyncTypedInteractionProjection;
 import redxax.oxy.remotely.data.flow.FlowDebugController;
-import redxax.oxy.remotely.data.flow.FlowManagerUiAdapter;
 import redxax.oxy.remotely.data.flow.OptionCatalogItem;
 import redxax.oxy.remotely.data.flow.ReSyncCollaborationClient;
-import redxax.oxy.remotely.data.flow.ReSyncFlowClient;
 import redxax.oxy.remotely.data.flow.ReSyncResourceType;
 import redxax.oxy.remotely.data.flow.ReSyncWorkspaceClient;
 import redxax.oxy.remotely.data.flow.world.WorldDashboardEntry;
@@ -29,7 +48,9 @@ import redxax.oxy.remotely.flow.data.FlowSerializer;
 import redxax.oxy.remotely.flow.data.FlowWorkspaceDocument;
 import redxax.oxy.remotely.flow.data.ReSyncProjectMetadata;
 import restudio.resync.flow.workspace.WorkspacePatch;
-import restudio.rescreen.util.JsonTreeParser;
+import restudio.resync.contract.canonical.CanonicalCodec;
+import restudio.resync.contract.canonical.JsonValue;
+import restudio.resync.contract.identity.IdentityCodec;
 import restudio.resync.flow.contract.EditorDiagnostic;
 import restudio.resync.flow.contract.EditorError;
 import redxax.oxy.remotely.flow.data.ReSyncResourceDragPayload;
@@ -47,10 +68,47 @@ import redxax.oxy.remotely.flow.ui.studio.ScoreboardStudioPreviewView;
 import redxax.oxy.remotely.flow.ui.studio.StudioDocument;
 import redxax.oxy.remotely.flow.ui.studio.StudioPanel;
 import redxax.oxy.remotely.flow.ui.studio.StudioResourceRenameAware;
+import redxax.oxy.remotely.flow.ui.studio.StudioSaveProvider;
 import redxax.oxy.remotely.flow.ui.studio.StudioScreen;
 import redxax.oxy.remotely.flow.ui.studio.StudioHeaderProvider;
 import redxax.oxy.remotely.flow.ui.studio.StudioSelectorView;
 import redxax.oxy.remotely.flow.ui.studio.StudioViewportState;
+import restudio.resync.flow.cache.CatalogAuthoringPublication;
+import restudio.resync.flow.cache.CatalogCacheKey;
+import restudio.resync.flow.cache.CatalogCachePublication;
+import restudio.resync.flow.cache.CatalogCachePublicationCodec;
+import restudio.resync.flow.cache.CatalogCacheState;
+import restudio.resync.flow.command.CommandGraphContract;
+import restudio.resync.flow.function.FunctionParameterContract;
+import restudio.resync.flow.function.FunctionSignature;
+import restudio.resync.flow.graph.GraphConnection;
+import restudio.resync.flow.graph.GraphDocument;
+import restudio.resync.flow.graph.GraphEndpoint;
+import restudio.resync.flow.graph.GraphNode;
+import restudio.resync.flow.graph.GraphPassthrough;
+import restudio.resync.flow.graph.InspectorState;
+import restudio.resync.flow.graph.OpaqueData;
+import restudio.resync.flow.graph.PinValue;
+import restudio.resync.flow.graph.RepeatableBinding;
+import restudio.resync.flow.graph.RepeatableElement;
+import restudio.resync.flow.identity.ConnectionId;
+import restudio.resync.flow.identity.CapabilityId;
+import restudio.resync.flow.identity.CatalogBinding;
+import restudio.resync.flow.identity.ContentHash;
+import restudio.resync.flow.identity.ContractRef;
+import restudio.resync.flow.identity.BranchId;
+import restudio.resync.flow.identity.InspectorFieldId;
+import restudio.resync.flow.identity.NodeId;
+import restudio.resync.flow.identity.NodeInstanceId;
+import restudio.resync.flow.identity.OwnerId;
+import restudio.resync.flow.identity.PinId;
+import restudio.resync.flow.identity.RepeatableElementId;
+import restudio.resync.flow.identity.RepeatableGroupId;
+import restudio.resync.flow.identity.ServerId;
+import restudio.resync.flow.identity.ServerResourceLocator;
+import restudio.resync.flow.type.TypeExpr;
+import restudio.resync.flow.type.TypeReference;
+import restudio.resync.flow.type.TypedValue;
 import redxax.oxy.remotely.flow.ui.studio.TabStudioPreviewView;
 import redxax.oxy.remotely.ui.collaboration.CollaborationOverlay;
 import redxax.oxy.remotely.ui.collaboration.CollaborationVisuals;
@@ -58,18 +116,20 @@ import redxax.oxy.remotely.ui.collaboration.DesignerCollaborationAuthority;
 import redxax.oxy.remotely.worldgen.WorldGenManager;
 import redxax.oxy.remotely.worldgen.data.WorldGenProject;
 import redxax.oxy.remotely.worldgen.ui.WorldGenEditorScreen;
-import redxax.oxy.remotely.host.ApplicationHost;
-import redxax.oxy.remotely.host.ApplicationHostRegistry;
 import restudio.rebase.ui.widgets.editor.TextAreaWidget;
 import restudio.rebase.ui.widgets.editor.CodeEditorWidget;
 import restudio.rebase.restudio.api.models.ServerModels.ClientServerView;
 import restudio.rescreen.config.Config;
 import restudio.rescreen.game.MinecraftAssetReference;
 import restudio.rescreen.game.MinecraftGameAssets;
+import restudio.rescreen.logging.LogSource;
+import restudio.rescreen.logging.LogTypes;
+import restudio.rescreen.logging.ReLog;
 import restudio.rescreen.platform.IDrawContext;
 import restudio.rescreen.platform.ITextRenderer;
 import restudio.rescreen.platform.input.ReKey;
 import restudio.rescreen.platform.input.ReKeyEvent;
+import restudio.rescreen.platform.input.ReLifecycleEvent;
 import restudio.rescreen.platform.input.ReMouseButton;
 import restudio.rescreen.platform.input.ReMouseEvent;
 import restudio.rescreen.platform.input.ReScrollEvent;
@@ -82,29 +142,84 @@ import restudio.rescreen.theme.Accent;
 import restudio.rescreen.ui.collaboration.ScreenCollaborationSurface;
 import restudio.rescreen.ui.core.Screen;
 import restudio.rescreen.ui.core.Widget;
+import restudio.rescreen.ui.core.WidgetCleanup;
 import restudio.rescreen.ui.rescreen.*;
 import restudio.rescreen.ui.rescreen.ReScreen.HeaderBuilder.Position;
 import restudio.rescreen.ui.screens.PopupOverlay;
 import restudio.rescreen.ui.widgets.*;
 import restudio.rescreen.util.Identifier;
 import restudio.rescreen.util.Notification;
-import restudio.rescreen.util.UiTasks;
 
+import java.lang.ref.WeakReference;
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.*;
+import java.util.Map;
+import java.util.function.BiFunction;
 import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
+import java.util.function.ToIntFunction;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static restudio.rescreen.config.Config.desktopMode;
 import static restudio.rescreen.config.Config.shadow;
 import static restudio.rescreen.render.TextRenderer.tr;
 
-public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvider, DesktopWindowBehaviorProvider, StudioResourceRenameAware {
+public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvider, DesktopWindowBehaviorProvider,
+    StudioResourceRenameAware, StudioSaveProvider {
     private static final String CUSTOM_FUNCTION_NODE_PREFIX = "custom_function:";
+    private static final Gson GSON = new Gson();
+    private static final Object GRAPH_SAVE_AUTHORITY_LOCK = new Object();
     protected static final Set<GraphEditorScreen> OPEN_SCREENS = BrowserSafeState.set();
+    private static final Map<String, WeakReference<GraphEditorScreen>> CLOSING_LIVE_SCREENS = BrowserSafeState.map();
+    private static final AsyncTaskWorker WORKSPACE_PUBLICATIONS = new AsyncTaskWorker(1, 2, 16);
+    private static final AsyncTaskWorker WORKSPACE_HISTORY_RESTORES = new AsyncTaskWorker(1, 1, 8);
+    private static final AsyncTaskWorker WORKSPACE_INBOUND_PREPARATIONS = new AsyncTaskWorker(1, 1, 8);
+    private static final AsyncTaskWorker GRAPH_RENDER_INDEXES = new AsyncTaskWorker(1, 2, 16);
+    private static final AsyncTaskWorker CORE_GRAPH_PROJECTIONS = new AsyncTaskWorker(1, 2, 16);
+    private static final int CORE_MUTATION_QUEUE_LIMIT = 128;
+    private static final int CORE_MUTATION_DIAGNOSTIC_NODE_LIMIT = 16;
+    private final AsyncTaskWorker lifecycleTasks = new AsyncTaskWorker(1, 1, 4);
+    private volatile long lifecycleTaskGeneration = 1L;
     protected FlowGraph graph;
     protected final String serverId;
+    private CoreGraphEditorSession coreGraphSession;
+    private String coreGraphSessionDocumentKey = "";
+    private BiFunction<CoreGraphEditorSession, DesignerSaveNotifications.SaveTicket, Boolean> coreGraphSaveHandler;
+    private String coreProjectionChecksum = "";
+    private String coreProjectionFailureChecksum = "";
+    private String coreTopologyChecksum = "";
+    private long coreProjectionGeneration;
+    private long coreProjectionRequestGeneration;
+    private long publishedWidgetProjectionGeneration;
+    private String publishedWidgetTopologyChecksum = "";
+    private CoreGraphUiProjection.EditorSnapshot coreProjectionSnapshot;
+    private CoreGraphUiProjection.EditorSnapshot coreProjectionRequestedSnapshot;
+    private CoreGraphUiProjection.ProjectionResult coreProjectionResult;
+    private CoreMutationCommit coreMutationCommitPending;
+    private CoreStructuralPreview coreStructuralPreview;
+    private CoreStructuralPreview coreVisualPreview;
+    private String coreStructurePreviewRejection;
+    private CoreAuthoringValidation coreAuthoringValidation;
+    private long coreAuthoringValidationBuildCount;
+    private CoreGraphEditorSession coreWidgetPreparationSession;
+    private final Map<String, FlowNodeWidget> corePreparedMutationWidgets = new HashMap<>();
+    private final Map<String, FlowNode> corePreparedMutationNodes = new HashMap<>();
+    private final ArrayDeque<CoreMutationCommand> coreMutationQueue = new ArrayDeque<>();
+    private final ArrayDeque<CoreDeferredSave> coreDeferredSaves = new ArrayDeque<>();
+    private boolean coreProjectionRefreshQueued;
+    private final BrowserSafeState.ReferenceValue<CoreProjectionRequest> coreProjectionPendingBuild = new BrowserSafeState.ReferenceValue<>();
+    private final java.util.Queue<CoreProjectionBuildResult> coreProjectionBuildResults = BrowserSafeState.queue();
+    private final BrowserSafeState.BooleanValue coreProjectionWorkerQueued = new BrowserSafeState.BooleanValue();
+    private StudioDocument.EditorReadiness coreEditorReadiness = StudioDocument.EditorReadiness.unavailable();
+    private CoreWidgetPublicationFailure coreWidgetPublicationFailure;
     private static Screen parent;
     private final Screen ownerScreen;
-    protected final Map<String, FlowNodeWidget> widgetCache = new HashMap<>();
+    protected Map<String, FlowNodeWidget> widgetCache = new HashMap<>();
+    private Map<FlowNodeWidget, String> widgetNodeIds = new IdentityHashMap<>();
     private final Map<String, List<EditorDiagnostic>> editorDiagnostics = new HashMap<>();
     private static final float WIRE_HIT_RADIUS = 6.0f;
     private static final double FUZZY_WIRE_NODE_MARGIN = 30.0;
@@ -112,16 +227,89 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     private static final int WIRE_OUT_OFFSET = 26;
     private static final int CONNECTION_PAN_EDGE = 56;
     private static final float CONNECTION_PAN_SPEED = 14.0F;
+    private static final int GRAPH_RENDER_CELL_SIZE = 512;
+    private static final int GRAPH_RENDER_COARSE_CELL_SIZE = 1_048_576;
+    private static final int GRAPH_RENDER_MAX_WIRE_CELLS = 4_096;
+    private static final int GRAPH_RENDER_MAX_QUERY_CELLS = 16_384;
+    private static final int GRAPH_RENDER_FALLBACK_NODE_LIMIT = 64;
+    private static final int GRAPH_RENDER_FALLBACK_BOUNDS_SCAN_LIMIT = 4_096;
+    private static final int GRAPH_RENDER_FALLBACK_CONNECTION_SCAN_LIMIT = 4_096;
+    private static final int GRAPH_RENDER_FALLBACK_CONNECTION_LIMIT = 256;
+    private static final double GRAPH_RENDER_MAX_COORDINATE = 1_073_741_824.0;
+    private static final double GRAPH_RENDER_MARGIN = 72.0;
+    private static final long GRAPH_FRAME_WARN_NANOS = 16_667_000L;
+    private static final long GRAPH_FRAME_CRITICAL_NANOS = ((25L) * 1_000_000L);
+    private static final long GRAPH_FRAME_TRACE_INTERVAL_NANOS = ((1L) * 1_000_000_000L);
+    private static final int GRAPH_FRAME_TRACE_RESOURCE_LIMIT = 32;
+    private static final Object GRAPH_FRAME_TRACE_LOCK = new Object();
+    private static final Map<String, Long> GRAPH_FRAME_SLOW_TRACES = new LinkedHashMap<>(16, 0.75F, true);
+    private static final long GRAPH_RENDER_TRACE_INTERVAL_NANOS = ((250L) * 1_000_000L);
+    private static final int GRAPH_RENDER_TRACE_KEY_LIMIT = 256;
+    private static final Object GRAPH_RENDER_TRACE_LOCK = new Object();
+    private static final Map<String, Long> GRAPH_RENDER_TRACES = new LinkedHashMap<>(64, 0.75F, true);
+    private long graphRenderMutationVersion = 1L;
+    private FlowGraph temporaryLifecycleRenderedGraph;
+    private long temporaryLifecycleRenderedVersion = -1L;
+    private boolean temporaryLifecycleRenderedVisible;
+    private long graphRenderFailureVersion = -1L;
+    private FlowGraph graphRenderFailureGraph;
+    private boolean graphRenderMutationPending;
+    private GraphRenderIndex graphRenderIndex;
+    private final BrowserSafeState.ReferenceValue<GraphRenderBuildResult> graphRenderBuildResult = new BrowserSafeState.ReferenceValue<>();
+    private final BrowserSafeState.ReferenceValue<GraphRenderTopologyPointer> graphRenderPendingBuild = new BrowserSafeState.ReferenceValue<>();
+    private final BrowserSafeState.BooleanValue graphRenderWorkerQueued = new BrowserSafeState.BooleanValue();
+    private Map<FlowNodeWidget, GraphRenderNodeSnapshot> graphRenderNodeTopology = BrowserSafeState.map();
+    private Map<FlowConnection, GraphRenderConnectionSnapshot> graphRenderConnectionTopology = BrowserSafeState.map();
+    private Map<String, Set<FlowConnection>> graphRenderConnectionsByNode = BrowserSafeState.map();
+    private BrowserSafeState.LongValue graphRenderTopologyRevision = new BrowserSafeState.LongValue();
+    private final Set<String> graphRenderGeometryDirtyNodeIds = new LinkedHashSet<>();
+    private long graphRenderFrameSequence;
+    private long graphRenderGeometryFlushedFrame = -1L;
+    private long graphRenderGeometryFlushCount;
+    private int graphRenderGeometryDirtyCount;
+    private int catalogDrainProcessedCount;
+    private final Map<String, RetainedCoreEditor> retainedCoreEditors = new HashMap<>();
+    private CoreWidgetTopology coreWidgetTopology;
+    private CoreWidgetTopology pendingCoreWidgetTopology;
+    private GraphRenderIndex graphRenderContinuityIndex;
+    private CoreWidgetTopology graphRenderContinuityTopology;
+    private final ArrayDeque<RetiredWidgetBatch> retiredWidgetBatches = new ArrayDeque<>();
+    private final Set<FlowNodeWidget> retiredCoreWidgets = Collections.newSetFromMap(new IdentityHashMap<>());
+    private long coreStructureFastPathCount;
+    private long coreStructureFallbackCount;
+    private String coreStructureFallbackReason;
+    private int coreStructureLastCreatedWidgetCount;
+    private int coreStructureLastReusedWidgetCount;
+    private int coreStructureLastRemovedWidgetCount;
+    private int coreStructureLastRefreshedTargetCount;
+    private int coreStructureLastTopologyNodeCount;
+    private int coreStructureLastTopologyConnectionCount;
+    private int coreStructureLastRenderBuildScheduleCount;
+    private int graphRenderFrontOrder;
     private final Set<String> selectedNodeIds = new HashSet<>();
     private final Set<String> selectionBase = new HashSet<>();
     private final Map<String, int[]> selectedDragStartPositions = new HashMap<>();
+    private final SelectedNodeMoveAccumulator selectedNodeMove = new SelectedNodeMoveAccumulator();
     private boolean isSelecting = false;
     private boolean selectionAdditive = false;
     private double selectionStartX = 0;
     private double selectionStartY = 0;
     private double selectionEndX = 0;
     private double selectionEndY = 0;
-    private final Queue<Runnable> workspaceUpdates = BrowserSafeState.queue();
+    private static final int WORKSPACE_UPDATE_LIMIT = 512;
+    private static final int WORKSPACE_AWARENESS_UPDATE_LIMIT = 128;
+    private static final int WORKSPACE_UPDATE_FRAME_LIMIT = 48;
+    private static final int WORKSPACE_DEFERRED_MUTATION_LIMIT = 129;
+    private static final int WORKSPACE_PENDING_OPERATION_LIMIT = 1;
+    private static final long WORKSPACE_PENDING_RETAINED_BYTE_LIMIT = 64L * 1024L * 1024L;
+    private static final long WORKSPACE_UPDATE_FRAME_NANOS = ((2L) * 1_000_000L);
+    private static final long WORKSPACE_CAPTURE_TIMEOUT_MILLIS = 5_000L;
+    private static final int WORKSPACE_CAPTURE_RETRY_LIMIT = 3;
+    private final Object workspaceUpdateLock = new Object();
+    private final PriorityQueue<WorkspaceUpdate> workspaceUpdates = new PriorityQueue<>(Comparator.comparingLong(WorkspaceUpdate::sequence));
+    private final BrowserSafeState.LongValue workspaceInputSequence = new BrowserSafeState.LongValue();
+    private final Map<String, Runnable> workspaceAwarenessUpdates = BrowserSafeState.map();
+    private volatile boolean workspaceUpdateOverflow;
     private final Map<String, ReSyncWorkspaceClient.Awareness> workspaceAwareness = BrowserSafeState.map();
     private final Map<String, WorkspacePoint> workspaceCursorPositions = new HashMap<>();
     private final Map<String, WorkspacePoint> workspaceDesignerCursorPositions = new HashMap<>();
@@ -129,47 +317,191 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     private final Map<String, String> workspaceNodeAuthors = new HashMap<>();
     private final Map<String, Long> workspaceNodeAwarenessWatermarks = new HashMap<>();
     private final Map<Integer, Accent> workspaceAccents = new HashMap<>();
+    private final Map<String, Integer> workspaceSelectionColors = new HashMap<>();
+    private final Map<String, WorkspaceSelectionSnapshot> workspaceSelectionSnapshots = new HashMap<>();
     private final Map<String, ItemSelectorWidget> workspaceSelectorMirrors = new HashMap<>();
     private Map<String, ReSyncWorkspaceClient.Awareness> delegatedWorkspaceAwareness;
     private final ReSyncWorkspaceClient.Listener workspaceListener = new ReSyncWorkspaceClient.Listener() {
         @Override
         public void onSnapshot(ReSyncWorkspaceClient.Snapshot snapshot) {
-            workspaceUpdates.add(() -> applyWorkspaceSnapshot(snapshot));
+            if (!isWorkspaceLifecycleActive() || (workspaceConflict != null && snapshot != null
+                && snapshot.document() != null && workspaceConflict.sameAuthoritative(snapshot.document()))) {
+                return;
+            }
+            offerWorkspaceUpdate(WorkspaceUpdateKind.SNAPSHOT, () -> applyWorkspaceSnapshot(snapshot));
         }
 
         @Override
         public void onOperation(ReSyncWorkspaceClient.Operation operation, boolean own) {
-            workspaceUpdates.add(() -> applyWorkspaceOperation(operation, own));
+            if (!isWorkspaceLifecycleActive() || workspaceConflict != null) {
+                return;
+            }
+            offerWorkspaceUpdate(WorkspaceUpdateKind.OPERATION, () -> applyWorkspaceOperation(operation, own));
         }
 
         @Override
         public void onAwareness(ReSyncWorkspaceClient.Awareness awareness) {
-            workspaceUpdates.add(() -> applyWorkspaceAwareness(awareness));
+            if (!isWorkspaceLifecycleActive() || workspaceConflict != null) {
+                return;
+            }
+            if (awareness != null && awareness.authorSessionId() != null && !awareness.authorSessionId().isBlank()) {
+                String sessionId = awareness.authorSessionId();
+                if (workspaceAwarenessUpdates.containsKey(sessionId) || workspaceAwarenessUpdates.size() < WORKSPACE_AWARENESS_UPDATE_LIMIT) {
+                    workspaceAwarenessUpdates.put(sessionId, () -> applyWorkspaceAwareness(awareness));
+                } else {
+                    workspaceUpdateOverflow = true;
+                }
+            }
         }
 
         @Override
         public void onResync(String reason) {
-            workspaceUpdates.add(() -> handleWorkspaceResync(reason));
+            if (!isWorkspaceLifecycleActive() || workspaceConflict != null) {
+                return;
+            }
+            offerWorkspaceUpdate(WorkspaceUpdateKind.RESYNC, () -> handleWorkspaceResync(reason));
         }
     };
+    private ReSyncWorkspaceClient.Listener joinedWorkspaceListener;
+
+    private ReSyncWorkspaceClient.Listener workspaceListener(long generation, String type, String resourceId) {
+        return new ReSyncWorkspaceClient.Listener() {
+            private boolean current() {
+                return generation == workspacePublicationGeneration && Objects.equals(type, workspaceType)
+                    && Objects.equals(resourceId, workspaceResourceId);
+            }
+
+            @Override
+            public void onSnapshot(ReSyncWorkspaceClient.Snapshot snapshot) {
+                if (current()) {
+                    workspaceListener.onSnapshot(snapshot);
+                }
+            }
+
+            @Override
+            public void onOperation(ReSyncWorkspaceClient.Operation operation, boolean own) {
+                if (current()) {
+                    workspaceListener.onOperation(operation, own);
+                }
+            }
+
+            @Override
+            public void onAwareness(ReSyncWorkspaceClient.Awareness awareness) {
+                if (current()) {
+                    workspaceListener.onAwareness(awareness);
+                }
+            }
+
+            @Override
+            public void onResync(String reason) {
+                if (current()) {
+                    workspaceListener.onResync(reason);
+                }
+            }
+        };
+    }
     private String workspaceType = "";
     private String workspaceResourceId = "";
     private JsonObject workspaceDocument;
     private JsonObject workspaceScanDocument;
     private JsonObject workspaceJoinDocument;
-    private final Map<String, List<WorkspacePatch<JsonElement>>> workspacePendingOperations = new LinkedHashMap<>();
+    private ReSyncWorkspaceClient.Snapshot deferredWorkspaceSnapshot;
+    private long deferredWorkspaceSnapshotSequence = -1L;
+    private final Map<String, PendingWorkspaceOperation> workspacePendingOperations = new LinkedHashMap<>();
+    private long workspacePendingRetainedBytes;
+    private long workspacePendingNextBaseSequence = -1L;
+    private long workspaceSequence = -1L;
     private long lastWorkspaceScanAt;
+    private long lastWorkspaceSnapshotCaptureAt;
     private long lastWorkspaceAwarenessAt;
     private String lastWorkspaceAwareness = "";
+    private long workspaceAwarenessPointerVersion;
+    private long workspaceAwarenessSurfaceVersion = 1L;
+    private long workspacePublishedAwarenessPointerVersion = -1L;
+    private long workspacePublishedAwarenessSurfaceVersion = -1L;
+    private long workspaceWidgetStatesVersion = -1L;
+    private int workspaceAwarenessMouseX = Integer.MIN_VALUE;
+    private int workspaceAwarenessMouseY = Integer.MIN_VALUE;
+    private boolean workspaceAwarenessPublicationInFlight;
+    private JsonObject workspaceWidgetStates = new JsonObject();
+    private final BrowserSafeState.ReferenceValue<WorkspaceAwarenessPublicationResult> workspaceAwarenessPublicationResult = new BrowserSafeState.ReferenceValue<>();
     private boolean workspaceResyncPending;
+    private boolean workspacePendingRepublish;
+    private boolean workspacePendingRepublishAwaitingSnapshot;
+    private PendingWorkspaceOperation workspacePendingRepublishQueued;
+    private PendingWorkspaceOperation workspacePendingRepublishInFlight;
+    private boolean workspaceConnectionWasConnected;
     private boolean applyingWorkspace;
     private long workspaceMutationVersion;
     private long workspacePublishedMutationVersion = -1L;
+    private boolean workspaceMutationPending;
+    private boolean workspacePublicationInFlight;
+    private long workspacePublicationBackpressureVersion = -1L;
+    private boolean workspacePublicationSettlementBackpressure;
+    private boolean workspaceSnapshotFrozen;
+    private long workspaceSnapshotRetryGeneration = -1L;
+    private long workspaceSnapshotRetryMutationVersion = -1L;
+    private String workspaceSnapshotRetryDocumentKey = "";
+    private long workspaceSnapshotRetryAt;
+    private long workspaceCaptureAttempt;
+    private long workspaceCaptureFailureGeneration = -1L;
+    private long workspaceCaptureFailureMutationVersion = -1L;
+    private String workspaceCaptureFailureDocumentKey = "";
+    private int workspaceCaptureFailureCount;
+    private boolean workspaceJoinPending;
+    private volatile long workspacePublicationGeneration;
+    private volatile StableWorkspaceDocument stableWorkspaceDocument;
+    private final BrowserSafeState.ReferenceValue<WorkspaceSnapshotResult> workspaceSnapshotResult = new BrowserSafeState.ReferenceValue<>();
+    private final BrowserSafeState.ReferenceValue<CollaborativeWorkspaceCaptureResult> collaborativeWorkspaceCaptureResult = new BrowserSafeState.ReferenceValue<>();
+    private final BrowserSafeState.ReferenceValue<WorkspacePublicationResult> workspacePublicationResult = new BrowserSafeState.ReferenceValue<>();
+    private final BrowserSafeState.ReferenceValue<WorkspaceGraphSaveResult> workspaceGraphSaveResult = new BrowserSafeState.ReferenceValue<>();
+    private final BrowserSafeState.ReferenceValue<WorkspaceFrozenGraphResult> workspaceFrozenGraphResult = new BrowserSafeState.ReferenceValue<>();
+    private final BrowserSafeState.ReferenceValue<WorkspaceHistoryRestoreResult> workspaceHistoryRestoreResult = new BrowserSafeState.ReferenceValue<>();
+    private final BrowserSafeState.ReferenceValue<WorkspaceInboundPreparationResult> workspaceInboundPreparationResult = new BrowserSafeState.ReferenceValue<>();
+    private final BrowserSafeState.ReferenceValue<StudioGraphOpenResult> studioGraphOpenResult = new BrowserSafeState.ReferenceValue<>();
+    private final BrowserSafeState.ReferenceValue<PreparedGraphResult> preparedGraphResult = new BrowserSafeState.ReferenceValue<>();
+    private final BrowserSafeState.ReferenceValue<WorkspaceGraphApplyResult> workspaceGraphApplyResult = new BrowserSafeState.ReferenceValue<>();
+    private final BrowserSafeState.ReferenceValue<DiscardGraphResult> discardGraphResult = new BrowserSafeState.ReferenceValue<>();
+    private final Deque<Runnable> deferredWorkspaceMutations = new ArrayDeque<>();
+    private final IdentityHashMap<Runnable, Long> deferredWorkspaceMutationSequences = new IdentityHashMap<>();
+    private Runnable deferredWorkspaceOverflowMutation;
+    private long deferredWorkspaceOverflowSequence = -1L;
+    private boolean workspaceMutationBackpressure;
+    private volatile long workspaceFrozenLeaseCancellation;
+    private String deferredWorkspaceMutationType = "";
+    private String deferredWorkspaceMutationResourceId = "";
+    private FlowGraph deferredWorkspaceMutationGraph;
+    private volatile WorkspaceGraphSaveRequest workspaceGraphSaveRequest;
+    private volatile WorkspaceFrozenGraphRequest workspaceFrozenGraphRequest;
+    private volatile WorkspaceHistoryRestoreRequest workspaceHistoryRestoreRequest;
+    private volatile WorkspaceInboundPreparationRequest workspaceInboundPreparationRequest;
+    private volatile WorkspaceCaptureJob workspaceCaptureJob;
+    private StudioGraphOpenRequest studioGraphOpenRequest;
+    private long studioGraphOpenGeneration;
+    private volatile PreparedGraphRequest preparedGraphRequest;
+    private long preparedGraphGeneration;
+    private volatile WorkspaceGraphApplyRequest workspaceGraphApplyRequest;
+    private long workspaceGraphApplyGeneration;
+    private boolean workspaceGraphApplyFrozen;
+    private volatile DiscardGraphRequest discardGraphRequest;
+    private long discardGraphGeneration;
+    private FlowGraph workspaceHistoryRestoreTarget;
+    private long workspaceHistoryGeneration;
+    private WorkspaceConflict workspaceConflict;
+    private final IdentityHashMap<FlowGraph, StableWorkspaceDocument> stableWorkspaceDocuments = new IdentityHashMap<>();
 
     protected SidePanel paletteSidePanel;
     protected StudioPanel paletteStudioPanel;
     private final Map<NodeDefinition.NodeCategory, PopupWidget> categoryPopups = new HashMap<>();
     private List<NodeDefinition.NodeCategory> categoryOrder = List.of();
+    private static final int CATALOG_WIDGETS_PER_TICK = 12;
+    private static final long CATALOG_WIDGET_DRAIN_NANOS = ((2L) * 1_000_000L);
+    private static final int CATALOG_WIDGET_RETRY_LIMIT = 3;
+    private static final int CATALOG_PALETTE_ROWS_PER_TICK = 24;
+    private boolean nodeCatalogRefreshQueued;
+    private long nodeCatalogPublicationToken;
+    private CatalogRefresh catalogRefresh;
+    private PaletteRefresh paletteRefresh;
 
     private IconButton headerBackground;
     private AnimatedWidget debugToggleButton;
@@ -182,10 +514,18 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     private static final float INITIAL_VIEWPORT_START_ZOOM = 3.0F;
     private static final int INITIAL_VIEWPORT_PADDING = 80;
     private static final int INITIAL_VIEWPORT_STABLE_FRAMES = 2;
+    private static final int INITIAL_VIEWPORT_DEFINITION_GRACE_FRAMES = 30;
     private boolean initialViewportFitPending = true;
     private int initialViewportStableFrames;
+    private int initialViewportDefinitionGraceFrames;
+    private String initialViewportWaitReason = "";
+    private long initialViewportRequestedAtNanos;
+    private long nodeCatalogRefreshQueuedAtNanos;
+    private FlowGraph firstVisibleRenderedGraph;
+    private long firstVisibleRenderedRevision = -1L;
     private int initialViewportSignature;
     private final Set<String> initialViewportFittedKeys = new HashSet<>();
+    private boolean initialViewportFallbackApplied;
 
     private int initialWidth;
     private int initialHeight;
@@ -198,6 +538,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     private IconButton startupCloseButton;
     private IconButton setupReSyncButton;
     private IconButton welcomeServerButton;
+    private AnimatedWidget workspaceConflictButton;
     private boolean startupProbeRunning;
     private boolean setupRunning;
     private volatile boolean reSyncUpdateAvailable;
@@ -206,13 +547,13 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     private boolean studioChromeBuilt;
     private boolean liveStudioWorkspaceRequested;
     private boolean liveStudioFullEditorMode;
+    private boolean lifecycleClosed;
     private long lastStartupProbeAt;
 
     private enum StudioStartupState {
         LOADING,
         NOT_SUPPORTED,
         SETUP,
-        SECURE_CONNECTION_REPAIR,
         INSTALLING,
         INSTALLED,
         SERVER_STOPPED,
@@ -268,6 +609,518 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private record NodeSelectorVariant(NodeDefinition.PinDefinition selectorPin, String option) {
+    }
+
+    private record NodeSelectorTypePair(String sourceId, String targetId) {
+    }
+
+    private record NodeSelectorItemToken(NodeSelectorVariant variant, String autoWirePin) {
+    }
+
+    private record NodeSelectorPrepared(List<NodeDefinition> definitions,
+                                        List<NodeDefinition.NodeCategory> categoryOrder,
+                                        Map<NodeDefinition.NodeCategory, List<NodeDefinition>> typedCategories,
+                                        Map<String, FlowDataType> resolvedTypes,
+                                        Set<NodeSelectorTypePair> convertibleTypes,
+                                        Map<NodeDefinition.NodeCategory, String> categoryGroups,
+                                        Map<NodeDefinition.NodeCategory, String> categoryBadges,
+                                        Map<NodeDefinition, Integer> priorities) {
+        private NodeSelectorPrepared {
+            definitions = definitions != null ? List.copyOf(definitions) : List.of();
+            categoryOrder = categoryOrder != null ? List.copyOf(categoryOrder) : List.of();
+            LinkedHashMap<NodeDefinition.NodeCategory, List<NodeDefinition>> copiedCategories = new LinkedHashMap<>();
+            if (typedCategories != null) {
+                typedCategories.forEach((category, values) -> copiedCategories.put(category,
+                    values != null ? List.copyOf(values) : List.of()));
+            }
+            typedCategories = Collections.unmodifiableMap(copiedCategories);
+            resolvedTypes = resolvedTypes != null ? Map.copyOf(resolvedTypes) : Map.of();
+            convertibleTypes = convertibleTypes != null ? Set.copyOf(convertibleTypes) : Set.of();
+            categoryGroups = categoryGroups != null ? Map.copyOf(categoryGroups) : Map.of();
+            categoryBadges = categoryBadges != null ? Map.copyOf(categoryBadges) : Map.of();
+            priorities = priorities != null
+                ? Collections.unmodifiableMap(new IdentityHashMap<>(priorities)) : Map.of();
+        }
+    }
+
+    private final class NodeSelectorProvider implements ItemSelectorWidget.VirtualItemProvider<NodeDefinition> {
+        private final ReSyncTypedInteractionProjection.Palette typedPalette;
+        private final NodeRegistry.SelectorCatalogSnapshot legacySnapshot;
+        private final FlowDataType sourceType;
+        private final boolean sourceIsInput;
+        private final int worldX;
+        private final int worldY;
+        private final boolean atCenter;
+        private final Object catalogKey;
+        private final boolean typedProjection;
+        private final boolean legacyCompatibility;
+        private final boolean strictTypeCompatibility;
+        private final boolean commandDocument;
+        private final ThreadLocal<NodeSelectorPrepared> preparedCatalog = new ThreadLocal<>();
+
+        private NodeSelectorProvider(ReSyncTypedInteractionProjection.Palette typedPalette,
+                                     NodeRegistry.SelectorCatalogSnapshot legacySnapshot,
+                                     FlowDataType sourceType, boolean sourceIsInput, int worldX, int worldY,
+                                     boolean atCenter, Object catalogKey, boolean typedProjection,
+                                     boolean legacyCompatibility, boolean strictTypeCompatibility,
+                                     boolean commandDocument) {
+            this.typedPalette = typedPalette;
+            this.legacySnapshot = legacySnapshot;
+            this.sourceType = sourceType;
+            this.sourceIsInput = sourceIsInput;
+            this.worldX = worldX;
+            this.worldY = worldY;
+            this.atCenter = atCenter;
+            this.catalogKey = catalogKey;
+            this.typedProjection = typedProjection;
+            this.legacyCompatibility = legacyCompatibility;
+            this.strictTypeCompatibility = strictTypeCompatibility;
+            this.commandDocument = commandDocument;
+        }
+
+        @Override
+        public List<NodeDefinition> model() {
+            if (typedPalette != null) {
+                return addableNodeDefinitions(typedPalette.definitions(), commandDocument);
+            }
+            if (legacySnapshot == null) {
+                return List.of();
+            }
+            return addableNodeDefinitions(legacySnapshot.definitions().values().stream()
+                .filter(definition -> definition != null && !definition.isHidden())
+                .toList(), commandDocument);
+        }
+
+        @Override
+        public List<ItemSelectorWidget.VirtualItem<NodeDefinition>> entries(List<NodeDefinition> model) {
+            NodeSelectorPrepared prepared = prepareCatalog(model);
+            preparedCatalog.set(prepared);
+            try {
+                if (sourceType != null) {
+                    return compatibleEntries(prepared.definitions());
+                }
+                return allEntries(prepared.definitions());
+            } finally {
+                preparedCatalog.remove();
+            }
+        }
+
+        private NodeSelectorPrepared prepareCatalog(List<NodeDefinition> model) {
+            List<NodeDefinition> definitions = addableNodeDefinitions(model, commandDocument);
+            List<NodeDefinition.NodeCategory> categoryOrder;
+            Map<NodeDefinition.NodeCategory, List<NodeDefinition>> typedCategories = Map.of();
+            List<FlowCategoryMetadata> categoryMetadata = legacySnapshot != null
+                ? legacySnapshot.categoryMetadata() : List.of();
+            if (typedPalette != null) {
+                categoryOrder = List.copyOf(typedPalette.categoryOrder());
+                LinkedHashMap<NodeDefinition.NodeCategory, List<NodeDefinition>> copiedCategories = new LinkedHashMap<>();
+                typedPalette.categories().forEach((category, values) -> copiedCategories.put(category,
+                    addableNodeDefinitions(values, commandDocument)));
+                typedCategories = copiedCategories;
+            } else {
+                categoryOrder = legacySnapshot != null ? legacySnapshot.categoryOrder() : List.of();
+            }
+
+            Map<String, FlowDataType> resolvedTypes = captureResolvedTypes();
+            Set<NodeSelectorTypePair> convertibleTypes = captureConversions();
+            Map<NodeDefinition.NodeCategory, String> categoryGroups = captureCategoryGroups(categoryMetadata, categoryOrder,
+                definitions);
+            Map<NodeDefinition.NodeCategory, String> categoryBadges = categoryGroups.entrySet().stream()
+                .collect(Collectors.toUnmodifiableMap(Map.Entry::getKey, entry -> selectorGroupBadge(entry.getValue())));
+            IdentityHashMap<NodeDefinition, Integer> priorities = new IdentityHashMap<>();
+            definitions.forEach(definition -> priorities.put(definition, definition.getPriority()));
+            typedCategories.values().forEach(values -> values.forEach(definition ->
+                priorities.putIfAbsent(definition, definition.getPriority())));
+            return new NodeSelectorPrepared(definitions, categoryOrder, typedCategories, resolvedTypes, convertibleTypes,
+                categoryGroups, categoryBadges, priorities);
+        }
+
+        private Map<String, FlowDataType> captureResolvedTypes() {
+            if (!sourceCompatibilityCapture() || legacySnapshot == null) {
+                return Map.of();
+            }
+            Map<String, FlowDataType> types = new HashMap<>();
+            legacySnapshot.dataTypes().forEach((id, type) -> {
+                if (id != null && !id.isBlank() && type != null) {
+                    types.put(id.toLowerCase(Locale.ROOT), type);
+                }
+            });
+            return types;
+        }
+
+        private Set<NodeSelectorTypePair> captureConversions() {
+            if (!sourceCompatibilityCapture() || strictTypeCompatibility || legacySnapshot == null) {
+                return Set.of();
+            }
+            Set<NodeSelectorTypePair> conversions = new HashSet<>();
+            for (FlowConversionRule rule : legacySnapshot.conversionRules()) {
+                if (rule != null && rule.getSourceTypeId() != null && rule.getTargetTypeId() != null
+                    && (rule.getAvailability() == null || rule.getAvailability().isBlank()
+                    || "available".equalsIgnoreCase(rule.getAvailability()))) {
+                    conversions.add(new NodeSelectorTypePair(rule.getSourceTypeId().toLowerCase(Locale.ROOT),
+                        rule.getTargetTypeId().toLowerCase(Locale.ROOT)));
+                }
+            }
+            return conversions;
+        }
+
+        private boolean sourceCompatibilityCapture() {
+            return sourceType != null && legacyCompatibility;
+        }
+
+        private Map<NodeDefinition.NodeCategory, String> captureCategoryGroups(List<FlowCategoryMetadata> metadata,
+                                                                                List<NodeDefinition.NodeCategory> categoryOrder,
+                                                                                List<NodeDefinition> definitions) {
+            Map<String, String> metadataGroups = new HashMap<>();
+            if (metadata != null) {
+                for (FlowCategoryMetadata value : metadata) {
+                    if (value != null && value.getId() != null && !value.getId().isBlank()
+                        && value.getGroupName() != null && !value.getGroupName().isBlank()) {
+                        metadataGroups.put(value.getId().toLowerCase(Locale.ROOT), value.getGroupName());
+                    }
+                }
+            }
+            LinkedHashSet<NodeDefinition.NodeCategory> categories = new LinkedHashSet<>();
+            if (categoryOrder != null) {
+                categories.addAll(categoryOrder);
+            }
+            if (definitions != null) {
+                definitions.forEach(definition -> categories.add(selectorCategory(definition)));
+            }
+            LinkedHashMap<NodeDefinition.NodeCategory, String> groups = new LinkedHashMap<>();
+            for (NodeDefinition.NodeCategory category : categories) {
+                groups.put(category, metadataGroups.getOrDefault(category.getId(), fallbackCategoryGroup(category)));
+            }
+            return groups;
+        }
+
+        private String fallbackCategoryGroup(NodeDefinition.NodeCategory category) {
+            return switch (category != null ? category.getId() : "") {
+                case "logic", "data", "variable", "flow", "function", "utility" -> "Flow";
+                case "event", "action", "player", "entity", "block", "world", "inventory", "item", "visual", "world_gen" -> "Minecraft";
+                case "command", "network", "chat", "scoreboard", "trade", "npc", "loot", "menu", "tab_list", "dialog", "custom_content", "recipe", "advancement", "text", "permission", "ability" -> "ReSync";
+                default -> "Integrations";
+            };
+        }
+
+        private NodeSelectorPrepared prepared() {
+            return preparedCatalog.get();
+        }
+
+        private List<ItemSelectorWidget.VirtualItem<NodeDefinition>> compatibleEntries(List<NodeDefinition> source) {
+            List<NodeDefinition> compatible = new ArrayList<>(source);
+            compatible.removeIf(definition -> compatibilityScore(definition) == Integer.MAX_VALUE);
+            Comparator<NodeDefinition> catalogOrder = selectorCatalogOrder();
+            compatible.sort(Comparator.comparingInt((NodeDefinition definition) -> compatibilityScore(definition))
+                .thenComparing(catalogOrder));
+            List<ItemSelectorWidget.VirtualItem<NodeDefinition>> result = new ArrayList<>();
+            int displayedCompatibilityScore = Integer.MIN_VALUE;
+            for (NodeDefinition definition : compatible) {
+                int score = compatibilityScore(definition);
+                if (score != displayedCompatibilityScore) {
+                    result.add(ItemSelectorWidget.VirtualItem.section(smartDropSectionLabel(score)));
+                    displayedCompatibilityScore = score;
+                }
+                String autoWirePin = compatiblePin(definition);
+                result.add(nodeItem(definition, null, autoWirePin, score));
+                addVariantItems(result, definition, autoWirePin, score);
+            }
+            return result;
+        }
+
+        private int compatibilityScore(NodeDefinition definition) {
+            String pinName = compatiblePin(definition);
+            if (pinName == null) {
+                return Integer.MAX_VALUE;
+            }
+            if (sourceType == FlowDataType.EXECUTION) {
+                return 0;
+            }
+            NodeDefinition.PinDefinition pin = findPin(definition, pinName);
+            return pin != null ? compatibilityScore(sourceType, pin.getDataType()) : Integer.MAX_VALUE;
+        }
+
+        private String compatiblePin(NodeDefinition definition) {
+            List<NodeDefinition.PinDefinition> pins = sourceIsInput ? definition.getOutputs() : definition.getInputs();
+            String bestPin = null;
+            int bestScore = Integer.MAX_VALUE;
+            for (NodeDefinition.PinDefinition pin : pins) {
+                if (pin.getVisibleWhen() != null && !pin.getVisibleWhen().isEmpty()
+                    && !compatibleFamilyPinVisible(definition, pin)) {
+                    continue;
+                }
+                if (sourceType == FlowDataType.EXECUTION) {
+                    if (pin.getType() == NodeDefinition.PinType.FLOW && pin.getDataType() == FlowDataType.EXECUTION) {
+                        return pin.getName();
+                    }
+                    continue;
+                }
+                if (pin.getType() != NodeDefinition.PinType.DATA) {
+                    continue;
+                }
+                int score = compatibilityScore(sourceType, pin.getDataType());
+                if (score < bestScore) {
+                    bestScore = score;
+                    bestPin = pin.getName();
+                    if (score == 0) {
+                        break;
+                    }
+                }
+            }
+            return bestPin;
+        }
+
+        private boolean compatibleFamilyPinVisible(NodeDefinition definition, NodeDefinition.PinDefinition candidate) {
+            if (definition.getKind() != NodeDefinition.NodeKind.FAMILY || candidate.getVisibleWhen() == null
+                || candidate.getVisibleWhen().isEmpty()) {
+                return false;
+            }
+            for (NodeDefinition.PinDefinition input : definition.getInputs()) {
+                if (input.getDirection() == NodeDefinition.PinDirection.INPUT
+                    && input.getType() == NodeDefinition.PinType.DATA
+                    && (input.getName().equalsIgnoreCase("mode") || input.getName().equalsIgnoreCase("action"))) {
+                    if (input.getOptions() == null) {
+                        return false;
+                    }
+                    for (String value : candidate.getVisibleWhen().values()) {
+                        for (String option : value.split(",")) {
+                            if (input.getOptions().contains(option.trim())) {
+                                return true;
+                            }
+                        }
+                    }
+                    return false;
+                }
+            }
+            return false;
+        }
+
+        private int compatibilityScore(FlowDataType source, FlowDataType pin) {
+            if (source == null || pin == null) {
+                return Integer.MAX_VALUE;
+            }
+            if (source.equals(pin)) {
+                return 0;
+            }
+            if (typedProjection) {
+                FlowDataType connectionSourceType = sourceIsInput ? pin : source;
+                FlowDataType connectionTargetType = sourceIsInput ? source : pin;
+                if (!connectionSourceType.canConvertTo(connectionTargetType)) {
+                    return Integer.MAX_VALUE;
+                }
+                if (connectionSourceType == FlowDataType.ANY || connectionTargetType == FlowDataType.ANY) {
+                    return 2;
+                }
+                return connectionTargetType.isAssignableFrom(connectionSourceType) ? 1 : 3;
+            }
+            if (!legacyCompatibility) {
+                return Integer.MAX_VALUE;
+            }
+            FlowDataType connectionSourceType = resolvedType(sourceIsInput ? pin : source);
+            FlowDataType connectionTargetType = resolvedType(sourceIsInput ? source : pin);
+            if (!compatibleTypes(connectionSourceType, connectionTargetType)) {
+                return Integer.MAX_VALUE;
+            }
+            if (connectionSourceType == FlowDataType.ANY || connectionTargetType == FlowDataType.ANY) {
+                return 2;
+            }
+            if (connectionTargetType.isAssignableFrom(connectionSourceType)) {
+                return 1;
+            }
+            if (connectionTargetType == FlowDataType.STRING) {
+                return 4;
+            }
+            return 3;
+        }
+
+        private FlowDataType resolvedType(FlowDataType type) {
+            NodeSelectorPrepared prepared = prepared();
+            return type != null ? prepared.resolvedTypes().getOrDefault(type.getId().toLowerCase(Locale.ROOT), type) : null;
+        }
+
+        private boolean compatibleTypes(FlowDataType source, FlowDataType target) {
+            if (source == null || target == null) {
+                return false;
+            }
+            if (strictTypeCompatibility) {
+                return source.equals(target);
+            }
+            NodeSelectorPrepared prepared = prepared();
+            return source.canConvertTo(target)
+                || prepared.convertibleTypes().contains(new NodeSelectorTypePair(source.getId().toLowerCase(Locale.ROOT),
+                    target.getId().toLowerCase(Locale.ROOT)));
+        }
+
+        private String groupName(NodeDefinition.NodeCategory category) {
+            return prepared().categoryGroups().getOrDefault(category, "Integrations");
+        }
+
+        private String groupBadge(NodeDefinition.NodeCategory category) {
+            return prepared().categoryBadges().getOrDefault(category, "App");
+        }
+
+        private String variantSearchTerms(NodeDefinition definition, NodeSelectorVariant variant) {
+            StringBuilder label = new StringBuilder(selectorSearchTerms(definition));
+            label.append(" ")
+                .append(definition.getDisplayName())
+                .append(" ")
+                .append(variant.selectorPin().getName())
+                .append(" ")
+                .append(variant.option())
+                .append(" ")
+                .append(formatSelectorOption(variant.option()))
+                .append(" ")
+                .append(formatSelectorModeName(variant.selectorPin().getName()));
+            if (definition.getCategory() != null) {
+                label.append(" ").append(definition.getCategory().getDisplayName());
+                label.append(" ").append(groupName(definition.getCategory()));
+                label.append(" ").append(groupBadge(definition.getCategory()));
+            }
+            return label.toString();
+        }
+
+        private List<ItemSelectorWidget.VirtualItem<NodeDefinition>> allEntries(List<NodeDefinition> source) {
+            List<ItemSelectorWidget.VirtualItem<NodeDefinition>> result = new ArrayList<>();
+            Map<NodeDefinition.NodeCategory, List<NodeDefinition>> categories = categories(source);
+            String displayedGroup = null;
+            for (NodeDefinition.NodeCategory category : categoryOrder(categories)) {
+                List<NodeDefinition> values = categories.getOrDefault(category, List.of());
+                if (values.isEmpty()) {
+                    continue;
+                }
+                String group = groupName(category);
+                if (!group.equals(displayedGroup)) {
+                    result.add(ItemSelectorWidget.VirtualItem.section(group));
+                    displayedGroup = group;
+                }
+                result.add(ItemSelectorWidget.VirtualItem.section(getCategoryLabel(category)));
+                for (NodeDefinition definition : values) {
+                    result.add(nodeItem(definition, null, null, 0));
+                    addVariantItems(result, definition, null, 0);
+                }
+            }
+            return result;
+        }
+
+        private Map<NodeDefinition.NodeCategory, List<NodeDefinition>> categories(List<NodeDefinition> source) {
+            Map<NodeDefinition.NodeCategory, List<NodeDefinition>> categories = new LinkedHashMap<>();
+            NodeSelectorPrepared prepared = prepared();
+            if (!prepared.typedCategories().isEmpty()) {
+                prepared.typedCategories().forEach((category, values) -> categories.put(category, new ArrayList<>(values)));
+            } else {
+                for (NodeDefinition.NodeCategory category : prepared.categoryOrder()) {
+                    categories.put(category, new ArrayList<>());
+                }
+                for (NodeDefinition definition : source) {
+                    categories.computeIfAbsent(selectorCategory(definition), ignored -> new ArrayList<>()).add(definition);
+                }
+            }
+            categories.values().forEach(values -> values.sort(selectorCatalogOrder()));
+            return categories;
+        }
+
+        private List<NodeDefinition.NodeCategory> categoryOrder(Map<NodeDefinition.NodeCategory, List<NodeDefinition>> categories) {
+            List<NodeDefinition.NodeCategory> order = new ArrayList<>(prepared().categoryOrder());
+            categories.keySet().forEach(category -> {
+                if (!order.contains(category)) {
+                    order.add(category);
+                }
+            });
+            return order;
+        }
+
+        private Comparator<NodeDefinition> selectorCatalogOrder() {
+            return Comparator.comparingInt((NodeDefinition definition) -> prepared().priorities().getOrDefault(definition, 0))
+                .thenComparing(NodeDefinition::getDisplayName, String.CASE_INSENSITIVE_ORDER);
+        }
+
+        private ItemSelectorWidget.VirtualItem<NodeDefinition> nodeItem(NodeDefinition definition,
+                                                                          NodeSelectorVariant variant,
+                                                                          String autoWirePin, int rankingPriority) {
+            String label = variant == null ? selectorLabel(definition) : selectorVariantLabel(definition, variant);
+            String hint = variant == null ? selectorHint(definition) : selectorVariantHint(definition, variant);
+            String searchTerms = variant == null ? selectorSearchTerms(definition) : variantSearchTerms(definition, variant);
+            String key = variant == null ? label : selectorVariantUsageKey(definition, variant, autoWirePin);
+            return new ItemSelectorWidget.VirtualItem<>(definition,
+                new NodeSelectorItemToken(variant, autoWirePin), key, label, "", hint, searchTerms,
+                rankingPriority, variant == null ? groupName(selectorCategory(definition)) : "", false, false);
+        }
+
+        private void addVariantItems(List<ItemSelectorWidget.VirtualItem<NodeDefinition>> result, NodeDefinition definition,
+                                     String autoWirePin, int rankingPriority) {
+            for (NodeSelectorVariant variant : selectorVariants(definition)) {
+                if (autoWirePin != null && !variantExposesPin(definition, variant, autoWirePin)) {
+                    continue;
+                }
+                result.add(nodeItem(definition, variant, autoWirePin, rankingPriority));
+            }
+        }
+
+        private String selectorVariantUsageKey(NodeDefinition definition, NodeSelectorVariant variant, String autoWirePin) {
+            return definition.getDisplayName() + " " + selectorVariantLabel(definition, variant) + " "
+                + selectorVariantDataType(definition, variant, autoWirePin).getDisplayName();
+        }
+
+        @Override
+        public AnimatedWidget create(ItemSelectorWidget.VirtualItem<NodeDefinition> item, Runnable onSelect) {
+            if (item.section()) {
+                return ItemSelectorWidget.VirtualItemProvider.super.create(item, onSelect);
+            }
+            NodeSelectorItemToken token = item.token() instanceof NodeSelectorItemToken value ? value : null;
+            if (token == null || token.variant() == null) {
+                AnimatedWidget entry = ItemSelectorWidget.VirtualItemProvider.super.create(item, onSelect);
+                entry.addOnEnter(ignored -> onSelect.run());
+                return entry;
+            }
+            NodeDefinition definition = item.value();
+            FamilyVariantSelectorEntry entry = new FamilyVariantSelectorEntry(definition.getDisplayName(),
+                selectorVariantLabel(definition, token.variant()), selectorVariantDataType(definition, token.variant(), token.autoWirePin()),
+                0, onSelect);
+            entry.addOnEnter(ignored -> onSelect.run());
+            entry.hint = selectorVariantHint(definition, token.variant());
+            return entry;
+        }
+
+        @Override
+        public void select(ItemSelectorWidget.VirtualItem<NodeDefinition> item) {
+            if (item == null || item.section() || item.value() == null) {
+                return;
+            }
+            NodeSelectorItemToken token = item.token() instanceof NodeSelectorItemToken value ? value : null;
+            NodeDefinition definition = item.value();
+            if (token != null && token.variant() != null) {
+                captureSnapshot();
+                if (atCenter) {
+                    addNodeAtCenter(catalogNodeType(definition), Map.of(token.variant().selectorPin().getName(), token.variant().option()));
+                } else {
+                    addNode(worldX, worldY, catalogNodeType(definition), token.autoWirePin(),
+                        Map.of(token.variant().selectorPin().getName(), token.variant().option()));
+                }
+                return;
+            }
+            captureSnapshot();
+            if (atCenter) {
+                addNodeAtCenter(catalogNodeType(definition));
+            } else {
+                addNode(worldX, worldY, catalogNodeType(definition), token != null ? token.autoWirePin() : null);
+            }
+        }
+
+        @Override
+        public Object catalogKey() {
+            return catalogKey;
+        }
+
+        @Override
+        public Supplier<?> currentCatalogKey() {
+            return GraphEditorScreen.this::nodeSelectorCatalogKey;
+        }
+    }
+
+    record WorkspaceSelectionSnapshot(long updatedAt, int color, Set<String> nodeIds) {
+        WorkspaceSelectionSnapshot {
+            nodeIds = Set.copyOf(nodeIds);
+        }
     }
 
     private record FuzzyWireTarget(FlowNodeWidget widget, String pinName, boolean input, double score) {
@@ -387,7 +1240,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                 while (!builder.isEmpty() && tr.getWidth(builder.toString()) + suffixWidth > maxWidth) {
                     builder.setLength(builder.length() - 1);
                 }
-                return builder.toString() + suffix;
+                return builder + suffix;
             }
         }
 
@@ -432,6 +1285,10 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     private FlowNodeWidget dragPinWidget;
     private ItemSelectorWidget nodeItemSelector;
     private FlowNodeWidget focusedNode;
+    private FlowNodeWidget focusedNodeChildOwner;
+    private Widget focusedNodeChild;
+    private FlowNodeWidget pointerOwnerNode;
+    private Widget pointerOwnerChild;
     private boolean movingSelectedNodes = false;
 
     private String pendingSourceNodeId;
@@ -446,6 +1303,11 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     private static class ClipboardData {
         final List<CopiedNode> nodes = new ArrayList<>();
         final List<CopiedConnection> connections = new ArrayList<>();
+
+        void clear() {
+            nodes.clear();
+            connections.clear();
+        }
     }
 
     private static class CopiedNode {
@@ -477,44 +1339,1068 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private final ClipboardData clipboard = new ClipboardData();
+    private CoreClipboardData coreClipboard;
+
+    record CoreClipboardData(String serverId, CatalogBinding catalogBinding, ContentHash authoringChecksum,
+                             Set<ContractRef<CapabilityId>> requiredCapabilities, List<GraphNode> nodes,
+                             List<GraphConnection> connections) {
+        CoreClipboardData {
+            serverId = Objects.requireNonNull(serverId, "Core clipboard server is required");
+            catalogBinding = Objects.requireNonNull(catalogBinding, "Core clipboard catalog binding is required");
+            authoringChecksum = Objects.requireNonNull(authoringChecksum, "Core clipboard authoring checksum is required");
+            requiredCapabilities = Set.copyOf(requiredCapabilities == null ? Set.of() : requiredCapabilities);
+            nodes = List.copyOf(nodes == null ? List.of() : nodes);
+            connections = List.copyOf(connections == null ? List.of() : connections);
+        }
+
+        boolean empty() {
+            return nodes.isEmpty();
+        }
+    }
+
+    record CorePasteResult(GraphDocument document, List<NodeInstanceId> selectedNodeIds) {
+        CorePasteResult {
+            document = Objects.requireNonNull(document, "Pasted Core graph is required");
+            selectedNodeIds = List.copyOf(selectedNodeIds == null ? List.of() : selectedNodeIds);
+        }
+    }
+
+    record CoreClipboardCapture(boolean accepted, CoreClipboardData clipboard) {
+    }
 
     private static class GraphSnapshot {
         final Set<String> selectedIds;
         final JsonObject document;
-        final JsonObject editableDocument;
 
-        GraphSnapshot(FlowGraph graph, Set<String> selectedIds) {
+        GraphSnapshot(JsonObject document, Set<String> selectedIds) {
             this.selectedIds = new HashSet<>(selectedIds);
-            this.document = FlowWorkspaceDocument.fromGraph(graph);
-            this.editableDocument = FlowWorkspaceDocument.editableWorkspace(document);
+            this.document = Objects.requireNonNull(document, "Graph snapshot document is required");
+        }
+    }
+
+    protected record StableWorkspaceDocument(long generation, long mutationVersion, JsonObject document) {
+        protected StableWorkspaceDocument {
+            document = Objects.requireNonNull(document, "Workspace document is required");
+        }
+    }
+
+    private record WorkspaceFence(long generation, long mutationVersion, long topologyRevision,
+                                  String documentKey, String catalogFence) {
+        private WorkspaceFence {
+            documentKey = documentKey != null ? documentKey : "";
+            catalogFence = catalogFence != null ? catalogFence : "";
+        }
+    }
+
+    private record WorkspaceSnapshot(WorkspaceFence fence, JsonObject document) {
+        private WorkspaceSnapshot {
+            fence = Objects.requireNonNull(fence, "Workspace fence is required");
+            document = Objects.requireNonNull(document, "Workspace document is required");
+        }
+
+        private FlowGraph materializeGraph() {
+            return FlowSerializer.deserialize(document.toString());
+        }
+    }
+
+    private record WorkspaceCaptureJob(long attempt, long expiresAt, WorkspaceFence fence, FlowGraph graph,
+                                       ReSyncCollaborativeView collaborative, long cancellation, WorkspaceGraphSaveRequest saveRequest,
+                                       WorkspaceFrozenGraphRequest frozenRequest,
+                                       ReSyncCollaborativeView.CollaborationDocumentSnapshot collaborativeSnapshot,
+                                       WorkspaceSaveAdmission saveAdmission) {
+        private WorkspaceCaptureJob {
+            fence = Objects.requireNonNull(fence, "Workspace capture fence is required");
+            saveAdmission = Objects.requireNonNull(saveAdmission, "Workspace save admission is required");
+        }
+
+        private WorkspaceCaptureJob withCollaborativeSnapshot(
+            ReSyncCollaborativeView.CollaborationDocumentSnapshot snapshot) {
+            return new WorkspaceCaptureJob(attempt, expiresAt, fence, graph, collaborative, cancellation, saveRequest,
+                frozenRequest, snapshot, saveAdmission);
+        }
+    }
+
+    static final class WorkspaceSaveAdmission {
+        private static final int PENDING = 0;
+        private static final int STARTED = 1;
+        private static final int CANCELLED = 2;
+        private final BrowserSafeState.IntegerValue state = new BrowserSafeState.IntegerValue(PENDING);
+
+        boolean begin() {
+            return state.compareAndSet(PENDING, STARTED);
+        }
+
+        boolean cancel() {
+            return state.compareAndSet(PENDING, CANCELLED);
+        }
+
+        boolean started() {
+            return state.get() == STARTED;
+        }
+    }
+
+    private record CollaborativeWorkspaceCaptureResult(WorkspaceCaptureJob job,
+                                                        ReSyncCollaborativeView.CollaborationDocumentSnapshot snapshot) {
+        private CollaborativeWorkspaceCaptureResult {
+            job = Objects.requireNonNull(job, "Workspace capture job is required");
+        }
+    }
+
+    private record StudioGraphOpenRequest(long generation, long lifecycleGeneration, long workspaceGeneration,
+                                          String type, String resourceId, String title, FlowGraph source,
+                                          String sourceId, int sourceVersion, boolean sourceFunction,
+                                          String sourceResourceType, long sourceRevision, String sourceHash,
+                                          String sourceMutationId, boolean sourceEnabled, String catalogFence,
+                                          Runnable completion, JsonObject sourceDocument,
+                                          FlowManager.ResourceReadLease sourceLease, boolean ownedSource) {
+        private StudioGraphOpenRequest {
+            type = type != null ? type : "";
+            resourceId = resourceId != null ? resourceId : "";
+            title = title != null ? title : "";
+            sourceId = sourceId != null ? sourceId : "";
+            sourceResourceType = sourceResourceType != null ? sourceResourceType : "";
+            sourceHash = sourceHash != null ? sourceHash : "";
+            sourceMutationId = sourceMutationId != null ? sourceMutationId : "";
+            catalogFence = catalogFence != null ? catalogFence : "";
+            if (source == null && sourceDocument == null && sourceLease == null) {
+                throw new IllegalArgumentException("Studio graph source is required");
+            }
+        }
+    }
+
+    private record StudioGraphOpenResult(StudioGraphOpenRequest request, FlowGraph graph, JsonObject document,
+                                         boolean failed) {
+        private StudioGraphOpenResult {
+            request = Objects.requireNonNull(request, "Studio graph open request is required");
+        }
+    }
+
+    private record PreparedGraphRequest(long generation, long lifecycleGeneration, long workspaceGeneration,
+                                        FlowGraph source, String sourceId, int sourceVersion, boolean sourceFunction,
+                                        String sourceResourceType, long sourceRevision, String sourceHash,
+                                        String sourceMutationId, boolean sourceEnabled, String catalogFence,
+                                        boolean replace, boolean clearHistory) {
+        private PreparedGraphRequest {
+            source = Objects.requireNonNull(source, "Prepared graph source is required");
+            sourceId = sourceId != null ? sourceId : "";
+            sourceResourceType = sourceResourceType != null ? sourceResourceType : "";
+            sourceHash = sourceHash != null ? sourceHash : "";
+            sourceMutationId = sourceMutationId != null ? sourceMutationId : "";
+            catalogFence = catalogFence != null ? catalogFence : "";
+        }
+    }
+
+    private record PreparedGraphResult(PreparedGraphRequest request, FlowGraph graph, JsonObject document,
+                                       boolean failed) {
+        private PreparedGraphResult {
+            request = Objects.requireNonNull(request, "Prepared graph request is required");
         }
     }
 
     private record InboundBoundary(String sourceNodeId, String sourcePin, String targetNodeId, String targetPin) {
     }
 
+    private record PendingWorkspaceOperation(String operationId, long baseSequence, JsonObject base,
+                                             List<WorkspacePatch<JsonElement>> patches, JsonObject desired,
+                                             long retainedBytes) {
+        private PendingWorkspaceOperation {
+            if (operationId == null || operationId.isBlank()) {
+                throw new IllegalArgumentException("Workspace operation ID is required");
+            }
+            if (baseSequence < 0L) {
+                throw new IllegalArgumentException("Workspace operation base sequence cannot be negative");
+            }
+            base = Objects.requireNonNull(base, "Workspace operation base is required").deepCopy();
+            patches = copyWorkspacePatches(Objects.requireNonNull(patches, "Workspace operation patches are required"));
+            if (patches.isEmpty()) {
+                throw new IllegalArgumentException("Workspace operation requires patches");
+            }
+            desired = Objects.requireNonNull(desired, "Workspace operation desired document is required").deepCopy();
+            if (retainedBytes <= 0L) {
+                throw new IllegalArgumentException("Workspace operation retained size is required");
+            }
+        }
+    }
+
+    private record PendingWorkspaceProjection(JsonObject document, Map<String, PendingWorkspaceOperation> operations) {
+        private PendingWorkspaceProjection {
+            document = Objects.requireNonNull(document, "Workspace projection is required").deepCopy();
+            operations = Collections.unmodifiableMap(new LinkedHashMap<>(Objects.requireNonNull(operations, "Workspace operations are required")));
+        }
+    }
+
+    private record WorkspacePublicationJob(long generation, String type, String resourceId,
+                                           StableWorkspaceDocument snapshot, JsonObject base, long baseSequence,
+                                           long retainedByteBudget, ReSyncFlowClient client,
+                                           JsonObject workspaceDocument, long workspaceSequence) {
+    }
+
+    private record WorkspacePublicationResult(long generation, String type, String resourceId,
+                                              StableWorkspaceDocument snapshot, PendingWorkspaceOperation operation,
+                                              boolean failed, boolean backpressured,
+                                              JsonObject workspaceDocument, long workspaceSequence) {
+    }
+
+    protected record SaveTicketIdentity(ReSyncResourceType type, String id, String name) {
+    }
+
+    enum GraphSaveAuthorityMode {
+        LEGACY,
+        CORE
+    }
+
+    record GraphSaveAuthorityToken(GraphSaveAuthorityMode mode, String serverId, String resourceType,
+                                   String resourceId, Object managerIdentity, Object clientIdentity,
+                                   String authorityIdentity, Object sessionIdentity, long sessionRevision,
+                                   String snapshotIdentity) {
+        GraphSaveAuthorityToken {
+            mode = Objects.requireNonNull(mode, "Graph save authority mode is required");
+            serverId = serverId != null ? serverId : "";
+            resourceType = resourceType != null ? resourceType : "";
+            resourceId = resourceId != null ? resourceId : "";
+            authorityIdentity = authorityIdentity != null ? authorityIdentity : "";
+            snapshotIdentity = snapshotIdentity != null ? snapshotIdentity : "";
+        }
+
+        GraphSaveAuthorityToken withSnapshot(String snapshot) {
+            return new GraphSaveAuthorityToken(mode, serverId, resourceType, resourceId, managerIdentity,
+                clientIdentity, authorityIdentity, sessionIdentity, sessionRevision, snapshot);
+        }
+    }
+
+    static <T> Optional<T> dispatchAuthorityFencedSave(GraphSaveAuthorityToken expected,
+                                                        Supplier<GraphSaveAuthorityToken> current,
+                                                        Supplier<T> dispatch) {
+        if (expected == null || current == null || dispatch == null) {
+            return Optional.empty();
+        }
+        synchronized (GRAPH_SAVE_AUTHORITY_LOCK) {
+            GraphSaveAuthorityToken actual = current.get();
+            return expected.equals(actual) ? Optional.ofNullable(dispatch.get()) : Optional.empty();
+        }
+    }
+
+    private record WorkspaceSnapshotResult(long captureAttempt, WorkspaceFence fence, JsonObject document, boolean failed,
+                                           ReSyncCollaborativeView.CollaborationDocumentSnapshot collaborativeSnapshot) {
+        private WorkspaceSnapshotResult(WorkspaceCaptureJob job, JsonObject document, boolean failed) {
+            this(job.attempt(), job.fence(), document, failed, null);
+        }
+
+        private WorkspaceSnapshotResult(WorkspaceCaptureJob job, JsonObject document, boolean failed,
+                                        ReSyncCollaborativeView.CollaborationDocumentSnapshot collaborativeSnapshot) {
+            this(job.attempt(), job.fence(), document, failed, collaborativeSnapshot);
+        }
+
+        private WorkspaceSnapshotResult {
+            fence = Objects.requireNonNull(fence, "Workspace fence is required");
+        }
+
+        private long generation() {
+            return fence.generation();
+        }
+
+        private long mutationVersion() {
+            return fence.mutationVersion();
+        }
+    }
+
+    private record WorkspaceGraphApplyRequest(long generation, long lifecycleGeneration, WorkspaceFence fence,
+                                              JsonObject document, List<WorkspacePatch<JsonElement>> patches,
+                                              boolean clearHistory, Runnable completion, GraphEditorScreen editor,
+                                              JsonObject expectedWorkspaceDocument, JsonObject expectedScanDocument,
+                                              JsonObject expectedCurrentDocument) {
+        private WorkspaceGraphApplyRequest {
+            fence = Objects.requireNonNull(fence, "Workspace graph apply fence is required");
+            document = Objects.requireNonNull(document, "Workspace graph document is required");
+            patches = patches == null ? List.of() : List.copyOf(patches);
+            editor = Objects.requireNonNull(editor, "Workspace graph editor is required");
+        }
+    }
+
+    private record WorkspaceGraphApplyResult(WorkspaceGraphApplyRequest request, FlowGraph graph, boolean failed) {
+        private WorkspaceGraphApplyResult {
+            request = Objects.requireNonNull(request, "Workspace graph apply request is required");
+        }
+    }
+
+    private record DiscardGraphRequest(long generation, long lifecycleGeneration, long workspaceGeneration,
+                                       StudioDocument document, StudioScreen.History<GraphSnapshot> history,
+                                       ReSyncResourceType type, String resourceId, String catalogFence,
+                                       FlowManager.ResourceReadLease lease) {
+        private DiscardGraphRequest {
+            document = Objects.requireNonNull(document, "Discard document is required");
+            type = Objects.requireNonNull(type, "Discard graph type is required");
+            resourceId = Objects.requireNonNull(resourceId, "Discard graph ID is required");
+            catalogFence = catalogFence != null ? catalogFence : "";
+            lease = Objects.requireNonNull(lease, "Discard graph lease is required");
+        }
+    }
+
+    private record DiscardGraphResult(DiscardGraphRequest request, FlowGraph graph, JsonObject document,
+                                      boolean failed) {
+        private DiscardGraphResult {
+            request = Objects.requireNonNull(request, "Discard graph request is required");
+        }
+    }
+
+    private enum WorkspaceInboundPreparationKind {
+        SNAPSHOT,
+        OPERATION
+    }
+
+    private record WorkspaceInboundPreparationRequest(WorkspaceInboundPreparationKind kind,
+                                                      ReSyncWorkspaceClient.Snapshot snapshot,
+                                                      ReSyncWorkspaceClient.Operation operation,
+                                                      boolean own, boolean replayEcho, boolean collaborative,
+                                                      boolean conflictActive, boolean pendingRepublishActive,
+                                                      long generation, long baseSequence,
+                                                      WorkspaceFence fence, JsonObject currentDocument,
+                                                      JsonObject workspaceDocument, JsonObject workspaceScanDocument,
+                                                      JsonObject workspaceJoinDocument,
+                                                      Map<String, PendingWorkspaceOperation> pendingOperations,
+                                                      PendingWorkspaceOperation pendingRepublishInFlight,
+                                                      JsonObject conflictAuthoritative,
+                                                      StudioScreen.History<GraphSnapshot> history,
+                                                      StudioScreen.History.RebaseState<GraphSnapshot> historyState) {
+        private WorkspaceInboundPreparationRequest {
+            kind = Objects.requireNonNull(kind, "Workspace inbound preparation kind is required");
+            fence = Objects.requireNonNull(fence, "Workspace inbound preparation fence is required");
+            currentDocument = Objects.requireNonNull(currentDocument, "Workspace current document is required");
+            pendingOperations = immutableWorkspacePendingOperations(pendingOperations);
+            if (kind == WorkspaceInboundPreparationKind.SNAPSHOT) {
+                snapshot = Objects.requireNonNull(snapshot, "Workspace snapshot is required");
+                operation = null;
+            } else {
+                operation = Objects.requireNonNull(operation, "Workspace operation is required");
+                snapshot = null;
+            }
+        }
+
+        private String type() {
+            return kind == WorkspaceInboundPreparationKind.SNAPSHOT ? snapshot.type() : operation.type();
+        }
+
+        private String resourceId() {
+            return kind == WorkspaceInboundPreparationKind.SNAPSHOT ? snapshot.resourceId() : operation.resourceId();
+        }
+
+        private long sequence() {
+            return kind == WorkspaceInboundPreparationKind.SNAPSHOT ? snapshot.sequence() : operation.sequence();
+        }
+    }
+
+    private record WorkspaceInboundPreparationResult(WorkspaceInboundPreparationRequest request,
+                                                     JsonObject authoritative, JsonObject scanDocument,
+                                                     JsonObject mergedDocument,
+                                                     Map<String, PendingWorkspaceOperation> pendingOperations,
+                                                     List<WorkspacePatch<JsonElement>> historyPatches,
+                                                     List<WorkspacePatch<JsonElement>> adapterPatches,
+                                                     StudioScreen.History.PreparedRebase<GraphSnapshot> preparedHistory,
+                                                     boolean clearJoin, boolean own, boolean replayEcho,
+                                                     boolean pendingReplayActive, boolean conflict,
+                                                     boolean sameConflictAuthoritative,
+                                                     JsonObject conflictBase, JsonObject conflictDraft,
+                                                     String conflictPath, FlowGraph preparedGraph,
+                                                     boolean changed, boolean failed) {
+        private WorkspaceInboundPreparationResult {
+            request = Objects.requireNonNull(request, "Workspace inbound preparation request is required");
+            pendingOperations = pendingOperations != null
+                ? Collections.unmodifiableMap(new LinkedHashMap<>(pendingOperations)) : Map.of();
+            historyPatches = historyPatches != null ? List.copyOf(historyPatches) : List.of();
+            adapterPatches = adapterPatches != null ? List.copyOf(adapterPatches) : List.of();
+            conflictPath = conflictPath != null ? conflictPath : "";
+        }
+    }
+
+    private record GraphRestoreMetadata(String id, boolean function, String resourceType, long resourceRevision,
+                                        String resourceHash, String resourceMutationId, boolean enabled) {
+        private static GraphRestoreMetadata from(FlowGraph graph) {
+            return graph == null ? null : new GraphRestoreMetadata(graph.getId(), graph.isFunction(), graph.getResourceType(),
+                graph.getResourceRevision(), graph.getResourceHash(), graph.getResourceMutationId(), graph.isEnabled());
+        }
+
+        private void apply(FlowGraph graph) {
+            if (graph == null) {
+                return;
+            }
+            graph.setId(id);
+            graph.setFunction(function);
+            graph.setResourceType(resourceType);
+            graph.setResourceRevision(resourceRevision);
+            graph.setResourceHash(resourceHash);
+            graph.setResourceMutationId(resourceMutationId);
+            graph.setEnabled(enabled);
+        }
+    }
+
+    private record WorkspaceHistoryRestoreRequest(StudioScreen.History<GraphSnapshot> history, GraphSnapshot snapshot,
+                                                  boolean undo, boolean commit, String targetKey, long generation,
+                                                  WorkspaceFence fence, GraphRestoreMetadata metadata) {
+        private WorkspaceHistoryRestoreRequest {
+            history = Objects.requireNonNull(history, "History is required");
+            snapshot = Objects.requireNonNull(snapshot, "History snapshot is required");
+            fence = Objects.requireNonNull(fence, "Workspace fence is required");
+            targetKey = targetKey != null ? targetKey : "";
+        }
+    }
+
+    private record WorkspaceHistoryRestoreResult(WorkspaceHistoryRestoreRequest request, FlowGraph graph,
+                                                 boolean failed) {
+        private WorkspaceHistoryRestoreResult {
+            request = Objects.requireNonNull(request, "History restore request is required");
+        }
+    }
+
+    private record WorkspaceGraphSaveRequest(WorkspaceFence fence, String serverId,
+                                             ReSyncResourceType type, String notificationName, FlowManager manager,
+                                             SaveTicketIdentity ticketIdentity, GraphSaveAuthorityToken authority,
+                                             BrowserSafeState.ReferenceValue<DesignerSaveNotifications.SaveTicket> ticketState) {
+        private WorkspaceGraphSaveRequest {
+            ticketIdentity = Objects.requireNonNull(ticketIdentity, "Graph save ticket identity is required");
+            authority = Objects.requireNonNull(authority, "Graph save authority is required");
+            ticketState = Objects.requireNonNull(ticketState, "Graph save ticket state is required");
+        }
+
+        private DesignerSaveNotifications.SaveTicket ticket() {
+            return ticketState.get();
+        }
+
+        private DesignerSaveNotifications.SaveTicket startTicket() {
+            DesignerSaveNotifications.SaveTicket existing = ticketState.get();
+            if (existing != null) {
+                return existing;
+            }
+            DesignerSaveNotifications.SaveTicket created = DesignerSaveNotifications.startExact(serverId,
+                ticketIdentity.type(), ticketIdentity.id(), ticketIdentity.name());
+            return created != null && ticketState.compareAndSet(null, created) ? created : ticketState.get();
+        }
+    }
+
+    private record WorkspaceGraphSaveResult(long generation, WorkspaceGraphSaveRequest request, String issue,
+                                            boolean admitted) {
+    }
+
+    private record WorkspaceFrozenGraphRequest(WorkspaceFence fence, Function<FlowGraph, Boolean> action,
+                                               Consumer<Boolean> completion) {
+    }
+
+    private record WorkspaceFrozenGraphResult(WorkspaceFrozenGraphRequest request, boolean succeeded) {
+    }
+
+    private record WorkspaceAwarenessPublicationJob(long generation, String type, String resourceId,
+                                                     long pointerVersion, long surfaceVersion, JsonObject state,
+                                                     String previousSignature, boolean keepalive, ReSyncFlowClient client) {
+    }
+
+    private record WorkspaceAwarenessPublicationResult(long generation, String type, String resourceId,
+                                                        long pointerVersion, long surfaceVersion, String signature,
+                                                        boolean published, boolean failed) {
+    }
+
+    private record WorkspaceUpdate(long sequence, WorkspaceUpdateKind kind, Runnable action) {
+    }
+
+    private record WorkspaceInput(long sequence, Runnable action, boolean deferredMutation) {
+    }
+
+    private enum WorkspaceUpdateKind {
+        SNAPSHOT,
+        OPERATION,
+        RESYNC
+    }
+
+    private record WorkspaceConflict(JsonObject base, JsonObject draft, JsonObject authoritative, long sequence, String path) {
+        private WorkspaceConflict {
+            base = Objects.requireNonNull(base, "Workspace conflict base is required");
+            draft = Objects.requireNonNull(draft, "Workspace conflict draft is required");
+            authoritative = Objects.requireNonNull(authoritative, "Workspace conflict authoritative document is required");
+            path = path == null ? "" : path;
+        }
+
+        private WorkspaceConflict withAuthoritative(JsonObject next, long nextSequence) {
+            return new WorkspaceConflict(base, draft, next, nextSequence, path);
+        }
+
+        private boolean sameAuthoritative(JsonObject next) {
+            return next != null && authoritative.equals(next);
+        }
+    }
+
     private record OutboundBoundary(String sourceNodeId, String sourcePin, String targetNodeId, String targetPin) {
     }
 
-    private record WireSegment(double x1, double y1, double x2, double y2) {
+    record WireSegment(double x1, double y1, double x2, double y2) {
+    }
+
+    record WorldBounds(double minX, double minY, double maxX, double maxY) {
+        boolean intersects(WorldBounds other) {
+            return other != null && maxX >= other.minX && minX <= other.maxX && maxY >= other.minY && minY <= other.maxY;
+        }
+
+        WorldBounds expand(double amount) {
+            return new WorldBounds(minX - amount, minY - amount, maxX + amount, maxY + amount);
+        }
+    }
+
+    private static final class WireRenderGroup {
+        private final int order;
+        private final List<FlowConnection> connections;
+        private final Set<String> nodeIds;
+        private List<WireSegment> segments = List.of();
+        private List<WireSegment> fanoutTrunks = List.of();
+        private List<WireSegment> fanoutArms = List.of();
+        private FanoutArmHitIndex fanoutHitIndex = FanoutArmHitIndex.empty();
+        private Map<FlowConnection, List<WireSegment>> connectionSegments = Map.of();
+        private Map<FlowConnection, List<WireSegment>> hitSegments = Map.of();
+        private Map<WireSegment, FlowConnection> fanoutConnectionsByArm = Map.of();
+        private Set<Long> cells = Set.of();
+        private Set<Long> coarseCells = Set.of();
+        private boolean overflow;
+        private WorldBounds bounds;
+
+        private WireRenderGroup(int order, List<FlowConnection> connections, Collection<String> nodeIds) {
+            this.order = order;
+            this.connections = List.copyOf(connections);
+            this.nodeIds = Set.copyOf(nodeIds);
+        }
+    }
+
+    static final class FanoutArmHitIndex {
+        private final List<WireSegment> arms;
+        private final double[] minimumX;
+        private final double[] maximumX;
+
+        private FanoutArmHitIndex(List<WireSegment> arms) {
+            this.arms = arms == null || arms.isEmpty() ? List.of() : arms;
+            int capacity = Math.max(1, this.arms.size() * 4);
+            this.minimumX = new double[capacity];
+            this.maximumX = new double[capacity];
+            Arrays.fill(minimumX, Double.POSITIVE_INFINITY);
+            Arrays.fill(maximumX, Double.NEGATIVE_INFINITY);
+            if (!this.arms.isEmpty()) {
+                build(1, 0, this.arms.size());
+            }
+        }
+
+        private static FanoutArmHitIndex empty() {
+            return new FanoutArmHitIndex(List.of());
+        }
+
+        private void build(int node, int start, int end) {
+            if (end - start == 1) {
+                WireSegment arm = arms.get(start);
+                minimumX[node] = Math.min(arm.x1(), arm.x2());
+                maximumX[node] = Math.max(arm.x1(), arm.x2());
+                return;
+            }
+            int middle = (start + end) >>> 1;
+            build(node << 1, start, middle);
+            build(node << 1 | 1, middle, end);
+            minimumX[node] = Math.min(minimumX[node << 1], minimumX[node << 1 | 1]);
+            maximumX[node] = Math.max(maximumX[node << 1], maximumX[node << 1 | 1]);
+        }
+
+        private int hit(double worldX, double worldY, double hitRadius) {
+            if (arms.isEmpty()) {
+                return -1;
+            }
+            int start = lowerBound(worldY - hitRadius);
+            int end = upperBound(worldY + hitRadius);
+            return start < end ? findFirst(1, 0, arms.size(), start, end, worldX, worldY, hitRadius) : -1;
+        }
+
+        private int lowerBound(double y) {
+            int low = 0;
+            int high = arms.size();
+            while (low < high) {
+                int middle = (low + high) >>> 1;
+                if (arms.get(middle).y1() < y) {
+                    low = middle + 1;
+                } else {
+                    high = middle;
+                }
+            }
+            return low;
+        }
+
+        private int upperBound(double y) {
+            int low = 0;
+            int high = arms.size();
+            while (low < high) {
+                int middle = (low + high) >>> 1;
+                if (arms.get(middle).y1() <= y) {
+                    low = middle + 1;
+                } else {
+                    high = middle;
+                }
+            }
+            return low;
+        }
+
+        private int findFirst(int node, int start, int end, int queryStart, int queryEnd,
+                              double worldX, double worldY, double hitRadius) {
+            if (queryEnd <= start || end <= queryStart || maximumX[node] < worldX - hitRadius
+                || minimumX[node] > worldX + hitRadius) {
+                return -1;
+            }
+            if (end - start == 1) {
+                return isNearWireSegment(worldX, worldY, arms.get(start), hitRadius) ? start : -1;
+            }
+            int middle = (start + end) >>> 1;
+            int left = findFirst(node << 1, start, middle, queryStart, queryEnd, worldX, worldY, hitRadius);
+            return left >= 0 ? left
+                : findFirst(node << 1 | 1, middle, end, queryStart, queryEnd, worldX, worldY, hitRadius);
+        }
+    }
+
+    private static final class GraphRenderIndex {
+        private final FlowGraph graph;
+        private final long version;
+        private final long projectionGeneration;
+        private final String topologyChecksum;
+        private final Map<Long, List<FlowNodeWidget>> nodeCells = new HashMap<>();
+        private final Map<Long, List<WireRenderGroup>> wireCells = new HashMap<>();
+        private final Map<Long, List<WireRenderGroup>> coarseWireCells = new HashMap<>();
+        private final List<WireRenderGroup> overflowWireGroups = new ArrayList<>();
+        private SpatialBoundsNode<WireRenderGroup> overflowWireRoot;
+        private boolean overflowWireDirty;
+        private final IdentityHashMap<FlowNodeWidget, WorldBounds> nodeBounds = new IdentityHashMap<>();
+        private final IdentityHashMap<FlowNodeWidget, Integer> nodeOrder = new IdentityHashMap<>();
+        private final Map<FanoutKey, List<FlowConnection>> fanouts;
+        private final Map<ConnectionRouteKey, List<FlowConnection>> connectionsByRoute = new HashMap<>();
+        private final IdentityHashMap<FlowConnection, WireRenderGroup> groupsByConnection = new IdentityHashMap<>();
+        private final Map<String, List<WireRenderGroup>> groupsByNode = new HashMap<>();
+        private WorldBounds worldBounds;
+        private int worldSignature;
+        private int unresolvedDefinitions;
+
+        private GraphRenderIndex(FlowGraph graph, long version, long projectionGeneration, String topologyChecksum,
+                                 Map<FanoutKey, List<FlowConnection>> fanouts) {
+            this.graph = graph;
+            this.version = version;
+            this.projectionGeneration = projectionGeneration;
+            this.topologyChecksum = topologyChecksum;
+            this.fanouts = fanouts;
+        }
+    }
+
+    private record GraphRenderNodeSnapshot(FlowNodeWidget widget, WorldBounds bounds, int order, boolean definitionLoaded) {
+    }
+
+    private record GraphRenderConnectionSnapshot(FlowConnection connection, String sourceNodeId, String sourcePin,
+                                                 String editorSourceNodeId, String editorSourcePin, String targetNodeId,
+                                                 String targetPin, PinPoint source, PinPoint target, boolean dataSource,
+                                                 double targetNodeX, double targetNodeY) {
+    }
+
+    private record GraphRenderSnapshot(FlowGraph graph, long version, long revision, long projectionGeneration,
+                                       String topologyChecksum, List<GraphRenderNodeSnapshot> nodes,
+                                       List<GraphRenderConnectionSnapshot> connections) {
+        private GraphRenderSnapshot {
+            nodes = List.copyOf(nodes);
+            connections = List.copyOf(connections);
+        }
+    }
+
+    private record GraphRenderTopologyPointer(FlowGraph graph, long version, long revision,
+                                              long projectionGeneration, String topologyChecksum,
+                                              Map<FlowNodeWidget, GraphRenderNodeSnapshot> nodes,
+                                              Map<FlowConnection, GraphRenderConnectionSnapshot> connections,
+                                              BrowserSafeState.LongValue currentRevision, long queuedAtNanos) {
+    }
+
+    private record GraphRenderBuildResult(FlowGraph graph, long version, long revision, long projectionGeneration,
+                                          String topologyChecksum, GraphRenderIndex index, boolean failed,
+                                          long queuedAtNanos, long startedAtNanos, long finishedAtNanos) {
+    }
+
+    private record CoreWidgetTopology(FlowGraph graph, long projectionGeneration, String topologyChecksum,
+                                      Map<String, FlowNodeWidget> widgetsById,
+                                      Map<FlowNodeWidget, String> nodeIds,
+                                      List<FlowNodeWidget> widgets,
+                                      List<FlowNodeWidget> retireAfterAdoption,
+                                      List<FlowNodeWidget> retireIfAbandoned) {
+        private CoreWidgetTopology {
+            widgets = Collections.unmodifiableList(widgets);
+            retireAfterAdoption = List.copyOf(retireAfterAdoption);
+            retireIfAbandoned = List.copyOf(retireIfAbandoned);
+        }
+
+        private CoreWidgetTopology withoutRetirementPayloads() {
+            if (retireAfterAdoption.isEmpty() && retireIfAbandoned.isEmpty()) {
+                return this;
+            }
+            return new CoreWidgetTopology(graph, projectionGeneration, topologyChecksum, widgetsById, nodeIds, widgets,
+                List.of(), List.of());
+        }
+    }
+
+    private record RetainedCoreEditor(CoreGraphUiProjection.EditorSnapshot snapshot, String publication,
+                                      ReSyncTypedInteractionProjection catalog,
+                                      CoreGraphUiProjection.ProjectionResult projection, CoreWidgetTopology topology,
+                                      GraphRenderIndex renderIndex, long renderVersion,
+                                      Map<FlowNodeWidget, GraphRenderNodeSnapshot> nodes,
+                                      Map<FlowConnection, GraphRenderConnectionSnapshot> connections,
+                                      Map<String, Set<FlowConnection>> connectionsByNode,
+                                      BrowserSafeState.LongValue topologyRevision, int frontOrder,
+                                      Map<String, List<EditorDiagnostic>> diagnostics, Set<String> selectedNodes) {
+        private boolean currentFor(CoreGraphEditorSession session) {
+            return snapshot.currentFor(session) && publication.equals(corePublicationIdentity(session));
+        }
+    }
+
+    private record CoreStructureDelta(Map<String, FlowNode> nodes, List<FlowConnection> connections,
+                                      Map<ConnectionId, GraphConnection> canonicalConnections,
+                                      Set<String> addedNodeIds, Set<String> removedNodeIds,
+                                      Set<String> affectedTargetNodeIds) {
+        private CoreStructureDelta {
+            nodes = Collections.unmodifiableMap(nodes);
+            connections = List.copyOf(connections);
+            canonicalConnections = Collections.unmodifiableMap(canonicalConnections);
+            addedNodeIds = Set.copyOf(addedNodeIds);
+            removedNodeIds = Set.copyOf(removedNodeIds);
+            affectedTargetNodeIds = Set.copyOf(affectedTargetNodeIds);
+        }
+    }
+
+    private static final class RetiredWidgetBatch {
+        private final List<FlowNodeWidget> widgets;
+        private int index;
+
+        private RetiredWidgetBatch(List<FlowNodeWidget> widgets) {
+            this.widgets = widgets;
+        }
+    }
+
+    private record SpatialBoundsEntry<T>(WorldBounds bounds, T value) {
+    }
+
+    private static final class SpatialBoundsNode<T> {
+        private final WorldBounds bounds;
+        private final SpatialBoundsNode<T> left;
+        private final SpatialBoundsNode<T> right;
+        private final T value;
+
+        private SpatialBoundsNode(WorldBounds bounds, SpatialBoundsNode<T> left, SpatialBoundsNode<T> right, T value) {
+            this.bounds = bounds;
+            this.left = left;
+            this.right = right;
+            this.value = value;
+        }
     }
 
     private record FanoutKey(String sourceNodeId, String sourcePin) {
     }
 
+    private record ConnectionRouteKey(String sourceNodeId, String sourcePin, String targetNodeId, String targetPin) {
+    }
+
+    private record InputPinKey(String targetNodeId, String targetPin) {
+    }
+
+    private record CoreWidgetPublicationFailure(String resourceKey, long projectionGeneration,
+                                                String topologyChecksum, String nodeId, String failureType) {
+    }
+
+    private record CoreProjectionRequest(long generation, CoreGraphUiProjection.EditorSnapshot snapshot,
+                                         CoreMutationCommit mutation, long queuedAtNanos, long captureMicros) {
+    }
+
+    private enum CoreMutationAccess {
+        CONTENT,
+        MOVE,
+        STRUCTURE,
+        DELETE,
+        GLOBAL
+    }
+
+    private enum CoreHistoryTransition {
+        NONE,
+        UNDO,
+        REDO;
+
+        private boolean apply(CoreGraphEditorSession session) {
+            return switch (this) {
+                case NONE -> false;
+                case UNDO -> session.undo();
+                case REDO -> session.redo();
+            };
+        }
+
+        private boolean revert(CoreGraphEditorSession session) {
+            return switch (this) {
+                case NONE -> false;
+                case UNDO -> session.redo();
+                case REDO -> session.undo();
+            };
+        }
+    }
+
+    private record CoreMutationCommand(String operation, CoreGraphEditorSession session, ReSyncResourceType type,
+                                       String resourceId, Function<CoreGraphEditorSession, Boolean> mutation,
+                                       CoreMutationAccess access, List<String> nodeIds, String coalesceKey,
+                                       CoreHistoryTransition historyTransition, List<String> selectionNodeIds,
+                                       UUID mutationId, NodeWidget.NodeValueMutation valuePreview) {
+    }
+
+    private record CoreMutationCommit(CoreGraphEditorSession session,
+                                       CoreGraphUiProjection.EditorSnapshot baseline,
+                                       CoreGraphEditorSession candidate,
+                                       CoreMutationCommand command,
+                                       CoreGraphEditorSession.HistoryState baselineHistory,
+                                       CoreGraphEditorSession.HistoryState targetHistory,
+                                       long requestGeneration,
+                                       long publicationGeneration) {
+    }
+
+    private record CoreStructuralPreview(CoreMutationCommit mutation, FlowGraph graph,
+                                         Map<String, FlowNode> addedNodes, Map<String, FlowNode> removedNodes,
+                                         Map<String, FlowNodeWidget> addedWidgets, Map<String, FlowNodeWidget> removedWidgets,
+                                         List<FlowConnection> connections, Set<String> targets, Set<String> selection,
+                                         Set<WireRenderGroup> hiddenGroups, GraphRenderIndex overlay, long startedAtNanos) {
+    }
+
+    private record CoreDeferredSave(CoreGraphEditorSession session, ReSyncResourceType type, String resourceId,
+                                    DesignerSaveNotifications.SaveTicket ticket) {
+    }
+
+    private record CoreProjectionBuildResult(CoreProjectionRequest request,
+                                              CoreGraphUiProjection.ProjectionResult projection,
+                                              String failureType, String failureDetail,
+                                              long startedAtNanos, long finishedAtNanos) {
+        private CoreProjectionBuildResult {
+            failureType = failureType == null ? "" : failureType;
+            failureDetail = failureDetail == null ? "" : failureDetail;
+        }
+
+        private boolean failed() {
+            return projection == null;
+        }
+    }
+
+    private static final class CatalogRefresh {
+        private final FlowGraph graph;
+        private final long publicationToken;
+        private final long projectionGeneration;
+        private final String topologyChecksum;
+        private final List<Map.Entry<String, FlowNode>> nodes;
+        private final Map<String, FlowNodeWidget> preparedWidgets = new LinkedHashMap<>();
+        private final Map<FlowNodeWidget, String> preparedWidgetNodeIds = new IdentityHashMap<>();
+        private final List<FlowNodeWidget> preparedWidgetOrder = new ArrayList<>();
+        private final Map<FlowNodeWidget, GraphRenderNodeSnapshot> preparedNodeTopology = BrowserSafeState.map();
+        private final Map<FlowConnection, GraphRenderConnectionSnapshot> preparedConnectionTopology = BrowserSafeState.map();
+        private final Map<String, Set<FlowConnection>> preparedConnectionsByNode = BrowserSafeState.map();
+        private final boolean atomicCorePublication;
+        private final ReSyncTypedInteractionProjection.Palette palette;
+        private final long startedAtNanos;
+        private int nodeIndex;
+        private int nodeAttempts;
+        private final List<FlowConnection> connections;
+        private int connectionIndex;
+        private final List<String> obsoleteNodeIds;
+        private int obsoleteNodeIndex;
+        private final long queuedAtNanos;
+        private int editableDefinitionCount;
+        private int readOnlyDefinitionCount;
+        private int missingDefinitionCount;
+        private int lookupBlockedDefinitionCount;
+        private int placeholderWidgetCount;
+        private int constructionFailureCount;
+        private int placeholderFailureCount;
+
+        private CatalogRefresh(FlowGraph graph, long publicationToken, long projectionGeneration, String topologyChecksum,
+                               ReSyncTypedInteractionProjection.Palette palette,
+                               Collection<String> existingNodeIds, long queuedAtNanos) {
+            this.graph = graph;
+            this.publicationToken = publicationToken;
+            this.projectionGeneration = projectionGeneration;
+            this.topologyChecksum = topologyChecksum == null ? "" : topologyChecksum;
+            this.atomicCorePublication = projectionGeneration > 0L && !this.topologyChecksum.isBlank();
+            this.nodes = graph != null && graph.getNodes() != null
+                ? graph.getNodes().entrySet().stream()
+                    .map(entry -> Map.entry(entry.getKey(), entry.getValue()))
+                    .toList() : List.of();
+            this.connections = graph != null && graph.getConnections() != null
+                ? List.copyOf(graph.getConnections()) : List.of();
+            Set<String> nodeIds = this.nodes.stream().map(Map.Entry::getKey)
+                .collect(Collectors.toUnmodifiableSet());
+            this.obsoleteNodeIds = existingNodeIds.stream()
+                .filter(nodeId -> !nodeIds.contains(nodeId)).toList();
+            this.palette = palette;
+            this.queuedAtNanos = queuedAtNanos;
+            this.startedAtNanos = ReSyncFlowClient.TEMP_LIFECYCLE_DEBUG ? System.nanoTime() : 0L;
+        }
+    }
+
+    private static final class PaletteRefresh {
+        private final ReSyncTypedInteractionProjection.Palette palette;
+        private final List<NodeDefinition.NodeCategory> obsolete;
+        private int categoryIndex;
+        private int rowIndex;
+        private int obsoleteIndex;
+
+        private PaletteRefresh(ReSyncTypedInteractionProjection.Palette palette,
+                               Collection<NodeDefinition.NodeCategory> existing) {
+            this.palette = palette;
+            this.obsolete = existing.stream().filter(category -> palette == null
+                || !palette.categoryOrder().contains(category)).toList();
+        }
+    }
+
     private record PinPoint(double x, double y) {
     }
 
-    private final StudioScreen.History<GraphSnapshot> standaloneGraphHistory = history(() -> new GraphSnapshot(graph, selectedNodeIds), this::restoreSnapshot);
+    record CoreMutationTransaction(boolean changed, boolean committed, FlowGraph projection) {
+        CoreMutationTransaction {
+            if (committed && (!changed || projection == null)) {
+                throw new IllegalArgumentException("Committed Core mutations require a projected change");
+            }
+        }
+    }
+
+    private final StudioScreen.History<GraphSnapshot> standaloneGraphHistory = history(() -> graphSnapshot(graph, selectedNodeIds), this::restoreSnapshot);
     private final Map<String, StudioScreen.History<GraphSnapshot>> graphHistories = new HashMap<>();
 
     @Override
     protected StudioScreen.History<?> activeHistory() {
+        if (activeCoreGraphSession() != null) {
+            return null;
+        }
         ReSyncStudioView view = activeStudioView();
         if (view instanceof FocusedJsonResourceDesignerScreen resourceScreen && resourceScreen.hasResourceHistory()) {
             return resourceScreen.resourceHistory();
         }
         return graphHistory();
+    }
+
+    @Override
+    protected boolean undoActiveHistory() {
+        CoreGraphEditorSession session = activeCoreGraphSession();
+        if (session == null) {
+            ReSyncStudioView view = activeStudioView();
+            if (view instanceof FocusedJsonResourceDesignerScreen resourceScreen && resourceScreen.hasResourceHistory()) {
+                return super.undoActiveHistory();
+            }
+            return requestGraphHistoryRestore(true);
+        }
+        if (!session.canUndo()) {
+            return false;
+        }
+        return commitCoreHistoryMutation("Undo", CoreHistoryTransition.UNDO);
+    }
+
+    @Override
+    protected boolean redoActiveHistory() {
+        CoreGraphEditorSession session = activeCoreGraphSession();
+        if (session == null) {
+            ReSyncStudioView view = activeStudioView();
+            if (view instanceof FocusedJsonResourceDesignerScreen resourceScreen && resourceScreen.hasResourceHistory()) {
+                return super.redoActiveHistory();
+            }
+            return requestGraphHistoryRestore(false);
+        }
+        if (!session.canRedo()) {
+            return false;
+        }
+        return commitCoreHistoryMutation("Redo", CoreHistoryTransition.REDO);
+    }
+
+    private boolean requestGraphHistoryRestore(boolean undo) {
+        if (lifecycleClosed) {
+            return false;
+        }
+        if (workspaceHistoryRestoreRequest != null) {
+            workspaceMutationBackpressure = true;
+            return true;
+        }
+        completeWorkspaceMutation();
+        if (workspaceSnapshotPending()) {
+            return deferWorkspaceMutation(() -> requestGraphHistoryRestore(undo));
+        }
+        StudioScreen.History<GraphSnapshot> history = graphHistory();
+        GraphSnapshot snapshot = undo ? history.peekUndo() : history.peekRedo();
+        if (snapshot == null) {
+            return false;
+        }
+        StableWorkspaceDocument stable = stableWorkspaceDocument;
+        if (stable == null || stable.generation() != workspacePublicationGeneration
+            || stable.mutationVersion() != workspaceMutationVersion) {
+            captureStableWorkspaceDocument(workspaceMutationVersion);
+            return deferWorkspaceMutation(() -> requestGraphHistoryRestore(undo));
+        }
+        long generation;
+        try {
+            workspaceHistoryGeneration = Math.incrementExact(workspaceHistoryGeneration);
+            generation = workspaceHistoryGeneration;
+        } catch (ArithmeticException exception) {
+            workspaceHistoryGeneration = 1L;
+            generation = workspaceHistoryGeneration;
+        }
+        String targetKey = workspaceDocumentKey();
+        WorkspaceHistoryRestoreRequest request = new WorkspaceHistoryRestoreRequest(history, snapshot, undo, true, targetKey,
+            generation, workspaceFence(workspacePublicationGeneration, workspaceMutationVersion), GraphRestoreMetadata.from(graph));
+        workspaceHistoryRestoreRequest = request;
+        workspaceHistoryRestoreTarget = graph;
+        try {
+            WORKSPACE_HISTORY_RESTORES.execute(() -> prepareGraphHistoryRestore(request));
+            return true;
+        } catch (IllegalStateException exception) {
+            workspaceHistoryRestoreRequest = null;
+            workspaceMutationBackpressure = true;
+            return false;
+        }
+    }
+
+    private void prepareGraphHistoryRestore(WorkspaceHistoryRestoreRequest request) {
+        WorkspaceHistoryRestoreResult result;
+        try {
+            FlowGraph restored = FlowSerializer.deserialize(request.snapshot().document.toString());
+            if (request.metadata() != null) {
+                request.metadata().apply(restored);
+            }
+            result = new WorkspaceHistoryRestoreResult(request, restored, false);
+        } catch (RuntimeException | Error exception) {
+            result = new WorkspaceHistoryRestoreResult(request, null, true);
+        }
+        if (workspaceHistoryGeneration == request.generation() && workspaceHistoryRestoreRequest == request) {
+            workspaceHistoryRestoreResult.compareAndSet(null, result);
+        }
+    }
+
+    @Override
+    public boolean hasUnsavedChanges() {
+        CoreGraphEditorSession session = activeCoreGraphSession();
+        return session != null ? coreSessionDirty(activeStudioDocument, session) : super.hasUnsavedChanges();
+    }
+
+    @Override
+    public void markChangesSaved() {
+        if (activeCoreGraphSession() == null) {
+            super.markChangesSaved();
+        }
+    }
+
+    @Override
+    public void markChangesSaving(long sequence) {
+        if (activeCoreGraphSession() == null) {
+            super.markChangesSaving(sequence);
+        }
+    }
+
+    @Override
+    public void markChangesSaved(long sequence) {
+        if (activeCoreGraphSession() == null) {
+            super.markChangesSaved(sequence);
+        }
+    }
+
+    @Override
+    public void discardUnsavedChanges() {
+        if (activeCoreGraphSession() != null) {
+            discardStudioDocument(activeStudioDocument);
+            return;
+        }
+        super.discardUnsavedChanges();
     }
 
     private StudioScreen.History<GraphSnapshot> graphHistory() {
@@ -524,6 +2410,15 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         return graphHistory(activeStudioDocument);
     }
 
+    private GraphSnapshot graphSnapshot(FlowGraph target, Set<String> selection) {
+        StableWorkspaceDocument stable = target == graph ? stableWorkspaceDocument : stableWorkspaceDocuments.get(target);
+        if (stable != null && (target != graph || stable.generation() == workspacePublicationGeneration
+            && stable.mutationVersion() == workspaceMutationVersion)) {
+            return new GraphSnapshot(stable.document(), selection);
+        }
+        throw new IllegalStateException("Stable workspace document unavailable");
+    }
+
     private StudioScreen.History<GraphSnapshot> graphHistory(StudioDocument document) {
         StudioScreen.History<GraphSnapshot> existing = graphHistories.get(document.key());
         if (existing != null) {
@@ -531,7 +2426,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         }
         FlowGraph target = document.graph();
         StudioScreen.History<GraphSnapshot> created = new StudioScreen.History<>(
-            () -> new GraphSnapshot(target, graph == target ? selectedNodeIds : Set.of()),
+            () -> graphSnapshot(target, graph == target ? selectedNodeIds : Set.of()),
             snapshot -> {
                 if (graph == target) {
                     restoreSnapshot(snapshot);
@@ -541,7 +2436,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             },
             50
         );
-        created.clear();
+        created.clearWithoutSnapshot();
         graphHistories.put(document.key(), created);
         return created;
     }
@@ -564,7 +2459,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         this.startupServer = startupServer;
         this.loaderHint = safeText(loaderHint);
         this.serverTitle = safeText(serverTitle);
-        this.activeNodeRegistryServerId = ReSyncResourceDragPayload.WORLDGEN.equals(graph.getResourceType()) ? WorldGenManager.registryServerId(serverId) : serverId;
+        this.activeNodeRegistryServerId = ReSyncResourceDragPayload.WORLDGEN.equals(this.graph.getResourceType()) ? WorldGenManager.registryServerId(serverId) : serverId;
         if (!(parent instanceof GraphEditorScreen)) {
             GraphEditorScreen.parent = parent;
         }
@@ -573,16 +2468,23 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         this.nodeItemSelector = null;
         OPEN_SCREENS.add(this);
 
-        for (var entry : graph.getNodes().entrySet()) {
-            String nodeId = entry.getKey();
-            FlowNodeWidget widget = createNodeWidget(nodeId, entry.getValue());
-            addWorldWidget(widget);
-            widgetCache.put(entry.getKey(), widget);
-        }
+        queueNodeCatalogRefresh();
+        adoptPreparedGraphRenderState();
+    }
+
+    @Override
+    public boolean deferResourceRename(String type, String oldId, String newId, Runnable mutation) {
+        return mutation != null && deferWorkspaceMutation(mutation);
     }
 
     @Override
     public void resourceRenamed(String type, String oldId, String newId) {
+        if (isActiveCoreStudioDocument()) {
+            return;
+        }
+        if (deferWorkspaceMutation(() -> resourceRenamed(type, oldId, newId))) {
+            return;
+        }
         if (graph != null && oldId.equals(graph.getId())) {
             graph.setId(newId);
         }
@@ -595,7 +2497,14 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     public void openStudioFlow(FlowGraph targetGraph, String title) {
+        openStudioFlow(targetGraph, title, null);
+    }
+
+    private void openStudioFlow(FlowGraph targetGraph, String title, Runnable completion) {
         if (targetGraph == null) {
+            return;
+        }
+        if (deferWorkspaceMutation(() -> openStudioFlow(targetGraph, title, completion))) {
             return;
         }
         String type = targetGraph.getResourceType();
@@ -603,13 +2512,409 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             && !ReSyncResourceDragPayload.COMMAND.equals(type)) {
             type = targetGraph.isFunction() ? ReSyncResourceDragPayload.FUNCTION : ReSyncResourceDragPayload.FLOW;
         }
-        openStudioGraphDocument(type, targetGraph.getId(), title == null || title.isBlank() ? targetGraph.getId() : title, targetGraph);
+        submitStudioGraphOpen(type, targetGraph.getId(), title == null || title.isBlank() ? targetGraph.getId() : title,
+            targetGraph, completion);
+    }
+
+    private void submitPreparedGraphMutation(FlowGraph source, boolean replace, boolean clearHistory) {
+        if (source == null || lifecycleClosed) {
+            return;
+        }
+        if (preparedGraphRequest != null) {
+            workspaceMutationBackpressure = true;
+            return;
+        }
+        long generation;
+        try {
+            preparedGraphGeneration = Math.incrementExact(preparedGraphGeneration);
+            generation = preparedGraphGeneration;
+        } catch (ArithmeticException exception) {
+            preparedGraphGeneration = 1L;
+            generation = 1L;
+        }
+        PreparedGraphRequest request = new PreparedGraphRequest(generation, lifecycleTaskGeneration,
+            workspacePublicationGeneration, source, source.getId(), source.getVersion(), source.isFunction(),
+            source.getResourceType(), source.getResourceRevision(), source.getResourceHash(), source.getResourceMutationId(),
+            source.isEnabled(), workspaceCatalogFence(), replace, clearHistory);
+        preparedGraphRequest = request;
+        try {
+            WORKSPACE_HISTORY_RESTORES.execute(() -> prepareGraphMutation(request));
+        } catch (IllegalStateException exception) {
+            if (preparedGraphRequest == request) {
+                preparedGraphRequest = null;
+            }
+            workspaceMutationBackpressure = true;
+        }
+    }
+
+    private void prepareGraphMutation(PreparedGraphRequest request) {
+        FlowGraph prepared = null;
+        JsonObject document = null;
+        boolean failed = false;
+        try {
+            document = FlowSerializer.toSnapshotJsonObject(request.source());
+            prepared = FlowSerializer.deserialize(document);
+        } catch (RuntimeException | Error exception) {
+            failed = true;
+        }
+        PreparedGraphResult result = new PreparedGraphResult(request, prepared, document, failed);
+        if (request.generation() == preparedGraphGeneration && request.lifecycleGeneration() == lifecycleTaskGeneration
+            && preparedGraphRequest == request) {
+            preparedGraphResult.compareAndSet(null, result);
+        }
+    }
+
+    private void applyPreparedGraphResult() {
+        PreparedGraphResult result = preparedGraphResult.getAndSet(null);
+        if (result == null) {
+            return;
+        }
+        PreparedGraphRequest request = preparedGraphRequest;
+        if (request != result.request()) {
+            return;
+        }
+        preparedGraphRequest = null;
+        if (result.failed() || result.graph() == null || !preparedGraphFenceCurrent(request)) {
+            recoverPreparedGraphApplyFailure("Graph Apply Failed");
+            return;
+        }
+        Runnable apply = () -> applyPreparedGraphMutation(result.graph(), request.replace(), request.clearHistory(),
+            result.document());
+        try {
+            if (deferWorkspaceMutation(apply)) {
+                return;
+            }
+            apply.run();
+        } catch (RuntimeException | Error exception) {
+            recoverPreparedGraphApplyFailure("Graph Apply Failed");
+        }
+    }
+
+    private void recoverPreparedGraphApplyFailure(String issue) {
+        workspaceMutationBackpressure = true;
+        requestWorkspaceSnapshot();
+        if (issue != null && !issue.isBlank()) {
+            new Notification("Workspace", issue, Notification.Type.ERROR);
+        }
+    }
+
+    private boolean preparedGraphFenceCurrent(PreparedGraphRequest request) {
+        if (request == null || lifecycleClosed || request.generation() != preparedGraphGeneration
+            || request.lifecycleGeneration() != lifecycleTaskGeneration
+            || request.workspaceGeneration() != workspacePublicationGeneration
+            || !request.catalogFence().equals(workspaceCatalogFence())) {
+            return false;
+        }
+        FlowGraph source = request.source();
+        return source != null && request.sourceId().equals(safeText(source.getId()))
+            && request.sourceVersion() == source.getVersion() && request.sourceFunction() == source.isFunction()
+            && request.sourceResourceType().equals(safeText(source.getResourceType()))
+            && request.sourceRevision() == source.getResourceRevision()
+            && request.sourceHash().equals(safeText(source.getResourceHash()))
+            && request.sourceMutationId().equals(safeText(source.getResourceMutationId()))
+            && request.sourceEnabled() == source.isEnabled();
+    }
+
+    private boolean submitDiscardGraphRestore(StudioDocument document, StudioScreen.History<GraphSnapshot> history,
+                                              ReSyncResourceType type, FlowManager.ResourceReadLease lease) {
+        if (document == null || type == null || !type.isGraph() || lease == null
+            || lifecycleClosed || workspaceSnapshotPending() || discardGraphRequest != null) {
+            return false;
+        }
+        long generation;
+        try {
+            discardGraphGeneration = Math.incrementExact(discardGraphGeneration);
+            generation = discardGraphGeneration;
+        } catch (ArithmeticException exception) {
+            discardGraphGeneration = 1L;
+            generation = 1L;
+        }
+        DiscardGraphRequest request = new DiscardGraphRequest(generation, lifecycleTaskGeneration,
+            workspacePublicationGeneration, document, history, type, document.id(), workspaceCatalogFence(), lease);
+        discardGraphRequest = request;
+        try {
+            WORKSPACE_HISTORY_RESTORES.execute(() -> prepareDiscardGraph(request));
+            return true;
+        } catch (IllegalStateException exception) {
+            if (discardGraphRequest == request) {
+                discardGraphRequest = null;
+            }
+            workspaceMutationBackpressure = true;
+            return false;
+        }
+    }
+
+    private void prepareDiscardGraph(DiscardGraphRequest request) {
+        FlowGraph prepared = null;
+        JsonObject document = null;
+        boolean failed = false;
+        try {
+            if (!request.lease().isCurrent()) {
+                throw new IllegalStateException("Discard graph lease expired");
+            }
+            prepared = FlowSerializer.deserialize(request.lease().materialize());
+            document = FlowWorkspaceDocument.snapshot(prepared);
+            if (!request.lease().isCurrent()) {
+                throw new IllegalStateException("Discard graph lease expired");
+            }
+        } catch (RuntimeException | Error exception) {
+            failed = true;
+        }
+        DiscardGraphResult result = new DiscardGraphResult(request, prepared, document, failed);
+        if (request.generation() == discardGraphGeneration && discardGraphRequest == request) {
+            discardGraphResult.compareAndSet(null, result);
+        }
+    }
+
+    private void applyDiscardGraphResult() {
+        DiscardGraphResult result = discardGraphResult.getAndSet(null);
+        if (result == null) {
+            return;
+        }
+        DiscardGraphRequest request = discardGraphRequest;
+        if (request != result.request()) {
+            return;
+        }
+        discardGraphRequest = null;
+        if (result.failed() || result.graph() == null || result.document() == null || !discardGraphFenceCurrent(request)) {
+            recoverDiscardGraphApplyFailure("Discard Failed");
+            return;
+        }
+        try {
+            copyPreparedGraphState(request.document().graph(), result.graph());
+            if (request.document() == activeStudioDocument) {
+                graph = request.document().graph();
+                resetGraphEditorState(false, true);
+            }
+            if (request.history() != null) {
+                request.history().resetSaved(new GraphSnapshot(result.document(), Set.of()));
+            }
+            FlowManager manager = FlowManager.getInstance();
+            if (manager != null) {
+                manager.discardGraphDraft(serverId, request.type(), request.resourceId());
+            }
+            if (request.document() == activeStudioDocument) {
+                workspaceMutationPending = false;
+                publishStableWorkspaceDocument(workspacePublicationGeneration, workspaceMutationVersion, result.document());
+                requestWorkspaceSnapshot();
+            }
+        } catch (RuntimeException | Error exception) {
+            recoverDiscardGraphApplyFailure("Discard Failed");
+        }
+    }
+
+    private void recoverDiscardGraphApplyFailure(String issue) {
+        workspaceMutationBackpressure = true;
+        requestWorkspaceSnapshot();
+        if (issue != null && !issue.isBlank()) {
+            new Notification("Discard", issue, Notification.Type.ERROR);
+        }
+    }
+
+    private boolean discardGraphFenceCurrent(DiscardGraphRequest request) {
+        return request != null && !lifecycleClosed && request.generation() == discardGraphGeneration
+            && request.lifecycleGeneration() == lifecycleTaskGeneration
+            && request.workspaceGeneration() == workspacePublicationGeneration
+            && request.type().typeId().equals(request.document().type())
+            && request.resourceId().equals(request.document().id())
+            && request.catalogFence().equals(workspaceCatalogFence())
+            && request.lease().isCurrent()
+            && findStudioDocument(request.document().key()) == request.document()
+            && (request.document() != activeStudioDocument || request.document().key().equals(workspaceDocumentKey()));
+    }
+
+    private void submitStudioGraphOpen(String type, String resourceId, String title, FlowGraph source, Runnable completion) {
+        submitStudioGraphOpen(type, resourceId, title, source, completion, false);
+    }
+
+    private boolean submitStudioGraphResourceOpen(String type, String resourceId, String title, Runnable completion) {
+        FlowManager manager = FlowManager.getInstance();
+        FlowManager.ResourceReadLease lease = manager != null
+            ? manager.snapshotResource(serverId, type, resourceId) : null;
+        if (lease == null) {
+            return false;
+        }
+        return submitStudioGraphOpen(type, resourceId, title, null, completion, false, null, lease);
+    }
+
+    public final void openPreparedWorkspaceGraphEditor(FlowGraph preparedGraph) {
+        if (preparedGraph == null) {
+            return;
+        }
+        String type = preparedGraph.getResourceType();
+        if (!ReSyncResourceDragPayload.FLOW.equals(type) && !ReSyncResourceDragPayload.FUNCTION.equals(type)
+            && !ReSyncResourceDragPayload.COMMAND.equals(type)) {
+            type = preparedGraph.isFunction() ? ReSyncResourceDragPayload.FUNCTION : ReSyncResourceDragPayload.FLOW;
+        }
+        submitStudioGraphOpen(type, preparedGraph.getId(), preparedGraph.getId(), preparedGraph, null, true);
+    }
+
+    private boolean submitStudioGraphOpen(String type, String resourceId, String title, FlowGraph source,
+                                          Runnable completion, boolean ownedSource) {
+        return submitStudioGraphOpen(type, resourceId, title, source, completion, ownedSource, null, null);
+    }
+
+    private boolean submitStudioGraphOpen(String type, String resourceId, String title, FlowGraph source,
+                                          Runnable completion, boolean ownedSource, JsonObject sourceDocument,
+                                          FlowManager.ResourceReadLease sourceLease) {
+        if ((source == null && sourceDocument == null && sourceLease == null) || type == null || type.isBlank()
+            || resourceId == null || resourceId.isBlank() || lifecycleClosed) {
+            return false;
+        }
+        if (!ownedSource && sourceDocument == null && sourceLease == null && source == graph
+            && !isActiveCoreStudioDocument()) {
+            StableWorkspaceDocument stable = stableWorkspaceDocument;
+            if (stable == null || stable.generation() != workspacePublicationGeneration
+                || stable.mutationVersion() != workspaceMutationVersion) {
+                captureStableWorkspaceDocument(workspaceMutationVersion);
+                JsonObject deferredSourceDocument = sourceDocument;
+                FlowManager.ResourceReadLease deferredSourceLease = sourceLease;
+                if (deferWorkspaceMutation(() -> submitStudioGraphOpen(type, resourceId, title, source, completion,
+                    ownedSource, deferredSourceDocument, deferredSourceLease))) {
+                    return true;
+                }
+                return false;
+            }
+            sourceDocument = stable.document();
+        }
+        if (studioGraphOpenRequest != null) {
+            workspaceMutationBackpressure = true;
+            return false;
+        }
+        if (!ownedSource && sourceDocument == null && sourceLease == null) {
+            FlowManager manager = FlowManager.getInstance();
+            sourceLease = manager != null ? manager.snapshotResource(serverId, type, resourceId) : null;
+            if (sourceLease == null) {
+                workspaceMutationBackpressure = true;
+                return false;
+            }
+        }
+        long generation;
+        try {
+            studioGraphOpenGeneration = Math.incrementExact(studioGraphOpenGeneration);
+            generation = studioGraphOpenGeneration;
+        } catch (ArithmeticException exception) {
+            studioGraphOpenGeneration = 1L;
+            generation = 1L;
+        }
+        String sourceId = source != null ? source.getId() : resourceId;
+        int sourceVersion = source != null ? source.getVersion() : 0;
+        boolean sourceFunction = source != null && source.isFunction();
+        String sourceResourceType = source != null ? source.getResourceType() : type;
+        long sourceRevision = source != null ? source.getResourceRevision() : 0L;
+        String sourceHash = source != null ? source.getResourceHash() : "";
+        String sourceMutationId = source != null ? source.getResourceMutationId() : "";
+        boolean sourceEnabled = source == null || source.isEnabled();
+        StudioGraphOpenRequest request = new StudioGraphOpenRequest(generation, lifecycleTaskGeneration,
+            workspacePublicationGeneration, type, resourceId, title, source, sourceId, sourceVersion, sourceFunction,
+            sourceResourceType, sourceRevision, sourceHash, sourceMutationId, sourceEnabled, workspaceCatalogFence(),
+            completion, sourceDocument, sourceLease, ownedSource);
+        studioGraphOpenRequest = request;
+        try {
+            WORKSPACE_HISTORY_RESTORES.execute(() -> prepareStudioGraphOpen(request));
+        } catch (IllegalStateException exception) {
+            if (studioGraphOpenRequest == request) {
+                studioGraphOpenRequest = null;
+            }
+            workspaceMutationBackpressure = true;
+            return false;
+        }
+        return true;
+    }
+
+    private void prepareStudioGraphOpen(StudioGraphOpenRequest request) {
+        FlowGraph prepared = null;
+        JsonObject document = null;
+        boolean failed = false;
+        try {
+            if (request.sourceDocument() != null) {
+                document = request.sourceDocument();
+            } else if (request.sourceLease() != null) {
+                if (!request.sourceLease().isCurrent()) {
+                    throw new IllegalStateException("Studio graph source expired");
+                }
+                document = JsonParser.parseString(request.sourceLease().materialize()).getAsJsonObject();
+                if (!request.sourceLease().isCurrent()) {
+                    throw new IllegalStateException("Studio graph source expired");
+                }
+            } else if (request.ownedSource()) {
+                document = FlowSerializer.toSnapshotJsonObject(request.source());
+            } else {
+                throw new IllegalStateException("Studio graph source lease is required");
+            }
+            prepared = FlowSerializer.deserialize(document);
+        } catch (RuntimeException | Error exception) {
+            failed = true;
+        }
+        StudioGraphOpenResult result = new StudioGraphOpenResult(request, prepared, document, failed);
+        if (request.generation() == studioGraphOpenGeneration && request.lifecycleGeneration() == lifecycleTaskGeneration
+            && studioGraphOpenRequest == request) {
+            studioGraphOpenResult.compareAndSet(null, result);
+        }
+    }
+
+    private void applyStudioGraphOpenResult() {
+        StudioGraphOpenResult result = studioGraphOpenResult.getAndSet(null);
+        if (result == null) {
+            return;
+        }
+        StudioGraphOpenRequest request = studioGraphOpenRequest;
+        if (request != result.request()) {
+            return;
+        }
+        studioGraphOpenRequest = null;
+        if (result.failed() || result.graph() == null || result.document() == null || !studioGraphOpenFenceCurrent(request)) {
+            workspaceMutationBackpressure = true;
+            return;
+        }
+        StableWorkspaceDocument stable = new StableWorkspaceDocument(workspacePublicationGeneration,
+            workspaceMutationVersion, result.document());
+        stableWorkspaceDocuments.put(result.graph(), stable);
+        try {
+            super.openStudioGraphDocumentOwned(request.type(), request.resourceId(), request.title(), result.graph());
+            if (request.completion() != null) {
+                request.completion().run();
+            }
+        } catch (RuntimeException | Error exception) {
+            workspaceMutationBackpressure = true;
+        }
+    }
+
+    private boolean studioGraphOpenFenceCurrent(StudioGraphOpenRequest request) {
+        if (request == null || lifecycleClosed || request.generation() != studioGraphOpenGeneration
+            || request.lifecycleGeneration() != lifecycleTaskGeneration
+            || request.workspaceGeneration() != workspacePublicationGeneration
+            || !request.catalogFence().equals(workspaceCatalogFence())) {
+            return false;
+        }
+        if (request.sourceDocument() != null) {
+            return request.source() == graph && stableWorkspaceDocument != null
+                && stableWorkspaceDocument.document() == request.sourceDocument()
+                && stableWorkspaceDocument.generation() == workspacePublicationGeneration
+                && stableWorkspaceDocument.mutationVersion() == workspaceMutationVersion;
+        }
+        if (request.sourceLease() != null && !request.sourceLease().isCurrent()) {
+            return false;
+        }
+        FlowGraph source = request.source();
+        if (source != null && (!request.sourceId().equals(safeText(source.getId()))
+            || request.sourceVersion() != source.getVersion() || request.sourceFunction() != source.isFunction()
+            || !request.sourceResourceType().equals(safeText(source.getResourceType()))
+            || request.sourceRevision() != source.getResourceRevision()
+            || !request.sourceHash().equals(safeText(source.getResourceHash()))
+            || !request.sourceMutationId().equals(safeText(source.getResourceMutationId()))
+            || request.sourceEnabled() != source.isEnabled())) {
+            return false;
+        }
+        return true;
     }
 
     @Override
     public void openWorkspaceGraphEditor(FlowGraph targetGraph) {
         if (targetGraph != null) {
-            openStudioFlow(targetGraph, targetGraph.getId());
+            String type = targetGraph.getResourceType();
+            openWorkspaceResource(type == null || type.isBlank() ? ReSyncResourceDragPayload.FLOW : type,
+                targetGraph.getId());
         }
     }
 
@@ -618,14 +2923,10 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (manager == null || flowId == null) {
             return;
         }
-        FlowGraph targetGraph = manager.getGraph(serverId, ReSyncResourceType.FLOW, flowId);
-        if (targetGraph == null) {
+        String title = manager.getFlowName(serverId, flowId);
+        if (!submitStudioGraphResourceOpen(ReSyncResourceDragPayload.FLOW, flowId, title, branchPin != null
+            ? () -> focusContentBranch(branchPin) : null)) {
             manager.openFlowEditor(serverId, null, flowId, branchPin);
-            return;
-        }
-        openStudioFlow(targetGraph, manager.getFlowName(serverId, flowId));
-        if (branchPin != null) {
-            focusContentBranch(branchPin);
         }
     }
 
@@ -635,17 +2936,45 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
     @Override
     protected boolean dropStudioResource(ReSyncResourceDragPayload payload, ReMouseEvent event) {
-        if (payload == null || event == null || !payload.isLiteralAssignable() || !isGraphDropArea(event.x(), event.y())) {
+        if (payload == null || event == null) {
             return false;
         }
-        double[] undistorted = unDistortMouse(event.x(), event.y());
+        double dropX = event.x();
+        double dropY = event.y();
+        if (deferWorkspaceMutation(() -> dropStudioResource(payload, dropX, dropY))) {
+            return true;
+        }
+        return dropStudioResource(payload, dropX, dropY);
+    }
+
+    private boolean dropStudioResource(ReSyncResourceDragPayload payload, double dropX, double dropY) {
+        try {
+        boolean typedCatalogDrop = hasTypedCatalogProjection();
+        if (payload == null || (!payload.isLiteralAssignable() && !typedCatalogDrop) || !isGraphDropArea(dropX, dropY)) {
+            return false;
+        }
+        double[] undistorted = unDistortMouse(dropX, dropY);
         double[] world = screenToWorld(undistorted[0], undistorted[1]);
         int worldX = (int) world[0];
         int worldY = (int) world[1];
         FlowNodeWidget target = findNodeAt(worldX, worldY);
         if (target != null) {
+            String targetNodeId = findNodeId(target);
+            FlowNode targetNode = targetNodeId != null && graph != null ? graph.getNodes().get(targetNodeId) : null;
+            boolean targetEditable = isActiveCoreStudioDocument() ? isEditableNode(targetNodeId)
+                : targetNode != null && typedNodeTypeEditable(targetNode.getType());
+            if (targetNode == null || !targetEditable || !target.isEditable()) {
+                return false;
+            }
             String pin = target.getInputPinAtPosition(worldX, worldY);
             if (pin != null && acceptsResource(target, pin, payload)) {
+                if (isActiveCoreStudioDocument()) {
+                    boolean assigned = coreSetLiteralInput(targetNodeId, pin, payload.id(), payload);
+                    if (assigned) {
+                        completeStudioResourceDragToWorldBounds(target);
+                    }
+                    return assigned;
+                }
                 captureSnapshot();
                 removeExistingInputConnection(findNodeId(target), pin);
                 boolean assigned = target.assignLiteralInput(pin, payload.id());
@@ -654,7 +2983,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                     if (inputWidget != null) {
                         completeStudioResourceDragToWorldBounds(inputWidget);
                     } else {
-                        completeStudioResourceDragTo((int) event.x() - 4, (int) event.y() - 4, 8, 8, true);
+                        completeStudioResourceDragTo((int) dropX - 4, (int) dropY - 4, 8, 8, true);
                     }
                 }
                 return assigned;
@@ -662,30 +2991,43 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             return false;
         }
 
-        ReSyncResourceDropCapabilities.DropSpec spec = ReSyncResourceDropCapabilities.forResource(payload);
-        if (spec == null) {
+        ReSyncResourceDropCapabilities.DropResult dropResult = resolvePublishedResourceDrop(payload);
+        if (!dropResult.isAvailable()) {
             return false;
         }
-        NodeRegistry registry = NodeRegistry.getInstance();
-        NodeDefinition dropDefinition = registry != null ? registry.getDefinition(nodeRegistryServerId(), spec.nodeType()) : null;
-        if (dropDefinition == null && ReSyncResourceDragPayload.FUNCTION.equals(payload.type())) {
-            FlowManager manager = FlowManager.getInstance();
-            FlowGraph function = manager != null ? manager.getGraph(serverId, ReSyncResourceType.FUNCTION, payload.id()) : null;
-            if (function != null && function.isFunction()) {
-                dropDefinition = buildCustomFunctionNodeDefinition(spec.nodeType(), payload.id(), function);
-                if (registry != null) {
-                    registry.registerServerDefinition(serverId, dropDefinition);
-                }
-            }
-        }
+        ReSyncResourceDropCapabilities.DropSpec spec = dropResult.spec();
+        ReSyncResourceDropCapabilities.DropTarget dropTarget = spec.target();
+        ReSyncTypedInteractionProjection.DropAuthoring dropAuthoring = hasTypedCatalogProjection()
+            ? resolvePublishedDropAuthoring(spec) : null;
+        NodeDefinition dropDefinition = dropAuthoring != null ? dropAuthoring.definition()
+            : resolvePublishedDropDefinition(dropTarget);
         if (dropDefinition == null) {
             return false;
         }
+        if (dropTarget.nodeId().isBlank()) {
+            return false;
+        }
+        ServerId currentServer = typedCatalogServerId();
+        Map<String, Object> inputValues = dropAuthoring != null
+            ? dropAuthoring.inputValues(payload.id(), currentServer) : spec.inputValues(payload.id());
+        if (dropAuthoring != null && inputValues.isEmpty()) {
+            return false;
+        }
+        if (isActiveCoreStudioDocument()) {
+            String nodeId = addNode(worldX - 50, worldY - 20, dropTarget.canonical(), null, inputValues);
+            if (nodeId == null) {
+                return false;
+            }
+            morphStudioResourceIntoNode(widgetCache.get(nodeId));
+            return true;
+        }
         captureSnapshot();
-        Map<String, Object> inputValues = spec.inputValues(payload.id());
         FlowConnection connection = findConnectionAt(worldX, worldY);
         if (connection != null && isFlowConnection(connection) && hasFlowPath(dropDefinition)) {
-            String nodeId = addNode(worldX - 50, worldY - 20, spec.nodeType(), null, inputValues);
+            String nodeId = addNode(worldX - 50, worldY - 20, dropTarget.canonical(), null, inputValues);
+            if (nodeId == null) {
+                return false;
+            }
             morphStudioResourceIntoNode(widgetCache.get(nodeId));
             graph.getConnections().remove(connection);
             FlowConnection incoming = new FlowConnection(connection.getSourceNodeId(), connection.getSourcePin(), nodeId, "flow");
@@ -696,9 +3038,357 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             refreshInputWidgets(connection.getTargetNodeId());
             return true;
         }
-        String nodeId = addNode(worldX - 50, worldY - 20, spec.nodeType(), null, inputValues);
+        String nodeId = addNode(worldX - 50, worldY - 20, dropTarget.canonical(), null, inputValues);
+        if (nodeId == null) {
+            return false;
+        }
         morphStudioResourceIntoNode(widgetCache.get(nodeId));
         return true;
+        } finally {
+            completeWorkspaceInteraction();
+        }
+    }
+
+    private ReSyncResourceDropCapabilities.DropResult resolvePublishedResourceDrop(ReSyncResourceDragPayload payload) {
+        if (payload == null || payload.id() == null || payload.id().isBlank()) {
+            return ReSyncResourceDropCapabilities.resolve(payload, null);
+        }
+        if (isWorldGenDocument() && !legacyCatalogAllowed() && !hasTypedCatalogProjection()) {
+            return ReSyncResourceDropCapabilities.resolve(payload, null);
+        }
+        if (hasTypedCatalogProjection()) {
+            return typedInteractionProjection()
+                .map(projection -> ReSyncResourceDropCapabilities.resolveTyped(payload, projection))
+                .orElseGet(() -> ReSyncResourceDropCapabilities.resolve(payload, null));
+        }
+        if (!legacyCatalogAllowed()) {
+            return ReSyncResourceDropCapabilities.resolve(payload, null);
+        }
+        NodeRegistry registry = NodeRegistry.getInstance();
+        NodeRegistry.SnapshotAuthority authority = registry != null
+            ? registry.getSnapshotAuthority(nodeRegistryServerId()) : null;
+        if (authority == null) {
+            return ReSyncResourceDropCapabilities.resolve(payload, null);
+        }
+        String projectionIdentity = registry.getSnapshotProjectionIdentity(nodeRegistryServerId());
+        if (projectionIdentity.isBlank()) {
+            return ReSyncResourceDropCapabilities.resolve(payload, null);
+        }
+        return ReSyncResourceDropCapabilities.resolvePublished(payload, authority.serverId(), authority.generation(), authority.checksum(), projectionIdentity);
+    }
+
+    private NodeDefinition resolvePublishedDropDefinition(ReSyncResourceDropCapabilities.DropTarget target) {
+        if (target == null) {
+            return null;
+        }
+        if (hasTypedCatalogProjection() || !typedCatalogAllows(target.owner(), target.nodeId())
+            || !typedCatalogEditable(target.owner(), target.nodeId())) {
+            return null;
+        }
+        NodeDefinition generic = genericNodeDefinition(target.owner(), target.nodeId());
+        if (generic != null) {
+            return generic;
+        }
+        if (hasTypedCatalogProjection()) {
+            return null;
+        }
+        if (!legacyCatalogAllowed()) {
+            return null;
+        }
+        NodeRegistry registry = NodeRegistry.getInstance();
+        if (registry == null || !registry.hasCanonicalCatalogAuthority(nodeRegistryServerId())) {
+            return null;
+        }
+        return registry.getAuthoritativeDefinition(nodeRegistryServerId(), target.canonical());
+    }
+
+    private ReSyncTypedInteractionProjection.DropAuthoring resolvePublishedDropAuthoring(
+        ReSyncResourceDropCapabilities.DropSpec spec) {
+        if (spec == null || !spec.isAvailable() || spec.target() == null || spec.inputPin() == null) {
+            return null;
+        }
+        ServerId currentServer = typedCatalogServerId();
+        if (currentServer == null) {
+            return null;
+        }
+        return typedInteractionProjection().flatMap(projection -> projection.dropAuthoring(
+            spec.resourceOwner(), spec.resourceType(), spec.capability(), spec.target().typedIdentity(),
+            spec.inputPin(), spec.referenceKind(), spec.referenceOwner(), currentServer)).orElse(null);
+    }
+
+    private ServerId typedCatalogServerId() {
+        String current = serverId;
+        if (current == null || current.isBlank()) {
+            return null;
+        }
+        try {
+            return ServerId.parseCanonicalText(current);
+        } catch (RuntimeException exception) {
+            return null;
+        }
+    }
+
+    private NodeDefinition resolveAuthoritativeNodeDefinition(String nodeType) {
+        if (hasTypedCatalogProjection()) {
+            return genericNodeDefinition(nodeType);
+        }
+        NodeDefinition generic = genericNodeDefinition(nodeType);
+        if (generic != null) {
+            return generic;
+        }
+        if (!legacyCatalogAllowed()) {
+            return null;
+        }
+        NodeRegistry registry = NodeRegistry.getInstance();
+        NodeDefinition definition = registry != null ? registry.getAuthoritativeDefinition(nodeRegistryServerId(), nodeType) : null;
+        return definition != null && typedCatalogAllows(definition.getOwner(), definition.getId()) ? definition : null;
+    }
+
+    private boolean typedCatalogAllows(String owner, String nodeId) {
+        ReSyncFlowClient client = typedCatalogClient();
+        if (client == null) {
+            return !catalogAuthorityRequired();
+        }
+        if (allowsLegacyCatalogEditing(client.catalogAuthority())) {
+            NodeRegistry registry = NodeRegistry.getInstance();
+            return registry != null && registry.getAuthoritativeDefinition(nodeRegistryServerId(), owner + ":" + nodeId) != null;
+        }
+        if (!allowsCatalogDescriptorResolution(client.catalogAuthority())) {
+            return false;
+        }
+        return typedDescriptorProjection(client, owner, nodeId)
+            .filter(this::typedDescriptorRenderable)
+            .flatMap(projection -> typedWidgetDefinition(client, owner, nodeId).map(ignored -> projection))
+            .isPresent();
+    }
+
+    private boolean typedCatalogEditable(String owner, String nodeId) {
+        ReSyncFlowClient client = typedCatalogClient();
+        if (client == null) {
+            return false;
+        }
+        if (allowsLegacyCatalogEditing(client.catalogAuthority())) {
+            NodeRegistry registry = NodeRegistry.getInstance();
+            return registry != null && registry.getAuthoritativeDefinition(nodeRegistryServerId(), owner + ":" + nodeId) != null;
+        }
+        if (!allowsCatalogDescriptorResolution(client.catalogAuthority())) {
+            return false;
+        }
+        return typedDescriptorProjection(client, owner, nodeId)
+            .filter(this::typedDescriptorEditable)
+            .flatMap(projection -> typedWidgetDefinition(client, owner, nodeId)
+                .filter(widget -> !widget.readOnly())
+                    .map(ignored -> projection))
+                .isPresent();
+    }
+
+    private NodeDefinition genericNodeDefinition(String nodeType) {
+        if (nodeType == null || nodeType.isBlank()) {
+            return null;
+        }
+        int separator = nodeType.indexOf(':');
+        if (separator <= 0 || separator == nodeType.length() - 1 || nodeType.indexOf(':', separator + 1) >= 0) {
+            Optional<ReSyncTypedInteractionProjection> interaction = typedInteractionProjection();
+            if (interaction.isPresent()) {
+                return typedWidgetDefinitionForNodeType(interaction.orElseThrow(), nodeType, isWorldGenDocument())
+                    .map(ReSyncGenericWidgetCapabilities.WidgetDefinition::definition).orElse(null);
+            }
+            if (!isWorldGenDocument() || !legacyCatalogAllowed()) {
+                return null;
+            }
+            List<NodeDefinition> matches = legacyCatalogDefinitions().stream()
+                .filter(WorldGenManager::isWorldGenDefinition)
+                .filter(definition -> nodeType.equals(definition.getId())).limit(2).toList();
+            return matches.size() == 1 ? matches.getFirst() : null;
+        }
+        return genericNodeDefinition(nodeType.substring(0, separator), nodeType.substring(separator + 1));
+    }
+
+    private NodeDefinition genericNodeDefinition(String owner, String nodeId) {
+        ReSyncFlowClient client = typedCatalogClient();
+        if (client == null || !allowsCatalogDescriptorResolution(client.catalogAuthority())) {
+            return null;
+        }
+        return typedWidgetDefinition(client, owner, nodeId)
+            .map(ReSyncGenericWidgetCapabilities.WidgetDefinition::definition)
+            .orElse(null);
+    }
+
+    protected ReSyncFlowClient typedCatalogClient() {
+        FlowManager manager = FlowManager.getInstance();
+        String catalogServerId = isWorldGenDocument()
+            ? WorldGenManager.connectionServerId(nodeRegistryServerId()) : nodeRegistryServerId();
+        return manager != null ? manager.existingFlowClient(catalogServerId) : null;
+    }
+
+    private boolean catalogAuthorityRequired() {
+        if (isWorldGenDocument()) {
+            return true;
+        }
+        String resourceType = activeStudioDocument != null ? activeStudioDocument.type()
+            : graph != null ? graph.getResourceType() : "";
+        return ReSyncResourceDragPayload.FLOW.equals(resourceType)
+            || ReSyncResourceDragPayload.FUNCTION.equals(resourceType)
+            || ReSyncResourceDragPayload.COMMAND.equals(resourceType);
+    }
+
+    private boolean catalogAuthorityAllowsInteraction() {
+        ReSyncFlowClient client = typedCatalogClient();
+        return client != null ? allowsCatalogNodeEditing(client.catalogAuthority())
+            : !catalogAuthorityRequired();
+    }
+
+    private boolean catalogAuthorityAllowsWorkspacePublication() {
+        ReSyncFlowClient client = typedCatalogClient();
+        return client != null ? allowsCatalogWorkspacePublication(client.catalogAuthority())
+            : !catalogAuthorityRequired();
+    }
+
+    private boolean catalogAuthorityAllowsDurableSave() {
+        ReSyncFlowClient client = typedCatalogClient();
+        return client != null ? allowsCatalogDurableSave(client.catalogAuthority())
+            : !catalogAuthorityRequired();
+    }
+
+    private boolean isWorldGenDocument() {
+        if (activeStudioDocument != null) {
+            return ReSyncResourceDragPayload.WORLDGEN.equals(activeStudioDocument.type());
+        }
+        return graph != null && ReSyncResourceDragPayload.WORLDGEN.equals(graph.getResourceType());
+    }
+
+    private Optional<ReSyncTypedInteractionProjection> typedInteractionProjection() {
+        ReSyncFlowClient client = typedCatalogClient();
+        return ReSyncTypedInteractionProjection.from(client);
+    }
+
+    static boolean allowsLegacyCustomFunctionRegistration(ReSyncFlowClient client) {
+        return client != null && allowsLegacyCatalogEditing(client.catalogAuthority());
+    }
+
+    static boolean allowsCatalogDescriptorResolution(ReSyncFlowClient.CatalogAuthority authority) {
+        return ReSyncFlowClient.catalogAuthorityAllowsTypedDescriptorResolution(authority);
+    }
+
+    static boolean allowsCatalogNodeEditing(ReSyncFlowClient.CatalogAuthority authority) {
+        return ReSyncFlowClient.catalogAuthorityAllowsGraphInteraction(authority);
+    }
+
+    static boolean allowsCatalogWorkspacePublication(ReSyncFlowClient.CatalogAuthority authority) {
+        return ReSyncFlowClient.catalogAuthorityAllowsWorkspacePublication(authority);
+    }
+
+    static boolean allowsCatalogDurableSave(ReSyncFlowClient.CatalogAuthority authority) {
+        return ReSyncFlowClient.catalogAuthorityAllowsDurableSave(authority);
+    }
+
+    static boolean allowsLegacyCatalogEditing(ReSyncFlowClient.CatalogAuthority authority) {
+        return ReSyncFlowClient.catalogAuthorityAllowsLegacyEditing(authority);
+    }
+
+    static boolean allowsTypedMutation(ReSyncFlowClient.CatalogAuthority authority) {
+        return ReSyncFlowClient.catalogAuthorityAllowsTypedMutation(authority);
+    }
+
+    private Optional<ReSyncGenericDescriptorProjection.Projection> typedDescriptorProjection(
+        ReSyncFlowClient client, String owner, String nodeId) {
+        ContractRef<NodeId> identity = FlowNodeWidget.typedNodeIdentity(owner, nodeId);
+        return identity == null || client != typedCatalogClient() ? Optional.empty() : typedInteractionProjection()
+            .flatMap(projection -> projection.descriptor(identity));
+    }
+
+    private Optional<ReSyncGenericWidgetCapabilities.WidgetDefinition> typedWidgetDefinition(
+        ReSyncFlowClient client, String owner, String nodeId) {
+        ContractRef<NodeId> identity = FlowNodeWidget.typedNodeIdentity(owner, nodeId);
+        return identity == null || client != typedCatalogClient() ? Optional.empty() : typedInteractionProjection()
+            .flatMap(projection -> projection.widgetDefinition(identity));
+    }
+
+    private boolean typedDescriptorRenderable(ReSyncGenericDescriptorProjection.Projection projection) {
+        return projection != null && switch (projection.status()) {
+            case ACTIVE, READ_ONLY -> true;
+            case UNAVAILABLE, OPAQUE, INVALID, TOMBSTONED -> false;
+        };
+    }
+
+    private boolean typedDescriptorEditable(ReSyncGenericDescriptorProjection.Projection projection) {
+        return projection != null && projection.status() == ReSyncGenericDescriptorProjection.Status.ACTIVE
+            && !projection.readOnly();
+    }
+
+    private boolean hasAuthoritativeNodeCatalog() {
+        if (!legacyCatalogAllowed()) {
+            return false;
+        }
+        NodeRegistry registry = NodeRegistry.getInstance();
+        return registry != null && registry.hasCanonicalCatalogAuthority(nodeRegistryServerId());
+    }
+
+    private boolean isEditableNode(String nodeId) {
+        if (nodeId == null || graph == null) {
+            return false;
+        }
+        if (isActiveCoreStudioDocument()) {
+            CoreGraphEditorSession session = coreInteractionSession();
+            return session != null && coreAuthoringNegotiated()
+                && coreNode(session, nodeId) != null
+                && widgetCache.get(nodeId) != null && widgetCache.get(nodeId).isEditable()
+                && coreCapabilityAllowed(nodeId);
+        }
+        if (!catalogAuthorityAllowsInteraction()) {
+            return false;
+        }
+        if (!hasTypedCatalogProjection() && !hasAuthoritativeNodeCatalog()) {
+            return false;
+        }
+        FlowNode node = graph.getNodes().get(nodeId);
+        FlowNodeWidget widget = widgetCache.get(nodeId);
+        return node != null && widget != null && widget.isEditable()
+            && resolveAuthoritativeNodeDefinition(node.getType()) != null;
+    }
+
+    private boolean isEditableWidget(FlowNodeWidget widget) {
+        String nodeId = findNodeId(widget);
+        return nodeId != null && isEditableNode(nodeId);
+    }
+
+    private boolean canMoveNode(String nodeId) {
+        return canMutateNodeStructure(nodeId);
+    }
+
+    private boolean canMoveWidget(FlowNodeWidget widget) {
+        String nodeId = findNodeId(widget);
+        return nodeId != null && canMoveNode(nodeId);
+    }
+
+    private boolean canMutateNodeStructure(String nodeId) {
+        if (!isActiveCoreStudioDocument()) {
+            return isEditableNode(nodeId);
+        }
+        CoreGraphEditorSession session = coreInteractionSession();
+        return nodeId != null && session != null && coreAuthoringNegotiated() && coreCapabilityAllowed(session)
+            && coreNode(session, nodeId) != null && widgetCache.get(nodeId) != null;
+    }
+
+    private boolean canMutateWidgetStructure(FlowNodeWidget widget) {
+        String nodeId = findNodeId(widget);
+        return nodeId != null && canMutateNodeStructure(nodeId);
+    }
+
+    private boolean canDeleteNode(String nodeId) {
+        if (!isActiveCoreStudioDocument()) {
+            return isEditableNode(nodeId);
+        }
+        CoreGraphEditorSession session = coreInteractionSession();
+        return canMutateNodeStructure(nodeId) && !isProtectedCoreNode(session, nodeId);
+    }
+
+    private boolean hasDeletableSelection() {
+        return selectedNodeIds.stream().anyMatch(this::canDeleteNode);
+    }
+
+    private boolean hasEditableSelection() {
+        return selectedNodeIds.stream().anyMatch(this::isEditableNode);
     }
 
     private void morphStudioResourceIntoNode(FlowNodeWidget widget) {
@@ -738,7 +3428,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
     private boolean isGraphDropArea(double mouseX, double mouseY) {
         int left = studioContentBrowser != null ? studioContentBrowser.visibleLayoutWidth() : 0;
-        int right = paletteSidePanel != null ? paletteSidePanel.layoutWidth(0) : 0;
+        int right = paletteSidePanel != null && paletteSidePanel.isVisible() ? paletteSidePanel.getDesiredWidth() : 0;
         return mouseX > left && mouseX < width - right && mouseY > 30 && mouseY < height;
     }
 
@@ -872,14 +3562,20 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
     public void dismissStudioWorkspace() {
         saveActiveStudioViewport();
-        OPEN_SCREENS.remove(this);
+        closeLifecycle();
     }
 
     public GraphEditorScreen setLiveStudioFullEditorMode(boolean fullEditorMode) {
         if (liveStudioFullEditorMode == fullEditorMode) {
+            if (!fullEditorMode && serverId != null) {
+                CLOSING_LIVE_SCREENS.remove(serverId);
+            }
             return this;
         }
         liveStudioFullEditorMode = fullEditorMode;
+        if (!fullEditorMode && serverId != null) {
+            CLOSING_LIVE_SCREENS.remove(serverId);
+        }
         if (studioMode && studioChromeBuilt) {
             headerButtons.clear();
             debugToggleButton = null;
@@ -913,15 +3609,3607 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
     public static void refreshCatalogForServer(String serverId, String sourceId) {
         for (GraphEditorScreen screen : OPEN_SCREENS) {
-            if (screen != null && serverId != null && serverId.equals(screen.getServerId())) {
+            if (screen != null && screen.isWorkspaceLifecycleActive() && serverId != null && serverId.equals(screen.getServerId())) {
                 screen.onOptionCatalogRefreshed(sourceId);
+            }
+        }
+    }
+
+    private CoreGraphEditorSession activeCoreGraphSession() {
+        if (activeStudioDocument != null && activeStudioDocument.view() == null) {
+            CoreGraphEditorSession documentSession = activeStudioDocument.coreSession();
+            if (documentSession != null) {
+                return documentSession;
+            }
+        }
+        if (coreGraphSession == null) {
+            return null;
+        }
+        return activeStudioDocument == null || coreGraphSessionDocumentKey.isBlank()
+            || coreGraphSessionDocumentKey.equals(activeStudioDocument.key()) ? coreGraphSession : null;
+    }
+
+    private CoreGraphEditorSession coreInteractionSession() {
+        CoreGraphEditorSession active = activeCoreGraphSession();
+        CoreStructuralPreview preview = coreStructuralPreview;
+        CoreMutationCommit pending = coreMutationCommitPending;
+        if (preview != null && pending == preview.mutation() && preview.graph() == graph && pending.session() == active
+            && pending.requestGeneration() == coreProjectionRequestGeneration && pending.baseline().currentFor(active)
+            && coreProjectionRequestedSnapshot != null && coreProjectionRequestedSnapshot.currentFor(pending.candidate())) {
+            return pending.candidate();
+        }
+        return active;
+    }
+
+    private CoreStructuralPreview visibleCorePreview() {
+        return coreStructuralPreview != null ? coreStructuralPreview : coreVisualPreview;
+    }
+
+    private boolean isCoreStudioDocument(StudioDocument document) {
+        if (document == null || document.view() != null) {
+            return false;
+        }
+        return document.coreSession() != null
+            || coreGraphSession != null && (coreGraphSessionDocumentKey.isBlank()
+                || coreGraphSessionDocumentKey.equals(document.key()));
+    }
+
+    private boolean isActiveCoreStudioDocument() {
+        return activeCoreGraphSession() != null;
+    }
+
+    private boolean isCoreOwnedStudioDocument() {
+        if (isActiveCoreStudioDocument()) {
+            return true;
+        }
+        StudioDocument document = activeStudioDocument;
+        ReSyncResourceType type = document != null && document.view() == null
+            ? ReSyncResourceType.byTypeId(document.type()) : null;
+        FlowManager manager = FlowManager.getInstance();
+        return type != null && type.isGraph() && manager != null
+            && (manager.isCoreGraphAuthoritative(serverId, type, document.id())
+                || manager.coreGraphCreationRequired(serverId, type));
+    }
+
+    private boolean isActiveCoreCommandDocument() {
+        return isActiveCoreStudioDocument() && activeStudioDocument != null
+            && ReSyncResourceDragPayload.COMMAND.equals(activeStudioDocument.type());
+    }
+
+    private FlowNodeWidget.FunctionBoundaryCatalog functionBoundaryCatalog() {
+        if (hasTypedCatalogProjection()) {
+            return typedInteractionProjection().map(FlowNodeWidget::fromTypedProjection)
+                .orElseGet(FlowNodeWidget.FunctionBoundaryCatalog::unavailable);
+        }
+        return legacyCatalogAllowed() ? FlowNodeWidget.boundaryCatalogForServer(nodeRegistryServerId())
+            : FlowNodeWidget.FunctionBoundaryCatalog.unavailable();
+    }
+
+    private boolean isProtectedCoreNode(CoreGraphEditorSession session, String nodeId) {
+        ReSyncResourceType type = coreSessionResourceType(session);
+        return isProtectedCoreNode(session, type, nodeId);
+    }
+
+    private ReSyncResourceType coreSessionResourceType(CoreGraphEditorSession session) {
+        if (session == null || session.resource() == null) {
+            return null;
+        }
+        String type = session.resource().resourceType().value();
+        String id = session.resource().id();
+        if (activeStudioDocument != null && Objects.equals(activeStudioDocument.type(), type)
+            && Objects.equals(activeStudioDocument.id(), id)) {
+            return ReSyncResourceType.byTypeId(activeStudioDocument.type());
+        }
+        return ReSyncResourceType.byTypeId(type);
+    }
+
+    private boolean isProtectedCoreNode(CoreGraphEditorSession session, ReSyncResourceType type, String nodeId) {
+        if (session == null || nodeId == null) {
+            return false;
+        }
+        ReSyncResourceType sessionType = coreSessionResourceType(session);
+        if (sessionType != null) {
+            type = sessionType;
+        }
+        GraphNode node = coreNode(session, nodeId);
+        if (node == null) {
+            return false;
+        }
+        return isProtectedCoreDefinition(session, type, node.definition());
+    }
+
+    private boolean isProtectedCoreDefinition(CoreGraphEditorSession session, ReSyncResourceType type,
+                                              ContractRef<NodeId> definition) {
+        if (session == null || definition == null) {
+            return false;
+        }
+        if (type == ReSyncResourceType.COMMAND && CommandGraphContract.isCanonicalStart(definition)) {
+            return true;
+        }
+        if (!session.isFunction()) {
+            return false;
+        }
+        FlowNodeWidget.FunctionBoundaryCatalog boundaries = functionBoundaryCatalog();
+        return Arrays.stream(FlowNodeWidget.FunctionBoundaryRole.values())
+            .map(boundaries::intent)
+            .filter(Objects::nonNull)
+            .anyMatch(intent -> definition.equals(intent.nodeIdentity()));
+    }
+
+    private boolean isAnyCommandStartType(String nodeType) {
+        if (CommandGraphContract.isAnyStart(nodeType)) {
+            return true;
+        }
+        try {
+            return CommandGraphContract.isAnyStart(typedNodeReference(nodeType));
+        } catch (RuntimeException exception) {
+            return false;
+        }
+    }
+
+    private boolean isAnyCommandStartDefinition(NodeDefinition definition) {
+        if (definition == null || CommandGraphContract.isAnyStart(definition.getId())) {
+            return definition != null;
+        }
+        try {
+            return CommandGraphContract.isAnyStart(FlowNodeWidget.typedNodeIdentity(definition.getOwner(), definition.getId()));
+        } catch (RuntimeException exception) {
+            return false;
+        }
+    }
+
+    private List<NodeDefinition> addableNodeDefinitions(Collection<NodeDefinition> definitions) {
+        return addableNodeDefinitions(definitions, isActiveCoreCommandDocument());
+    }
+
+    private List<NodeDefinition> addableNodeDefinitions(Collection<NodeDefinition> definitions, boolean commandDocument) {
+        if (definitions == null || definitions.isEmpty()) {
+            return List.of();
+        }
+        if (!commandDocument) {
+            return List.copyOf(definitions);
+        }
+        return definitions.stream().filter(definition -> !isAnyCommandStartDefinition(definition)).toList();
+    }
+
+    private boolean coreSessionDirty(StudioDocument document, CoreGraphEditorSession session) {
+        if (session == null) {
+            return false;
+        }
+        if (ownsCoreGraphSession(session)) {
+            return session.dirty();
+        }
+        FlowManager manager = FlowManager.getInstance();
+        ReSyncResourceType type = document != null ? ReSyncResourceType.byTypeId(document.type()) : null;
+        String id = document != null ? document.id() : session.resource() != null ? session.resource().id() : "";
+        if (manager == null || type == null || serverId == null || serverId.isBlank() || id == null || id.isBlank()) {
+            return true;
+        }
+        if (manager.isCoreGraphEditorSessionStale(serverId, type, id, session)
+            || !manager.isCurrentCoreGraphEditorSession(serverId, type, id, session)) {
+            return true;
+        }
+        return manager.isCoreGraphEditorSessionDirty(serverId, type, id, session);
+    }
+
+    protected boolean ownsCoreGraphSession(CoreGraphEditorSession session) {
+        return false;
+    }
+
+    public CoreGraphEditorSession coreGraphEditorSession() {
+        return activeCoreGraphSession();
+    }
+
+    public void setCoreGraphEditorSession(CoreGraphEditorSession session) {
+        coreGraphSession = session;
+        coreGraphSessionDocumentKey = session == null || activeStudioDocument == null ? ""
+            : activeStudioDocument.key();
+        invalidateCoreProjectionRequests();
+        coreProjectionChecksum = "";
+        coreProjectionFailureChecksum = "";
+        coreTopologyChecksum = "";
+        coreProjectionResult = null;
+        coreEditorReadiness = StudioDocument.EditorReadiness.unavailable();
+        if (session == null) {
+            ReSyncFlowClient.traceLifecycle(serverId, "graph_core_session_cleared", "serverId", serverId,
+                "resourceKey", "graph:unknown", "requestId", "editor", "mutationId", null, "generation", -1L,
+                "authorityEpoch", 0L, "revision", -1L);
+            return;
+        }
+        if (graph == null) {
+            graph = unavailableCoreGraph(session);
+        }
+        requestCoreProjection(session, true);
+        ReSyncFlowClient.traceLifecycle(serverId, "graph_core_session_projection_queued", "serverId", serverId, "resourceKey",
+            session.resource() != null ? session.resource().resourceType().value() + ":" + session.resource().id()
+                : "graph:unknown", "requestId", "editor",
+            "mutationId", null, "generation", -1L, "authorityEpoch", 0L, "revision", session.revision(), "nodeCount",
+            graph != null && graph.getNodes() != null ? graph.getNodes().size() : 0);
+        scheduleInitialViewportFit();
+    }
+
+    private FlowGraph unavailableCoreGraph(CoreGraphEditorSession session) {
+        FlowGraph unavailable = new FlowGraph();
+        if (session != null && session.resource() != null) {
+            unavailable.setId(session.resource().id());
+            unavailable.setResourceType(session.resource().resourceType().value());
+            unavailable.setResourceRevision(session.revision());
+        }
+        return unavailable;
+    }
+
+    public StudioDocument.EditorReadiness coreEditorReadiness() {
+        updateCoreEditorReadiness(false);
+        return coreEditorReadiness;
+    }
+
+    public boolean isCoreEditorReady() {
+        return coreEditorReadiness().ready();
+    }
+
+    private boolean coreSaveProjectionReady(CoreGraphEditorSession session) {
+        updateCoreEditorReadiness(false);
+        return coreSaveProjectionMatches(session, coreProjectionSnapshot, coreProjectionResult, coreProjectionChecksum,
+            coreEditorReadiness.currentSessionBound()) && graph == coreProjectionResult.graph();
+    }
+
+    static boolean coreSaveProjectionMatches(CoreGraphEditorSession session,
+                                             CoreGraphUiProjection.EditorSnapshot snapshot,
+                                             CoreGraphUiProjection.ProjectionResult result, String projectionChecksum,
+                                             boolean currentSession) {
+        return currentSession && session != null && snapshot != null && snapshot.currentFor(session)
+            && completeCoreProjection(result) && Objects.equals(projectionChecksum, result.documentChecksum())
+            && Objects.equals(snapshot.checksum().canonicalText(), result.documentChecksum());
+    }
+
+    private void updateCoreEditorReadiness(boolean widgetTopologyPublished) {
+        CoreGraphEditorSession session = activeCoreGraphSession();
+        boolean currentSession = session != null && (activeStudioDocument != null
+            ? activeStudioDocument.coreSession() == session : coreGraphSession == session);
+        FlowManager manager = FlowManager.getInstance();
+        ReSyncResourceType type = session != null && session.resource() != null
+            ? ReSyncResourceType.byTypeId(session.resource().resourceType().value()) : null;
+        if (currentSession && manager != null && type != null && !ownsCoreGraphSession(session)) {
+            currentSession = manager.isCurrentCoreGraphEditorSession(serverId, type, session.resource().id(), session);
+        }
+        boolean projectionAvailable = coreProjectionResult != null && coreProjectionResult.complete()
+            && graph == coreProjectionResult.graph();
+        CoreWidgetTopology topology = coreWidgetTopology;
+        boolean exactTopologyOwner = pendingCoreWidgetTopology == null && topology != null && topology.graph() == graph
+            && topology.widgetsById() == widgetCache && topology.nodeIds() == widgetNodeIds
+            && topology.projectionGeneration() == coreProjectionGeneration
+            && Objects.equals(topology.topologyChecksum(), coreTopologyChecksum);
+        boolean topologyAvailable = projectionAvailable && (widgetTopologyPublished
+            || coreEditorReadiness.widgetTopologyAvailable()) && exactTopologyOwner
+            && currentGraphRenderIndex(graphRenderIndex)
+            && widgetCache.size() == coreProjectionResult.projectedNodeCount()
+            && publishedWidgetProjectionGeneration == coreProjectionGeneration
+            && Objects.equals(publishedWidgetTopologyChecksum, coreTopologyChecksum);
+        boolean selectionValid = graph != null && graph.getNodes() != null
+            && selectedNodeIds.stream().allMatch(graph.getNodes()::containsKey);
+        coreEditorReadiness = new StudioDocument.EditorReadiness(currentSession, projectionAvailable,
+            topologyAvailable, selectionValid, coreProjectionGeneration, coreTopologyChecksum);
+    }
+
+    public void setCoreGraphSaveHandler(BiFunction<CoreGraphEditorSession, DesignerSaveNotifications.SaveTicket, Boolean> handler) {
+        coreGraphSaveHandler = handler;
+    }
+
+    private boolean coreCapabilityAllowed() {
+        return coreCapabilityAllowed(activeCoreGraphSession());
+    }
+
+    private boolean coreCapabilityAllowed(CoreGraphEditorSession session) {
+        if (session == null) {
+            return false;
+        }
+        Set<ContractRef<CapabilityId>> capabilities = session.authoringCapabilities();
+        return capabilities.containsAll(session.requiredCapabilities());
+    }
+
+    private boolean coreAuthoringNegotiated() {
+        return "ready".equals(coreAuthoringDiagnostic());
+    }
+
+    private String coreAuthoringDiagnostic() {
+        CoreGraphEditorSession session = activeCoreGraphSession();
+        ReSyncResourceType type = activeStudioDocument != null
+            ? ReSyncResourceType.byTypeId(activeStudioDocument.type())
+            : session != null && session.resource() != null
+                ? ReSyncResourceType.byTypeId(session.resource().resourceType().value()) : null;
+        String id = activeStudioDocument != null ? activeStudioDocument.id()
+            : session != null && session.resource() != null ? session.resource().id() : "";
+        return coreSessionAuthoringDiagnostic(session, type, id);
+    }
+
+    private String coreSessionAuthoringDiagnostic(CoreGraphEditorSession session, ReSyncResourceType type, String id) {
+        if (session == null) {
+            return "session=missing";
+        }
+        if (session.activeAuthoringChecksum() == null) {
+            return "sessionAuthoringChecksum=missing";
+        }
+        Set<ContractRef<CapabilityId>> authoringCapabilities = session.authoringCapabilities();
+        Set<ContractRef<CapabilityId>> editCapabilities = session.editCapabilities();
+        if (session.catalogBinding() == null) {
+            return "sessionCatalogBinding=missing";
+        }
+        if (authoringCapabilities.stream().anyMatch(capability -> capability == null
+            || capability.owner() == null || capability.owner().canonicalText().isBlank()
+            || capability.id() == null || capability.id().canonicalText().isBlank())) {
+            return "sessionAuthoringCapabilities=invalid";
+        }
+        if (editCapabilities.stream().anyMatch(capability -> capability == null
+            || capability.owner() == null || capability.owner().canonicalText().isBlank()
+            || capability.id() == null || capability.id().canonicalText().isBlank())) {
+            return "sessionEditCapabilities=invalid";
+        }
+        if (!authoringCapabilities.containsAll(session.requiredCapabilities())) {
+            return "sessionAuthoringCapabilitiesMissing=" + session.requiredCapabilities().stream()
+                .filter(required -> !authoringCapabilities.contains(required)).toList();
+        }
+        ReSyncFlowClient client = typedCatalogClient();
+        if (client == null) {
+            return "catalogClient=missing";
+        }
+        if (client.catalogAuthority() != ReSyncFlowClient.CatalogAuthority.TYPED_PUBLICATION) {
+            return "catalogAuthority=" + client.catalogAuthority();
+        }
+        CatalogAuthoringPublication publication = client.activeCatalogAuthoringPublication().orElse(null);
+        try {
+            if (publication == null) {
+                return "authoringPublication=missing";
+            }
+            if (!publication.binding().equals(session.catalogBinding())) {
+                return "authoringBinding=mismatch";
+            }
+            CoreAuthoringValidation validation = coreAuthoringValidation(publication);
+            if (!validation.checksum().equals(session.activeAuthoringChecksum())) {
+                return "authoringChecksum=mismatch";
+            }
+            Set<ContractRef<CapabilityId>> publishedAuthoringCapabilities = validation.capabilities();
+            if (!publishedAuthoringCapabilities.containsAll(authoringCapabilities)) {
+                return "authoringCapabilitiesMissing=" + authoringCapabilities.stream()
+                    .filter(required -> !publishedAuthoringCapabilities.contains(required)).toList();
+            }
+            if (!publication.advertisedEditCapabilities().containsAll(editCapabilities)) {
+                return "editCapabilitiesMissing=" + editCapabilities.stream()
+                    .filter(required -> !publication.advertisedEditCapabilities().contains(required)).toList();
+            }
+        } catch (RuntimeException exception) {
+            return "authoringValidation=" + TaskIdentities.failureName(exception);
+        }
+        FlowManager manager = FlowManager.getInstance();
+        if (manager == null || type == null || serverId == null || serverId.isBlank() || id == null || id.isBlank()) {
+            return "editorIdentity=invalid";
+        }
+        if (!ownsCoreGraphSession(session) && !manager.isCurrentCoreGraphEditorSession(serverId, type, id, session)) {
+            return "editorSession=stale,type=" + type.typeId() + ",id=" + id + ",revision=" + session.revision();
+        }
+        return "ready";
+    }
+
+    private CoreAuthoringValidation coreAuthoringValidation(CatalogAuthoringPublication publication) {
+        CoreAuthoringValidation current = coreAuthoringValidation;
+        if (current != null && current.publication() == publication) {
+            return current;
+        }
+        long startedAtNanos = lifecycleNowNanos();
+        ContentHash checksum = CatalogCachePublicationCodec.authoringPublicationChecksum(publication);
+        Set<ContractRef<CapabilityId>> capabilities = publication.section(CatalogAuthoringPublication.Section.CAPABILITIES) == null
+            ? Set.of() : publication.capabilities().stream().filter(entry -> entry != null && entry.editable())
+                .map(CatalogAuthoringPublication.Entry::reference).collect(Collectors.toUnmodifiableSet());
+        CoreAuthoringValidation next = new CoreAuthoringValidation(publication, checksum, capabilities);
+        coreAuthoringValidation = next;
+        coreAuthoringValidationBuildCount++;
+        ReSyncLifecycleDiagnostics.offer(serverId, "core_authoring_validation_prepared", "publicationId", checksum.canonicalText(),
+            "capabilityCount", capabilities.size(), "buildCount", coreAuthoringValidationBuildCount,
+            "prepareMicros", elapsedMicros(startedAtNanos, lifecycleNowNanos()));
+        return next;
+    }
+
+    private record CoreAuthoringValidation(CatalogAuthoringPublication publication, ContentHash checksum,
+                                           Set<ContractRef<CapabilityId>> capabilities) {
+    }
+
+    private boolean coreCapabilityAllowed(String nodeId) {
+        return coreCapabilityAllowed(coreInteractionSession(), nodeId);
+    }
+
+    private boolean coreCapabilityAllowed(CoreGraphEditorSession session, String nodeId) {
+        if (session == null || !coreCapabilityAllowed(session)) {
+            return false;
+        }
+        GraphNode node = coreNode(session, nodeId);
+        ReSyncGenericDescriptorProjection.Projection descriptor = node != null
+            ? typedInteractionProjection().flatMap(projection -> projection.descriptor(node.definition())).orElse(null)
+            : null;
+        if (descriptor != null && ownsCoreNodeFields(node, descriptor)) {
+            return true;
+        }
+        return descriptor != null && !descriptor.readOnly() && descriptor.fields().stream().allMatch(field -> {
+            ContractRef<CapabilityId> capability = coreCapabilityReference(field.capability());
+            return field.editable() && capability != null && session.editCapabilities().contains(capability);
+        });
+    }
+
+    protected boolean ownsCoreNodeFields(GraphNode node, ReSyncGenericDescriptorProjection.Projection descriptor) {
+        return false;
+    }
+
+    private boolean coreCapabilityAllowed(String... nodeIds) {
+        return coreCapabilityAllowed(coreInteractionSession(), nodeIds);
+    }
+
+    private boolean coreCapabilityAllowed(CoreGraphEditorSession session, String... nodeIds) {
+        if (nodeIds == null || nodeIds.length == 0) {
+            return coreCapabilityAllowed(session);
+        }
+        for (String nodeId : nodeIds) {
+            if (!coreCapabilityAllowed(session, nodeId)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private ContractRef<CapabilityId> coreCapabilityReference(String canonicalText) {
+        if (canonicalText == null || canonicalText.isBlank()) {
+            return null;
+        }
+        try {
+            return ContractRef.parseCanonicalText(canonicalText, CapabilityId::new);
+        } catch (RuntimeException exception) {
+            return null;
+        }
+    }
+
+    private void coreOperationUnavailable(String operation) {
+        new Notification("Core Graph", operation + " Unavailable", Notification.Type.ERROR);
+    }
+
+    private void refreshCoreProjection() {
+        CoreGraphEditorSession session = activeCoreGraphSession();
+        if (session == null) {
+            return;
+        }
+        requestCoreProjection(session, true);
+    }
+
+    private void refreshCoreProjectionIfChanged() {
+        CoreGraphEditorSession session = activeCoreGraphSession();
+        if (session == null) {
+            return;
+        }
+        if (coreProjectionSnapshot != null && coreProjectionSnapshot.currentFor(session)
+            || coreProjectionRequestedSnapshot != null && coreProjectionRequestedSnapshot.currentFor(session)) {
+            return;
+        }
+        requestCoreProjection(session, false);
+    }
+
+    private void invalidateCoreProjectionRequests() {
+        coreProjectionRequestGeneration = nextProjectionGeneration(coreProjectionRequestGeneration);
+        coreProjectionSnapshot = null;
+        coreProjectionRequestedSnapshot = null;
+        if (coreMutationCommitPending != null || !coreMutationQueue.isEmpty()) {
+            coreProjectionRefreshQueued = true;
+            return;
+        }
+        coreProjectionPendingBuild.set(null);
+        coreProjectionBuildResults.clear();
+    }
+
+    private void requestCoreProjection(CoreGraphEditorSession session, boolean force) {
+        if (session == null) {
+            return;
+        }
+        if (coreMutationCommitPending != null || !coreMutationQueue.isEmpty()) {
+            coreProjectionRefreshQueued = true;
+            return;
+        }
+        long captureStartedAtNanos = lifecycleNowNanos();
+        CoreGraphUiProjection.EditorSnapshot snapshot;
+        try {
+            snapshot = CoreGraphUiProjection.EditorSnapshot.capture(session);
+        } catch (RuntimeException exception) {
+            rejectCoreProjection(session, "unavailable", TaskIdentities.failureName(exception), exception.getMessage());
+            return;
+        }
+        if (!force && (coreProjectionSnapshot != null && coreProjectionSnapshot.currentFor(session)
+            || coreProjectionRequestedSnapshot != null && coreProjectionRequestedSnapshot.currentFor(session))) {
+            return;
+        }
+        coreProjectionRequestGeneration = nextProjectionGeneration(coreProjectionRequestGeneration);
+        long queuedAtNanos = lifecycleNowNanos();
+        CoreProjectionRequest request = new CoreProjectionRequest(coreProjectionRequestGeneration, snapshot, null,
+            queuedAtNanos, elapsedMicros(captureStartedAtNanos, queuedAtNanos));
+        coreProjectionRequestedSnapshot = snapshot;
+        CoreProjectionRequest superseded = coreProjectionPendingBuild.getAndSet(request);
+        if (superseded != null) {
+            traceCoreProjectionDropped(superseded, null, "superseded_before_build");
+        }
+        traceCoreProjectionCaptured(request, force ? "forced" : "changed");
+        scheduleCoreProjectionWorker(request);
+    }
+
+    private void scheduleCoreProjectionWorker(CoreProjectionRequest request) {
+        if (!coreProjectionWorkerQueued.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            CORE_GRAPH_PROJECTIONS.execute(this::buildCoreProjections);
+        } catch (IllegalStateException exception) {
+            coreProjectionWorkerQueued.set(false);
+            coreProjectionPendingBuild.compareAndSet(request, null);
+            long finishedAtNanos = lifecycleNowNanos();
+            coreProjectionBuildResults.add(new CoreProjectionBuildResult(request, null,
+                TaskIdentities.failureName(exception), "Core graph projection worker is busy", finishedAtNanos,
+                finishedAtNanos));
+        }
+    }
+
+    private void buildCoreProjections() {
+        try {
+            CoreProjectionRequest request;
+            while ((request = coreProjectionPendingBuild.getAndSet(null)) != null) {
+                long startedAtNanos = lifecycleNowNanos();
+                try {
+                    CoreGraphUiProjection.ProjectionResult result = new CoreGraphUiProjection()
+                        .projectEditorSnapshot(request.snapshot());
+                    long finishedAtNanos = lifecycleNowNanos();
+                    CoreProjectionBuildResult build = new CoreProjectionBuildResult(request, result, "", "",
+                        startedAtNanos, finishedAtNanos);
+                    coreProjectionBuildResults.add(build);
+                    traceCoreProjectionBuilt(build);
+                } catch (RuntimeException exception) {
+                    long finishedAtNanos = lifecycleNowNanos();
+                    CoreProjectionBuildResult build = new CoreProjectionBuildResult(request, null,
+                        TaskIdentities.failureName(exception), exception.getMessage(), startedAtNanos, finishedAtNanos);
+                    coreProjectionBuildResults.add(build);
+                    traceCoreProjectionBuilt(build);
+                }
+            }
+        } finally {
+            coreProjectionWorkerQueued.set(false);
+            CoreProjectionRequest pending = coreProjectionPendingBuild.get();
+            if (pending != null) {
+                scheduleCoreProjectionWorker(pending);
+            }
+        }
+    }
+
+    private void applyCoreProjectionBuild() {
+        CoreProjectionBuildResult build;
+        while ((build = coreProjectionBuildResults.poll()) != null) {
+            CoreProjectionRequest request = build.request();
+            CoreMutationCommit mutation = request.mutation();
+            if (mutation != null) {
+                if (activeCoreGraphSession() == mutation.session() && coreVisualPreview != null
+                    && pendingCoreWidgetTopology != null) {
+                    ensureGraphRenderIndex();
+                    if (graphRenderFailureGraph != graph && (pendingCoreWidgetTopology != null
+                        || graphRenderWorkerQueued.get() || graphRenderPendingBuild.get() != null)) {
+                        coreProjectionBuildResults.add(build);
+                        break;
+                    }
+                }
+                if (coreMutationCommitPending != mutation) {
+                    traceCoreProjectionDropped(request, build, "mutation_fence_changed");
+                    continue;
+                }
+                if (!request.snapshot().currentFor(mutation.candidate())
+                    || !mutation.baseline().currentFor(mutation.session())) {
+                    traceCoreProjectionDropped(request, build, "mutation_fence_changed");
+                    settleCoreMutation(false, mutation, null);
+                    continue;
+                }
+                if (build.failed()) {
+                    if (activeCoreGraphSession() == mutation.session()) {
+                        rejectCoreProjection(mutation.session(), "unavailable", build.failureType(), build.failureDetail());
+                    }
+                    settleCoreMutation(false, mutation, null);
+                    continue;
+                }
+                if (!completeCoreProjection(build.projection())) {
+                    if (activeCoreGraphSession() == mutation.session()) {
+                        rejectCoreProjection(mutation.session(), projectionChecksum(build.projection()),
+                            "incomplete_projection", projectionFailureDetail(build.projection()));
+                    }
+                    settleCoreMutation(false, mutation, null);
+                    continue;
+                }
+                if (!commitProjectedCoreMutation(mutation)) {
+                    settleCoreMutation(false, mutation, null);
+                    continue;
+                }
+                settleCoreMutation(true, mutation, build.projection());
+                continue;
+            }
+            CoreGraphEditorSession session = activeCoreGraphSession();
+            if (!coreProjectionPublicationMatches(request, session, coreProjectionRequestGeneration,
+                coreProjectionRequestedSnapshot)) {
+                traceCoreProjectionDropped(request, build, "publication_fence_changed");
+                continue;
+            }
+            if (build.failed()) {
+                coreProjectionRequestedSnapshot = coreProjectionSnapshot;
+                rejectCoreProjection(session, "unavailable", build.failureType(), build.failureDetail());
+                continue;
+            }
+            if (!completeCoreProjection(build.projection())) {
+                coreProjectionRequestedSnapshot = coreProjectionSnapshot;
+                rejectCoreProjection(session, projectionChecksum(build.projection()), "incomplete_projection",
+                    projectionFailureDetail(build.projection()));
+                continue;
+            }
+            coreProjectionSnapshot = request.snapshot();
+            applyCoreProjection(session, build.projection());
+        }
+    }
+
+    private void settleCoreMutation(boolean committed, CoreMutationCommit mutation,
+                                    CoreGraphUiProjection.ProjectionResult projection) {
+        CoreStructuralPreview preview = restoreCoreStructuralPreview(mutation, committed);
+        coreMutationCommitPending = null;
+        CoreGraphEditorSession active = activeCoreGraphSession();
+        if (!committed) {
+            if (active == mutation.session()) {
+                restoreRejectedCoreWidgets(mutation);
+                coreOperationUnavailable(mutation.command().operation());
+            }
+        }
+        if (committed && active == mutation.session()) {
+            String focusedNodeId = focusedNode != null ? findNodeId(focusedNode) : null;
+            String draggedNodeId = draggedWidget instanceof FlowNodeWidget widget ? findNodeId(widget) : null;
+            if (preview != null) {
+                corePreparedMutationWidgets.putAll(preview.addedWidgets());
+                corePreparedMutationNodes.putAll(preview.addedNodes());
+            }
+            if (!applyStableCoreValueProjection(active, projection, mutation)
+                && !applyStableCoreMoveProjection(active, projection, mutation)
+                && !applyStableCoreStructureProjection(active, projection, mutation)) {
+                coreProjectionSnapshot = CoreGraphUiProjection.EditorSnapshot.capture(active);
+                coreProjectionRequestedSnapshot = coreProjectionSnapshot;
+                applyCoreProjection(active, projection);
+            }
+            if (preview != null && pendingCoreWidgetTopology != null && pendingCoreWidgetTopology.graph() == graph
+                && corePreparedMutationWidgets.isEmpty()) {
+                coreVisualPreview = preview;
+                widgetCache = pendingCoreWidgetTopology.widgetsById();
+                widgetNodeIds = pendingCoreWidgetTopology.nodeIds();
+            }
+            settleCommittedCoreValuePreview(mutation.command());
+            applyCommittedCoreSelection(mutation);
+            applyCommittedCoreDeletion(mutation, focusedNodeId, draggedNodeId);
+            retireCoreWidgets(corePreparedMutationWidgets.values());
+            corePreparedMutationWidgets.clear();
+            corePreparedMutationNodes.clear();
+        } else if (active == mutation.session()) {
+            coreProjectionRequestedSnapshot = coreProjectionSnapshot;
+            coreProjectionRefreshQueued = true;
+        }
+        if (!startNextCoreMutation()) {
+            boolean refresh = coreProjectionRefreshQueued;
+            coreProjectionRefreshQueued = false;
+            if (refresh && activeCoreGraphSession() != null) {
+                requestCoreProjection(activeCoreGraphSession(), true);
+            }
+            dispatchDeferredCoreSaves();
+        }
+    }
+
+    private void previewCoreStructure(CoreMutationCommit mutation) {
+        coreStructurePreviewRejection = null;
+        if (!coreStructuralMutation(mutation)) {
+            return;
+        }
+        long startedAtNanos = lifecycleNowNanos();
+        String admission = activeCoreGraphSession() != mutation.session() ? "session_changed"
+            : coreStructuralPreview != null ? "preview_pending"
+            : coreProjectionSnapshot == null || !coreProjectionSnapshot.currentFor(mutation.session()) ? "projection_changed"
+            : graph == null || coreWidgetTopology == null || coreWidgetTopology.graph() != graph ? "topology_unavailable"
+            : pendingCoreWidgetTopology != null ? "topology_pending"
+            : catalogRefresh != null || nodeCatalogRefreshQueued ? "catalog_pending"
+            : !currentGraphRenderIndex(graphRenderIndex) ? "render_index_pending" : null;
+        if (admission != null) {
+            rejectCoreStructurePreview(mutation, startedAtNanos, admission, null);
+            return;
+        }
+        GraphDocument before = mutation.baseline().document();
+        GraphDocument after = coreGraphDocument(mutation.candidate());
+        if (!sameCoreStructureEnvelope(before, after) || !sameCoreFunctionEnvelope(mutation)) {
+            rejectCoreStructurePreview(mutation, startedAtNanos, "document_envelope_changed", null);
+            return;
+        }
+        Map<String, GraphNode> beforeNodes = coreNodesById(before.nodes());
+        Map<String, GraphNode> afterNodes = coreNodesById(after.nodes());
+        Map<ConnectionId, GraphConnection> beforeConnections = coreConnectionsById(before.connections());
+        Map<ConnectionId, GraphConnection> afterConnections = coreConnectionsById(after.connections());
+        if (beforeNodes == null || afterNodes == null || beforeConnections == null || afterConnections == null) {
+            rejectCoreStructurePreview(mutation, startedAtNanos, "duplicate_identity", null);
+            return;
+        }
+        Set<String> addedIds = new LinkedHashSet<>(afterNodes.keySet());
+        addedIds.removeAll(beforeNodes.keySet());
+        Set<String> removedIds = new LinkedHashSet<>(beforeNodes.keySet());
+        removedIds.removeAll(afterNodes.keySet());
+        boolean history = mutation.command().historyTransition() != CoreHistoryTransition.NONE;
+        if (addedIds.size() > 1 || removedIds.size() > 16
+            || !history && mutation.command().access() == CoreMutationAccess.DELETE
+                && !exactCoreNodeIds(mutation.command().nodeIds(), removedIds)
+            || !history && !addedIds.isEmpty()
+                && !exactCoreStructureNodeIds(mutation.command().nodeIds(), mutation.command().selectionNodeIds(), addedIds)) {
+            rejectCoreStructurePreview(mutation, startedAtNanos, "node_scope_changed", null);
+            return;
+        }
+        Set<String> survivorIds = new HashSet<>(beforeNodes.keySet());
+        if (!exactCoreStructureCapabilities(before, after, beforeNodes, afterNodes, addedIds, removedIds, history)) {
+            rejectCoreStructurePreview(mutation, startedAtNanos, "capability_scope_changed", null);
+            return;
+        }
+        survivorIds.retainAll(afterNodes.keySet());
+        for (WorkspacePatch<JsonValue> patch : CoreGraphWorkspacePatch.diff(before, after)) {
+            String nodeId = corePatchedNodeId(patch != null ? patch.path() : null);
+            if (nodeId != null && survivorIds.contains(nodeId)) {
+                rejectCoreStructurePreview(mutation, startedAtNanos, "surviving_node_changed", null);
+                return;
+            }
+        }
+        Set<ConnectionId> removedConnections = new LinkedHashSet<>(beforeConnections.keySet());
+        removedConnections.removeAll(afterConnections.keySet());
+        Set<ConnectionId> addedConnections = new LinkedHashSet<>(afterConnections.keySet());
+        addedConnections.removeAll(beforeConnections.keySet());
+        if (addedConnections.size() + removedConnections.size() > 256) {
+            rejectCoreStructurePreview(mutation, startedAtNanos, "connection_limit", null);
+            return;
+        }
+        for (Map.Entry<ConnectionId, GraphConnection> entry : beforeConnections.entrySet()) {
+            GraphConnection current = afterConnections.get(entry.getKey());
+            if (current != null && !current.equals(entry.getValue())) {
+                rejectCoreStructurePreview(mutation, startedAtNanos, "surviving_connection_changed", null);
+                return;
+            }
+        }
+        if (addedIds.isEmpty() && removedIds.isEmpty() && addedConnections.isEmpty() && removedConnections.isEmpty()) {
+            return;
+        }
+        Map<String, FlowNode> addedNodes = new LinkedHashMap<>();
+        Map<String, FlowNode> removedNodes = new LinkedHashMap<>();
+        Map<String, FlowNodeWidget> addedWidgets = new LinkedHashMap<>();
+        Map<String, FlowNodeWidget> removedWidgets = new LinkedHashMap<>();
+        List<FlowConnection> previousConnections = graph.getConnections();
+        Set<String> targets = new LinkedHashSet<>();
+        Set<WireRenderGroup> hiddenGroups = Collections.newSetFromMap(new IdentityHashMap<>());
+        Set<FlowConnection> rebuiltConnections = Collections.newSetFromMap(new IdentityHashMap<>());
+        CoreGraphUiProjection projector = new CoreGraphUiProjection();
+        try {
+            for (String id : addedIds) {
+                addedNodes.put(id, projector.projectEditorNode(afterNodes.get(id)));
+            }
+            for (String id : removedIds) {
+                FlowNode node = graph.getNodes().get(id);
+                FlowNodeWidget widget = widgetCache.get(id);
+                if (node == null || widget == null) {
+                    rejectCoreStructurePreview(mutation, startedAtNanos, "removed_node_unavailable", null);
+                    return;
+                }
+                removedNodes.put(id, node);
+                removedWidgets.put(id, widget);
+            }
+            List<FlowConnection> connections = new ArrayList<>(previousConnections.size() + addedConnections.size());
+            for (FlowConnection connection : previousConnections) {
+                if (removedConnections.contains(coreConnectionId(connection))) {
+                    targets.add(connection.getTargetNodeId());
+                    WireRenderGroup group = graphRenderIndex.groupsByConnection.get(connection);
+                    if (group != null) {
+                        hiddenGroups.add(group);
+                    }
+                } else {
+                    connections.add(connection);
+                }
+            }
+            for (ConnectionId id : addedConnections) {
+                FlowConnection connection = projector.projectEditorConnection(afterConnections.get(id));
+                connections.add(connection);
+                rebuiltConnections.add(connection);
+                targets.add(connection.getTargetNodeId());
+                for (FlowConnection sibling : graphRenderIndex.fanouts.getOrDefault(
+                    new FanoutKey(editorSourceNodeId(connection), editorSourcePin(connection)), List.of())) {
+                    WireRenderGroup group = graphRenderIndex.groupsByConnection.get(sibling);
+                    if (group != null) {
+                        hiddenGroups.add(group);
+                    }
+                }
+            }
+            for (String id : targets) {
+                hiddenGroups.addAll(graphRenderIndex.groupsByNode.getOrDefault(id, List.of()));
+            }
+            hiddenGroups.forEach(group -> rebuiltConnections.addAll(group.connections));
+            rebuiltConnections.removeIf(connection -> removedConnections.contains(coreConnectionId(connection)));
+            coreStructuralPreview = new CoreStructuralPreview(mutation, graph, addedNodes, removedNodes,
+                addedWidgets, removedWidgets, previousConnections, targets, Set.copyOf(selectedNodeIds),
+                hiddenGroups, null, startedAtNanos);
+            removedIds.forEach(graph.getNodes()::remove);
+            graph.getNodes().putAll(addedNodes);
+            graph.setConnections(connections);
+            removedWidgets.forEach((id, widget) -> {
+                widgetCache.remove(id);
+                widgetNodeIds.remove(widget);
+            });
+            coreWidgetPreparationSession = mutation.candidate();
+            for (Map.Entry<String, FlowNode> entry : addedNodes.entrySet()) {
+                FlowNodeWidget widget = createNodeWidget(entry.getKey(), entry.getValue());
+                WidgetCleanup.attach(widget);
+                addedWidgets.put(entry.getKey(), widget);
+                widget.morphFromBounds(widget.getX(), widget.getY(), Math.max(32, Math.round(widget.getWidth() * 0.45f)),
+                    Math.max(12, Math.round(widget.getHeight() * 0.35f)));
+                widgetCache.put(entry.getKey(), widget);
+                widgetNodeIds.put(widget, entry.getKey());
+            }
+            coreWidgetPreparationSession = null;
+            List<GraphRenderNodeSnapshot> nodeSnapshots = new ArrayList<>();
+            int order = graphRenderFrontOrder;
+            for (FlowNodeWidget widget : addedWidgets.values()) {
+                nodeSnapshots.add(new GraphRenderNodeSnapshot(widget, widgetBounds(widget), order++, widget.hasLoadedDefinition()));
+            }
+            for (String id : targets) {
+                FlowNodeWidget widget = widgetCache.get(id);
+                if (widget != null && !addedWidgets.containsKey(id)) {
+                    widget.refreshInputWidgets();
+                    nodeSnapshots.add(new GraphRenderNodeSnapshot(widget, widgetBounds(widget),
+                        graphRenderIndex.nodeOrder.getOrDefault(widget, order++), widget.hasLoadedDefinition()));
+                }
+            }
+            List<GraphRenderConnectionSnapshot> connectionSnapshots = new ArrayList<>();
+            for (FlowConnection connection : rebuiltConnections) {
+                GraphRenderConnectionSnapshot snapshot = graphRenderConnectionSnapshot(connection, widgetCache);
+                if (snapshot == null) {
+                    throw new IllegalStateException("Core preview connection topology is incomplete");
+                }
+                connectionSnapshots.add(snapshot);
+            }
+            GraphRenderIndex overlay = buildGraphRenderIndex(new GraphRenderSnapshot(graph, graphRenderMutationVersion,
+                0L, coreProjectionGeneration, coreTopologyChecksum, nodeSnapshots, connectionSnapshots));
+            coreStructuralPreview = new CoreStructuralPreview(mutation, graph, addedNodes, removedNodes,
+                addedWidgets, removedWidgets, previousConnections, targets, coreStructuralPreview.selection(),
+                hiddenGroups, overlay, startedAtNanos);
+            selectedNodeIds.removeAll(removedIds);
+            applyCommittedCoreSelection(mutation);
+            ReSyncLifecycleDiagnostics.offer(serverId, "core_structure_preview_applied", "resourceKey",
+                mutation.baseline().resourceKey(), "mutationId", mutation.command().mutationId(),
+                "addedNodeCount", addedNodes.size(), "removedNodeCount", removedNodes.size(),
+                "changedConnectionCount", addedConnections.size() + removedConnections.size(),
+                "previewMicros", elapsedMicros(startedAtNanos, lifecycleNowNanos()));
+        } catch (RuntimeException failure) {
+            restoreCoreStructuralPreview(mutation, false);
+            rejectCoreStructurePreview(mutation, startedAtNanos, "preview_failed", failure);
+        } finally {
+            coreWidgetPreparationSession = null;
+        }
+    }
+
+    private void rejectCoreStructurePreview(CoreMutationCommit mutation, long startedAtNanos, String reason, RuntimeException failure) {
+        String errorType = failure != null ? TaskIdentities.failureName(failure) : "none";
+        coreStructurePreviewRejection = reason + ":" + errorType;
+        ReSyncLifecycleDiagnostics.offer(serverId, "core_structure_preview_rejected", "resourceKey",
+            mutation.baseline().resourceKey(), "mutationId", mutation.command().mutationId(),
+            "sessionIdentity", mutation.baseline().sessionIdentity(), "reason", reason, "errorType", errorType,
+            "previewMicros", elapsedMicros(startedAtNanos, lifecycleNowNanos()));
+    }
+
+    private CoreStructuralPreview restoreCoreStructuralPreview(CoreMutationCommit mutation, boolean retainWidgets) {
+        CoreStructuralPreview preview = coreStructuralPreview;
+        if (preview == null || preview.mutation() != mutation) {
+            return null;
+        }
+        coreStructuralPreview = null;
+        if (graph == preview.graph()) {
+            preview.addedNodes().keySet().forEach(graph.getNodes()::remove);
+            graph.getNodes().putAll(preview.removedNodes());
+            graph.setConnections(preview.connections());
+            preview.addedWidgets().forEach((id, widget) -> {
+                widgetCache.remove(id);
+                widgetNodeIds.remove(widget);
+            });
+            preview.removedWidgets().forEach((id, widget) -> {
+                widgetCache.put(id, widget);
+                widgetNodeIds.put(widget, id);
+            });
+            selectedNodeIds.clear();
+            selectedNodeIds.addAll(preview.selection());
+            for (String id : preview.targets()) {
+                FlowNodeWidget widget = widgetCache.get(id);
+                if (widget != null) {
+                    try {
+                        widget.refreshInputWidgets();
+                    } catch (RuntimeException failure) {
+                        queueNodeCatalogRefresh();
+                    }
+                }
+            }
+        }
+        if (!retainWidgets) {
+            retireCoreWidgets(preview.addedWidgets().values());
+            preview.addedNodes().keySet().forEach(editorDiagnostics::remove);
+        }
+        ReSyncLifecycleDiagnostics.offer(serverId, "core_structure_preview_settled", "resourceKey",
+            mutation.baseline().resourceKey(), "mutationId", mutation.command().mutationId(), "retained", retainWidgets,
+            "latencyMicros", elapsedMicros(preview.startedAtNanos(), lifecycleNowNanos()));
+        return preview;
+    }
+
+    private void restoreRejectedCoreWidgets(CoreMutationCommit mutation) {
+        if (mutation == null || mutation.command() == null || graph == null || graph.getNodes() == null) {
+            return;
+        }
+        Set<String> changedNodeIds = new LinkedHashSet<>();
+        for (String nodeId : mutation.command().nodeIds()) {
+            FlowNodeWidget widget = widgetCache.get(nodeId);
+            FlowNode node = graph.getNodes().get(nodeId);
+            if (widget == null || node == null) {
+                continue;
+            }
+            int restoredX = (int) node.getX();
+            int restoredY = (int) node.getY();
+            if (graphRenderWidgetBoundsChanged(widget.getX(), widget.getY(), widget.getWidth(), widget.getHeight(),
+                restoredX, restoredY, widget.getWidth(), widget.getHeight())) {
+                changedNodeIds.add(nodeId);
+            }
+            widget.setX(restoredX);
+            widget.setY(restoredY);
+            if (mutation.command().access() == CoreMutationAccess.CONTENT) {
+                if (mutation.command().valuePreview() != null) {
+                    widget.rejectInputValuePreview(mutation.command().valuePreview());
+                } else {
+                    widget.restoreInputWidgets();
+                }
+                changedNodeIds.add(nodeId);
+            }
+        }
+        queueGraphRenderGeometry(changedNodeIds);
+    }
+
+    private void settleCommittedCoreValuePreview(CoreMutationCommand command) {
+        if (command == null || command.valuePreview() == null) {
+            return;
+        }
+        String nodeId = command.valuePreview().nodeId().canonicalText();
+        FlowNodeWidget widget = widgetCache.get(nodeId);
+        if (widget != null) {
+            widget.commitInputValuePreview(command.valuePreview());
+            queueGraphRenderGeometry(List.of(nodeId));
+        }
+    }
+
+    private void applyCommittedCoreSelection(CoreMutationCommit mutation) {
+        if (mutation == null || mutation.command() == null || mutation.command().selectionNodeIds().isEmpty()
+            || graph == null || graph.getNodes() == null) {
+            return;
+        }
+        List<String> nodeIds = mutation.command().selectionNodeIds().stream()
+            .filter(graph.getNodes()::containsKey).toList();
+        if (nodeIds.size() == mutation.command().selectionNodeIds().size()) {
+            selectedNodeIds.clear();
+            selectedNodeIds.addAll(nodeIds);
+        }
+    }
+
+    private void applyCommittedCoreDeletion(CoreMutationCommit mutation, String focusedNodeId, String draggedNodeId) {
+        if (mutation == null || mutation.command() == null
+            || mutation.command().access() != CoreMutationAccess.DELETE
+                && mutation.command().historyTransition() == CoreHistoryTransition.NONE) {
+            return;
+        }
+        Set<String> deletedNodeIds = mutation.command().historyTransition() == CoreHistoryTransition.NONE
+            ? Set.copyOf(mutation.command().nodeIds()) : mutation.baseline().document().nodes().stream()
+                .map(node -> node.instanceId().canonicalText()).filter(nodeId -> !graph.getNodes().containsKey(nodeId))
+                .collect(Collectors.toUnmodifiableSet());
+        clearCommittedCoreDeletionSelection(deletedNodeIds, selectedNodeIds, selectionBase, selectedDragStartPositions);
+        if (focusedNodeId != null && deletedNodeIds.contains(focusedNodeId)) {
+            focusedNode = null;
+        }
+        String focusedChildNodeId = focusedNodeChildOwner != null ? findNodeId(focusedNodeChildOwner) : null;
+        if (focusedChildNodeId != null && deletedNodeIds.contains(focusedChildNodeId)) {
+            setFocusedWidget(null);
+            clearFocusedNodeChild();
+        }
+        String pointerNodeId = pointerOwnerNode != null ? findNodeId(pointerOwnerNode) : null;
+        if (pointerNodeId != null && deletedNodeIds.contains(pointerNodeId)) {
+            revokePointerOwner();
+        }
+        if (draggedNodeId != null && deletedNodeIds.contains(draggedNodeId)) {
+            draggedWidget = null;
+            movingSelectedNodes = false;
+            selectedDragStartPositions.clear();
+            selectedNodeMove.clear();
+        }
+        if (dragState.sourceNodeId != null && deletedNodeIds.contains(dragState.sourceNodeId)) {
+            dragState.isDragging = false;
+            dragState.sourceNodeId = null;
+            dragState.sourcePin = null;
+        }
+    }
+
+    static boolean coreProjectionPublicationMatches(CoreProjectionRequest request, CoreGraphEditorSession session,
+                                                    long currentGeneration,
+                                                    CoreGraphUiProjection.EditorSnapshot requestedSnapshot) {
+        return request != null && request.generation() == currentGeneration && request.snapshot() == requestedSnapshot
+            && (request.mutation() == null ? request.snapshot().currentFor(session)
+                : request.mutation().session() == session && request.mutation().baseline().currentFor(session)
+                    && request.snapshot().currentFor(request.mutation().candidate()));
+    }
+
+    private boolean commitProjectedCoreMutation(CoreMutationCommit mutation) {
+        CoreGraphEditorSession session = mutation != null ? mutation.session() : null;
+        CoreMutationCommand command = mutation != null ? mutation.command() : null;
+        if (session == null || command == null || !mutation.baseline().currentFor(session)
+            || !"ready".equals(coreSessionAuthoringDiagnostic(session, command.type(), command.resourceId()))
+            || !coreMutationAccessAllowed(session, command.type(), command.access(), command.nodeIds())) {
+            return false;
+        }
+        synchronized (session) {
+            if (!mutation.baseline().currentFor(session)
+                || !"ready".equals(coreSessionAuthoringDiagnostic(session, command.type(), command.resourceId()))) {
+                return false;
+            }
+            if (command.historyTransition() != CoreHistoryTransition.NONE) {
+                if (!Objects.equals(mutation.baselineHistory(), session.historyState())
+                    || !command.historyTransition().apply(session)) {
+                    return false;
+                }
+                boolean exact = Objects.equals(mutation.targetHistory(), session.historyState())
+                    && coreSessionPayloadMatches(session, mutation.candidate());
+                if (exact) {
+                    return true;
+                }
+                if (!command.historyTransition().revert(session)
+                    || !Objects.equals(mutation.baselineHistory(), session.historyState())
+                    || !mutation.baseline().currentFor(session)) {
+                    throw new IllegalStateException("Core history transition rollback was not exact");
+                }
+                return false;
+            }
+            if (mutation.candidate().isFunction()) {
+                session.replaceFunctionSource(mutation.candidate().functionSourceDocument());
+            } else {
+                session.replaceGraph(mutation.candidate().graphDocument());
+            }
+            return true;
+        }
+    }
+
+    private static boolean coreSessionPayloadMatches(CoreGraphEditorSession first, CoreGraphEditorSession second) {
+        return first != null && second != null && first.kind() == second.kind()
+            && Objects.equals(first.canonicalPayloadJson(), second.canonicalPayloadJson());
+    }
+
+    private boolean applyStableCoreValueProjection(CoreGraphEditorSession session,
+                                                   CoreGraphUiProjection.ProjectionResult result,
+                                                   CoreMutationCommit mutation) {
+        long applyStartedAtNanos = lifecycleNowNanos();
+        if (!stableCoreValuePublicationAllowed(session, result, mutation)) {
+            return false;
+        }
+        NodeWidget.NodeValueMutation preview = mutation.command().valuePreview();
+        String nodeId = preview.nodeId().canonicalText();
+        FlowNode source = result.graph().getNodes().get(nodeId);
+        FlowNode target = graph.getNodes().get(nodeId);
+        FlowNodeWidget widget = widgetCache.get(nodeId);
+        if (source == null || target == null || widget == null) {
+            return false;
+        }
+        coreProjectionChecksum = result.documentChecksum();
+        coreTopologyChecksum = result.topologyChecksum();
+        coreProjectionFailureChecksum = "";
+        graph.setResourceRevision(result.graph().getResourceRevision());
+        graph.setResourceHash(result.graph().getResourceHash());
+        graph.setResourceMutationId(result.graph().getResourceMutationId());
+        target.setInputValues(source.getInputValues() != null
+            ? new LinkedHashMap<>(source.getInputValues()) : new LinkedHashMap<>());
+        if (preview.elementId() != null) {
+            GraphNode candidateNode = coreNode(mutation.candidate(), nodeId);
+            ReSyncGenericWidgetCapabilities.WidgetDefinition generic = genericWidgetDefinition(source.getType());
+            CoreRepeatableUiProjection.Projection repeatables = candidateNode != null && generic != null
+                ? CoreRepeatableUiProjection.project(candidateNode, generic.definition())
+                : CoreRepeatableUiProjection.Projection.empty();
+            if (!repeatables.available()) {
+                return false;
+            }
+            widget.configureCoreRepeatables(repeatables,
+                isEditableWidget(widget) && repeatables.available() ? this::handleCoreRepeatableMutation : null);
+        } else {
+            widget.refreshInputWidgets();
+        }
+        coreProjectionResult = new CoreGraphUiProjection.ProjectionResult(graph, result.sourceNodeCount(),
+            result.projectedNodeCount(), result.droppedNodeIdentities(), result.sourceConnectionCount(),
+            result.projectedConnectionCount(), result.droppedConnectionIdentities(), result.documentChecksum(),
+            result.topologyChecksum(), result.rejectionReason());
+        queueGraphRenderGeometry(List.of(nodeId));
+        coreProjectionSnapshot = CoreGraphUiProjection.EditorSnapshot.capture(session);
+        coreProjectionRequestedSnapshot = coreProjectionSnapshot;
+        recordAppliedCoreProjection(session, coreProjectionResult, applyStartedAtNanos, preview.mutationId());
+        return true;
+    }
+
+    private boolean stableCoreValuePublicationAllowed(CoreGraphEditorSession session,
+                                                      CoreGraphUiProjection.ProjectionResult result,
+                                                      CoreMutationCommit mutation) {
+        if (!completeCoreProjection(result) || mutation == null || mutation.session() != session
+            || activeCoreGraphSession() != session
+            || mutation.command() == null || mutation.command().valuePreview() == null
+            || mutation.command().access() != CoreMutationAccess.CONTENT || mutation.command().nodeIds().size() != 1
+            || mutation.requestGeneration() != coreProjectionRequestGeneration
+            || mutation.publicationGeneration() != coreProjectionGeneration
+            || !coreSessionPayloadMatches(session, mutation.candidate())
+            || session.revision() != mutation.candidate().revision()
+            || coreProjectionSnapshot == null || coreProjectionSnapshot.owner() != session
+            || coreProjectionSnapshot.document() != mutation.baseline().document()
+            || !Objects.equals(coreProjectionChecksum, mutation.baseline().checksum().canonicalText())
+            || !Objects.equals(coreTopologyChecksum, result.topologyChecksum())
+            || !Objects.equals(result.documentChecksum(), CoreGraphUiProjection.EditorSnapshot.capture(
+                mutation.candidate()).checksum().canonicalText()) || !canRefreshStableCoreWidgets(result.graph())
+            || coreWidgetTopology.projectionGeneration() != mutation.publicationGeneration()
+            || publishedWidgetProjectionGeneration != mutation.publicationGeneration()
+            || !Objects.equals(coreWidgetTopology.topologyChecksum(), coreTopologyChecksum)
+            || !Objects.equals(publishedWidgetTopologyChecksum, coreTopologyChecksum)
+            || !currentGraphRenderIndex(graphRenderIndex)) {
+            return false;
+        }
+        NodeWidget.NodeValueMutation preview = mutation.command().valuePreview();
+        if (!mutation.command().mutationId().equals(preview.mutationId())
+            || !mutation.command().nodeIds().getFirst().equals(preview.nodeId().canonicalText())
+            || !coreValueMatchesPreview(mutation.candidate(), preview)) {
+            return false;
+        }
+        try {
+            GraphDocument before = mutation.baseline().document();
+            GraphDocument after = coreGraphDocument(mutation.candidate());
+            if (after == null) {
+                return false;
+            }
+            List<WorkspacePatch<JsonValue>> patches = CoreGraphWorkspacePatch.diff(before, after);
+            return !patches.isEmpty() && patches.stream().allMatch(patch -> coreValuePatchPath(patch.path(), preview));
+        } catch (RuntimeException exception) {
+            return false;
+        }
+    }
+
+    private boolean coreValueMatchesPreview(CoreGraphEditorSession session, NodeWidget.NodeValueMutation preview) {
+        GraphNode node = coreNode(session, preview.nodeId().canonicalText());
+        PinValue value = preview.elementId() == null ? node != null ? node.values().get(preview.pinId()) : null
+            : coreRepeatableValue(node, corePinRepeatableGroup(preview.nodeId().canonicalText(), preview.pinId()),
+                preview.pinId(), preview.elementId());
+        return preview.remove() ? value == null
+            : value != null && (preview.exactValue() != null ? value.value().equals(preview.exactValue())
+                : Objects.deepEquals(coreTypedValueObject(value.value()), preview.value()));
+    }
+
+    private static boolean coreValuePatchPath(String path, NodeWidget.NodeValueMutation mutation) {
+        if (path == null || mutation == null) {
+            return false;
+        }
+        String node = "/nodes/@" + mutation.nodeId().canonicalText() + "/values/";
+        if (mutation.elementId() != null) {
+            String repeatable = "/nodes/@" + mutation.nodeId().canonicalText() + "/repeatables/";
+            return path.startsWith(repeatable) && path.contains(mutation.elementId().canonicalText());
+        }
+        String pin = mutation.pinId().canonicalText();
+        return path.equals(node + pin) || path.startsWith(node + pin + "/")
+            || path.equals(node + "@" + pin) || path.startsWith(node + "@" + pin + "/");
+    }
+
+    private boolean applyStableCoreMoveProjection(CoreGraphEditorSession session,
+                                                  CoreGraphUiProjection.ProjectionResult result,
+                                                  CoreMutationCommit mutation) {
+        long applyStartedAtNanos = lifecycleNowNanos();
+        if (!stableCoreMovePublicationAllowed(session, result, mutation)) {
+            return false;
+        }
+        Set<String> previewNodeIds = coreMutationQueue.stream()
+            .filter(command -> command.session() == session && command.access() == CoreMutationAccess.MOVE)
+            .flatMap(command -> command.nodeIds().stream()).collect(Collectors.toCollection(LinkedHashSet::new));
+        if (movingSelectedNodes) {
+            previewNodeIds.addAll(selectedNodeIds);
+        }
+        Set<String> movedNodeIds = new LinkedHashSet<>(mutation.command().nodeIds());
+        for (String nodeId : movedNodeIds) {
+            FlowNode source = result.graph().getNodes().get(nodeId);
+            FlowNode target = graph.getNodes().get(nodeId);
+            FlowNodeWidget widget = widgetCache.get(nodeId);
+            target.setX(source.getX());
+            target.setY(source.getY());
+            if (!previewNodeIds.contains(nodeId)) {
+                widget.setPosition((int) source.getX(), (int) source.getY());
+            }
+        }
+        coreProjectionChecksum = result.documentChecksum();
+        coreTopologyChecksum = result.topologyChecksum();
+        coreProjectionFailureChecksum = "";
+        graph.setResourceRevision(result.graph().getResourceRevision());
+        graph.setResourceHash(result.graph().getResourceHash());
+        graph.setResourceMutationId(result.graph().getResourceMutationId());
+        coreProjectionResult = new CoreGraphUiProjection.ProjectionResult(graph, result.sourceNodeCount(),
+            result.projectedNodeCount(), result.droppedNodeIdentities(), result.sourceConnectionCount(),
+            result.projectedConnectionCount(), result.droppedConnectionIdentities(), result.documentChecksum(),
+            result.topologyChecksum(), result.rejectionReason());
+        queueGraphRenderGeometry(movedNodeIds);
+        coreProjectionSnapshot = CoreGraphUiProjection.EditorSnapshot.capture(session);
+        coreProjectionRequestedSnapshot = coreProjectionSnapshot;
+        recordAppliedCoreProjection(session, coreProjectionResult, applyStartedAtNanos, mutation.command().mutationId());
+        return true;
+    }
+
+    private boolean stableCoreMovePublicationAllowed(CoreGraphEditorSession session,
+                                                     CoreGraphUiProjection.ProjectionResult result,
+                                                     CoreMutationCommit mutation) {
+        if (!completeCoreProjection(result) || mutation == null || mutation.session() != session
+            || activeCoreGraphSession() != session || mutation.command() == null
+            || mutation.command().access() != CoreMutationAccess.MOVE || mutation.command().nodeIds().isEmpty()
+            || mutation.requestGeneration() != coreProjectionRequestGeneration
+            || mutation.publicationGeneration() != coreProjectionGeneration
+            || !coreSessionPayloadMatches(session, mutation.candidate())
+            || session.revision() != mutation.candidate().revision()
+            || coreProjectionSnapshot == null || coreProjectionSnapshot.owner() != session
+            || coreProjectionSnapshot.document() != mutation.baseline().document()
+            || !Objects.equals(coreProjectionChecksum, mutation.baseline().checksum().canonicalText())
+            || !Objects.equals(coreTopologyChecksum, result.topologyChecksum())
+            || !Objects.equals(result.documentChecksum(), CoreGraphUiProjection.EditorSnapshot.capture(
+                mutation.candidate()).checksum().canonicalText()) || !canRefreshStableCoreWidgets(result.graph())
+            || coreWidgetTopology.projectionGeneration() != mutation.publicationGeneration()
+            || publishedWidgetProjectionGeneration != mutation.publicationGeneration()
+            || !Objects.equals(coreWidgetTopology.topologyChecksum(), coreTopologyChecksum)
+            || !Objects.equals(publishedWidgetTopologyChecksum, coreTopologyChecksum)
+            || !currentGraphRenderIndex(graphRenderIndex)) {
+            return false;
+        }
+        try {
+            GraphDocument before = mutation.baseline().document();
+            GraphDocument after = coreGraphDocument(mutation.candidate());
+            if (after == null || mutation.baseline().functionSourceDocument() != null
+                && (!Objects.equals(mutation.baseline().functionSourceDocument().signature(),
+                    mutation.candidate().functionSourceDocument().signature())
+                    || !Objects.equals(mutation.baseline().functionSourceDocument().unknown(),
+                    mutation.candidate().functionSourceDocument().unknown()))) {
+                return false;
+            }
+            List<WorkspacePatch<JsonValue>> patches = CoreGraphWorkspacePatch.diff(before, after);
+            if (!exactCoreMovePatches(patches, mutation.command().nodeIds())) {
+                return false;
+            }
+            Map<String, GraphNode> canonicalNodes = after.nodes().stream().collect(Collectors.toMap(
+                node -> node.instanceId().canonicalText(), Function.identity(), (first, second) -> first,
+                LinkedHashMap::new));
+            for (String nodeId : mutation.command().nodeIds()) {
+                GraphNode canonical = canonicalNodes.get(nodeId);
+                FlowNode projected = result.graph().getNodes().get(nodeId);
+                if (canonical == null || projected == null || graph.getNodes().get(nodeId) == null
+                    || widgetCache.get(nodeId) == null || Double.compare(canonical.x(), projected.getX()) != 0
+                    || Double.compare(canonical.y(), projected.getY()) != 0) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (RuntimeException exception) {
+            return false;
+        }
+    }
+
+    static boolean exactCoreMovePatches(List<WorkspacePatch<JsonValue>> patches, Collection<String> nodeIds) {
+        if (patches == null || patches.isEmpty() || nodeIds == null || nodeIds.isEmpty()) {
+            return false;
+        }
+        Set<String> expectedNodeIds = new LinkedHashSet<>();
+        Map<String, String> nodeIdsByPath = new HashMap<>();
+        for (String nodeId : nodeIds) {
+            if (nodeId == null || nodeId.isBlank() || !expectedNodeIds.add(nodeId)) {
+                return false;
+            }
+            String positionPath = "/nodes/@" + nodeId + "/position/";
+            nodeIdsByPath.put(positionPath + "x", nodeId);
+            nodeIdsByPath.put(positionPath + "y", nodeId);
+        }
+        Set<String> patchedNodeIds = new LinkedHashSet<>();
+        for (WorkspacePatch<JsonValue> patch : patches) {
+            String nodeId = patch != null && CoreGraphWorkspacePatch.SET.equals(patch.op())
+                ? nodeIdsByPath.get(patch.path()) : null;
+            if (nodeId == null) {
+                return false;
+            }
+            patchedNodeIds.add(nodeId);
+        }
+        return patchedNodeIds.equals(expectedNodeIds);
+    }
+
+    private boolean applyStableCoreStructureProjection(CoreGraphEditorSession session,
+                                                        CoreGraphUiProjection.ProjectionResult result,
+                                                        CoreMutationCommit mutation) {
+        if (!coreStructuralMutation(mutation)) {
+            return false;
+        }
+        long applyStartedAtNanos = lifecycleNowNanos();
+        coreStructureFallbackReason = null;
+        CoreStructureDelta delta = stableCoreStructureDelta(session, result, mutation);
+        if (delta == null) {
+            recordCoreStructureFallback(mutation, applyStartedAtNanos, null);
+            return false;
+        }
+        Map<String, FlowNodeWidget> addedWidgets = new LinkedHashMap<>();
+        Map<String, List<EditorDiagnostic>> previousDiagnostics = new HashMap<>();
+        Set<String> previousDiagnosticIds = new HashSet<>();
+        for (String nodeId : delta.addedNodeIds()) {
+            if (editorDiagnostics.containsKey(nodeId)) {
+                previousDiagnosticIds.add(nodeId);
+                previousDiagnostics.put(nodeId, editorDiagnostics.get(nodeId));
+            }
+        }
+        Map<String, FlowNodeWidget> preparedWidgets = new LinkedHashMap<>();
+        Map<FlowNodeWidget, String> preparedNodeIds = new IdentityHashMap<>();
+        List<FlowNodeWidget> preparedWidgetOrder = new ArrayList<>(delta.nodes().size());
+        List<FlowNodeWidget> removedWidgets = new ArrayList<>(delta.removedNodeIds().size());
+        for (String nodeId : delta.removedNodeIds()) {
+            FlowNodeWidget widget = widgetCache.get(nodeId);
+            if (widget != null) {
+                removedWidgets.add(widget);
+            }
+        }
+        Map<String, FlowNode> previousNodes = graph.getNodes();
+        List<FlowConnection> previousConnections = graph.getConnections();
+        long previousResourceRevision = graph.getResourceRevision();
+        String previousResourceHash = graph.getResourceHash();
+        String previousResourceMutationId = graph.getResourceMutationId();
+        Map<FlowNodeWidget, GraphRenderNodeSnapshot> preparedNodeTopology = BrowserSafeState.map();
+        Map<FlowConnection, GraphRenderConnectionSnapshot> preparedConnectionTopology = BrowserSafeState.map();
+        Map<String, Set<FlowConnection>> preparedConnectionsByNode = BrowserSafeState.map();
+        int refreshedTargets = 0;
+        try {
+            graph.setNodes(new LinkedHashMap<>(delta.nodes()));
+            graph.setConnections(copyCoreStructureConnections(delta.connections()));
+            graph.setResourceRevision(result.graph().getResourceRevision());
+            graph.setResourceHash(result.graph().getResourceHash());
+            graph.setResourceMutationId(result.graph().getResourceMutationId());
+            for (String nodeId : delta.addedNodeIds()) {
+                FlowNode node = graph.getNodes().get(nodeId);
+                if (node == null) {
+                    throw new IllegalStateException("Projected Core node is missing");
+                }
+                FlowNodeWidget widget;
+                try {
+                    widget = corePreparedMutationWidgets.remove(nodeId);
+                    if (widget == null) {
+                        widget = createNodeWidget(nodeId, node);
+                    }
+                } catch (RuntimeException failure) {
+                    widget = createDiagnosticNodeWidget(nodeId, node, failure);
+                }
+                WidgetCleanup.attach(widget);
+                addedWidgets.put(nodeId, widget);
+            }
+            for (String nodeId : delta.nodes().keySet()) {
+                FlowNodeWidget widget = addedWidgets.get(nodeId);
+                if (widget == null) {
+                    widget = widgetCache.get(nodeId);
+                }
+                if (widget == null || preparedNodeIds.put(widget, nodeId) != null) {
+                    throw new IllegalStateException("Core widget topology is incomplete");
+                }
+                preparedWidgets.put(nodeId, widget);
+                preparedWidgetOrder.add(widget);
+            }
+            for (String nodeId : delta.affectedTargetNodeIds()) {
+                FlowNodeWidget widget = preparedWidgets.get(nodeId);
+                if (widget != null) {
+                    widget.refreshInputWidgets();
+                    refreshedTargets++;
+                }
+            }
+            if (!exactCoreStructureView(result.graph(), delta.canonicalConnections())) {
+                throw new IllegalStateException("Core widget refresh changed the projected graph");
+            }
+            for (int order = 0; order < preparedWidgetOrder.size(); order++) {
+                FlowNodeWidget widget = preparedWidgetOrder.get(order);
+                preparedNodeTopology.put(widget, new GraphRenderNodeSnapshot(widget,
+                    new WorldBounds(widget.getX(), widget.getY(), widget.getX() + widget.getWidth(),
+                        widget.getY() + widget.getHeight()), order, widget.hasLoadedDefinition()));
+            }
+            for (FlowConnection connection : graph.getConnections()) {
+                GraphRenderConnectionSnapshot snapshot = graphRenderConnectionSnapshot(connection, preparedWidgets);
+                if (snapshot == null) {
+                    throw new IllegalStateException("Core connection topology is incomplete");
+                }
+                preparedConnectionTopology.put(connection, snapshot);
+                preparedConnectionsByNode.computeIfAbsent(snapshot.editorSourceNodeId(),
+                    ignored -> BrowserSafeState.set()).add(connection);
+                preparedConnectionsByNode.computeIfAbsent(snapshot.targetNodeId(),
+                    ignored -> BrowserSafeState.set()).add(connection);
+            }
+        } catch (RuntimeException failure) {
+            restoreCoreStructureNodes(previousNodes, result.graph().getNodes());
+            graph.setNodes(previousNodes);
+            graph.setConnections(previousConnections);
+            graph.setResourceRevision(previousResourceRevision);
+            graph.setResourceHash(previousResourceHash);
+            graph.setResourceMutationId(previousResourceMutationId);
+            for (String nodeId : delta.affectedTargetNodeIds()) {
+                FlowNodeWidget widget = widgetCache.get(nodeId);
+                if (widget != null) {
+                    try {
+                        widget.refreshInputWidgets();
+                    } catch (RuntimeException ignored) {
+                    }
+                }
+            }
+            retireCoreWidgets(addedWidgets.values());
+            restoreCoreStructureDiagnostics(delta.addedNodeIds(), previousDiagnosticIds, previousDiagnostics);
+            coreStructureFallbackReason = "widget_preparation_failed";
+            recordCoreStructureFallback(mutation, applyStartedAtNanos, failure);
+            return false;
+        }
+
+        coreProjectionGeneration = nextProjectionGeneration(coreProjectionGeneration);
+        coreProjectionChecksum = result.documentChecksum();
+        coreTopologyChecksum = result.topologyChecksum();
+        coreProjectionFailureChecksum = "";
+        coreProjectionResult = new CoreGraphUiProjection.ProjectionResult(graph, result.sourceNodeCount(),
+            result.projectedNodeCount(), result.droppedNodeIdentities(), result.sourceConnectionCount(),
+            result.projectedConnectionCount(), result.droppedConnectionIdentities(), result.documentChecksum(),
+            result.topologyChecksum(), result.rejectionReason());
+        publishStableCoreStructureTopology(preparedWidgets, preparedNodeIds, preparedWidgetOrder,
+            preparedNodeTopology, preparedConnectionTopology, preparedConnectionsByNode, removedWidgets,
+            new ArrayList<>(addedWidgets.values()));
+        coreProjectionSnapshot = CoreGraphUiProjection.EditorSnapshot.capture(session);
+        coreProjectionRequestedSnapshot = coreProjectionSnapshot;
+        delta.removedNodeIds().forEach(editorDiagnostics::remove);
+        coreStructureFastPathCount++;
+        coreStructureLastCreatedWidgetCount = addedWidgets.size();
+        coreStructureLastReusedWidgetCount = preparedWidgets.size() - addedWidgets.size();
+        coreStructureLastRemovedWidgetCount = removedWidgets.size();
+        coreStructureLastRefreshedTargetCount = refreshedTargets;
+        coreStructureLastTopologyNodeCount = preparedNodeTopology.size();
+        coreStructureLastTopologyConnectionCount = preparedConnectionTopology.size();
+        coreStructureLastRenderBuildScheduleCount = 1;
+        recordAppliedCoreProjection(session, coreProjectionResult, applyStartedAtNanos, mutation.command().mutationId());
+        return true;
+    }
+
+    private CoreStructureDelta stableCoreStructureDelta(CoreGraphEditorSession session,
+                                                        CoreGraphUiProjection.ProjectionResult result,
+                                                        CoreMutationCommit mutation) {
+        String rejection = stableCoreStructurePublicationRejection(session, result, mutation);
+        if (rejection != null) {
+            return rejectCoreStructureDelta(rejection);
+        }
+        try {
+            GraphDocument before = mutation.baseline().document();
+            GraphDocument after = coreGraphDocument(mutation.candidate());
+            if (after == null || !sameCoreStructureEnvelope(before, after)
+                || !sameCoreFunctionEnvelope(mutation)) {
+                return rejectCoreStructureDelta("document_envelope_changed");
+            }
+            Map<String, GraphNode> beforeNodes = coreNodesById(before.nodes());
+            Map<String, GraphNode> afterNodes = coreNodesById(after.nodes());
+            if (beforeNodes == null || afterNodes == null) {
+                return rejectCoreStructureDelta("duplicate_node_identity");
+            }
+            Set<String> addedNodeIds = new LinkedHashSet<>(afterNodes.keySet());
+            addedNodeIds.removeAll(beforeNodes.keySet());
+            Set<String> removedNodeIds = new LinkedHashSet<>(beforeNodes.keySet());
+            removedNodeIds.removeAll(afterNodes.keySet());
+            CoreMutationAccess access = mutation.command().access();
+            boolean history = mutation.command().historyTransition() != CoreHistoryTransition.NONE;
+            if (history) {
+                if (addedNodeIds.size() > 16 || removedNodeIds.size() > 16) {
+                    return rejectCoreStructureDelta("history_node_limit");
+                }
+            } else if (access == CoreMutationAccess.STRUCTURE) {
+                if (!removedNodeIds.isEmpty()
+                    || !addedNodeIds.isEmpty() && !exactCoreStructureNodeIds(mutation.command().nodeIds(),
+                        mutation.command().selectionNodeIds(), addedNodeIds)) {
+                    return rejectCoreStructureDelta("added_node_scope_changed");
+                }
+            } else if (access == CoreMutationAccess.DELETE) {
+                if (removedNodeIds.isEmpty() || !addedNodeIds.isEmpty()
+                    || !exactCoreNodeIds(mutation.command().nodeIds(), removedNodeIds)) {
+                    return rejectCoreStructureDelta("removed_node_scope_changed");
+                }
+            } else {
+                return rejectCoreStructureDelta("mutation_scope_changed");
+            }
+            Set<String> survivorNodeIds = new HashSet<>(beforeNodes.keySet());
+            survivorNodeIds.retainAll(afterNodes.keySet());
+            for (WorkspacePatch<JsonValue> patch : CoreGraphWorkspacePatch.diff(before, after)) {
+                String patchedNodeId = corePatchedNodeId(patch != null ? patch.path() : null);
+                if (patchedNodeId != null && survivorNodeIds.contains(patchedNodeId)) {
+                    return rejectCoreStructureDelta("surviving_node_changed");
+                }
+            }
+            if (!exactCoreStructureCapabilities(before, after, beforeNodes, afterNodes, addedNodeIds, removedNodeIds, history)) {
+                return rejectCoreStructureDelta("capability_scope_changed");
+            }
+            Map<String, FlowNode> currentNodes = graph.getNodes();
+            Map<String, FlowNode> projectedNodes = result.graph().getNodes();
+            if (currentNodes == null || projectedNodes == null || !currentNodes.keySet().equals(beforeNodes.keySet())
+                || !projectedNodes.keySet().equals(afterNodes.keySet()) || !widgetCache.keySet().equals(beforeNodes.keySet())) {
+                return rejectCoreStructureDelta("node_topology_changed");
+            }
+            LinkedHashMap<String, FlowNode> mergedNodes = new LinkedHashMap<>();
+            for (Map.Entry<String, FlowNode> entry : projectedNodes.entrySet()) {
+                String nodeId = entry.getKey();
+                FlowNode projected = entry.getValue();
+                FlowNode current = currentNodes.get(nodeId);
+                if (current != null && !sameCoreFlowNode(current, projected)) {
+                    return rejectCoreStructureDelta("surviving_node_projection_changed");
+                }
+                FlowNode prepared = corePreparedMutationNodes.get(nodeId);
+                if (prepared != null && !sameCoreFlowNode(prepared, projected)) {
+                    return rejectCoreStructureDelta("preview_node_projection_changed");
+                }
+                mergedNodes.put(nodeId, current != null ? current : prepared != null ? prepared : copyCoreStructureNode(projected));
+            }
+            if (!sameCoreStructureGraphEnvelope(graph, result.graph())) {
+                return rejectCoreStructureDelta("view_envelope_changed");
+            }
+            Map<ConnectionId, GraphConnection> beforeConnections = coreConnectionsById(before.connections());
+            Map<ConnectionId, GraphConnection> afterConnections = coreConnectionsById(after.connections());
+            if (beforeConnections == null || afterConnections == null
+                || !projectedCoreConnectionsMatch(beforeConnections, graph.getConnections())
+                || !projectedCoreConnectionsMatch(afterConnections, result.graph().getConnections())) {
+                return rejectCoreStructureDelta("connection_projection_changed");
+            }
+            Set<ConnectionId> addedConnections = new LinkedHashSet<>(afterConnections.keySet());
+            addedConnections.removeAll(beforeConnections.keySet());
+            Set<ConnectionId> removedConnections = new LinkedHashSet<>(beforeConnections.keySet());
+            removedConnections.removeAll(afterConnections.keySet());
+            if (history && addedConnections.size() + removedConnections.size() > 256) {
+                return rejectCoreStructureDelta("history_connection_limit");
+            }
+            if (addedNodeIds.isEmpty() && removedNodeIds.isEmpty() && addedConnections.isEmpty() && removedConnections.isEmpty()) {
+                return rejectCoreStructureDelta("no_structure_change");
+            }
+            for (ConnectionId connectionId : beforeConnections.keySet()) {
+                GraphConnection projected = afterConnections.get(connectionId);
+                if (projected != null && !beforeConnections.get(connectionId).equals(projected)) {
+                    return rejectCoreStructureDelta("surviving_connection_changed");
+                }
+            }
+            Set<String> affectedTargets = new LinkedHashSet<>();
+            if (history) {
+                addedConnections.forEach(id -> affectedTargets.add(afterConnections.get(id).target().nodeId().canonicalText()));
+                removedConnections.forEach(id -> affectedTargets.add(beforeConnections.get(id).target().nodeId().canonicalText()));
+                affectedTargets.removeAll(removedNodeIds);
+            } else if (access == CoreMutationAccess.STRUCTURE) {
+                Set<InputPinKey> replacedInputs = new HashSet<>();
+                for (ConnectionId connectionId : addedConnections) {
+                    GraphConnection connection = afterConnections.get(connectionId);
+                    String source = connection.source().nodeId().canonicalText();
+                    String target = connection.target().nodeId().canonicalText();
+                    if (!addedNodeIds.isEmpty() && !addedNodeIds.contains(source) && !addedNodeIds.contains(target)) {
+                        return rejectCoreStructureDelta("added_connection_scope_changed");
+                    }
+                    if (addedNodeIds.isEmpty() || addedNodeIds.contains(source) && !addedNodeIds.contains(target)) {
+                        replacedInputs.add(new InputPinKey(target, connection.target().pinId().canonicalText()));
+                        affectedTargets.add(target);
+                    }
+                }
+                for (ConnectionId connectionId : removedConnections) {
+                    GraphConnection connection = beforeConnections.get(connectionId);
+                    InputPinKey target = new InputPinKey(connection.target().nodeId().canonicalText(),
+                        connection.target().pinId().canonicalText());
+                    if (!addedNodeIds.isEmpty() && !replacedInputs.contains(target)) {
+                        return rejectCoreStructureDelta("replaced_input_scope_changed");
+                    }
+                    affectedTargets.add(target.targetNodeId());
+                }
+            } else {
+                if (!addedConnections.isEmpty()) {
+                    return rejectCoreStructureDelta("deleted_connection_scope_changed");
+                }
+                for (ConnectionId connectionId : removedConnections) {
+                    GraphConnection connection = beforeConnections.get(connectionId);
+                    String source = connection.source().nodeId().canonicalText();
+                    String target = connection.target().nodeId().canonicalText();
+                    if (!removedNodeIds.contains(source) && !removedNodeIds.contains(target)) {
+                        return rejectCoreStructureDelta("removed_connection_scope_changed");
+                    }
+                    if (!removedNodeIds.contains(target)) {
+                        affectedTargets.add(target);
+                    }
+                }
+            }
+            return new CoreStructureDelta(mergedNodes, result.graph().getConnections(), afterConnections, addedNodeIds,
+                removedNodeIds, affectedTargets);
+        } catch (RuntimeException failure) {
+            return rejectCoreStructureDelta("delta_failed:" + TaskIdentities.failureName(failure));
+        }
+    }
+
+    private CoreStructureDelta rejectCoreStructureDelta(String reason) {
+        coreStructureFallbackReason = reason;
+        return null;
+    }
+
+    private static boolean coreStructuralMutation(CoreMutationCommit mutation) {
+        return mutation != null && mutation.command() != null
+            && (mutation.command().access() == CoreMutationAccess.STRUCTURE
+                || mutation.command().access() == CoreMutationAccess.DELETE
+                || mutation.command().historyTransition() != CoreHistoryTransition.NONE);
+    }
+
+    private String stableCoreStructurePublicationRejection(CoreGraphEditorSession session,
+                                                           CoreGraphUiProjection.ProjectionResult result,
+                                                           CoreMutationCommit mutation) {
+        if (!completeCoreProjection(result)) {
+            return "projection_incomplete";
+        }
+        if (!coreStructuralMutation(mutation) || mutation.command().valuePreview() != null) {
+            return "mutation_scope_changed";
+        }
+        if (mutation.session() != session || activeCoreGraphSession() != session) {
+            return "session_changed";
+        }
+        if (mutation.requestGeneration() != coreProjectionRequestGeneration
+            || mutation.publicationGeneration() != coreProjectionGeneration) {
+            return "projection_generation_changed";
+        }
+        if (!coreSessionPayloadMatches(session, mutation.candidate()) || session.revision() != mutation.candidate().revision()) {
+            return "candidate_changed";
+        }
+        if (coreProjectionSnapshot == null || coreProjectionSnapshot.owner() != session
+            || coreProjectionSnapshot.document() != mutation.baseline().document()
+            || !Objects.equals(coreProjectionChecksum, mutation.baseline().checksum().canonicalText())
+            || !Objects.equals(result.documentChecksum(), CoreGraphUiProjection.EditorSnapshot.capture(
+                mutation.candidate()).checksum().canonicalText())) {
+            return "projection_baseline_changed";
+        }
+        if (graph == null || result.graph() == null || coreWidgetTopology == null || coreWidgetTopology.graph() != graph
+            || coreWidgetTopology.widgetsById() != widgetCache || coreWidgetTopology.nodeIds() != widgetNodeIds) {
+            return "widget_topology_changed";
+        }
+        if (coreWidgetTopology.projectionGeneration() != mutation.publicationGeneration()
+            || publishedWidgetProjectionGeneration != mutation.publicationGeneration()
+            || !Objects.equals(coreWidgetTopology.topologyChecksum(), coreTopologyChecksum)
+            || !Objects.equals(publishedWidgetTopologyChecksum, coreTopologyChecksum)) {
+            return "widget_publication_changed";
+        }
+        if (pendingCoreWidgetTopology != null || graphRenderContinuityIndex != null || graphRenderContinuityTopology != null) {
+            return "widget_publication_pending";
+        }
+        if (catalogRefresh != null || nodeCatalogRefreshQueued) {
+            return "catalog_refresh_pending";
+        }
+        if (coreWidgetPublicationFailure != null) {
+            return "widget_publication_failed";
+        }
+        return currentGraphRenderIndex(graphRenderIndex) ? null : "render_index_changed";
+    }
+
+    private static boolean sameCoreStructureEnvelope(GraphDocument before, GraphDocument after) {
+        return before != null && after != null && before.schemaVersion().equals(after.schemaVersion())
+            && before.resource().equals(after.resource()) && before.revision() == after.revision()
+            && before.catalogBinding().equals(after.catalogBinding()) && before.variables().equals(after.variables())
+            && before.functions().equals(after.functions()) && before.unknown().equals(after.unknown());
+    }
+
+    private static boolean sameCoreFunctionEnvelope(CoreMutationCommit mutation) {
+        var before = mutation.baseline().functionSourceDocument();
+        var after = mutation.candidate().functionSourceDocument();
+        return before == null && after == null || before != null && after != null
+            && before.signature().equals(after.signature()) && before.unknown().equals(after.unknown());
+    }
+
+    private static Map<String, GraphNode> coreNodesById(List<GraphNode> nodes) {
+        LinkedHashMap<String, GraphNode> result = new LinkedHashMap<>();
+        for (GraphNode node : nodes) {
+            String nodeId = node.instanceId().canonicalText();
+            if (result.putIfAbsent(nodeId, node) != null) {
+                return null;
+            }
+        }
+        return result;
+    }
+
+    private static Map<ConnectionId, GraphConnection> coreConnectionsById(List<GraphConnection> connections) {
+        LinkedHashMap<ConnectionId, GraphConnection> result = new LinkedHashMap<>();
+        for (GraphConnection connection : connections) {
+            if (result.putIfAbsent(connection.connectionId(), connection) != null) {
+                return null;
+            }
+        }
+        return result;
+    }
+
+    private static String corePatchedNodeId(String path) {
+        String prefix = "/nodes/@";
+        if (path == null || !path.startsWith(prefix)) {
+            return null;
+        }
+        int end = path.indexOf('/', prefix.length());
+        return end >= 0 ? path.substring(prefix.length(), end) : path.substring(prefix.length());
+    }
+
+    private static boolean exactOptionalCoreNodeIds(Collection<String> actual, Set<String> expected) {
+        return actual == null || actual.isEmpty() || exactCoreNodeIds(actual, expected);
+    }
+
+    static boolean exactCoreStructureNodeIds(Collection<String> commandNodeIds,
+                                             Collection<String> selectionNodeIds, Set<String> expected) {
+        boolean commandIdentified = commandNodeIds != null && !commandNodeIds.isEmpty();
+        boolean selectionIdentified = selectionNodeIds != null && !selectionNodeIds.isEmpty();
+        return (commandIdentified || selectionIdentified)
+            && exactOptionalCoreNodeIds(commandNodeIds, expected)
+            && exactOptionalCoreNodeIds(selectionNodeIds, expected);
+    }
+
+    private static boolean exactCoreNodeIds(Collection<String> actual, Set<String> expected) {
+        if (actual == null || expected == null || actual.size() != expected.size()) {
+            return false;
+        }
+        LinkedHashSet<String> identities = new LinkedHashSet<>();
+        for (String nodeId : actual) {
+            if (nodeId == null || nodeId.isBlank() || !identities.add(nodeId)) {
+                return false;
+            }
+        }
+        return identities.equals(expected);
+    }
+
+    private boolean exactCoreStructureView(FlowGraph projected,
+                                           Map<ConnectionId, GraphConnection> canonicalConnections) {
+        if (graph == null || projected == null || graph.getNodes() == null || projected.getNodes() == null
+            || !sameCoreStructureGraphEnvelope(graph, projected)
+            || !graph.getNodes().keySet().equals(projected.getNodes().keySet())) {
+            return false;
+        }
+        for (Map.Entry<String, FlowNode> entry : graph.getNodes().entrySet()) {
+            if (!sameCoreFlowNode(entry.getValue(), projected.getNodes().get(entry.getKey()))) {
+                return false;
+            }
+        }
+        return sameCoreStructureConnections(graph.getConnections(), projected.getConnections())
+            && projectedCoreConnectionsMatch(canonicalConnections, graph.getConnections());
+    }
+
+    private static boolean sameCoreStructureConnections(List<FlowConnection> current,
+                                                        List<FlowConnection> projected) {
+        if (current == null || projected == null || current.size() != projected.size()) {
+            return false;
+        }
+        for (int index = 0; index < current.size(); index++) {
+            FlowConnection first = current.get(index);
+            FlowConnection second = projected.get(index);
+            if (first == null || second == null
+                || !Objects.equals(first.getSourceNodeId(), second.getSourceNodeId())
+                || !Objects.equals(first.getSourcePin(), second.getSourcePin())
+                || !Objects.equals(first.getSourcePinId(), second.getSourcePinId())
+                || !Objects.equals(first.getSourcePinDisplayName(), second.getSourcePinDisplayName())
+                || !Objects.equals(first.getTargetNodeId(), second.getTargetNodeId())
+                || !Objects.equals(first.getTargetPin(), second.getTargetPin())
+                || !Objects.equals(first.getTargetPinId(), second.getTargetPinId())
+                || !Objects.equals(first.getTargetPinDisplayName(), second.getTargetPinDisplayName())
+                || !Objects.equals(first.getEditorSourceNodeId(), second.getEditorSourceNodeId())
+                || !Objects.equals(first.getEditorSourcePin(), second.getEditorSourcePin())
+                || !Objects.equals(first.getEditorSourcePinId(), second.getEditorSourcePinId())
+                || !Objects.equals(first.getEditorSourcePinDisplayName(), second.getEditorSourcePinDisplayName())
+                || !first.getOpaqueProperties().equals(second.getOpaqueProperties())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static FlowNode copyCoreStructureNode(FlowNode source) {
+        FlowNode copied = new FlowNode(source.getType(), source.getX(), source.getY(),
+            copyCoreStructureValues(source.getInputValues()));
+        copied.setVersion(source.getVersion());
+        copied.setOpaqueProperties(copyCoreStructureOpaqueProperties(source.getOpaqueProperties()));
+        return copied;
+    }
+
+    private static List<FlowConnection> copyCoreStructureConnections(List<FlowConnection> connections) {
+        List<FlowConnection> copied = new ArrayList<>(connections.size());
+        for (FlowConnection source : connections) {
+            if (source == null) {
+                throw new IllegalStateException("Projected Core connection is missing");
+            }
+            FlowConnection connection = FlowConnection.stable(source.getSourceNodeId(), source.getSourcePinId(),
+                source.getTargetNodeId(), source.getTargetPinId());
+            connection.setSourcePinDisplayName(source.getSourcePinDisplayName());
+            connection.setTargetPinDisplayName(source.getTargetPinDisplayName());
+            connection.setEditorSourceNodeId(source.getEditorSourceNodeId());
+            connection.setEditorSourcePinId(source.getEditorSourcePinId());
+            connection.setEditorSourcePinDisplayName(source.getEditorSourcePinDisplayName());
+            connection.setOpaqueProperties(copyCoreStructureOpaqueProperties(source.getOpaqueProperties()));
+            copied.add(connection);
+        }
+        return copied;
+    }
+
+    private static Map<String, Object> copyCoreStructureValues(Map<String, Object> values) {
+        LinkedHashMap<String, Object> copied = new LinkedHashMap<>();
+        if (values != null) {
+            values.forEach((key, value) -> copied.put(key, copyCoreStructureValue(value)));
+        }
+        return copied;
+    }
+
+    private static Object copyCoreStructureValue(Object value) {
+        if (value instanceof Map<?, ?> values) {
+            LinkedHashMap<Object, Object> copied = new LinkedHashMap<>();
+            values.forEach((key, nested) -> copied.put(key, copyCoreStructureValue(nested)));
+            return copied;
+        }
+        if (value instanceof List<?> values) {
+            List<Object> copied = new ArrayList<>(values.size());
+            values.forEach(nested -> copied.add(copyCoreStructureValue(nested)));
+            return copied;
+        }
+        if (value instanceof Set<?> values) {
+            return values.stream().map(GraphEditorScreen::copyCoreStructureValue)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+        }
+        if (value instanceof JsonElement element) {
+            return element.deepCopy();
+        }
+        if (value instanceof Object[] values) {
+            return Arrays.stream(values).map(GraphEditorScreen::copyCoreStructureValue).toArray();
+        }
+        if (value instanceof byte[] values) {
+            return values.clone();
+        }
+        if (value instanceof short[] values) {
+            return values.clone();
+        }
+        if (value instanceof int[] values) {
+            return values.clone();
+        }
+        if (value instanceof long[] values) {
+            return values.clone();
+        }
+        if (value instanceof float[] values) {
+            return values.clone();
+        }
+        if (value instanceof double[] values) {
+            return values.clone();
+        }
+        if (value instanceof char[] values) {
+            return values.clone();
+        }
+        if (value instanceof boolean[] values) {
+            return values.clone();
+        }
+        return value;
+    }
+
+    private static Map<String, JsonElement> copyCoreStructureOpaqueProperties(Map<String, JsonElement> properties) {
+        LinkedHashMap<String, JsonElement> copied = new LinkedHashMap<>();
+        if (properties != null) {
+            properties.forEach((key, value) -> copied.put(key, value != null ? value.deepCopy() : null));
+        }
+        return copied;
+    }
+
+    private static void restoreCoreStructureNodes(Map<String, FlowNode> previous,
+                                                  Map<String, FlowNode> projected) {
+        if (previous == null || projected == null) {
+            return;
+        }
+        previous.forEach((nodeId, target) -> {
+            FlowNode source = projected.get(nodeId);
+            if (target != null && source != null) {
+                target.setType(source.getType());
+                target.setVersion(source.getVersion());
+                target.setX(source.getX());
+                target.setY(source.getY());
+                target.setInputValues(copyCoreStructureValues(source.getInputValues()));
+                target.setOpaqueProperties(copyCoreStructureOpaqueProperties(source.getOpaqueProperties()));
+            }
+        });
+    }
+
+    private boolean exactCoreStructureCapabilities(GraphDocument before, GraphDocument after,
+                                                   Map<String, GraphNode> beforeNodes, Map<String, GraphNode> afterNodes,
+                                                   Set<String> addedNodeIds, Set<String> removedNodeIds, boolean history) {
+        return exactCoreStructureCapabilities(before, after, afterNodes, addedNodeIds)
+            || history && addedNodeIds.isEmpty() && !removedNodeIds.isEmpty()
+                && exactCoreStructureCapabilities(after, before, beforeNodes, removedNodeIds);
+    }
+
+    private boolean exactCoreStructureCapabilities(GraphDocument before, GraphDocument after,
+                                                   Map<String, GraphNode> afterNodes, Set<String> addedNodeIds) {
+        if (before.requiredCapabilities().equals(after.requiredCapabilities())) {
+            return true;
+        }
+        Set<ContractRef<CapabilityId>> allowed = new HashSet<>(before.requiredCapabilities());
+        for (String nodeId : addedNodeIds) {
+            GraphNode node = afterNodes.get(nodeId);
+            ReSyncGenericDescriptorProjection.Projection descriptor = node == null ? null
+                : typedDescriptorProjection(typedCatalogClient(), node.definition().owner().canonicalText(),
+                    node.definition().id().canonicalText()).orElse(null);
+            if (descriptor == null) {
+                return false;
+            }
+            allowed.addAll(descriptor.requiredCapabilities());
+        }
+        return allowed.equals(after.requiredCapabilities());
+    }
+
+    private static boolean sameCoreFlowNode(FlowNode current, FlowNode projected) {
+        return current != null && projected != null && Objects.equals(current.getType(), projected.getType())
+            && current.getVersion() == projected.getVersion() && Double.compare(current.getX(), projected.getX()) == 0
+            && Double.compare(current.getY(), projected.getY()) == 0
+            && Objects.deepEquals(current.getInputValues(), projected.getInputValues())
+            && current.getOpaqueProperties().equals(projected.getOpaqueProperties());
+    }
+
+    private static boolean sameCoreStructureGraphEnvelope(FlowGraph current, FlowGraph projected) {
+        return Objects.equals(current.getId(), projected.getId()) && current.isEnabled() == projected.isEnabled()
+            && current.getVersion() == projected.getVersion()
+            && Objects.equals(current.getLocalVariables(), projected.getLocalVariables())
+            && current.isFunction() == projected.isFunction()
+            && Objects.equals(current.getFunctionOwner(), projected.getFunctionOwner())
+            && Objects.equals(current.getFunctionNamespace(), projected.getFunctionNamespace())
+            && current.getFunctionVersion() == projected.getFunctionVersion()
+            && Objects.equals(current.getFunctionDescription(), projected.getFunctionDescription())
+            && sameCoreFunctionParameters(current.getFunctionInputs(), projected.getFunctionInputs())
+            && sameCoreFunctionParameters(current.getFunctionOutputs(), projected.getFunctionOutputs())
+            && Objects.equals(current.getEditorPassthroughs(), projected.getEditorPassthroughs())
+            && Objects.deepEquals(current.getContentProperties(), projected.getContentProperties())
+            && Objects.equals(current.getResourceType(), projected.getResourceType())
+            && current.getOpaqueProperties().equals(projected.getOpaqueProperties());
+    }
+
+    private static boolean sameCoreFunctionParameters(List<FlowGraph.FunctionParameter> first,
+                                                      List<FlowGraph.FunctionParameter> second) {
+        if (first == null || second == null || first.size() != second.size()) {
+            return first == second;
+        }
+        for (int index = 0; index < first.size(); index++) {
+            FlowGraph.FunctionParameter left = first.get(index);
+            FlowGraph.FunctionParameter right = second.get(index);
+            if (left == null || right == null) {
+                if (left != right) {
+                    return false;
+                }
+                continue;
+            }
+            if (!Objects.equals(left.getParameterId(), right.getParameterId())
+                || !Objects.equals(left.getDisplayName(), right.getDisplayName())
+                || !Objects.equals(left.getTypeRef(), right.getTypeRef())
+                || !Objects.equals(left.getWidget(), right.getWidget())
+                || !Objects.equals(left.getOptionsSource(), right.getOptionsSource())
+                || !Objects.equals(left.getDefaultValue(), right.getDefaultValue())
+                || !left.getOpaqueProperties().equals(right.getOpaqueProperties())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean projectedCoreConnectionsMatch(Map<ConnectionId, GraphConnection> core,
+                                                   List<FlowConnection> projected) {
+        if (core == null || projected == null || core.size() != projected.size()) {
+            return false;
+        }
+        Set<ConnectionId> identities = new HashSet<>();
+        for (FlowConnection connection : projected) {
+            ConnectionId identity = coreConnectionId(connection);
+            GraphConnection canonical = identity != null ? core.get(identity) : null;
+            if (canonical == null || !identities.add(identity)
+                || !canonical.source().nodeId().canonicalText().equals(connection.getSourceNodeId())
+                || !canonical.source().pinId().canonicalText().equals(connection.getSourcePinId())
+                || !Objects.equals(canonical.source().elementId(), coreEndpointElement(connection, true))
+                || !Objects.equals(canonical.source().branchId(), coreEndpointBranch(connection, true))
+                || !canonical.target().nodeId().canonicalText().equals(connection.getTargetNodeId())
+                || !canonical.target().pinId().canonicalText().equals(connection.getTargetPinId())
+                || !Objects.equals(canonical.target().elementId(), coreEndpointElement(connection, false))
+                || !Objects.equals(canonical.target().branchId(), coreEndpointBranch(connection, false))) {
+                return false;
+            }
+        }
+        return identities.size() == core.size();
+    }
+
+    private void publishStableCoreStructureTopology(Map<String, FlowNodeWidget> preparedWidgets,
+                                                    Map<FlowNodeWidget, String> preparedNodeIds,
+                                                    List<FlowNodeWidget> preparedWidgetOrder,
+                                                    Map<FlowNodeWidget, GraphRenderNodeSnapshot> preparedNodeTopology,
+                                                    Map<FlowConnection, GraphRenderConnectionSnapshot> preparedConnectionTopology,
+                                                    Map<String, Set<FlowConnection>> preparedConnectionsByNode,
+                                                    List<FlowNodeWidget> removedWidgets,
+                                                    List<FlowNodeWidget> addedWidgets) {
+        CoreWidgetTopology previous = coreWidgetTopology;
+        graphRenderContinuityIndex = graphRenderIndex;
+        graphRenderContinuityTopology = previous;
+        worldWidgets.clear();
+        graphRenderNodeTopology = preparedNodeTopology;
+        graphRenderConnectionTopology = preparedConnectionTopology;
+        graphRenderConnectionsByNode = preparedConnectionsByNode;
+        graphRenderTopologyRevision = new BrowserSafeState.LongValue();
+        graphRenderFrontOrder = preparedWidgetOrder.size();
+        pendingCoreWidgetTopology = new CoreWidgetTopology(graph, coreProjectionGeneration, coreTopologyChecksum,
+            preparedWidgets, preparedNodeIds, preparedWidgetOrder, removedWidgets, addedWidgets);
+        publishedWidgetProjectionGeneration = coreProjectionGeneration;
+        publishedWidgetTopologyChecksum = coreTopologyChecksum;
+        graphRenderMutationPending = false;
+        invalidateGraphRenderTopology();
+        scheduleGraphRenderIndexBuild();
+    }
+
+    private void restoreCoreStructureDiagnostics(Set<String> nodeIds, Set<String> previousIds,
+                                                 Map<String, List<EditorDiagnostic>> previous) {
+        for (String nodeId : nodeIds) {
+            if (previousIds.contains(nodeId)) {
+                editorDiagnostics.put(nodeId, previous.get(nodeId));
+            } else {
+                editorDiagnostics.remove(nodeId);
+            }
+        }
+    }
+
+    private void recordCoreStructureFallback(CoreMutationCommit mutation, long startedAtNanos, RuntimeException failure) {
+        coreStructureFallbackCount++;
+        coreStructureLastCreatedWidgetCount = 0;
+        coreStructureLastReusedWidgetCount = 0;
+        coreStructureLastRemovedWidgetCount = 0;
+        coreStructureLastRefreshedTargetCount = 0;
+        coreStructureLastTopologyNodeCount = 0;
+        coreStructureLastTopologyConnectionCount = 0;
+        coreStructureLastRenderBuildScheduleCount = 0;
+        ReSyncLifecycleDiagnostics.offer(serverId, "core_structure_fallback", "resourceKey", mutation.baseline().resourceKey(),
+            "mutationId", mutation.command().mutationId(), "sessionIdentity", mutation.baseline().sessionIdentity(),
+            "operation", mutation.command().operation(), "reason", coreStructureFallbackReason,
+            "errorType", failure != null ? TaskIdentities.failureName(failure) : "none",
+            "applyMicros", elapsedMicros(startedAtNanos, lifecycleNowNanos()));
+    }
+
+    private void applyCoreProjection(CoreGraphEditorSession session, CoreGraphUiProjection.ProjectionResult result) {
+        long applyStartedAtNanos = lifecycleNowNanos();
+        if (!completeCoreProjection(result)) {
+            rejectCoreProjection(session, projectionChecksum(result), "incomplete_projection",
+                projectionFailureDetail(result));
+            return;
+        }
+        boolean topologyChanged = !Objects.equals(coreTopologyChecksum, result.topologyChecksum());
+        boolean generationChanged = !Objects.equals(coreProjectionChecksum, result.documentChecksum()) || topologyChanged;
+        if (generationChanged) {
+            coreProjectionGeneration = nextProjectionGeneration(coreProjectionGeneration);
+        }
+        coreProjectionChecksum = result.documentChecksum();
+        coreTopologyChecksum = result.topologyChecksum();
+        coreProjectionFailureChecksum = "";
+        FlowGraph projected = result.graph();
+        if (!topologyChanged && canRefreshStableCoreWidgets(projected)) {
+            refreshStableCoreWidgets(projected);
+            result = new CoreGraphUiProjection.ProjectionResult(graph, result.sourceNodeCount(), result.projectedNodeCount(),
+                result.droppedNodeIdentities(), result.sourceConnectionCount(), result.projectedConnectionCount(),
+                result.droppedConnectionIdentities(), result.documentChecksum(), result.topologyChecksum(),
+                result.rejectionReason());
+            coreProjectionResult = result;
+        } else {
+            onCoreGraphProjectionPublished(graph, projected);
+            graph = projected;
+            coreProjectionResult = result;
+            refreshNodeRegistry();
+        }
+        selectedNodeIds.retainAll(graph.getNodes().keySet());
+        recordAppliedCoreProjection(session, result, applyStartedAtNanos, null);
+    }
+
+    protected void onCoreGraphProjectionPublished(FlowGraph previous, FlowGraph current) {
+    }
+
+    protected void synchronizeCoreWorkspaceMutation() {
+    }
+
+    protected final boolean submitCoreWorkspaceMutation(String operation, Function<CoreGraphEditorSession, Boolean> mutation) {
+        return commitCoreGlobalMutation(operation, mutation);
+    }
+
+    private void recordAppliedCoreProjection(CoreGraphEditorSession session,
+                                             CoreGraphUiProjection.ProjectionResult result,
+                                             long applyStartedAtNanos, UUID mutationId) {
+        ReSyncFlowClient.traceLifecycle(serverId, "graph_projection_applied", "serverId", serverId,
+            "resourceKey", session.resource().resourceType().value() + ":" + session.resource().id(),
+            "requestId", "projection", "mutationId", mutationId, "generation", coreProjectionGeneration,
+            "authorityEpoch", 0L, "revision", session.revision(), "sourceNodeCount", result.sourceNodeCount(),
+            "projectedNodeCount", result.projectedNodeCount(), "documentChecksum", result.documentChecksum(),
+            "topologyChecksum", result.topologyChecksum(), "droppedNodeCount", result.droppedNodeIdentities().size(),
+            "droppedNodeIdentities", result.droppedNodeIdentities(), "sourceConnectionCount",
+            result.sourceConnectionCount(), "projectedConnectionCount", result.projectedConnectionCount(),
+            "droppedConnectionCount", result.droppedConnectionIdentities().size(), "droppedConnectionIdentities",
+            result.droppedConnectionIdentities(), "applyMicros", elapsedMicros(applyStartedAtNanos,
+                lifecycleNowNanos()), "sessionId", coreSessionIdentity(session), "publicationId",
+            corePublicationIdentity(session), "catalogId", coreCatalogIdentity(session));
+        updateCoreEditorReadiness(false);
+    }
+
+    private boolean canRefreshStableCoreWidgets(FlowGraph projected) {
+        CoreWidgetTopology topology = coreWidgetTopology;
+        return graph != null && projected != null && topology != null && pendingCoreWidgetTopology == null
+            && catalogRefresh == null && !nodeCatalogRefreshQueued
+            && topology.graph() == graph && topology.widgetsById() == widgetCache && topology.nodeIds() == widgetNodeIds
+            && graph.getNodes() != null && projected.getNodes() != null
+            && graph.getNodes().keySet().equals(projected.getNodes().keySet())
+            && widgetCache.keySet().equals(projected.getNodes().keySet());
+    }
+
+    private void refreshStableCoreWidgets(FlowGraph projected) {
+        CoreGraphEditorSession session = activeCoreGraphSession();
+        Set<String> queuedMoveNodes = coreMutationQueue.stream()
+            .filter(command -> command.session() == session && command.access() == CoreMutationAccess.MOVE)
+            .flatMap(command -> command.nodeIds().stream()).collect(Collectors.toSet());
+        graph.setId(projected.getId());
+        graph.setEnabled(projected.isEnabled());
+        graph.setVersion(projected.getVersion());
+        graph.setConnections(new ArrayList<>(projected.getConnections()));
+        graph.setLocalVariables(new ArrayList<>(projected.getLocalVariables()));
+        graph.setFunction(projected.isFunction());
+        graph.setFunctionOwner(projected.getFunctionOwner());
+        graph.setFunctionNamespace(projected.getFunctionNamespace());
+        graph.setFunctionVersion(projected.getFunctionVersion());
+        graph.setFunctionDescription(projected.getFunctionDescription());
+        graph.setFunctionInputs(new ArrayList<>(projected.getFunctionInputs()));
+        graph.setFunctionOutputs(new ArrayList<>(projected.getFunctionOutputs()));
+        graph.setEditorPassthroughs(new ArrayList<>(projected.getEditorPassthroughs()));
+        graph.setContentProperties(new LinkedHashMap<>(projected.getContentProperties()));
+        graph.setResourceType(projected.getResourceType());
+        graph.setResourceRevision(projected.getResourceRevision());
+        graph.setResourceHash(projected.getResourceHash());
+        graph.setResourceMutationId(projected.getResourceMutationId());
+        graph.setOpaqueProperties(projected.getOpaqueProperties());
+        CoreGraphUiProjection inspectorProjection = new CoreGraphUiProjection();
+        projected.getNodes().forEach((nodeId, source) -> {
+            FlowNode target = graph.getNodes().get(nodeId);
+            target.setType(source.getType());
+            target.setVersion(source.getVersion());
+            target.setX(source.getX());
+            target.setY(source.getY());
+            boolean valuesChanged = !Objects.deepEquals(target.getInputValues(), source.getInputValues());
+            target.setInputValues(new LinkedHashMap<>(source.getInputValues()));
+            target.setOpaqueProperties(source.getOpaqueProperties());
+            FlowNodeWidget widget = widgetCache.get(nodeId);
+            NodeInstanceId identity = coreNodeId(nodeId);
+            boolean repeatablesChanged = false;
+            if (identity != null) {
+                GraphNode coreNode = coreNode(session, nodeId);
+                widget.configureCoreOptions(session.resource(), coreNode != null ? coreNode.values() : Map.of());
+                ReSyncGenericWidgetCapabilities.WidgetDefinition generic = genericWidgetDefinition(source.getType());
+                if (coreNode != null && generic != null) {
+                    CoreRepeatableUiProjection.Projection repeatables = CoreRepeatableUiProjection.project(coreNode,
+                        generic.definition());
+                    repeatablesChanged = widget.configureCoreRepeatables(repeatables,
+                        isEditableWidget(widget) && repeatables.available()
+                            ? this::handleCoreRepeatableMutation : null);
+                }
+                widget.updateInspectorProjection(inspectorProjection.projectInspector(session, identity).orElse(null));
+            }
+            if (valuesChanged && !repeatablesChanged) {
+                widget.refreshInputWidgets();
+            }
+            if (!queuedMoveNodes.contains(nodeId) && (!movingSelectedNodes || !selectedNodeIds.contains(nodeId))) {
+                widget.setX((int) source.getX());
+                widget.setY((int) source.getY());
+            }
+        });
+        coreWidgetTopology = new CoreWidgetTopology(graph, coreProjectionGeneration, coreTopologyChecksum, widgetCache,
+            widgetNodeIds, coreWidgetTopology.widgets(), List.of(), List.of());
+        publishedWidgetProjectionGeneration = coreProjectionGeneration;
+        publishedWidgetTopologyChecksum = coreTopologyChecksum;
+        graphRenderNodeTopology.clear();
+        for (FlowNodeWidget widget : coreWidgetTopology.widgets()) {
+            updateGraphRenderNodeTopology(widget, null);
+        }
+        normalizePassthroughConnections();
+        invalidateGraphRenderTopology();
+        scheduleGraphRenderIndexBuild();
+    }
+
+    private void rejectCoreProjection(CoreGraphEditorSession session, String checksum, String reason, String detail) {
+        String safeChecksum = checksum == null || checksum.isBlank() ? "unavailable" : checksum;
+        String safeDetail = detail == null || detail.isBlank() ? reason : detail;
+        if (!safeChecksum.equals(coreProjectionFailureChecksum)) {
+            ReLog.logger(LogTypes.FLOW).source(LogSource.server(serverId, serverId)).component(GraphEditorScreen.class)
+                .operation("Core Graph Projection").error("Core projection failed: resource="
+                    + (session.resource() != null ? session.resource() : "missing") + ",revision=" + session.revision()
+                    + ",checksum=" + safeChecksum + ",reason=" + safeDetail);
+            coreProjectionFailureChecksum = safeChecksum;
+        }
+        updateCoreEditorReadiness(false);
+        ReSyncFlowClient.traceLifecycle(serverId, "graph_projection_failed", "serverId", serverId,
+            "resourceKey", session.resource() != null
+                ? session.resource().resourceType().value() + ":" + session.resource().id() : "graph:unknown",
+            "requestId", "projection", "mutationId", null, "generation", coreProjectionGeneration,
+            "authorityEpoch", 0L, "revision", session.revision(), "reason", reason, "detail", safeDetail,
+            "sourceNodeCount", coreProjectionResult != null ? coreProjectionResult.sourceNodeCount() : 0,
+            "projectedNodeCount", coreProjectionResult != null ? coreProjectionResult.projectedNodeCount() : 0,
+            "droppedNodeIdentities", coreProjectionResult != null ? coreProjectionResult.droppedNodeIdentities() : List.of(),
+            "sourceConnectionCount", coreProjectionResult != null ? coreProjectionResult.sourceConnectionCount() : 0,
+            "projectedConnectionCount", coreProjectionResult != null ? coreProjectionResult.projectedConnectionCount() : 0,
+            "droppedConnectionIdentities", coreProjectionResult != null
+                ? coreProjectionResult.droppedConnectionIdentities() : List.of());
+    }
+
+    static long nextProjectionGeneration(long generation) {
+        return generation == Long.MAX_VALUE ? 1L : generation + 1L;
+    }
+
+    static boolean completeCoreProjection(CoreGraphUiProjection.ProjectionResult result) {
+        return result != null && result.complete() && !result.documentChecksum().isBlank()
+            && !result.topologyChecksum().isBlank();
+    }
+
+    private static String projectionChecksum(CoreGraphUiProjection.ProjectionResult result) {
+        return result != null ? result.documentChecksum() : "unavailable";
+    }
+
+    private static String projectionFailureDetail(CoreGraphUiProjection.ProjectionResult result) {
+        if (result == null) {
+            return "Core projection is unavailable";
+        }
+        if (!result.rejectionReason().isBlank()) {
+            return result.rejectionReason();
+        }
+        return "Core projection dropped identities: nodes=" + result.droppedNodeIdentities()
+            + ",connections=" + result.droppedConnectionIdentities();
+    }
+
+    private void traceCoreProjectionCaptured(CoreProjectionRequest request, String reason) {
+        CoreGraphUiProjection.EditorSnapshot snapshot = request.snapshot();
+        CoreMutationCommand command = request.mutation() != null ? request.mutation().command() : null;
+        List<String> nodeIdentities = coreMutationDiagnosticNodeIds(command);
+        ReSyncFlowClient.traceLifecycle(serverId, "graph_projection_captured", "serverId", serverId,
+            "resourceKey", snapshot.resourceKey(), "requestId", "projection", "mutationId",
+            command != null ? command.mutationId() : null, "generation", request.generation(), "authorityEpoch", 0L,
+            "revision", snapshot.document().revision(), "sessionId", snapshot.sessionIdentity(), "publicationId",
+            snapshot.publicationIdentity(), "catalogId", snapshot.catalogIdentity(), "documentChecksum",
+            snapshot.checksum().canonicalText(), "nodeCount", snapshot.nodeCount(), "connectionCount",
+            snapshot.connectionCount(), "nodeIdentityCount", nodeIdentities.size(), "nodeIdentities",
+            boundedCoreMutationNodeIds(nodeIdentities), "nodeIdentitiesTruncated",
+            nodeIdentities.size() > CORE_MUTATION_DIAGNOSTIC_NODE_LIMIT, "captureMicros", request.captureMicros(),
+            "reason", reason);
+    }
+
+    private void traceCoreProjectionBuilt(CoreProjectionBuildResult build) {
+        CoreProjectionRequest request = build.request();
+        CoreGraphUiProjection.EditorSnapshot snapshot = request.snapshot();
+        CoreGraphUiProjection.ProjectionResult projection = build.projection();
+        CoreMutationCommand command = request.mutation() != null ? request.mutation().command() : null;
+        ReSyncFlowClient.traceLifecycle(serverId, build.failed() ? "graph_projection_build_failed"
+            : "graph_projection_built", "serverId", serverId, "resourceKey", snapshot.resourceKey(), "requestId",
+            "projection", "mutationId", command != null ? command.mutationId() : null, "generation",
+            request.generation(), "authorityEpoch", 0L, "revision", snapshot.document().revision(), "sessionId",
+            snapshot.sessionIdentity(), "publicationId", snapshot.publicationIdentity(), "catalogId",
+            snapshot.catalogIdentity(), "documentChecksum", snapshot.checksum().canonicalText(), "topologyChecksum",
+            projection != null ? projection.topologyChecksum() : "unavailable", "sourceNodeCount", snapshot.nodeCount(),
+            "projectedNodeCount", projection != null ? projection.projectedNodeCount() : 0,
+            "sourceConnectionCount", snapshot.connectionCount(), "projectedConnectionCount", projection != null
+                ? projection.projectedConnectionCount() : 0, "queueMicros", elapsedMicros(request.queuedAtNanos(),
+                build.startedAtNanos()), "buildMicros", elapsedMicros(build.startedAtNanos(), build.finishedAtNanos()),
+            "totalMicros", elapsedMicros(request.queuedAtNanos(), build.finishedAtNanos()), "reason", build.failed()
+                ? compactReason(build.failureType(), build.failureDetail()) : projection.compactReason());
+    }
+
+    private void traceCoreProjectionDropped(CoreProjectionRequest request, CoreProjectionBuildResult build,
+                                            String reason) {
+        if (request == null || request.snapshot() == null) {
+            return;
+        }
+        CoreGraphUiProjection.EditorSnapshot snapshot = request.snapshot();
+        CoreGraphUiProjection.ProjectionResult projection = build != null ? build.projection() : null;
+        CoreMutationCommand command = request.mutation() != null ? request.mutation().command() : null;
+        ReSyncFlowClient.traceLifecycle(serverId, "graph_projection_dropped", "serverId", serverId, "resourceKey",
+            snapshot.resourceKey(), "requestId", "projection", "mutationId",
+            command != null ? command.mutationId() : null, "generation", request.generation(), "authorityEpoch", 0L,
+            "revision", snapshot.document().revision(), "sessionId", snapshot.sessionIdentity(), "publicationId",
+            snapshot.publicationIdentity(), "catalogId", snapshot.catalogIdentity(), "documentChecksum",
+            snapshot.checksum().canonicalText(), "topologyChecksum", projection != null
+                ? projection.topologyChecksum() : "unavailable", "nodeCount", snapshot.nodeCount(), "connectionCount",
+            snapshot.connectionCount(), "totalMicros", elapsedMicros(request.queuedAtNanos(), lifecycleNowNanos()),
+            "reason", reason);
+    }
+
+    private static List<String> coreMutationDiagnosticNodeIds(CoreMutationCommand command) {
+        if (command == null) {
+            return List.of();
+        }
+        return Stream.concat(command.nodeIds().stream(), command.selectionNodeIds().stream())
+            .filter(Objects::nonNull)
+            .filter(nodeId -> !nodeId.isBlank())
+            .distinct()
+            .sorted()
+            .toList();
+    }
+
+    static List<String> boundedCoreMutationNodeIds(Collection<String> nodeIds) {
+        if (nodeIds == null || nodeIds.isEmpty()) {
+            return List.of();
+        }
+        return nodeIds.stream()
+            .filter(Objects::nonNull)
+            .filter(nodeId -> !nodeId.isBlank())
+            .distinct()
+            .sorted()
+            .limit(CORE_MUTATION_DIAGNOSTIC_NODE_LIMIT)
+            .toList();
+    }
+
+    private static long lifecycleNowNanos() {
+        return ReSyncFlowClient.TEMP_LIFECYCLE_DEBUG ? System.nanoTime() : 0L;
+    }
+
+    private static long elapsedMicros(long startedAtNanos, long finishedAtNanos) {
+        return startedAtNanos > 0L && finishedAtNanos >= startedAtNanos
+            ? BrowserSafeState.nanosToMicros(finishedAtNanos - startedAtNanos) : -1L;
+    }
+
+    private static String compactReason(String type, String detail) {
+        String safeType = type == null || type.isBlank() ? "unknown" : type;
+        String safeDetail = detail == null || detail.isBlank() ? "" : detail;
+        return safeDetail.isBlank() ? safeType : safeType + ":" + safeDetail;
+    }
+
+    private static String coreSessionIdentity(CoreGraphEditorSession session) {
+        return session != null && session.resource() != null
+            ? session.resource().resourceType().value() + ":" + session.resource().id() + "@"
+                + Integer.toHexString(System.identityHashCode(session)) : "unavailable";
+    }
+
+    private static String corePublicationIdentity(CoreGraphEditorSession session) {
+        return session != null && session.activeAuthoringChecksum() != null
+            ? session.activeAuthoringChecksum().canonicalText() : "unavailable";
+    }
+
+    private static String coreCatalogIdentity(CoreGraphEditorSession session) {
+        return session != null && session.catalogBinding() != null ? session.catalogBinding().toString() : "unavailable";
+    }
+
+    private static String coreText(JsonObject source, String key) {
+        JsonElement value = source == null ? null : source.get(key);
+        return value == null || value.isJsonNull() || !value.isJsonPrimitive() ? null : value.getAsString();
+    }
+
+    private static JsonElement coreProjectedValue(JsonObject typedValue) {
+        String state = coreText(typedValue, "state");
+        if ("value".equals(state) || "opaque".equals(state)) {
+            return typedValue.get("value");
+        }
+        if ("locator".equals(state)) {
+            return typedValue.get("locator");
+        }
+        return null;
+    }
+
+    private static Object coreProjectedObject(JsonElement value) {
+        if (value == null || value.isJsonNull()) {
+            return null;
+        }
+        if (value.isJsonObject()) {
+            Map<String, Object> result = new LinkedHashMap<>();
+            value.getAsJsonObject().entrySet().forEach(entry -> result.put(entry.getKey(), coreProjectedObject(entry.getValue())));
+            return result;
+        }
+        if (value.isJsonArray()) {
+            List<Object> result = new ArrayList<>();
+            value.getAsJsonArray().forEach(entry -> result.add(coreProjectedObject(entry)));
+            return result;
+        }
+        if (value.getAsJsonPrimitive().isBoolean()) {
+            return value.getAsBoolean();
+        }
+        if (value.getAsJsonPrimitive().isNumber()) {
+            return new BigDecimal(value.getAsString());
+        }
+        return value.getAsString();
+    }
+
+    private boolean commitCoreMutation(String operation, Function<CoreGraphEditorSession, Boolean> mutation,
+                                       String... nodeIds) {
+        return commitCoreMutation(operation, mutation, CoreMutationAccess.CONTENT, "", CoreHistoryTransition.NONE,
+            "", nodeIds);
+    }
+
+    private boolean commitCoreValueMutation(NodeWidget.NodeValueMutation valuePreview,
+                                            Function<CoreGraphEditorSession, Boolean> mutation, String nodeId) {
+        return commitCoreMutation("Node Values", mutation, CoreMutationAccess.CONTENT, "",
+            CoreHistoryTransition.NONE, List.of(), valuePreview, nodeId);
+    }
+
+    private boolean commitCoreMoveMutation(String operation, String coalesceKey,
+                                           Function<CoreGraphEditorSession, Boolean> mutation, String... nodeIds) {
+        return commitCoreMutation(operation, mutation, CoreMutationAccess.MOVE, coalesceKey, CoreHistoryTransition.NONE,
+            "", nodeIds);
+    }
+
+    private boolean commitCoreStructuralMutation(String operation, Function<CoreGraphEditorSession, Boolean> mutation,
+                                                  String... nodeIds) {
+        return commitCoreMutation(operation, mutation, CoreMutationAccess.STRUCTURE, "", CoreHistoryTransition.NONE,
+            "", nodeIds);
+    }
+
+    private boolean commitCorePasteMutation(String operation, Function<CoreGraphEditorSession, Boolean> mutation,
+                                            List<String> selectionNodeIds) {
+        return commitCoreMutation(operation, mutation, CoreMutationAccess.STRUCTURE, "", CoreHistoryTransition.NONE,
+            selectionNodeIds, null);
+    }
+
+    private boolean commitCoreCreateMutation(String operation, Function<CoreGraphEditorSession, Boolean> mutation,
+                                             String selectionNodeId) {
+        return commitCoreMutation(operation, mutation, CoreMutationAccess.STRUCTURE, "", CoreHistoryTransition.NONE,
+            selectionNodeId);
+    }
+
+    private boolean commitCoreDeleteMutation(String operation, Function<CoreGraphEditorSession, Boolean> mutation,
+                                             String... nodeIds) {
+        return commitCoreMutation(operation, mutation, CoreMutationAccess.DELETE, "", CoreHistoryTransition.NONE,
+            "", nodeIds);
+    }
+
+    private boolean commitCoreGlobalMutation(String operation, Function<CoreGraphEditorSession, Boolean> mutation) {
+        return commitCoreMutation(operation, mutation, CoreMutationAccess.GLOBAL, "", CoreHistoryTransition.NONE, "");
+    }
+
+    private boolean commitCoreHistoryMutation(String operation, CoreHistoryTransition transition) {
+        return commitCoreMutation(operation, null, CoreMutationAccess.GLOBAL, "", transition, "");
+    }
+
+    private boolean commitCoreMutation(String operation, Function<CoreGraphEditorSession, Boolean> mutation,
+                                       CoreMutationAccess access, String coalesceKey,
+                                       CoreHistoryTransition historyTransition, String selectionNodeId,
+                                       String... nodeIds) {
+        List<String> selectionNodeIds = selectionNodeId == null || selectionNodeId.isBlank()
+            ? List.of() : List.of(selectionNodeId);
+        return commitCoreMutation(operation, mutation, access, coalesceKey, historyTransition, selectionNodeIds, null,
+            nodeIds);
+    }
+
+    private boolean commitCoreMutation(String operation, Function<CoreGraphEditorSession, Boolean> mutation,
+                                       CoreMutationAccess access, String coalesceKey,
+                                       CoreHistoryTransition historyTransition, List<String> selectionNodeIds,
+                                       NodeWidget.NodeValueMutation valuePreview, String... nodeIds) {
+        CoreGraphEditorSession session = activeCoreGraphSession();
+        if (session == null) {
+            ReLog.logger(LogTypes.FLOW).source(LogSource.server(serverId, serverId)).component(GraphEditorScreen.class)
+                .operation("Core Graph " + operation).error("Core mutation rejected: session=missing");
+            return false;
+        }
+        ReSyncResourceType type = activeStudioDocument != null
+            ? ReSyncResourceType.byTypeId(activeStudioDocument.type())
+            : session.resource() != null ? ReSyncResourceType.byTypeId(session.resource().resourceType().value()) : null;
+        String resourceId = activeStudioDocument != null ? activeStudioDocument.id()
+            : session.resource() != null ? session.resource().id() : "";
+        List<String> identities = nodeIds == null ? List.of()
+            : Arrays.stream(nodeIds).filter(Objects::nonNull).toList();
+        String authoringDiagnostic = coreSessionAuthoringDiagnostic(session, type, resourceId);
+        if (!"ready".equals(authoringDiagnostic) || !coreMutationAccessAllowed(coreInteractionSession(), type, access, identities)) {
+            ReLog.logger(LogTypes.FLOW).source(LogSource.server(serverId, serverId)).component(GraphEditorScreen.class)
+                .operation("Core Graph " + operation).error("Core mutation rejected: authoring=" + authoringDiagnostic
+                    + ",resource=" + session.resource() + ",revision=" + session.revision() + ",nodeIds="
+                    + identities + ",requiredCapabilities="
+                    + session.requiredCapabilities() + ",editCapabilities=" + session.editCapabilities());
+            coreOperationUnavailable(operation);
+            refreshCoreProjection();
+            return false;
+        }
+        CoreMutationCommand command = new CoreMutationCommand(operation, session, type, resourceId, mutation, access,
+            identities, coalesceKey == null ? "" : coalesceKey,
+            historyTransition == null ? CoreHistoryTransition.NONE : historyTransition,
+            selectionNodeIds == null ? List.of() : List.copyOf(selectionNodeIds),
+            valuePreview != null ? valuePreview.mutationId() : UUID.randomUUID(), valuePreview);
+        if (coreMutationCommitPending != null || !coreMutationQueue.isEmpty()) {
+            if (!command.coalesceKey().isBlank() && !coreMutationQueue.isEmpty()) {
+                CoreMutationCommand last = coreMutationQueue.peekLast();
+                if (last != null && last.session() == session && last.access() == access
+                    && command.coalesceKey().equals(last.coalesceKey())
+                    && sameCoreMutationNodeIdentities(command.nodeIds(), last.nodeIds())) {
+                    coreMutationQueue.removeLast();
+                    coreMutationQueue.addLast(command);
+                    traceCoreMutationAdmitted(command, "coalesced");
+                    return true;
+                }
+            }
+            if (coreMutationQueue.size() >= CORE_MUTATION_QUEUE_LIMIT) {
+                coreOperationUnavailable(operation);
+                return false;
+            }
+            coreMutationQueue.addLast(command);
+            traceCoreMutationAdmitted(command, "queued");
+            return true;
+        }
+        traceCoreMutationAdmitted(command, "immediate");
+        return startCoreMutation(command);
+    }
+
+    static boolean sameCoreMutationNodeIdentities(Collection<String> first, Collection<String> second) {
+        if (first == null || second == null) {
+            return false;
+        }
+        Set<String> firstIdentities = new HashSet<>(first);
+        Set<String> secondIdentities = new HashSet<>(second);
+        return firstIdentities.size() == first.size() && secondIdentities.size() == second.size()
+            && firstIdentities.equals(secondIdentities);
+    }
+
+    private void traceCoreMutationAdmitted(CoreMutationCommand command, String scheduling) {
+        List<String> nodeIdentities = coreMutationDiagnosticNodeIds(command);
+        String resourceType = command.type() != null ? command.type().typeId()
+            : command.session().resource() != null ? command.session().resource().resourceType().value() : "unknown";
+        ReSyncFlowClient.traceLifecycle(serverId, "graph_mutation_admitted", "serverId", serverId, "resourceKey",
+            resourceType + ":" + command.resourceId(), "requestId", "projection", "mutationId", command.mutationId(),
+            "generation", coreProjectionRequestGeneration, "authorityEpoch", 0L, "revision",
+            command.session().revision(), "operation", command.operation(), "nodeIdentityCount", nodeIdentities.size(),
+            "nodeIdentities", boundedCoreMutationNodeIds(nodeIdentities), "nodeIdentitiesTruncated",
+            nodeIdentities.size() > CORE_MUTATION_DIAGNOSTIC_NODE_LIMIT, "scheduling", scheduling, "queueDepth",
+            coreMutationQueue.size(), "mutationPending", coreMutationCommitPending != null);
+    }
+
+    private boolean coreMutationAccessAllowed(CoreGraphEditorSession session, ReSyncResourceType type,
+                                              CoreMutationAccess access, List<String> nodeIds) {
+        if (!coreCapabilityAllowed(session)) {
+            return false;
+        }
+        if (access == CoreMutationAccess.MOVE) {
+            GraphDocument document = coreGraphDocument(session);
+            if (document == null) {
+                return false;
+            }
+            Set<String> availableNodeIds = document.nodes().stream()
+                .map(node -> node.instanceId().canonicalText()).collect(Collectors.toSet());
+            return availableNodeIds.containsAll(nodeIds);
+        }
+        for (String nodeId : nodeIds) {
+            if (coreNode(session, nodeId) == null) {
+                return false;
+            }
+            if (access == CoreMutationAccess.CONTENT && !coreCapabilityAllowed(session, nodeId)) {
+                return false;
+            }
+            if (access == CoreMutationAccess.DELETE && isProtectedCoreNode(session, type, nodeId)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean startCoreMutation(CoreMutationCommand command) {
+        long prepareStartedAtNanos = lifecycleNowNanos();
+        String authoringDiagnostic = coreSessionAuthoringDiagnostic(command.session(), command.type(), command.resourceId());
+        if (!"ready".equals(authoringDiagnostic)
+            || !coreMutationAccessAllowed(command.session(), command.type(), command.access(), command.nodeIds())) {
+            coreOperationUnavailable(command.operation());
+            return false;
+        }
+        try {
+            CoreGraphUiProjection.EditorSnapshot baseline;
+            CoreGraphEditorSession candidate;
+            CoreGraphEditorSession.HistoryState baselineHistory = null;
+            CoreGraphEditorSession.HistoryState targetHistory = null;
+            synchronized (command.session()) {
+                baseline = CoreGraphUiProjection.EditorSnapshot.capture(command.session());
+                if (command.historyTransition() == CoreHistoryTransition.NONE) {
+                    candidate = copyCoreSession(command.session());
+                    if (command.mutation() == null || !Boolean.TRUE.equals(command.mutation().apply(candidate))) {
+                        return false;
+                    }
+                } else {
+                    baselineHistory = command.session().historyState();
+                    if (!command.historyTransition().apply(command.session())) {
+                        return false;
+                    }
+                    targetHistory = command.session().historyState();
+                    candidate = copyCoreSession(command.session());
+                    if (!command.historyTransition().revert(command.session())
+                        || !Objects.equals(baselineHistory, command.session().historyState())
+                        || !baseline.currentFor(command.session())) {
+                        throw new IllegalStateException("Core history preparation rollback was not exact");
+                    }
+                }
+            }
+            long captureStartedAtNanos = lifecycleNowNanos();
+            CoreGraphUiProjection.EditorSnapshot snapshot = CoreGraphUiProjection.EditorSnapshot.capture(candidate);
+            long queuedAtNanos = lifecycleNowNanos();
+            coreProjectionRequestGeneration = nextProjectionGeneration(coreProjectionRequestGeneration);
+            CoreMutationCommit commit = new CoreMutationCommit(command.session(), baseline, candidate, command,
+                baselineHistory, targetHistory, coreProjectionRequestGeneration, coreProjectionGeneration);
+            CoreProjectionRequest request = new CoreProjectionRequest(coreProjectionRequestGeneration, snapshot, commit,
+                queuedAtNanos, elapsedMicros(captureStartedAtNanos, queuedAtNanos));
+            coreMutationCommitPending = commit;
+            ReSyncLifecycleDiagnostics.offer(serverId, "core_mutation_prepared", "resourceKey", baseline.resourceKey(),
+                "mutationId", command.mutationId(), "operation", command.operation(),
+                "sessionIdentity", baseline.sessionIdentity(), "nodeCount", snapshot.nodeCount(),
+                "prepareMicros", elapsedMicros(prepareStartedAtNanos, queuedAtNanos));
+            try {
+                previewCoreStructure(commit);
+            } catch (RuntimeException failure) {
+                restoreCoreStructuralPreview(commit, false);
+                ReSyncLifecycleDiagnostics.offer(serverId, "core_structure_preview_failed", "resourceKey",
+                    baseline.resourceKey(), "mutationId", command.mutationId(), "reason", TaskIdentities.failureName(failure));
+            }
+            if (activeCoreGraphSession() == command.session()) {
+                coreProjectionRequestedSnapshot = snapshot;
+            }
+            CoreProjectionRequest superseded = coreProjectionPendingBuild.getAndSet(request);
+            if (superseded != null) {
+                traceCoreProjectionDropped(superseded, null, "superseded_before_mutation_build");
+            }
+            traceCoreProjectionCaptured(request, "mutation:" + command.operation());
+            scheduleCoreProjectionWorker(request);
+            return true;
+        } catch (RuntimeException exception) {
+            String detail = exception.getMessage() == null || exception.getMessage().isBlank()
+                ? TaskIdentities.failureName(exception) : exception.getMessage();
+            ReLog.logger(LogTypes.FLOW).source(LogSource.server(serverId, serverId)).component(GraphEditorScreen.class)
+                .operation("Core Graph " + command.operation()).error("Core mutation failed: resource="
+                    + command.session().resource() + ",revision=" + command.session().revision() + ",nodeIds="
+                    + command.nodeIds() + ",reason=" + detail);
+            coreOperationUnavailable(command.operation());
+            coreProjectionRefreshQueued = true;
+            return false;
+        }
+    }
+
+    private static CoreGraphEditorSession copyCoreSession(CoreGraphEditorSession session) {
+        return session.isFunction()
+            ? new CoreGraphEditorSession(session.functionSourceDocument(), session.activeAuthoringChecksum(),
+                session.authoringCapabilities(), session.editCapabilities())
+            : new CoreGraphEditorSession(session.graphDocument(), session.activeAuthoringChecksum(),
+                session.authoringCapabilities(), session.editCapabilities());
+    }
+
+    private boolean startNextCoreMutation() {
+        while (!coreMutationQueue.isEmpty()) {
+            CoreMutationCommand command = coreMutationQueue.removeFirst();
+            if (startCoreMutation(command)) {
+                return true;
+            }
+            rejectUnstartedCoreMutation(command);
+        }
+        return false;
+    }
+
+    private void rejectUnstartedCoreMutation(CoreMutationCommand command) {
+        if (command == null || command.valuePreview() == null || activeCoreGraphSession() != command.session()) {
+            return;
+        }
+        String nodeId = command.valuePreview().nodeId().canonicalText();
+        FlowNodeWidget widget = widgetCache.get(nodeId);
+        if (widget != null) {
+            widget.rejectInputValuePreview(command.valuePreview());
+            queueGraphRenderGeometry(List.of(nodeId));
+        }
+    }
+
+    static CoreMutationTransaction transactCoreMutation(CoreGraphEditorSession session,
+                                                         Function<CoreGraphEditorSession, Boolean> mutation,
+                                                         Function<CoreGraphEditorSession,
+                                                             CoreGraphUiProjection.ProjectionResult> projection) {
+        Objects.requireNonNull(session, "Core graph session is required");
+        Objects.requireNonNull(mutation, "Core graph mutation is required");
+        Objects.requireNonNull(projection, "Core graph projection is required");
+        synchronized (session) {
+            CoreGraphEditorSession candidate = copyCoreSession(session);
+            boolean changed = Boolean.TRUE.equals(mutation.apply(candidate));
+            if (!changed) {
+                return new CoreMutationTransaction(false, false, null);
+            }
+            CoreGraphUiProjection.ProjectionResult result = projection.apply(candidate);
+            if (!completeCoreProjection(result)) {
+                return new CoreMutationTransaction(true, false, null);
+            }
+            if (candidate.isFunction()) {
+                session.replaceFunctionSource(candidate.functionSourceDocument());
+            } else {
+                session.replaceGraph(candidate.graphDocument());
+            }
+            return new CoreMutationTransaction(true, true, result.graph());
+        }
+    }
+
+    @Override
+    protected void applyCoreCommandInteraction(CommandBindingContext context) {
+        commitCoreGlobalMutation("Command Settings", current -> {
+            var next = commandMetadata(context);
+            if (current.commandMetadata().equals(next)) {
+                return false;
+            }
+            current.setCommandMetadata(next);
+            return true;
+        });
+    }
+
+    private GraphNode coreNode(CoreGraphEditorSession session, String nodeId) {
+        if (session == null || nodeId == null || nodeId.isBlank() || !session.isGraph() && !session.isFunction()) {
+            return null;
+        }
+        try {
+            NodeInstanceId identity = NodeInstanceId.parseCanonicalText(nodeId);
+            GraphDocument document = session.isFunction()
+                ? session.functionSourceDocument().graph() : session.graphDocument();
+            return document.nodes().stream().filter(node -> node.instanceId().equals(identity)).findFirst().orElse(null);
+        } catch (RuntimeException exception) {
+            return null;
+        }
+    }
+
+    private NodeInstanceId coreNodeId(String nodeId) {
+        if (nodeId == null || nodeId.isBlank()) {
+            return null;
+        }
+        try {
+            return NodeInstanceId.parseCanonicalText(nodeId);
+        } catch (RuntimeException exception) {
+            return null;
+        }
+    }
+
+    private ConnectionId coreConnectionId(FlowConnection connection) {
+        if (connection == null) {
+            return null;
+        }
+        JsonElement value = connection.getOpaqueProperties().get("connectionId");
+        if (value == null || !value.isJsonPrimitive()) {
+            return null;
+        }
+        try {
+            return ConnectionId.parseCanonicalText(value.getAsString());
+        } catch (RuntimeException exception) {
+            return null;
+        }
+    }
+
+    private PinId corePinId(String pinId) {
+        if (pinId == null || pinId.isBlank()) {
+            return null;
+        }
+        try {
+            return PinId.of(pinId);
+        } catch (RuntimeException exception) {
+            return null;
+        }
+    }
+
+    private Object coreTypedValueObject(TypedValue value) {
+        if (value == null || value.state() == TypedValue.State.OPAQUE) {
+            return null;
+        }
+        try {
+            return coreProjectedObject(coreProjectedValue(JsonParser.parseString(value.canonicalJson()).getAsJsonObject()));
+        } catch (RuntimeException exception) {
+            return null;
+        }
+    }
+
+    private static boolean coreTypeContainsResource(TypeExpr type) {
+        if (type instanceof TypeExpr.ResourceType) {
+            return true;
+        }
+        if (type instanceof TypeExpr.OptionalType optional) {
+            return coreTypeContainsResource(optional.element());
+        }
+        if (type instanceof TypeExpr.ListType list) {
+            return coreTypeContainsResource(list.element());
+        }
+        if (type instanceof TypeExpr.MapType map) {
+            return coreTypeContainsResource(map.key()) || coreTypeContainsResource(map.value());
+        }
+        if (type instanceof TypeExpr.TupleType tuple) {
+            return tuple.elements().stream().anyMatch(GraphEditorScreen::coreTypeContainsResource);
+        }
+        if (type instanceof TypeExpr.ResultType result) {
+            return coreTypeContainsResource(result.success()) || coreTypeContainsResource(result.failure());
+        }
+        if (type instanceof TypeExpr.UnionType union) {
+            return union.variants().stream().map(TypeExpr.UnionVariant::type).anyMatch(GraphEditorScreen::coreTypeContainsResource);
+        }
+        if (type instanceof TypeExpr.Named named) {
+            return named.arguments().stream().anyMatch(GraphEditorScreen::coreTypeContainsResource);
+        }
+        return false;
+    }
+
+    private static Object coreNormalizeTypedValue(TypeExpr type, Object value) {
+        if (type instanceof TypeExpr.OptionalType optional) {
+            return coreNormalizeTypedValue(optional.element(), value);
+        }
+        if (type instanceof TypeExpr.Named named && "builtin".equals(named.reference().ownerId())
+            && named.arguments().isEmpty()) {
+            return switch (named.reference().localId()) {
+                case "string" -> value instanceof String ? value : null;
+                case "boolean" -> value instanceof Boolean ? value : null;
+                case "integer" -> {
+                    if (value instanceof Number number) {
+                        try {
+                            yield new BigInteger(number.toString()).longValueExact();
+                        } catch (ArithmeticException exception) {
+                            yield null;
+                        }
+                    }
+                    yield null;
+                }
+                case "number" -> value instanceof Number ? new BigDecimal(value.toString()) : null;
+                case "uuid" -> {
+                    try {
+                        yield value instanceof UUID ? value : UUID.fromString(String.valueOf(value));
+                    } catch (IllegalArgumentException exception) {
+                        yield null;
+                    }
+                }
+                default -> value;
+            };
+        }
+        if (coreTypeContainsResource(type)) {
+            return null;
+        }
+        return value instanceof String || value instanceof Boolean || value instanceof Number
+            || value instanceof UUID || value instanceof Map<?, ?> || value instanceof List<?> ? value : null;
+    }
+
+    static TypedValue coreTypedValue(TypedValue previous, Object value, ServerId serverId) {
+        if (previous == null || previous.state() == TypedValue.State.OPAQUE || value == null) {
+            return null;
+        }
+        ServerResourceLocator selected = coreResourceLocator(previous.type(), value, serverId);
+        if (selected != null) {
+            if (previous.locator() != null && !previous.locator().unknown().isEmpty()) {
+                selected = new ServerResourceLocator(selected.serverId(), selected.type(), selected.id(),
+                    previous.locator().unknown());
+            }
+            try {
+                return new TypedValue(previous.type(), TypedValue.State.LOCATOR, previous.variantId(), null, selected,
+                    previous.unknown());
+            } catch (RuntimeException exception) {
+                return null;
+            }
+        }
+        if (coreTypeContainsResource(previous.type())) {
+            return null;
+        }
+        Object normalized = coreNormalizeTypedValue(previous.type(), value);
+        if (normalized == null) {
+            return null;
+        }
+        try {
+            return new TypedValue(previous.type(), TypedValue.State.VALUE, previous.variantId(), normalized, null,
+                previous.unknown());
+        } catch (RuntimeException exception) {
+            return null;
+        }
+    }
+
+    private static ServerResourceLocator coreResourceLocator(TypeExpr type, Object value, ServerId serverId) {
+        TypeReference expected = coreResourceType(type);
+        if (expected == null || value == null || serverId == null) {
+            return null;
+        }
+        try {
+            JsonValue encoded = CanonicalCodec.decodePermissive(GSON.toJson(value));
+            ServerResourceLocator locator = IdentityCodec.decodeLocator(encoded);
+            if (!serverId.equals(locator.serverId()) || !expected.ownerId().equals(locator.type().owner().canonicalText())
+                || !expected.localId().equals(locator.type().id().canonicalText())) {
+                return null;
+            }
+            return locator;
+        } catch (RuntimeException exception) {
+            return null;
+        }
+    }
+
+    private static TypeReference coreResourceType(TypeExpr type) {
+        if (type instanceof TypeExpr.ResourceType resource) {
+            return resource.resourceType();
+        }
+        if (type instanceof TypeExpr.OptionalType optional) {
+            return coreResourceType(optional.element());
+        }
+        return null;
+    }
+
+    private CoreGraphAuthoringAdapter.Result prepareCoreWidgetMutation(CoreGraphEditorSession session,
+                                                                       FlowGraph current) {
+        ReSyncFlowClient client = typedCatalogClient();
+        ReSyncResourceType resourceType = activeStudioDocument != null
+            ? ReSyncResourceType.byTypeId(activeStudioDocument.type())
+            : session.resource() != null
+                ? ReSyncResourceType.byTypeId(session.resource().resourceType().value()) : null;
+        ReSyncCatalogPublicationProjection.Snapshot catalog = client != null
+            ? client.catalogPublicationProjection().active().orElse(null) : null;
+        GraphDocument document = session.isFunction() ? session.functionSourceDocument().graph() : session.graphDocument();
+        if (client == null || resourceType == null || catalog == null || document == null) {
+            return CoreGraphAuthoringAdapter.Result.rejected("Core graph catalog authoring is unavailable.");
+        }
+        try {
+            JsonObject authoritativePayload = JsonParser.parseString(session.canonicalPayloadJson()).getAsJsonObject();
+            CoreGraphAuthoringAdapter.Context context = CoreGraphAuthoringAdapter.Context.strict(resourceType,
+                session.resource(), session.catalogBinding(), document.schemaVersion(), catalog.entries().values(),
+                session.revision());
+            return new CoreGraphAuthoringAdapter().convert(current, authoritativePayload, context);
+        } catch (RuntimeException exception) {
+            String reason = exception.getMessage();
+            return CoreGraphAuthoringAdapter.Result.rejected(reason == null || reason.isBlank()
+                ? "The Core graph cannot preserve the edited node value." : reason);
+        }
+    }
+
+    private boolean commitPreparedCoreWidgetMutation(CoreGraphAuthoringAdapter.Result prepared, String nodeId,
+                                                     NodeWidget.NodeValueMutation valuePreview) {
+        if (prepared == null || !prepared.lossless()) {
+            return false;
+        }
+        CoreGraphEditorSession session = coreInteractionSession();
+        GraphDocument currentDocument = coreGraphDocument(session);
+        GraphDocument preparedDocument = prepared.graphDocument() != null ? prepared.graphDocument()
+            : prepared.functionSourceDocument() != null ? prepared.functionSourceDocument().graph() : null;
+        if (currentDocument == null || preparedDocument == null) {
+            return false;
+        }
+        List<WorkspacePatch<JsonValue>> patches = CoreGraphWorkspacePatch.diff(currentDocument, preparedDocument);
+        if (patches.isEmpty()) {
+            return false;
+        }
+        return commitCoreValueMutation(valuePreview, current -> {
+            GraphNode currentNode = coreNode(current, nodeId);
+            PinValue currentValue = currentNode != null ? currentNode.values().get(valuePreview.pinId()) : null;
+            Object presented = currentValue != null ? coreTypedValueObject(currentValue.value()) : null;
+            if (Objects.deepEquals(presented, valuePreview.value())) {
+                return false;
+            }
+            current.applyGraphPatches(patches);
+            return true;
+        }, nodeId);
+    }
+
+    private boolean hasOutstandingCoreValueMutation(CoreGraphEditorSession session, NodeInstanceId nodeId, PinId pinId) {
+        CoreMutationCommand pending = coreMutationCommitPending != null ? coreMutationCommitPending.command() : null;
+        if (matchesCoreValueMutation(pending, session, nodeId, pinId)) {
+            return true;
+        }
+        return coreMutationQueue.stream().anyMatch(command -> matchesCoreValueMutation(command, session, nodeId, pinId));
+    }
+
+    private static boolean matchesCoreValueMutation(CoreMutationCommand command, CoreGraphEditorSession session,
+                                                    NodeInstanceId nodeId, PinId pinId) {
+        NodeWidget.NodeValueMutation preview = command != null ? command.valuePreview() : null;
+        return command != null && command.session() == session && preview != null
+            && preview.nodeId().equals(nodeId) && preview.pinId().equals(pinId);
+    }
+
+    private boolean handleCoreWidgetValueMutation(NodeWidget.NodeValueMutation mutation) {
+        CoreGraphEditorSession session = coreInteractionSession();
+        String nodeId = mutation != null ? mutation.nodeId().canonicalText() : "";
+        GraphNode node = coreNode(session, nodeId);
+        NodeInstanceId identity = mutation != null ? mutation.nodeId() : null;
+        PinId pinId = mutation != null ? mutation.pinId() : null;
+        if (session == null || node == null || identity == null || pinId == null) {
+            if (session != null) {
+                coreOperationUnavailable("Node Values");
+                refreshCoreProjection();
+            }
+            return false;
+        }
+        if (mutation.elementId() != null) {
+            return handleCoreRepeatableValueMutation(session, node, mutation);
+        }
+        PinValue previous = node.values().get(pinId);
+        boolean outstanding = hasOutstandingCoreValueMutation(activeCoreGraphSession(), identity, pinId);
+        if (mutation.remove()) {
+            if (previous == null && !outstanding) {
+                return false;
+            }
+            return commitCoreValueMutation(mutation, current -> {
+                GraphNode currentNode = coreNode(current, identity.canonicalText());
+                if (currentNode == null || !currentNode.values().containsKey(pinId)) {
+                    return false;
+                }
+                current.removeNodeValue(identity, pinId);
+                return true;
+            }, identity.canonicalText());
+        }
+        if (mutation.exactValue() != null) {
+            TypedValue exact = mutation.exactValue();
+            if (previous != null && previous.value().equals(exact) && !outstanding) {
+                return false;
+            }
+            return commitCoreValueMutation(mutation, current -> {
+                GraphNode currentNode = coreNode(current, identity.canonicalText());
+                if (currentNode == null) {
+                    return false;
+                }
+                PinValue currentValue = currentNode.values().get(pinId);
+                if (currentValue != null && currentValue.value().equals(exact)) {
+                    return false;
+                }
+                current.setNodeValue(identity, new PinValue(pinId, exact,
+                    currentValue != null ? currentValue.unknown() : OpaqueData.empty()));
+                return true;
+            }, identity.canonicalText());
+        }
+        Object before = previous != null ? coreTypedValueObject(previous.value()) : null;
+        if (Objects.deepEquals(before, mutation.value()) && !outstanding) {
+            return false;
+        }
+        if (previous == null) {
+            CoreGraphAuthoringAdapter.Result prepared;
+            try {
+                FlowGraph proposal = FlowSerializer.deserialize(FlowSerializer.toSnapshotJsonObject(graph));
+                FlowNode proposedNode = proposal != null ? proposal.getNodes().get(nodeId) : null;
+                if (proposedNode == null) {
+                    return false;
+                }
+                Map<String, Object> values = proposedNode.getInputValues() != null
+                    ? new LinkedHashMap<>(proposedNode.getInputValues()) : new LinkedHashMap<>();
+                values.put(pinId.canonicalText(), mutation.value());
+                proposedNode.setInputValues(values);
+                prepared = prepareCoreWidgetMutation(session, proposal);
+            } catch (RuntimeException exception) {
+                coreOperationUnavailable("Node Values");
+                refreshCoreProjection();
+                return false;
+            }
+            if (!prepared.lossless()) {
+                ReLog.logger(LogTypes.FLOW).source(LogSource.server(serverId, serverId)).component(GraphEditorScreen.class)
+                    .operation("Core Graph Node Value").error("Core node value rejected: reason=" + prepared.reason());
+                coreOperationUnavailable("Node Values");
+                refreshCoreProjection();
+                return false;
+            }
+            return commitPreparedCoreWidgetMutation(prepared, identity.canonicalText(), mutation);
+        }
+        ServerId resourceServer = session.resource() != null ? session.resource().serverId() : null;
+        TypedValue replacement = coreTypedValue(previous.value(), mutation.value(), resourceServer);
+        if (replacement == null) {
+            coreOperationUnavailable("Node Values");
+            refreshCoreProjection();
+            return false;
+        }
+        return commitCoreValueMutation(mutation, current -> {
+            GraphNode currentNode = coreNode(current, identity.canonicalText());
+            PinValue currentValue = currentNode != null ? currentNode.values().get(pinId) : null;
+            Object presented = currentValue != null ? coreTypedValueObject(currentValue.value()) : null;
+            if (Objects.deepEquals(presented, mutation.value())) {
+                return false;
+            }
+            TypedValue currentReplacement = currentValue != null
+                ? coreTypedValue(currentValue.value(), mutation.value(), resourceServer) : replacement;
+            if (currentReplacement == null) {
+                return false;
+            }
+            current.setNodeValue(identity, new PinValue(pinId, currentReplacement,
+                currentValue != null ? currentValue.unknown() : previous.unknown()));
+            return true;
+        }, identity.canonicalText());
+    }
+
+    private boolean handleCoreRepeatableValueMutation(CoreGraphEditorSession session, GraphNode node,
+                                                       NodeWidget.NodeValueMutation mutation) {
+        RepeatableGroupId groupId = corePinRepeatableGroup(mutation.nodeId().canonicalText(), mutation.pinId());
+        if (groupId == null) {
+            return false;
+        }
+        PinValue previous = coreRepeatableValue(node, groupId, mutation.pinId(), mutation.elementId());
+        if (mutation.remove()) {
+            if (previous == null) {
+                return false;
+            }
+            return commitCoreValueMutation(mutation,
+                current -> applyCoreRepeatableValue(current, mutation, groupId, null), mutation.nodeId().canonicalText());
+        }
+        TypedValue replacement = mutation.exactValue();
+        if (replacement == null) {
+            TypeExpr type = corePinType(mutation.nodeId().canonicalText(), mutation.pinId());
+            if (type == null) {
+                coreOperationUnavailable("Node Values");
+                refreshCoreProjection();
+                return false;
+            }
+            ServerId resourceServer = session.resource() != null ? session.resource().serverId() : null;
+            replacement = coreTypedValue(previous != null ? previous.value() : TypedValue.absent(type),
+                mutation.value(), resourceServer);
+        }
+        if (replacement == null || previous != null && previous.value().equals(replacement)) {
+            return false;
+        }
+        TypedValue exactReplacement = replacement;
+        return commitCoreValueMutation(mutation,
+            current -> applyCoreRepeatableValue(current, mutation, groupId, exactReplacement),
+            mutation.nodeId().canonicalText());
+    }
+
+    private TypeExpr corePinType(String nodeId, PinId pinId) {
+        FlowNode flowNode = graph != null ? graph.getNodes().get(nodeId) : null;
+        NodeDefinition definition = flowNode != null ? resolveAuthoritativeNodeDefinition(flowNode.getType()) : null;
+        if (definition == null || pinId == null) {
+            return null;
+        }
+        return Stream.concat(definition.getInputs().stream(), definition.getOutputs().stream())
+            .filter(pin -> pinId.equals(pin.getId())).map(NodeDefinition.PinDefinition::getTypedType)
+            .filter(Objects::nonNull).findFirst().orElse(null);
+    }
+
+    private RepeatableGroupId corePinRepeatableGroup(String nodeId, PinId pinId) {
+        FlowNode flowNode = graph != null ? graph.getNodes().get(nodeId) : null;
+        NodeDefinition definition = flowNode != null ? resolveAuthoritativeNodeDefinition(flowNode.getType()) : null;
+        if (definition == null || pinId == null) {
+            return null;
+        }
+        NodeDefinition.RepeatablePin repeatable = Stream.concat(definition.getInputs().stream(),
+                definition.getOutputs().stream())
+            .filter(pin -> pinId.equals(pin.getId())).map(NodeDefinition.PinDefinition::getRepeatable)
+            .filter(Objects::nonNull).findFirst().orElse(null);
+        try {
+            return repeatable != null ? RepeatableGroupId.of(repeatable.getGroupId()) : null;
+        } catch (RuntimeException exception) {
+            return null;
+        }
+    }
+
+    private static PinValue coreRepeatableValue(GraphNode node, RepeatableGroupId groupId, PinId pinId,
+                                                RepeatableElementId elementId) {
+        if (node == null || groupId == null || pinId == null || elementId == null) {
+            return null;
+        }
+        return node.repeatables().stream().filter(binding -> binding.groupId().equals(groupId))
+            .flatMap(binding -> binding.elements().stream())
+            .filter(element -> element.elementId().equals(elementId))
+            .map(element -> element.values().get(pinId)).filter(Objects::nonNull).findFirst().orElse(null);
+    }
+
+    static boolean applyCoreRepeatableValue(CoreGraphEditorSession session,
+                                            NodeWidget.NodeValueMutation mutation,
+                                            RepeatableGroupId groupId,
+                                            TypedValue replacement) {
+        GraphDocument document = coreGraphDocument(session);
+        GraphNode node = mutation != null && document != null ? document.nodes().stream()
+            .filter(candidate -> candidate.instanceId().equals(mutation.nodeId())).findFirst().orElse(null) : null;
+        if (node == null) {
+            return false;
+        }
+        boolean[] changed = {false};
+        List<RepeatableBinding> bindings = node.repeatables().stream().map(binding -> {
+            if (!binding.groupId().equals(groupId)) {
+                return binding;
+            }
+            List<RepeatableElement> elements = binding.elements().stream().map(element -> {
+                if (!element.elementId().equals(mutation.elementId())) {
+                    return element;
+                }
+                LinkedHashMap<PinId, PinValue> values = new LinkedHashMap<>(element.values());
+                PinValue previous = values.get(mutation.pinId());
+                if (replacement == null) {
+                    changed[0] |= values.remove(mutation.pinId()) != null;
+                } else if (previous == null || !previous.value().equals(replacement)) {
+                    values.put(mutation.pinId(), new PinValue(mutation.pinId(), replacement,
+                        previous != null ? previous.unknown() : OpaqueData.empty()));
+                    changed[0] = true;
+                }
+                return new RepeatableElement(element.elementId(), values, element.unknown());
+            }).toList();
+            return new RepeatableBinding(binding.groupId(), binding.ordered(), elements, binding.unknown());
+        }).toList();
+        if (!changed[0]) {
+            return false;
+        }
+        session.setNodeRepeatables(mutation.nodeId(), bindings);
+        return true;
+    }
+
+    private boolean handleCoreInspectorMutation(NodeWidget.InspectorMutation mutation) {
+        CoreGraphEditorSession session = coreInteractionSession();
+        NodeInstanceId identity = mutation != null ? mutation.nodeId() : null;
+        String nodeId = identity != null ? identity.canonicalText() : "";
+        if (session == null || identity == null || mutation.fields().isEmpty() || coreNode(session, nodeId) == null) {
+            if (session != null) {
+                coreOperationUnavailable("Inspector");
+                refreshCoreProjection();
+            }
+            return false;
+        }
+        if (!validCoreInspectorMutation(mutation)) {
+            coreOperationUnavailable("Inspector");
+            return false;
+        }
+        return commitCoreMutation("Inspector", current -> applyCoreInspectorMutation(current, mutation), nodeId);
+    }
+
+    private boolean handleCoreRepeatableMutation(NodeWidget.RepeatableMutation mutation) {
+        CoreGraphEditorSession session = coreInteractionSession();
+        String nodeId = mutation != null ? mutation.nodeId().canonicalText() : "";
+        GraphNode node = coreNode(session, nodeId);
+        FlowNode flowNode = graph != null ? graph.getNodes().get(nodeId) : null;
+        ReSyncGenericWidgetCapabilities.WidgetDefinition generic = flowNode != null
+            ? genericWidgetDefinition(flowNode.getType()) : null;
+        if (session == null || node == null || generic == null || mutation == null) {
+            if (session != null) {
+                coreOperationUnavailable("Repeatable Pins");
+                refreshCoreProjection();
+            }
+            return false;
+        }
+        LinkedHashSet<String> affected = new LinkedHashSet<>();
+        affected.add(nodeId);
+        GraphDocument document = coreGraphDocument(session);
+        if (document != null && mutation.kind() == NodeWidget.RepeatableMutationKind.REMOVE) {
+            document.connections().stream()
+                .filter(connection -> repeatableEndpointMatches(connection.source(), mutation, generic.definition())
+                    || repeatableEndpointMatches(connection.target(), mutation, generic.definition()))
+                .flatMap(connection -> Stream.of(connection.source().nodeId(), connection.target().nodeId()))
+                .map(NodeInstanceId::canonicalText).forEach(affected::add);
+        }
+        String operation = switch (mutation.kind()) {
+            case ADD -> "Add Repeatable Item";
+            case REMOVE -> "Remove Repeatable Item";
+            case MOVE_EARLIER, MOVE_LATER -> "Reorder Repeatable Item";
+        };
+        return commitCoreStructuralMutation(operation,
+            current -> applyCoreRepeatableMutation(current, mutation, generic.definition()),
+            affected.toArray(String[]::new));
+    }
+
+    static boolean applyCoreRepeatableMutation(CoreGraphEditorSession session,
+                                               NodeWidget.RepeatableMutation mutation,
+                                               NodeDefinition definition) {
+        GraphDocument document = coreGraphDocument(session);
+        GraphNode node = mutation != null && document != null ? document.nodes().stream()
+            .filter(candidate -> candidate.instanceId().equals(mutation.nodeId())).findFirst().orElse(null) : null;
+        CoreRepeatableUiProjection.Projection projection = node != null
+            ? CoreRepeatableUiProjection.project(node, definition) : CoreRepeatableUiProjection.Projection.empty();
+        CoreRepeatableUiProjection.Group group = mutation != null
+            ? projection.group(mutation.groupId()).orElse(null) : null;
+        if (document == null || node == null || !projection.available() || group == null) {
+            return false;
+        }
+        RepeatableBinding current = node.repeatables().stream()
+            .filter(binding -> binding.groupId().equals(mutation.groupId())).findFirst().orElse(null);
+        List<RepeatableElement> elements = new ArrayList<>(current != null ? current.elements() : List.of());
+        if (mutation.kind() == NodeWidget.RepeatableMutationKind.ADD) {
+            if (elements.size() >= group.maximum()
+                || elements.stream().anyMatch(element -> element.elementId().equals(mutation.elementId()))) {
+                return false;
+            }
+            elements.add(new RepeatableElement(mutation.elementId(), Map.of()));
+            int requiredSize = Math.min(group.maximum(), Math.max(elements.size(), group.minimum()));
+            int generatedIndex = 0;
+            while (elements.size() < requiredSize) {
+                RepeatableElementId generated = RepeatableElementId.deterministic(
+                    mutation.mutationId() + ":" + mutation.groupId().canonicalText() + ":" + generatedIndex++);
+                if (elements.stream().noneMatch(element -> element.elementId().equals(generated))) {
+                    elements.add(new RepeatableElement(generated, Map.of()));
+                }
+            }
+        } else if (mutation.kind() == NodeWidget.RepeatableMutationKind.REMOVE) {
+            if (elements.size() <= group.minimum()
+                || elements.stream().noneMatch(element -> element.elementId().equals(mutation.elementId()))) {
+                return false;
+            }
+            elements.removeIf(element -> element.elementId().equals(mutation.elementId()));
+        } else {
+            if (!group.ordered()) {
+                return false;
+            }
+            int index = -1;
+            for (int position = 0; position < elements.size(); position++) {
+                if (elements.get(position).elementId().equals(mutation.elementId())) {
+                    index = position;
+                    break;
+                }
+            }
+            int target = mutation.kind() == NodeWidget.RepeatableMutationKind.MOVE_EARLIER
+                ? index - 1 : index + 1;
+            if (index < 0 || target < 0 || target >= elements.size()) {
+                return false;
+            }
+            Collections.swap(elements, index, target);
+        }
+        RepeatableBinding replacement = new RepeatableBinding(group.groupId(), group.ordered(), elements,
+            current != null ? current.unknown() : OpaqueData.empty());
+        List<GraphNode> nodes = document.nodes().stream().map(candidate -> {
+            if (!candidate.instanceId().equals(mutation.nodeId())) {
+                return candidate;
+            }
+            List<RepeatableBinding> bindings = new ArrayList<>(candidate.repeatables());
+            int index = -1;
+            for (int position = 0; position < bindings.size(); position++) {
+                if (bindings.get(position).groupId().equals(mutation.groupId())) {
+                    index = position;
+                    break;
+                }
+            }
+            if (index >= 0) {
+                bindings.set(index, replacement);
+            } else {
+                bindings.add(replacement);
+            }
+            Map<Object, Object> inspector = new LinkedHashMap<>();
+            inspector.putAll(candidate.inspector());
+            inspector.putAll(candidate.inspectorFields());
+            return new GraphNode(candidate.instanceId(), candidate.definition(), candidate.definitionVersion(),
+                candidate.modeId(), candidate.values(), inspector, candidate.branches(), bindings,
+                candidate.inspectorState(), candidate.x(), candidate.y(), candidate.unknown());
+        }).toList();
+        List<GraphConnection> connections = mutation.kind() == NodeWidget.RepeatableMutationKind.REMOVE
+            ? document.connections().stream().filter(connection ->
+                !repeatableEndpointMatches(connection.source(), mutation, definition)
+                    && !repeatableEndpointMatches(connection.target(), mutation, definition)).toList()
+            : document.connections();
+        List<GraphPassthrough> passthroughs = corePassthroughs(document, nodes, connections);
+        session.replaceGraph(new GraphDocument(document.schemaVersion(), document.resource(), document.revision(),
+            document.catalogBinding(), document.requiredCapabilities(), nodes, connections, passthroughs, document.variables(),
+            document.functions(), document.unknown()));
+        return true;
+    }
+
+    private static boolean repeatableEndpointMatches(GraphEndpoint endpoint,
+                                                     NodeWidget.RepeatableMutation mutation,
+                                                     NodeDefinition definition) {
+        if (endpoint == null || mutation == null || definition == null
+            || !endpoint.nodeId().equals(mutation.nodeId()) || !mutation.elementId().equals(endpoint.elementId())) {
+            return false;
+        }
+        return Stream.concat(definition.getInputs().stream(), definition.getOutputs().stream())
+            .filter(pin -> endpoint.pinId().equals(pin.getId()))
+            .map(NodeDefinition.PinDefinition::getRepeatable)
+            .filter(Objects::nonNull)
+            .anyMatch(repeatable -> mutation.groupId().canonicalText().equals(repeatable.getGroupId()));
+    }
+
+    private static boolean validCoreInspectorMutation(NodeWidget.InspectorMutation mutation) {
+        LinkedHashSet<InspectorFieldId> unique = new LinkedHashSet<>();
+        return mutation != null && !mutation.fields().isEmpty()
+            && mutation.fields().stream().allMatch(field -> unique.add(field.original().fieldId()));
+    }
+
+    static boolean applyCoreInspectorMutation(CoreGraphEditorSession session, NodeWidget.InspectorMutation mutation) {
+        if (session == null || mutation == null || !validCoreInspectorMutation(mutation)) {
+            return false;
+        }
+        NodeInstanceId identity = mutation.nodeId();
+        CoreGraphUiProjection projection = new CoreGraphUiProjection();
+        CoreGraphUiProjection.InspectorProjection currentProjection = projection.projectInspector(session, identity)
+            .orElse(null);
+        if (currentProjection == null) {
+            return false;
+        }
+        for (NodeWidget.InspectorFieldMutation field : mutation.fields()) {
+            CoreGraphUiProjection.InspectorValue currentValue = currentProjection.field(field.original().fieldId())
+                .orElse(null);
+            if (currentValue != null && !currentValue.canonicalJson().equals(field.original().canonicalJson())) {
+                return false;
+            }
+            if (currentValue == null && !field.original().absent()) {
+                return false;
+            }
+        }
+        boolean changed = false;
+        for (NodeWidget.InspectorFieldMutation field : mutation.fields()) {
+            InspectorFieldId fieldId = field.original().fieldId();
+            if (field.remove()) {
+                if (currentProjection.contains(fieldId)) {
+                    projection.removeInspectorValue(session, identity, fieldId);
+                    changed = true;
+                }
+                continue;
+            }
+            CoreGraphUiProjection.InspectorValue currentValue = currentProjection.field(fieldId).orElse(null);
+            if (currentValue == null || !currentValue.canonicalJson().equals(field.replacement().canonicalJson())) {
+                if (field.exactOption()) {
+                    projection.setExactInspectorValue(session, identity, field.replacement());
+                } else {
+                    projection.setInspectorValue(session, identity, field.replacement());
+                }
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    private boolean coreSetLiteralInput(String nodeId, String pinName, String value, ReSyncResourceDragPayload payload) {
+        CoreGraphEditorSession session = activeCoreGraphSession();
+        GraphNode node = coreNode(session, nodeId);
+        NodeInstanceId identity = coreNodeId(nodeId);
+        PinId pinId = corePinId(pinName);
+        if (session == null || node == null || identity == null || pinId == null) {
+            return false;
+        }
+        PinValue previous = node.values().get(pinId);
+        if (previous == null || previous.value().state() != TypedValue.State.LOCATOR || previous.value().locator() == null
+            || payload == null || payload.id() == null || payload.id().isBlank()) {
+            return false;
+        }
+        try {
+            ServerResourceLocator locator = new ServerResourceLocator(previous.value().locator().serverId(),
+                previous.value().locator().type(), payload.id(), previous.value().locator().unknown());
+            TypedValue replacement = new TypedValue(previous.value().type(), TypedValue.State.LOCATOR,
+                previous.value().variantId(), null, locator, previous.value().unknown());
+            return commitCoreMutation("Resource Input", current -> {
+                current.setNodeValue(identity, new PinValue(pinId, replacement, previous.unknown()));
+                return true;
+            }, identity.canonicalText());
+        } catch (RuntimeException exception) {
+            coreOperationUnavailable("Resource Input");
+            refreshCoreProjection();
+            return false;
+        }
+    }
+
+    private boolean coreRemoveConnections(String operation, Function<GraphConnection, Boolean> remove,
+                                          String... nodeIds) {
+        CoreGraphEditorSession session = coreInteractionSession();
+        if (session == null) {
+            return false;
+        }
+        GraphDocument document = session.isFunction()
+            ? session.functionSourceDocument().graph() : session.graphDocument();
+        List<GraphConnection> removed = document.connections().stream()
+            .filter(connection -> Boolean.TRUE.equals(remove.apply(connection))).toList();
+        if (removed.isEmpty()) {
+            return false;
+        }
+        Set<ConnectionId> removedIds = removed.stream().map(GraphConnection::connectionId).collect(Collectors.toSet());
+        LinkedHashSet<String> affectedNodeIds = new LinkedHashSet<>();
+        if (nodeIds != null) {
+            Arrays.stream(nodeIds).filter(Objects::nonNull).forEach(affectedNodeIds::add);
+        }
+        removed.forEach(connection -> {
+            affectedNodeIds.add(connection.source().nodeId().canonicalText());
+            affectedNodeIds.add(connection.target().nodeId().canonicalText());
+        });
+        return commitCoreStructuralMutation(operation, current -> {
+            GraphDocument latest = coreGraphDocument(current);
+            List<GraphConnection> remaining = latest.connections().stream()
+                .filter(connection -> !removedIds.contains(connection.connectionId())).toList();
+            if (remaining.size() == latest.connections().size()) {
+                return false;
+            }
+            current.setConnections(remaining);
+            return true;
+        }, affectedNodeIds.toArray(String[]::new));
+    }
+
+    private boolean coreConnectionEndpointMatches(GraphEndpoint endpoint, String nodeId, String pinName) {
+        FlowNodeWidget widget = widgetCache.get(nodeId);
+        CoreRepeatableUiProjection.PinEndpoint requested = widget != null ? widget.corePinEndpoint(pinName) : null;
+        PinId pinId = requested != null ? requested.pinId() : corePinId(pinName);
+        RepeatableElementId elementId = requested != null ? requested.elementId() : null;
+        return endpoint != null && endpoint.nodeId().canonicalText().equals(nodeId)
+            && Objects.equals(endpoint.pinId(), pinId) && Objects.equals(endpoint.elementId(), elementId);
+    }
+
+    private static GraphDocument coreGraphDocument(CoreGraphEditorSession session) {
+        if (session == null) {
+            return null;
+        }
+        return session.isFunction() ? session.functionSourceDocument().graph() : session.graphDocument();
+    }
+
+    private GraphConnection coreGraphConnection(FlowConnection sourceConnection, String sourceNodeId, String sourcePin,
+                                                String targetNodeId, String targetPin) {
+        GraphEndpoint source = coreEndpoint(sourceConnection, sourceNodeId, sourcePin, true);
+        GraphEndpoint target = coreEndpoint(null, targetNodeId, targetPin, false);
+        if (source == null || target == null) {
+            return null;
+        }
+        return new GraphConnection(ConnectionId.interactive(), source, target);
+    }
+
+    private CreatedCoreEndpoint createdCoreEndpoint(GraphNode node, NodeDefinition definition, String pinName) {
+        PinId pinId = corePinId(pinName);
+        if (node == null || definition == null || pinId == null) {
+            return null;
+        }
+        NodeDefinition.PinDefinition pin = Stream.concat(definition.getInputs().stream(), definition.getOutputs().stream())
+            .filter(candidate -> pinId.equals(candidate.getId())).findFirst().orElse(null);
+        if (pin == null) {
+            return null;
+        }
+        NodeDefinition.RepeatablePin repeatable = pin.getRepeatable();
+        if (repeatable == null) {
+            return new CreatedCoreEndpoint(node, new GraphEndpoint(node.instanceId(), pinId));
+        }
+        RepeatableGroupId groupId;
+        try {
+            groupId = RepeatableGroupId.of(repeatable.getGroupId());
+        } catch (RuntimeException exception) {
+            return null;
+        }
+        List<RepeatableBinding> bindings = new ArrayList<>(node.repeatables());
+        int bindingIndex = -1;
+        RepeatableBinding binding = null;
+        for (int index = 0; index < bindings.size(); index++) {
+            if (bindings.get(index).groupId().equals(groupId)) {
+                bindingIndex = index;
+                binding = bindings.get(index);
+                break;
+            }
+        }
+        List<RepeatableElement> elements = new ArrayList<>(binding != null ? binding.elements() : List.of());
+        if (repeatable.getMaxItems() < 1) {
+            return null;
+        }
+        int requiredSize = Math.min(repeatable.getMaxItems(), Math.max(1, repeatable.getMinItems()));
+        if (elements.size() < requiredSize) {
+            while (elements.size() < requiredSize) {
+                elements.add(new RepeatableElement(RepeatableElementId.interactive(), Map.of()));
+            }
+            RepeatableBinding replacement = new RepeatableBinding(groupId,
+                binding != null ? binding.ordered() : repeatable.isOrdered(), elements,
+                binding != null ? binding.unknown() : OpaqueData.empty());
+            if (bindingIndex >= 0) {
+                bindings.set(bindingIndex, replacement);
+            } else {
+                bindings.add(replacement);
+            }
+            Map<Object, Object> inspector = new LinkedHashMap<>();
+            inspector.putAll(node.inspector());
+            inspector.putAll(node.inspectorFields());
+            node = new GraphNode(node.instanceId(), node.definition(), node.definitionVersion(), node.modeId(),
+                node.values(), inspector, node.branches(), bindings, node.inspectorState(), node.x(), node.y(),
+                node.unknown());
+        }
+        return new CreatedCoreEndpoint(node, new GraphEndpoint(node.instanceId(), pinId,
+            elements.getFirst().elementId(), null));
+    }
+
+    private record CreatedCoreEndpoint(GraphNode node, GraphEndpoint endpoint) {
+    }
+
+    private GraphEndpoint coreEndpoint(FlowConnection connection, String nodeId, String pinName, boolean source) {
+        NodeInstanceId node = coreNodeId(nodeId);
+        FlowNodeWidget widget = widgetCache.get(nodeId);
+        CoreRepeatableUiProjection.PinEndpoint requested = widget != null ? widget.corePinEndpoint(pinName) : null;
+        PinId pin = requested != null ? requested.pinId() : corePinId(pinName);
+        if (node == null || pin == null) {
+            return null;
+        }
+        RepeatableElementId element = coreEndpointElement(connection, source);
+        if (element == null && requested != null) {
+            element = requested.elementId();
+        }
+        BranchId branch = coreEndpointBranch(connection, source);
+        return new GraphEndpoint(node, pin, element, branch);
+    }
+
+    private RepeatableElementId coreEndpointElement(FlowConnection connection, boolean source) {
+        JsonElement value = coreEndpointValue(connection, source, "ElementId");
+        if (value == null || !value.isJsonPrimitive()) {
+            return null;
+        }
+        try {
+            return RepeatableElementId.parseCanonicalText(value.getAsString());
+        } catch (RuntimeException exception) {
+            return null;
+        }
+    }
+
+    private BranchId coreEndpointBranch(FlowConnection connection, boolean source) {
+        JsonElement value = coreEndpointValue(connection, source, "BranchId");
+        if (value == null || !value.isJsonPrimitive()) {
+            return null;
+        }
+        try {
+            return BranchId.of(value.getAsString());
+        } catch (RuntimeException exception) {
+            return null;
+        }
+    }
+
+    private JsonElement coreEndpointValue(FlowConnection connection, boolean source, String suffix) {
+        if (connection == null) {
+            return null;
+        }
+        String prefix = source ? "source" : "target";
+        return connection.getOpaqueProperties().get(prefix + suffix);
+    }
+
+    public static void refreshNodeCatalogForServer(String serverId) {
+        for (GraphEditorScreen screen : OPEN_SCREENS) {
+            if (screen != null && screen.isWorkspaceLifecycleActive() && serverId != null
+                && serverId.equals(screen.getServerId())) {
+                screen.queueNodeCatalogRefresh();
             }
         }
     }
 
     public static GraphEditorScreen getStudioScreen(String serverId) {
         for (GraphEditorScreen screen : OPEN_SCREENS) {
-            if (screen != null
+            if (screen != null && screen.isWorkspaceLifecycleActive()
                 && screen.isStudioMode()
                 && screen.startupState == StudioStartupState.READY
                 && screen.studioChromeBuilt
@@ -930,12 +7218,21 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                 return screen;
             }
         }
+        WeakReference<GraphEditorScreen> closing = serverId != null ? CLOSING_LIVE_SCREENS.get(serverId) : null;
+        GraphEditorScreen screen = closing != null ? closing.get() : null;
+        if (screen != null && screen.isWorkspaceLifecycleActive() && screen.liveStudioFullEditorMode
+            && serverId.equals(screen.getServerId())) {
+            return screen;
+        }
+        if (closing != null) {
+            CLOSING_LIVE_SCREENS.remove(serverId, closing);
+        }
         return null;
     }
 
     public static void refreshWorldsForServer(String serverId) {
         for (GraphEditorScreen screen : OPEN_SCREENS) {
-            if (screen != null && serverId != null && serverId.equals(screen.getServerId())) {
+            if (screen != null && screen.isWorkspaceLifecycleActive() && serverId != null && serverId.equals(screen.getServerId())) {
                 screen.onWorldSnapshotRefreshed();
             }
         }
@@ -943,7 +7240,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
     public static void handleWorldOperationResultForServer(String serverId, WorldOperationResult result) {
         for (GraphEditorScreen screen : OPEN_SCREENS) {
-            if (screen != null && serverId != null && serverId.equals(screen.getServerId())) {
+            if (screen != null && screen.isWorkspaceLifecycleActive() && serverId != null && serverId.equals(screen.getServerId())) {
                 screen.handleWorldOperationResult(result);
             }
         }
@@ -954,7 +7251,8 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             return;
         }
         for (GraphEditorScreen screen : OPEN_SCREENS) {
-            if (screen != null && serverId.equals(screen.getServerId()) && screen.matchesEditorResource(error.resourceType(), error.resourceId())) {
+            if (screen != null && screen.isWorkspaceLifecycleActive() && serverId.equals(screen.getServerId())
+                && screen.matchesEditorResource(error.resourceType(), error.resourceId())) {
                 ReSyncStudioView view = screen.activeStudioView();
                 if (view instanceof ScreenBackedStudioView screenView) {
                     screenView.applyEditorError(error);
@@ -970,7 +7268,8 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             return;
         }
         for (GraphEditorScreen screen : OPEN_SCREENS) {
-            if (screen != null && serverId.equals(screen.getServerId()) && screen.matchesEditorResource(resourceType, resourceId)) {
+            if (screen != null && screen.isWorkspaceLifecycleActive() && serverId.equals(screen.getServerId())
+                && screen.matchesEditorResource(resourceType, resourceId)) {
                 ReSyncStudioView view = screen.activeStudioView();
                 if (view instanceof ScreenBackedStudioView screenView) {
                     screenView.clearEditorError();
@@ -983,7 +7282,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
     public static void handleWorldAuditSnapshotForServer(String serverId, JsonElement data) {
         for (GraphEditorScreen screen : OPEN_SCREENS) {
-            if (screen != null && serverId != null && serverId.equals(screen.getServerId())) {
+            if (screen != null && screen.isWorkspaceLifecycleActive() && serverId != null && serverId.equals(screen.getServerId())) {
                 screen.showWorldAuditSnapshot(data);
             }
         }
@@ -1052,9 +7351,36 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             return;
         }
         if (studioMode && (startupState != StudioStartupState.READY || activeStudioDocument == null)) {
+            traceInitialViewportWait("studio_startup", null);
             return;
         }
-        if (worldWidgets.isEmpty()) {
+        if (!initialViewportCatalogReady(nodeCatalogRefreshQueued, catalogRefresh != null)) {
+            traceInitialViewportWait("catalog_refresh", null);
+            return;
+        }
+        GraphRenderIndex renderIndex = ensureGraphRenderIndex();
+        if (renderIndex == null) {
+            traceInitialViewportWait("render_index", null);
+            if (!initialViewportFallbackApplied) {
+                WorldBounds fallbackBounds = fallbackViewportBounds();
+                if (fallbackBounds != null) {
+                    fitViewportToBounds(fallbackBounds);
+                    initialViewportFallbackApplied = true;
+                    ReSyncFlowClient.traceLifecycle(serverId, "viewport_fit_applied", "serverId", serverId,
+                        "resourceKey", temporaryLifecycleGraphKey(graph), "requestId", "viewport-fit", "mutationId",
+                        graphRenderMutationVersion, "generation", workspacePublicationGeneration, "authorityEpoch", 0L,
+                        "revision", graph != null ? graph.getResourceRevision() : -1L, "mode", "fallback",
+                        "bounds", fallbackBounds, "waitMicros", elapsedMicros(initialViewportRequestedAtNanos,
+                            lifecycleNowNanos()));
+                }
+            }
+            return;
+        }
+        if (renderIndex.worldBounds == null) {
+            if (graph != null && graph.getNodes() != null && !graph.getNodes().isEmpty()) {
+                traceInitialViewportWait("empty_bounds", renderIndex);
+                return;
+            }
             initialViewportFitPending = false;
             initialViewportFittedKeys.add(viewportFitKey);
             zoomLevel = INITIAL_VIEWPORT_MAX_ZOOM;
@@ -1063,16 +7389,35 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             panY = 0.0F;
             targetPanX = 0.0F;
             targetPanY = 0.0F;
+            ReSyncFlowClient.traceLifecycle(serverId, "viewport_fit_skipped", "serverId", serverId, "resourceKey",
+                temporaryLifecycleGraphKey(graph), "requestId", "viewport-fit", "mutationId", graphRenderMutationVersion,
+                "generation", workspacePublicationGeneration, "authorityEpoch", 0L, "revision",
+                graph != null ? graph.getResourceRevision() : -1L, "reason", "empty_graph", "waitMicros",
+                elapsedMicros(initialViewportRequestedAtNanos, lifecycleNowNanos()));
+            initialViewportWaitReason = "";
             return;
         }
-        for (Widget widget : worldWidgets) {
-            if (widget instanceof FlowNodeWidget flowNodeWidget && !flowNodeWidget.hasLoadedDefinition()) {
-                initialViewportStableFrames = 0;
-                initialViewportSignature = 0;
-                return;
-            }
+        boolean definitionsPending = renderIndex.unresolvedDefinitions > 0;
+        if (definitionsPending && initialViewportDefinitionGraceFrames++ < INITIAL_VIEWPORT_DEFINITION_GRACE_FRAMES) {
+            traceInitialViewportWait("definitions_pending", renderIndex);
+            initialViewportStableFrames = 0;
+            initialViewportSignature = 0;
+            return;
         }
-        int signature = initialViewportSignature();
+        if (definitionsPending) {
+            fitViewportToBounds(renderIndex.worldBounds);
+            initialViewportFitPending = false;
+            initialViewportFittedKeys.add(viewportFitKey);
+            ReSyncFlowClient.traceLifecycle(serverId, "viewport_fit_applied", "serverId", serverId, "resourceKey",
+                temporaryLifecycleGraphKey(graph), "requestId", "viewport-fit", "mutationId", graphRenderMutationVersion,
+                "generation", workspacePublicationGeneration, "authorityEpoch", 0L, "revision",
+                graph != null ? graph.getResourceRevision() : -1L, "mode", "definition_grace_expired", "bounds",
+                renderIndex.worldBounds, "unresolvedDefinitions", renderIndex.unresolvedDefinitions, "waitMicros",
+                elapsedMicros(initialViewportRequestedAtNanos, lifecycleNowNanos()));
+            initialViewportWaitReason = "";
+            return;
+        }
+        int signature = renderIndex.worldSignature;
         if (signature == initialViewportSignature) {
             initialViewportStableFrames++;
         } else {
@@ -1080,11 +7425,54 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             initialViewportStableFrames = 1;
         }
         if (initialViewportStableFrames < INITIAL_VIEWPORT_STABLE_FRAMES) {
+            traceInitialViewportWait("stabilizing", renderIndex);
             return;
         }
-        fitViewportToWorldWidgets();
+        fitViewportToBounds(renderIndex.worldBounds);
         initialViewportFitPending = false;
         initialViewportFittedKeys.add(viewportFitKey);
+        ReSyncFlowClient.traceLifecycle(serverId, "viewport_fit_applied", "serverId", serverId, "resourceKey",
+            temporaryLifecycleGraphKey(graph), "requestId", "viewport-fit", "mutationId", graphRenderMutationVersion,
+            "generation", workspacePublicationGeneration, "authorityEpoch", 0L, "revision",
+            graph != null ? graph.getResourceRevision() : -1L, "mode", "stable", "bounds", renderIndex.worldBounds,
+            "topologyRevision", graphRenderTopologyRevision.get(), "waitMicros",
+            elapsedMicros(initialViewportRequestedAtNanos, lifecycleNowNanos()));
+        initialViewportWaitReason = "";
+    }
+
+    private void traceInitialViewportWait(String reason, GraphRenderIndex renderIndex) {
+        String nextReason = reason == null || reason.isBlank() ? "unknown" : reason;
+        if (Objects.equals(initialViewportWaitReason, nextReason)) {
+            return;
+        }
+        initialViewportWaitReason = nextReason;
+        ReSyncFlowClient.traceLifecycle(serverId, "viewport_fit_waiting", "serverId", serverId, "resourceKey",
+            temporaryLifecycleGraphKey(graph), "requestId", "viewport-fit", "mutationId", graphRenderMutationVersion,
+            "generation", workspacePublicationGeneration, "authorityEpoch", 0L, "revision",
+            graph != null ? graph.getResourceRevision() : -1L, "reason", nextReason, "waitMicros",
+            elapsedMicros(initialViewportRequestedAtNanos, lifecycleNowNanos()), "renderIndexReady",
+            renderIndex != null, "unresolvedDefinitions", renderIndex != null ? renderIndex.unresolvedDefinitions : -1,
+            "nodeCount", renderIndex != null ? renderIndex.nodeBounds.size() : 0);
+    }
+
+    static boolean initialViewportCatalogReady(boolean refreshQueued, boolean refreshActive) {
+        return !refreshQueued && !refreshActive;
+    }
+
+    private WorldBounds fallbackViewportBounds() {
+        WorldBounds bounds = null;
+        int inspected = 0;
+        for (FlowNodeWidget widget : widgetCache.values()) {
+            if (inspected++ >= GRAPH_RENDER_FALLBACK_BOUNDS_SCAN_LIMIT) {
+                break;
+            }
+            WorldBounds nodeBounds = widgetBounds(widget);
+            if (!boundedWireCoordinates(nodeBounds)) {
+                continue;
+            }
+            bounds = bounds == null ? nodeBounds : unionBounds(bounds, nodeBounds);
+        }
+        return bounds;
     }
 
     private String initialViewportFitKey() {
@@ -1094,31 +7482,14 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         return graph != null && graph.getId() != null ? graph.getId() : "screen";
     }
 
-    private int initialViewportSignature() {
-        int signature = worldWidgets.size();
-        for (Widget widget : worldWidgets) {
-            signature = 31 * signature + widget.getX();
-            signature = 31 * signature + widget.getY();
-            signature = 31 * signature + widget.getWidth();
-            signature = 31 * signature + widget.getHeight();
-        }
-        return signature;
-    }
-
-    private void fitViewportToWorldWidgets() {
-        int minX = Integer.MAX_VALUE;
-        int minY = Integer.MAX_VALUE;
-        int maxX = Integer.MIN_VALUE;
-        int maxY = Integer.MIN_VALUE;
-        for (Widget widget : worldWidgets) {
-            minX = Math.min(minX, widget.getX());
-            minY = Math.min(minY, widget.getY());
-            maxX = Math.max(maxX, widget.getX() + widget.getWidth());
-            maxY = Math.max(maxY, widget.getY() + widget.getHeight());
-        }
-        if (minX == Integer.MAX_VALUE || minY == Integer.MAX_VALUE || maxX == Integer.MIN_VALUE || maxY == Integer.MIN_VALUE) {
+    private void fitViewportToBounds(WorldBounds bounds) {
+        if (bounds == null) {
             return;
         }
+        int minX = (int) Math.floor(bounds.minX());
+        int minY = (int) Math.floor(bounds.minY());
+        int maxX = (int) Math.ceil(bounds.maxX());
+        int maxY = (int) Math.ceil(bounds.maxY());
         int viewportWidth = Math.max(1, viewportFitWidth() - INITIAL_VIEWPORT_PADDING * 2);
         int viewportHeight = Math.max(1, viewportFitHeight() - INITIAL_VIEWPORT_PADDING * 2);
         int contentWidth = Math.max(1, maxX - minX);
@@ -1141,22 +7512,22 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
     protected int viewportFitLeft() {
         int left = studioMode ? studioContentBrowserWidth() : 0;
-        if (paletteSidePanel != null && paletteSidePanel.isLeftAnchored()) {
-            left += paletteSidePanel.layoutWidth(8);
+        if (paletteSidePanel != null && paletteSidePanel.isVisible() && paletteSidePanel.isLeftAnchored()) {
+            left += paletteSidePanel.getDesiredWidth() + 8;
         }
-        if (studioResourcePanel != null && studioResourcePanel.isLeftAnchored()) {
-            left += studioResourcePanel.layoutWidth(8);
+        if (studioResourcePanel != null && studioResourcePanel.isVisible() && studioResourcePanel.isLeftAnchored()) {
+            left += studioResourcePanel.getDesiredWidth() + 8;
         }
         return left;
     }
 
     protected int viewportFitWidth() {
         int right = 0;
-        if (paletteSidePanel != null && !paletteSidePanel.isLeftAnchored()) {
-            right += paletteSidePanel.layoutWidth(8);
+        if (paletteSidePanel != null && paletteSidePanel.isVisible() && !paletteSidePanel.isLeftAnchored()) {
+            right += paletteSidePanel.getDesiredWidth() + 8;
         }
-        if (studioResourcePanel != null && !studioResourcePanel.isLeftAnchored()) {
-            right += studioResourcePanel.layoutWidth(8);
+        if (studioResourcePanel != null && studioResourcePanel.isVisible() && !studioResourcePanel.isLeftAnchored()) {
+            right += studioResourcePanel.getDesiredWidth() + 8;
         }
         return Math.max(1, width - viewportFitLeft() - right);
     }
@@ -1176,42 +7547,74 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (sourceGraph == null) {
             return;
         }
+        if (deferWorkspaceMutation(() -> replaceGraph(sourceGraph))) {
+            return;
+        }
+        if (isActiveCoreStudioDocument()) {
+            coreOperationUnavailable("Graph Replace");
+            refreshCoreProjection();
+            return;
+        }
+        submitPreparedGraphMutation(sourceGraph, true, true);
+    }
+
+    public final void applyPreparedGraph(FlowGraph sourceGraph) {
+        applyPreparedGraph(sourceGraph, true);
+    }
+
+    public final void applyPreparedGraph(FlowGraph sourceGraph, boolean clearHistory) {
+        if (sourceGraph == null) {
+            return;
+        }
+        if (deferWorkspaceMutation(() -> applyPreparedGraph(sourceGraph, clearHistory))) {
+            return;
+        }
+        if (isActiveCoreStudioDocument()) {
+            coreOperationUnavailable("Graph Replace");
+            refreshCoreProjection();
+            return;
+        }
         graph = sourceGraph;
-        resetGraphEditorState(true);
+        resetGraphEditorState(clearHistory, true);
+    }
+
+    protected final void adoptPreparedGraph(FlowGraph sourceGraph, boolean clearHistory) {
+        applyPreparedGraph(sourceGraph, clearHistory);
     }
 
     private void applyGraph(FlowGraph sourceGraph, boolean clearHistory) {
         if (sourceGraph == null) {
             return;
         }
-        copyGraphState(graph, sourceGraph);
-        resetGraphEditorState(clearHistory);
+        if (deferWorkspaceMutation(() -> applyGraph(sourceGraph, clearHistory))) {
+            return;
+        }
+        if (isActiveCoreStudioDocument()) {
+            coreOperationUnavailable("Graph Replace");
+            refreshCoreProjection();
+            return;
+        }
+        submitPreparedGraphMutation(sourceGraph, false, clearHistory);
     }
 
-    private void copyGraphState(FlowGraph target, FlowGraph source) {
+    private void copyPreparedGraphState(FlowGraph target, FlowGraph source) {
+        if (target == null || source == null) {
+            return;
+        }
         target.setId(source.getId());
         target.setEnabled(source.isEnabled());
         target.setVersion(source.getVersion());
-        target.getNodes().clear();
-        if (source.getNodes() != null) {
-            target.getNodes().putAll(source.getNodes());
-        }
-        target.getConnections().clear();
-        if (source.getConnections() != null) {
-            target.getConnections().addAll(source.getConnections());
-        }
-        target.getLocalVariables().clear();
-        if (source.getLocalVariables() != null) {
-            target.getLocalVariables().addAll(source.getLocalVariables());
-        }
+        target.setNodes(source.getNodes());
+        target.setConnections(source.getConnections());
+        target.setLocalVariables(source.getLocalVariables());
         target.setFunction(source.isFunction());
         target.setFunctionOwner(source.getFunctionOwner());
         target.setFunctionNamespace(source.getFunctionNamespace());
         target.setFunctionVersion(source.getFunctionVersion());
         target.setFunctionDescription(source.getFunctionDescription());
-        target.setFunctionInputs(copyFunctionParameters(source.getFunctionInputs()));
-        target.setFunctionOutputs(copyFunctionParameters(source.getFunctionOutputs()));
-        target.setEditorPassthroughs(copyEditorPassthroughs(source.getEditorPassthroughs()));
+        target.setFunctionInputs(source.getFunctionInputs());
+        target.setFunctionOutputs(source.getFunctionOutputs());
+        target.setEditorPassthroughs(source.getEditorPassthroughs());
         target.setContentProperties(source.getContentProperties());
         target.setResourceType(source.getResourceType());
         target.setResourceRevision(source.getResourceRevision());
@@ -1220,28 +7623,91 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         target.setOpaqueProperties(source.getOpaqueProperties());
     }
 
+    private void applyPreparedGraphMutation(FlowGraph prepared, boolean replace, boolean clearHistory,
+                                            JsonObject preparedDocument) {
+        if (prepared == null) {
+            return;
+        }
+        if (replace) {
+            graph = prepared;
+        } else {
+            copyPreparedGraphState(graph, prepared);
+        }
+        resetGraphEditorState(clearHistory, true, preparedDocument);
+    }
+
+    private static Map<String, JsonElement> mergeOpaqueProperties(Map<String, JsonElement> current,
+                                                                    Map<String, JsonElement> incoming) {
+        Map<String, JsonElement> merged = new LinkedHashMap<>();
+        if (current != null) {
+            merged.putAll(current);
+        }
+        if (incoming != null) {
+            merged.putAll(incoming);
+        }
+        return merged;
+    }
+
     private void resetGraphEditorState(boolean clearHistory) {
+        resetGraphEditorState(clearHistory, false);
+    }
+
+    private void resetGraphEditorState(boolean clearHistory, boolean prepared) {
+        resetGraphEditorState(clearHistory, prepared, null);
+    }
+
+    private void resetGraphEditorState(boolean clearHistory, boolean prepared, JsonObject preparedDocument) {
         selectedNodeIds.clear();
         selectionBase.clear();
         selectedDragStartPositions.clear();
+        selectedNodeMove.clear();
+        movingSelectedNodes = false;
+        graphRenderGeometryDirtyNodeIds.clear();
+        graphRenderGeometryFlushedFrame = -1L;
         focusedNode = null;
         dragState.sourceNodeId = null;
         dragState.sourcePin = null;
         dragState.isDragging = false;
         dragState.sourceIsInput = false;
         if (clearHistory) {
-            graphHistory().clear();
+            if (!isActiveCoreStudioDocument()) {
+                StudioScreen.History<GraphSnapshot> history = graphHistory();
+                if (prepared) {
+                    if (preparedDocument != null) {
+                        history.resetSaved(new GraphSnapshot(preparedDocument, Set.of()));
+                    } else {
+                        history.clearWithoutSnapshot();
+                        if (clearHistory && graph != null) {
+                            workspaceMutationVersion++;
+                            workspaceMutationPending = false;
+                            stableWorkspaceDocument = null;
+                            stableWorkspaceDocuments.remove(graph);
+                            captureStableWorkspaceDocument(workspaceMutationVersion);
+                        }
+                    }
+                } else {
+                    history.clear();
+                }
+            }
             editorDiagnostics.clear();
             requestInitialViewportFit();
         }
         refreshNodeRegistry();
+        if (prepared) {
+            adoptPreparedGraphRenderState();
+        } else {
+            adoptGraphRenderState();
+        }
     }
 
     private void requestInitialViewportFit() {
         initialViewportFitPending = true;
         initialViewportStableFrames = 0;
+        initialViewportDefinitionGraceFrames = 0;
         initialViewportSignature = 0;
-        initialViewportFittedKeys.remove(initialViewportFitKey());
+        initialViewportFallbackApplied = false;
+        initialViewportWaitReason = "";
+        initialViewportRequestedAtNanos = lifecycleNowNanos();
     }
 
     public String getDesktopAppId() {
@@ -1269,18 +7735,379 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     public void refreshNodeRegistry() {
-        for (FlowNodeWidget widget : widgetCache.values()) {
-            removeWorldWidget(widget);
+        invalidateGraphRenderTopology();
+        queueNodeCatalogRefresh();
+    }
+
+    private void queueNodeCatalogRefresh() {
+        boolean newlyQueued = !nodeCatalogRefreshQueued;
+        if (newlyQueued) {
+            nodeCatalogRefreshQueuedAtNanos = lifecycleNowNanos();
         }
-        widgetCache.clear();
-        for (var entry : graph.getNodes().entrySet()) {
-            String nodeId = entry.getKey();
-            FlowNodeWidget widget = createNodeWidget(nodeId, entry.getValue());
-            addWorldWidget(widget);
-            widgetCache.put(entry.getKey(), widget);
+        nodeCatalogPublicationToken = nextProjectionGeneration(nodeCatalogPublicationToken);
+        nodeCatalogRefreshQueued = true;
+        paletteRefresh = null;
+        coreWidgetPublicationFailure = null;
+        if (activeCoreGraphSession() != null) {
+            publishedWidgetProjectionGeneration = 0L;
+            publishedWidgetTopologyChecksum = "";
+            updateCoreEditorReadiness(false);
+            coreEditorReadiness = new StudioDocument.EditorReadiness(coreEditorReadiness.currentSessionBound(),
+                coreEditorReadiness.projectionAvailable(), false, coreEditorReadiness.selectionValid(),
+                coreEditorReadiness.generation(), coreEditorReadiness.topologyChecksum());
         }
-        scheduleInitialViewportFit();
-        refreshPalette();
+        if (newlyQueued) {
+            ReSyncFlowClient.traceLifecycle(serverId, "widget_refresh_queued", "serverId", serverId, "resourceKey",
+                temporaryLifecycleGraphKey(graph), "requestId", "widget-refresh", "mutationId", graphRenderMutationVersion,
+                "generation", workspacePublicationGeneration, "authorityEpoch", 0L, "revision",
+                graph != null ? graph.getResourceRevision() : -1L, "nodeCount",
+                graph != null && graph.getNodes() != null ? graph.getNodes().size() : 0);
+        }
+    }
+
+    private void drainNodeCatalogRefresh() {
+        if (nodeCatalogRefreshQueued) {
+            retirePreparedWidgets(catalogRefresh);
+            Optional<ReSyncTypedInteractionProjection> interaction = typedInteractionProjection();
+            ReSyncTypedInteractionProjection projection = interaction.orElse(null);
+            catalogRefresh = new CatalogRefresh(graph, nodeCatalogPublicationToken,
+                coreProjectionGeneration, coreTopologyChecksum,
+                projection != null ? projection.palette(isWorldGenDocument()) : null, widgetCache.keySet(),
+                nodeCatalogRefreshQueuedAtNanos);
+            if (catalogRefresh.atomicCorePublication && graphRenderIndex != null) {
+                graphRenderContinuityIndex = graphRenderIndex;
+            }
+            nodeCatalogRefreshQueued = false;
+            ReSyncFlowClient.traceLifecycle(serverId, "widget_refresh_started", "serverId", serverId, "resourceKey",
+                temporaryLifecycleGraphKey(graph), "requestId", "widget-refresh", "mutationId", graphRenderMutationVersion,
+                "generation", workspacePublicationGeneration, "authorityEpoch", 0L, "revision",
+                graph != null ? graph.getResourceRevision() : -1L, "sourceNodeCount", catalogRefresh.nodes.size(),
+                "sourceConnectionCount", catalogRefresh.connections.size(), "obsoleteNodeCount",
+                catalogRefresh.obsoleteNodeIds.size(), "queueMicros", elapsedMicros(catalogRefresh.queuedAtNanos,
+                    catalogRefresh.startedAtNanos));
+        }
+        CatalogRefresh refresh = catalogRefresh;
+        if (refresh == null) {
+            return;
+        }
+        if (refresh.graph != graph || refresh.publicationToken != nodeCatalogPublicationToken
+            || refresh.projectionGeneration != coreProjectionGeneration
+            || !Objects.equals(refresh.topologyChecksum, coreTopologyChecksum)) {
+            traceWidgetRefreshRestart(refresh, catalogRefreshMismatchReason(refresh));
+            retirePreparedWidgets(refresh);
+            catalogRefresh = null;
+            nodeCatalogRefreshQueued = true;
+            return;
+        }
+        long drainStartedAtNanos = System.nanoTime();
+        int processed = 0;
+        catalogDrainProcessedCount = 0;
+        try {
+            while (!refresh.atomicCorePublication
+                && catalogWidgetDrainCanContinue(System.nanoTime() - drainStartedAtNanos, processed)
+                && refresh.obsoleteNodeIndex < refresh.obsoleteNodeIds.size()) {
+                FlowNodeWidget widget = removeCachedNodeWidget(refresh.obsoleteNodeIds.get(refresh.obsoleteNodeIndex++));
+                if (widget != null) {
+                    removeWorldWidget(widget);
+                }
+                processed++;
+            }
+            while (catalogWidgetDrainCanContinue(System.nanoTime() - drainStartedAtNanos, processed)
+                && refresh.nodeIndex < refresh.nodes.size()) {
+                Map.Entry<String, FlowNode> entry = refresh.nodes.get(refresh.nodeIndex);
+                FlowNodeWidget widget;
+                try {
+                    widget = createNodeWidget(entry.getKey(), entry.getValue());
+                } catch (RuntimeException exception) {
+                    refresh.nodeAttempts++;
+                    refresh.constructionFailureCount++;
+                    ReSyncFlowClient.traceLifecycle(serverId, "widget_refresh_node_failed", "serverId", serverId,
+                        "resourceKey", temporaryLifecycleGraphKey(refresh.graph), "requestId", "widget-refresh",
+                        "mutationId", graphRenderMutationVersion, "generation", workspacePublicationGeneration,
+                        "authorityEpoch", 0L, "revision", refresh.graph != null
+                            ? refresh.graph.getResourceRevision() : -1L, "nodeId", entry.getKey(), "nodeIndex",
+                        refresh.nodeIndex, "attempt", refresh.nodeAttempts, "reason",
+                        TaskIdentities.failureName(exception));
+                    if (refresh.nodeAttempts < CATALOG_WIDGET_RETRY_LIMIT) {
+                        processed++;
+                        break;
+                    }
+                    try {
+                        widget = createDiagnosticNodeWidget(entry.getKey(), entry.getValue(), exception);
+                        refresh.placeholderWidgetCount++;
+                    } catch (RuntimeException placeholderFailure) {
+                        refresh.placeholderFailureCount++;
+                        ReSyncFlowClient.traceLifecycle(serverId, "widget_refresh_placeholder_failed", "serverId",
+                            serverId, "resourceKey", temporaryLifecycleGraphKey(refresh.graph), "requestId",
+                            "widget-refresh", "mutationId", graphRenderMutationVersion, "generation",
+                            refresh.projectionGeneration, "authorityEpoch", 0L, "revision", refresh.graph != null
+                                ? refresh.graph.getResourceRevision() : -1L, "nodeId", entry.getKey(), "nodeIndex",
+                            refresh.nodeIndex, "reason", TaskIdentities.failureName(placeholderFailure));
+                        if (refresh.atomicCorePublication) {
+                            failCoreWidgetPublication(refresh, entry.getKey(), placeholderFailure);
+                            return;
+                        }
+                        refresh.nodeIndex++;
+                        refresh.nodeAttempts = 0;
+                        processed++;
+                        continue;
+                    }
+                }
+                recordWidgetResolution(refresh, widget);
+                if (refresh.atomicCorePublication) {
+                    refresh.preparedWidgets.put(entry.getKey(), widget);
+                    refresh.preparedWidgetNodeIds.put(widget, entry.getKey());
+                    int order = refresh.preparedWidgetOrder.size();
+                    refresh.preparedWidgetOrder.add(widget);
+                    refresh.preparedNodeTopology.put(widget, new GraphRenderNodeSnapshot(widget,
+                        new WorldBounds(widget.getX(), widget.getY(), widget.getX() + widget.getWidth(),
+                            widget.getY() + widget.getHeight()), order, widget.hasLoadedDefinition()));
+                    WidgetCleanup.attach(widget);
+                } else {
+                    FlowNodeWidget previous = removeCachedNodeWidget(entry.getKey());
+                    if (previous != null) {
+                        removeWorldWidget(previous);
+                    }
+                    addWorldWidget(widget);
+                    cacheNodeWidget(entry.getKey(), widget, false);
+                }
+                refresh.nodeIndex++;
+                refresh.nodeAttempts = 0;
+                processed++;
+            }
+            while (refresh.atomicCorePublication
+                && catalogWidgetDrainCanContinue(System.nanoTime() - drainStartedAtNanos, processed)
+                && refresh.nodeIndex >= refresh.nodes.size()
+                && refresh.connectionIndex < refresh.connections.size()) {
+                FlowConnection connection = refresh.connections.get(refresh.connectionIndex++);
+                GraphRenderConnectionSnapshot snapshot = graphRenderConnectionSnapshot(connection, refresh.preparedWidgets);
+                if (snapshot != null) {
+                    refresh.preparedConnectionTopology.put(connection, snapshot);
+                    refresh.preparedConnectionsByNode.computeIfAbsent(snapshot.editorSourceNodeId(),
+                        ignored -> BrowserSafeState.set()).add(connection);
+                    refresh.preparedConnectionsByNode.computeIfAbsent(snapshot.targetNodeId(),
+                        ignored -> BrowserSafeState.set()).add(connection);
+                }
+                processed++;
+            }
+        } catch (ConcurrentModificationException exception) {
+            catalogDrainProcessedCount = processed;
+            traceWidgetRefreshRestart(refresh, "source_collection_changed");
+            retirePreparedWidgets(refresh);
+            catalogRefresh = null;
+            nodeCatalogRefreshQueued = true;
+            return;
+        }
+        catalogDrainProcessedCount = processed;
+        if (refresh.nodeIndex >= refresh.nodes.size() && (!refresh.atomicCorePublication || refresh.connectionIndex >= refresh.connections.size())
+            && (refresh.atomicCorePublication || refresh.obsoleteNodeIndex >= refresh.obsoleteNodeIds.size())) {
+            if (refresh.atomicCorePublication && !publishCoreWidgetTopology(refresh)) {
+                retirePreparedWidgets(refresh);
+                catalogRefresh = null;
+                nodeCatalogRefreshQueued = true;
+                return;
+            }
+            catalogRefresh = null;
+            if (refresh.atomicCorePublication) {
+                adoptPreparedGraphRenderState();
+            } else {
+                adoptGraphRenderState();
+            }
+            scheduleInitialViewportFit();
+            beginPaletteRefresh(refresh.palette);
+            updateCoreEditorReadiness(true);
+            ReSyncFlowClient.traceLifecycle(serverId, "widget_refresh_completed", "serverId", serverId, "resourceKey",
+                temporaryLifecycleGraphKey(refresh.graph), "requestId", "widget-refresh", "mutationId",
+                graphRenderMutationVersion, "generation", workspacePublicationGeneration, "authorityEpoch", 0L,
+                "revision", refresh.graph != null ? refresh.graph.getResourceRevision() : -1L, "sourceNodeCount",
+                refresh.nodes.size(), "sourceConnectionCount", refresh.connections.size(), "widgetCount", widgetCache.size(),
+                "editableDefinitionCount", refresh.editableDefinitionCount, "readOnlyDefinitionCount",
+                refresh.readOnlyDefinitionCount, "missingDefinitionCount", refresh.missingDefinitionCount,
+                "lookupBlockedDefinitionCount", refresh.lookupBlockedDefinitionCount, "placeholderWidgetCount",
+                refresh.placeholderWidgetCount, "constructionFailureCount", refresh.constructionFailureCount,
+                "placeholderFailureCount", refresh.placeholderFailureCount, "atomicCorePublication",
+                refresh.atomicCorePublication, "projectionGeneration", refresh.projectionGeneration, "topologyChecksum",
+                refresh.topologyChecksum, "queueMicros", elapsedMicros(refresh.queuedAtNanos, refresh.startedAtNanos),
+                "elapsedMs", refresh.startedAtNanos > 0L ? ((System.nanoTime()
+                    - refresh.startedAtNanos) / 1_000_000L) : -1L);
+        }
+    }
+
+    private void recordWidgetResolution(CatalogRefresh refresh, FlowNodeWidget widget) {
+        if (refresh == null) {
+            return;
+        }
+        String cause = widget != null ? widget.getDefinitionResolutionCause() : "definition_missing";
+        if ("editable".equals(cause)) {
+            refresh.editableDefinitionCount++;
+        } else if ("lookup_blocked".equals(cause)) {
+            refresh.lookupBlockedDefinitionCount++;
+        } else if (cause != null && cause.startsWith("read_only:")) {
+            refresh.readOnlyDefinitionCount++;
+        } else {
+            refresh.missingDefinitionCount++;
+        }
+    }
+
+    private String catalogRefreshMismatchReason(CatalogRefresh refresh) {
+        if (refresh == null) {
+            return "refresh_missing";
+        }
+        List<String> reasons = new ArrayList<>(4);
+        if (refresh.graph != graph) {
+            reasons.add("graph_changed");
+        }
+        if (refresh.publicationToken != nodeCatalogPublicationToken) {
+            reasons.add("publication_token_changed");
+        }
+        if (refresh.projectionGeneration != coreProjectionGeneration) {
+            reasons.add("projection_generation_changed");
+        }
+        if (!Objects.equals(refresh.topologyChecksum, coreTopologyChecksum)) {
+            reasons.add("topology_checksum_changed");
+        }
+        return reasons.isEmpty() ? "state_changed" : String.join(",", reasons);
+    }
+
+    private void traceWidgetRefreshRestart(CatalogRefresh refresh, String reason) {
+        if (refresh == null) {
+            return;
+        }
+        ReSyncFlowClient.traceLifecycle(serverId, "widget_refresh_restarted", "serverId", serverId, "resourceKey",
+            temporaryLifecycleGraphKey(refresh.graph), "requestId", "widget-refresh", "mutationId",
+            graphRenderMutationVersion, "generation", workspacePublicationGeneration, "authorityEpoch", 0L,
+            "revision", refresh.graph != null ? refresh.graph.getResourceRevision() : -1L, "projectionGeneration",
+            refresh.projectionGeneration, "topologyChecksum", refresh.topologyChecksum, "nodeIndex", refresh.nodeIndex,
+            "sourceNodeCount", refresh.nodes.size(), "connectionIndex", refresh.connectionIndex,
+            "sourceConnectionCount", refresh.connections.size(), "obsoleteNodeIndex", refresh.obsoleteNodeIndex,
+            "obsoleteNodeCount", refresh.obsoleteNodeIds.size(), "editableDefinitionCount",
+            refresh.editableDefinitionCount, "readOnlyDefinitionCount", refresh.readOnlyDefinitionCount,
+            "missingDefinitionCount", refresh.missingDefinitionCount, "lookupBlockedDefinitionCount",
+            refresh.lookupBlockedDefinitionCount, "placeholderWidgetCount", refresh.placeholderWidgetCount,
+            "constructionFailureCount", refresh.constructionFailureCount, "placeholderFailureCount",
+            refresh.placeholderFailureCount, "queueMicros", elapsedMicros(refresh.queuedAtNanos,
+                refresh.startedAtNanos), "elapsedMicros", elapsedMicros(refresh.startedAtNanos, lifecycleNowNanos()),
+            "reason", reason == null || reason.isBlank() ? "state_changed" : reason);
+    }
+
+    static boolean catalogWidgetDrainCanContinue(long elapsedNanos, int processed) {
+        return processed < CATALOG_WIDGETS_PER_TICK
+            && (processed == 0 || elapsedNanos < CATALOG_WIDGET_DRAIN_NANOS);
+    }
+
+    private void failCoreWidgetPublication(CatalogRefresh refresh, String nodeId, RuntimeException failure) {
+        String failureType = failure != null ? TaskIdentities.failureName(failure) : "RuntimeException";
+        coreWidgetPublicationFailure = new CoreWidgetPublicationFailure(temporaryLifecycleGraphKey(refresh.graph),
+            refresh.projectionGeneration, refresh.topologyChecksum, nodeId == null ? "unknown" : nodeId, failureType);
+        retirePreparedWidgets(refresh);
+        catalogRefresh = null;
+        nodeCatalogRefreshQueued = false;
+        updateCoreEditorReadiness(false);
+        ReSyncFlowClient.traceLifecycle(serverId, "widget_refresh_terminal_failure", "serverId", serverId,
+            "resourceKey", coreWidgetPublicationFailure.resourceKey(), "requestId", "widget-refresh", "mutationId",
+            graphRenderMutationVersion, "generation", workspacePublicationGeneration, "authorityEpoch", 0L,
+            "revision", refresh.graph != null ? refresh.graph.getResourceRevision() : -1L, "nodeId",
+            coreWidgetPublicationFailure.nodeId(), "nodeIndex", refresh.nodeIndex, "attempt", refresh.nodeAttempts,
+            "reason", failureType);
+    }
+
+    protected FlowNodeWidget createDiagnosticNodeWidget(String nodeId, FlowNode node, RuntimeException failure) {
+        String reason = failure.getMessage() == null || failure.getMessage().isBlank()
+            ? TaskIdentities.failureName(failure) : failure.getMessage();
+        CoreGraphEditorSession coreSession = activeCoreGraphSession();
+        GraphNode coreNode = coreNode(coreSession, nodeId);
+        FlowNodeWidget widget = new FlowNodeWidget((int) node.getX(), (int) node.getY(), node, graph, nodeId,
+            nodeRegistryServerId(), null, null, FlowNodeWidget.FunctionBoundaryCatalog.unavailable(), null, true, true,
+            null, coreSession != null ? coreSession.resource() : null, coreNode != null ? coreNode.values() : Map.of());
+        EditorDiagnostic diagnostic = new EditorDiagnostic(EditorDiagnostic.Severity.ERROR,
+            "WIDGET_CONSTRUCTION_FAILED", nodeId, "", "", "Node widget construction failed: " + reason,
+            "Retry after the catalog refreshes");
+        List<EditorDiagnostic> diagnostics = new ArrayList<>(editorDiagnosticsForNode(nodeId));
+        diagnostics.add(diagnostic);
+        editorDiagnostics.put(nodeId, List.copyOf(diagnostics));
+        widget.setEditorDiagnostics(diagnostics);
+        return widget;
+    }
+
+    private boolean publishCoreWidgetTopology(CatalogRefresh refresh) {
+        if (refresh == null || refresh.graph != graph || refresh.projectionGeneration != coreProjectionGeneration
+            || !Objects.equals(refresh.topologyChecksum, coreTopologyChecksum)
+            || refresh.preparedWidgets.size() != refresh.nodes.size()) {
+            return false;
+        }
+        CoreWidgetTopology previous = coreWidgetTopology;
+        CoreWidgetTopology superseded = pendingCoreWidgetTopology;
+        if (superseded != null && superseded != previous) {
+            retireCoreWidgets(superseded.retireIfAbandoned());
+        }
+        graphRenderContinuityIndex = graphRenderIndex;
+        graphRenderContinuityTopology = graphRenderContinuityIndex != null ? previous : null;
+        worldWidgets.clear();
+        graphRenderNodeTopology = refresh.preparedNodeTopology;
+        graphRenderConnectionTopology = refresh.preparedConnectionTopology;
+        graphRenderConnectionsByNode = refresh.preparedConnectionsByNode;
+        graphRenderTopologyRevision = new BrowserSafeState.LongValue();
+        graphRenderFrontOrder = refresh.preparedWidgetOrder.size();
+        CoreWidgetTopology prepared = new CoreWidgetTopology(refresh.graph, refresh.projectionGeneration,
+            refresh.topologyChecksum, refresh.preparedWidgets, refresh.preparedWidgetNodeIds,
+            refresh.preparedWidgetOrder, previous != null ? previous.widgets() : List.of(),
+            refresh.preparedWidgetOrder);
+        if (previous == null) {
+            graphRenderContinuityIndex = null;
+            graphRenderContinuityTopology = null;
+            widgetCache = prepared.widgetsById();
+            widgetNodeIds = prepared.nodeIds();
+            coreWidgetTopology = prepared.withoutRetirementPayloads();
+            pendingCoreWidgetTopology = null;
+        } else {
+            pendingCoreWidgetTopology = prepared;
+        }
+        publishedWidgetProjectionGeneration = refresh.projectionGeneration;
+        publishedWidgetTopologyChecksum = refresh.topologyChecksum;
+        invalidateGraphRenderTopology();
+        return true;
+    }
+
+    private void retirePreparedWidgets(CatalogRefresh refresh) {
+        if (refresh != null && refresh.atomicCorePublication && !refresh.preparedWidgetOrder.isEmpty()) {
+            retireCoreWidgets(refresh.preparedWidgetOrder);
+        }
+    }
+
+    private void retireCoreWidgets(Collection<FlowNodeWidget> widgets) {
+        if (widgets == null || widgets.isEmpty()) {
+            return;
+        }
+        List<FlowNodeWidget> retired = new ArrayList<>();
+        for (FlowNodeWidget widget : widgets) {
+            if (widget != null && retiredCoreWidgets.add(widget)) {
+                retired.add(widget);
+            }
+        }
+        if (!retired.isEmpty()) {
+            retiredWidgetBatches.addLast(new RetiredWidgetBatch(List.copyOf(retired)));
+        }
+    }
+
+    private void drainRetiredWidgets() {
+        int remaining = CATALOG_WIDGETS_PER_TICK;
+        while (remaining > 0 && !retiredWidgetBatches.isEmpty()) {
+            RetiredWidgetBatch batch = retiredWidgetBatches.getFirst();
+            while (remaining > 0 && batch.index < batch.widgets.size()) {
+                FlowNodeWidget widget = batch.widgets.get(batch.index);
+                cleanupCoreWidget(widget);
+                batch.index++;
+                retiredCoreWidgets.remove(widget);
+                remaining--;
+            }
+            if (batch.index >= batch.widgets.size()) {
+                retiredWidgetBatches.removeFirst();
+            }
+        }
+    }
+
+    protected void cleanupCoreWidget(FlowNodeWidget widget) {
+        WidgetCleanup.cleanup(widget);
     }
 
     private void scheduleInitialViewportFit() {
@@ -1289,23 +8116,106 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         }
         initialViewportFitPending = true;
         initialViewportStableFrames = 0;
+        initialViewportDefinitionGraceFrames = 0;
         initialViewportSignature = 0;
+        initialViewportFallbackApplied = false;
+        initialViewportWaitReason = "";
+        initialViewportRequestedAtNanos = 0L;
     }
 
     private void cancelInitialViewportFit() {
         initialViewportFitPending = false;
         initialViewportStableFrames = 0;
+        initialViewportDefinitionGraceFrames = 0;
         initialViewportSignature = 0;
+        initialViewportFallbackApplied = false;
         initialViewportFittedKeys.add(initialViewportFitKey());
     }
 
     protected FlowNodeWidget createNodeWidget(String nodeId, FlowNode node) {
-        FlowNodeWidget widget = new FlowNodeWidget((int) node.getX(), (int) node.getY(), node, graph, nodeId, nodeRegistryServerId(), () -> {
-            captureSnapshot();
+        boolean coreDocument = isActiveCoreStudioDocument();
+        CoreGraphEditorSession coreSession = coreWidgetPreparationSession != null
+            ? coreWidgetPreparationSession : activeCoreGraphSession();
+        boolean typedProjection = hasTypedCatalogProjection();
+        FlowNodeWidget.FunctionBoundaryCatalog boundaryCatalog = functionBoundaryCatalog();
+        NodeDefinition definition = node != null ? resolveAuthoritativeNodeDefinition(node.getType()) : null;
+        ReSyncGenericWidgetCapabilities.WidgetDefinition generic = node != null ? genericWidgetDefinition(node.getType()) : null;
+        GraphNode coreNode = coreDocument && coreSession != null ? coreNode(coreSession, nodeId) : null;
+        CoreRepeatableUiProjection.Projection repeatables = coreDocument && coreNode != null && generic != null
+            ? CoreRepeatableUiProjection.project(coreNode, generic.definition())
+            : CoreRepeatableUiProjection.Projection.empty();
+        boolean definitionLookupBlocked = catalogAuthorityRequired() && !catalogAuthorityAllowsInteraction()
+            || typedProjection && generic == null;
+        boolean typedEditable = definition != null && typedCatalogEditable(definition.getOwner(), definition.getId());
+        boolean descriptorReadOnly = definitionLookupBlocked || !typedEditable || (generic != null ? generic.readOnly()
+            : definition != null && typedDescriptorProjection(typedCatalogClient(), definition.getOwner(), definition.getId())
+                .map(ReSyncGenericDescriptorProjection.Projection::readOnly).orElse(false));
+        if (coreDocument && !coreCapabilityAllowed(coreSession, nodeId)) {
+            descriptorReadOnly = true;
+        }
+        boolean boundaryNode = boundaryCatalog.intent(node) != null;
+        boolean editable = definition != null && !descriptorReadOnly && typedEditable
+            && (!boundaryNode || coreDocument || !boundaryCatalog.isReadOnly())
+            && (!coreDocument || coreSession != null && coreAuthoringNegotiated() && coreCapabilityAllowed(coreSession, nodeId));
+        boolean protectedCoreNode = coreDocument && isProtectedCoreNode(coreSession, nodeId);
+        boolean deletable = coreDocument ? coreSession != null && coreAuthoringNegotiated() && coreCapabilityAllowed()
+            && coreNode(coreSession, nodeId) != null && !protectedCoreNode : editable;
+        Runnable onClose = deletable ? () -> {
+            if (!coreDocument) {
+                captureSnapshot();
+            }
             deleteNode(nodeId);
-        }, this::markWorkspaceMutation);
+        } : null;
+        Runnable onMutation = editable ? coreDocument
+            ? () -> queueGraphRenderGeometry(List.of(nodeId))
+            : () -> queueGraphWidgetMutation(nodeId) : null;
+        NodeWidget.NodeValueMutationHandler nodeValueMutationHandler = editable && coreDocument
+            ? this::handleCoreWidgetValueMutation : null;
+        FlowNodeWidget widget = new FlowNodeWidget((int) node.getX(), (int) node.getY(), node, graph, nodeId, nodeRegistryServerId(),
+            onClose, onMutation, boundaryCatalog, generic != null ? generic.definition() : null, descriptorReadOnly,
+            definitionLookupBlocked, nodeValueMutationHandler, coreDocument && coreSession != null ? coreSession.resource() : null,
+            coreNode != null ? coreNode.values() : Map.of());
+        if (coreDocument && coreNode != null && generic != null) {
+            widget.configureCoreRepeatables(repeatables,
+                editable && repeatables.available() ? this::handleCoreRepeatableMutation : null);
+        }
+        if (coreDocument && coreSession != null && generic != null && generic.inspector().present()) {
+            CoreGraphUiProjection.InspectorProjection inspectorProjection = new CoreGraphUiProjection()
+                .projectInspector(coreSession, coreNodeId(nodeId)).orElse(null);
+            widget.configureInspector(generic.inspector(), inspectorProjection,
+                editable ? this::handleCoreInspectorMutation : null);
+        }
         widget.setEditorDiagnostics(editorDiagnosticsForNode(nodeId));
         return widget;
+    }
+
+    protected ReSyncGenericWidgetCapabilities.WidgetDefinition genericWidgetDefinition(String nodeType) {
+        if (nodeType == null || nodeType.isBlank()) {
+            return null;
+        }
+        ReSyncFlowClient client = typedCatalogClient();
+        Optional<ReSyncTypedInteractionProjection> interaction = typedInteractionProjection();
+        if (client == null || interaction.isEmpty()) {
+            return null;
+        }
+        return typedWidgetDefinitionForNodeType(interaction.orElseThrow(), nodeType, isWorldGenDocument()).orElse(null);
+    }
+
+    static Optional<ReSyncGenericWidgetCapabilities.WidgetDefinition> typedWidgetDefinitionForNodeType(
+        ReSyncTypedInteractionProjection interaction, String nodeType, boolean worldGen) {
+        if (interaction == null || nodeType == null || nodeType.isBlank() || !nodeType.equals(nodeType.strip())) {
+            return Optional.empty();
+        }
+        int separator = nodeType.indexOf(':');
+        if (separator > 0 && separator < nodeType.length() - 1 && nodeType.indexOf(':', separator + 1) < 0) {
+            ContractRef<NodeId> identity = FlowNodeWidget.typedNodeIdentity(
+                nodeType.substring(0, separator), nodeType.substring(separator + 1));
+            return identity == null ? Optional.empty() : interaction.widgetDefinition(identity);
+        }
+        if (separator >= 0) {
+            return Optional.empty();
+        }
+        return interaction.uniqueWidgetDefinition(nodeType, worldGen);
     }
 
     protected List<EditorDiagnostic> editorDiagnosticsForNode(String nodeId) {
@@ -1363,12 +8273,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                 studioEmptyMessage = new IconMessage(0, 0, 180, 96, "Open Or Create An Asset", "remotely.png");
                 studioEmptyMessage.entranceAnimationEnabled = false;
                 if (liveStudioWorkspaceRequested) {
-                    ensureStartupWidgets();
-                    setStartupState(StudioStartupState.LOADING, "Loading...\nConnecting To ReSync", "remotely.png", false);
-                    FlowManager manager = FlowManager.getInstance();
-                    if (manager != null) {
-                        manager.ensureFlowClientForStartup(serverId, startupServer, true);
-                    }
+                    enterStudioReadyState();
                 } else {
                     ensureStartupWidgets();
                     setStartupState(StudioStartupState.LOADING, "Loading...\nDetecting ReSync", "remotely.png", false);
@@ -1399,49 +8304,43 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     @Override
     public void tick() {
         super.tick();
+        applyCoreProjectionBuild();
+        refreshCoreProjectionIfChanged();
+        drainRetiredWidgets();
+        drainNodeCatalogRefresh();
+        drainPaletteRefresh();
+        applyStudioGraphOpenResult();
+        applyPreparedGraphResult();
+        applyDiscardGraphResult();
+        if (stableWorkspaceDocument == null && graph != null && !workspaceSnapshotPending()) {
+            activateWorkspaceGraph(graph);
+        }
         if (!studioMode || startupState == StudioStartupState.INSTALLING) {
             return;
         }
         FlowManager manager = FlowManager.getInstance();
-        ReSyncFlowClient.ReadinessState readiness = manager != null
-            ? manager.getFlowClientReadiness(serverId) : ReSyncFlowClient.ReadinessState.DISCONNECTED;
-        if (manager != null && manager.isFlowClientReady(serverId)) {
+        ReSyncFlowClient.ConnectionState connectionState = manager != null
+            ? manager.getFlowClientConnectionState(serverId) : ReSyncFlowClient.ConnectionState.DISCONNECTED;
+        if (manager != null && manager.isFlowClientConnected(serverId)) {
             if (startupState != StudioStartupState.READY) {
                 enterStudioReadyState();
             }
             return;
         }
-        if (readiness == ReSyncFlowClient.ReadinessState.INCOMPATIBLE) {
-            ReSyncFlowClient client = manager != null ? manager.existingFlowClient(serverId) : null;
-            String message = client != null ? client.readinessFailureMessage() : "ReSync Flow Contract Mismatch. Update ReSync And Remotely";
-            if (startupState != StudioStartupState.SECURE_CONNECTION_REPAIR) {
-                setStartupState(StudioStartupState.SECURE_CONNECTION_REPAIR, message, "ReSync.png", true);
-            }
-            return;
-        }
-        if (startupState == StudioStartupState.SECURE_CONNECTION_REPAIR
-            && readiness != ReSyncFlowClient.ReadinessState.CONNECTING
-            && readiness != ReSyncFlowClient.ReadinessState.WAITING_FOR_REGISTRY) {
-            return;
-        }
         if (liveStudioWorkspaceRequested) {
-            if (readiness == ReSyncFlowClient.ReadinessState.CONNECTING
+            if (connectionState == ReSyncFlowClient.ConnectionState.CONNECTING
                 && (startupState != StudioStartupState.LOADING || startupIcon == null
                 || !Objects.equals(startupIcon.getMessage(), "Loading...\nConnecting To ReSync"))) {
                 setStartupState(StudioStartupState.LOADING, "Loading...\nConnecting To ReSync", "remotely.png", false);
-            } else if (readiness != ReSyncFlowClient.ReadinessState.CONNECTING
+            } else if (connectionState != ReSyncFlowClient.ConnectionState.CONNECTING
                 && (startupState != StudioStartupState.LOADING || startupIcon == null
                 || !Objects.equals(startupIcon.getMessage(), "Loading...\nWaiting For ReSync"))) {
                 setStartupState(StudioStartupState.LOADING, "Loading...\nWaiting For ReSync", "remotely.png", false);
             }
             return;
         }
-        String message = readiness == ReSyncFlowClient.ReadinessState.CONNECTING
-            ? "Loading...\nConnecting To ReSync"
-            : readiness == ReSyncFlowClient.ReadinessState.WAITING_FOR_REGISTRY
-            ? "Loading...\nLoading Flow Nodes" : "ReSync Connection Failed\nRetrying";
-        if (startupState != StudioStartupState.LOADING || startupIcon == null || !Objects.equals(startupIcon.getMessage(), message)) {
-            setStartupState(StudioStartupState.LOADING, message, "remotely.png", false);
+        if (startupState == StudioStartupState.READY) {
+            setStartupState(StudioStartupState.LOADING, "Loading...\nConnecting To ReSync", "remotely.png", false);
         }
         if (!startupProbeRunning) {
             beginStartupProbe(false);
@@ -1521,9 +8420,8 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             startupIcon.setVisible(true);
         }
         if (setupReSyncButton != null) {
-            String action = state == StudioStartupState.SECURE_CONNECTION_REPAIR ? "Update ReSync" : "Setup ReSync";
-            setupReSyncButton.setMessage(action);
-            setupReSyncButton.setHint(action);
+            setupReSyncButton.setMessage("Setup ReSync");
+            setupReSyncButton.setHint("Setup ReSync");
             setupReSyncButton.setVisible(showSetupButton && !setupRunning);
         }
         if (welcomeServerButton != null) {
@@ -1548,50 +8446,58 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         startupProbeRunning = true;
         lastStartupProbeAt = now;
         manager.ensureFlowClientForStartup(serverId, startupServer, true);
-        if (manager.isFlowClientReady(serverId)) {
+        if (manager.isFlowClientConnected(serverId)) {
             startupProbeRunning = false;
             enterStudioReadyState();
-            return;
-        }
-        if (manager.getFlowClientReadiness(serverId) == ReSyncFlowClient.ReadinessState.INCOMPATIBLE) {
-            startupProbeRunning = false;
-            ReSyncFlowClient client = manager.existingFlowClient(serverId);
-            String message = client != null ? client.readinessFailureMessage() : "ReSync Flow Contract Mismatch. Update ReSync And Remotely";
-            setStartupState(StudioStartupState.SECURE_CONNECTION_REPAIR, message, "ReSync.png", true);
             return;
         }
         if (force && startupState != StudioStartupState.INSTALLING && startupState != StudioStartupState.INSTALLED) {
             setStartupState(StudioStartupState.LOADING, "Loading...\nDetecting ReSync", "remotely.png", false);
         }
-        UiTasks.runBackground(this::probeStartupStateAsync);
-    }
-
-    private void probeStartupStateAsync() {
-        try {
-            reSyncProvisioningService.computeStartupState(serverId, startupServer, loaderHint).whenComplete((result, error) ->
-                ScreenManager.getInstance().execute(() -> applyStartupProbeResult(result, error)));
-        } catch (Exception error) {
-            ScreenManager.getInstance().execute(() -> applyStartupProbeResult(null, error));
-        }
-    }
-
-    private void applyStartupProbeResult(ReSyncProvisioningService.StartupProbeResult resolvedResult, Throwable error) {
-        if (error != null || resolvedResult == null) {
-            resolvedResult = new ReSyncProvisioningService.StartupProbeResult(ReSyncProvisioningService.StartupStatus.SETUP, false, false);
-        }
-        {
+        long generation = lifecycleTaskGeneration;
+        if (!submitLifecycleTask(() -> probeStartupStateAsync(generation))) {
             startupProbeRunning = false;
-            FlowManager manager = FlowManager.getInstance();
-            ReSyncFlowClient.ReadinessState readiness = manager != null
-                ? manager.getFlowClientReadiness(serverId) : ReSyncFlowClient.ReadinessState.DISCONNECTED;
-            if (manager != null && manager.isFlowClientReady(serverId)) {
-                enterStudioReadyState();
+        }
+    }
+
+    protected final boolean submitLifecycleTask(Runnable task) {
+        if (task == null || lifecycleTasks.isClosed() || lifecycleClosed) {
+            return false;
+        }
+        try {
+            lifecycleTasks.execute(task);
+            return true;
+        } catch (IllegalStateException exception) {
+            if (!lifecycleClosed) {
+                new Notification("ReSync", "Action Queue Busy", Notification.Type.ERROR);
+            }
+            return false;
+        }
+    }
+
+    private boolean lifecycleTaskCurrent(long generation) {
+        return !lifecycleClosed && generation == lifecycleTaskGeneration;
+    }
+
+    private void probeStartupStateAsync(long generation) {
+        if (!lifecycleTaskCurrent(generation)) {
+            return;
+        }
+        ReSyncProvisioningService.StartupProbeResult result;
+        try {
+            result = reSyncProvisioningService.computeStartupState(serverId, startupServer, loaderHint).join();
+        } catch (Exception ignored) {
+            result = new ReSyncProvisioningService.StartupProbeResult(ReSyncProvisioningService.StartupStatus.SETUP, false, false);
+        }
+        ReSyncProvisioningService.StartupProbeResult resolvedResult = result;
+        ScreenManager.getInstance().execute(() -> {
+            if (!lifecycleTaskCurrent(generation)) {
                 return;
             }
-            if (readiness == ReSyncFlowClient.ReadinessState.INCOMPATIBLE) {
-                ReSyncFlowClient client = manager.existingFlowClient(serverId);
-                String message = client != null ? client.readinessFailureMessage() : "ReSync Flow Contract Mismatch. Update ReSync And Remotely";
-                setStartupState(StudioStartupState.SECURE_CONNECTION_REPAIR, message, "ReSync.png", true);
+            startupProbeRunning = false;
+            FlowManager manager = FlowManager.getInstance();
+            if (manager != null && manager.isFlowClientConnected(serverId)) {
+                enterStudioReadyState();
                 return;
             }
             if (startupState == StudioStartupState.INSTALLING) {
@@ -1602,38 +8508,21 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             }
             StudioStartupState resolvedState = startupStateFor(resolvedResult.status());
             switch (resolvedState) {
-                case READY -> {
-                    String message = readiness == ReSyncFlowClient.ReadinessState.CONNECTING
-                        ? "Loading...\nConnecting To ReSync" : "Loading...\nLoading Flow Nodes";
-                    setStartupState(StudioStartupState.LOADING, message, "remotely.png", false);
-                }
+                case READY -> enterStudioReadyState();
                 case NOT_SUPPORTED -> setStartupState(StudioStartupState.NOT_SUPPORTED, "ReSync Is Not On This Server\nBukkit-Based Server Required", "close.png", false);
                 case SERVER_STOPPED -> setStartupState(StudioStartupState.SERVER_STOPPED, "Server Is Offline\nStart The Server To Use ReSync", "stop.png", false);
-                case SETUP -> setStartupState(StudioStartupState.SETUP,
-                    startupMessage(resolvedResult, "Setup ReSync\nInstall And Configure"), "ReSync.png", true);
-                case SECURE_CONNECTION_REPAIR -> setStartupState(StudioStartupState.SECURE_CONNECTION_REPAIR,
-                    startupMessage(resolvedResult, "Update ReSync\nRepair Secure Connection"), "ReSync.png", true);
+                case SETUP -> setStartupState(StudioStartupState.SETUP, "Setup ReSync\nInstall And Configure", "ReSync.png", true);
                 case LOADING -> {
-                    String readinessMessage = resolvedResult.readinessMessage();
-                    if (readinessMessage != null && !readinessMessage.isBlank()) {
-                        setStartupState(StudioStartupState.LOADING, readinessMessage, "remotely.png", false);
+                    ReSyncFlowClient.ConnectionState connectionState = manager != null
+                        ? manager.getFlowClientConnectionState(serverId) : ReSyncFlowClient.ConnectionState.DISCONNECTED;
+                    if (connectionState == ReSyncFlowClient.ConnectionState.CONNECTING) {
+                        setStartupState(StudioStartupState.LOADING, "Loading...\nConnecting To ReSync", "remotely.png", false);
                     } else {
-                        if (readiness == ReSyncFlowClient.ReadinessState.CONNECTING) {
-                            setStartupState(StudioStartupState.LOADING, "Loading...\nConnecting To ReSync", "remotely.png", false);
-                        } else if (readiness == ReSyncFlowClient.ReadinessState.WAITING_FOR_REGISTRY) {
-                            setStartupState(StudioStartupState.LOADING, "Loading...\nLoading Flow Nodes", "remotely.png", false);
-                        } else {
-                            setStartupState(StudioStartupState.LOADING, "ReSync Connection Failed\nRetrying", "remotely.png", false);
-                        }
+                        setStartupState(StudioStartupState.LOADING, "ReSync Connection Failed\nRetrying", "remotely.png", false);
                     }
                 }
             }
-        }
-    }
-
-    private String startupMessage(ReSyncProvisioningService.StartupProbeResult result, String fallback) {
-        String message = result == null ? "" : result.readinessMessage();
-        return message == null || message.isBlank() ? fallback : message;
+        });
     }
 
     private StudioStartupState startupStateFor(ReSyncProvisioningService.StartupStatus status) {
@@ -1644,9 +8533,9 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             case READY -> StudioStartupState.READY;
             case NOT_SUPPORTED -> StudioStartupState.NOT_SUPPORTED;
             case SETUP -> StudioStartupState.SETUP;
-            case SECURE_CONNECTION_REPAIR -> StudioStartupState.SECURE_CONNECTION_REPAIR;
             case LOADING -> StudioStartupState.LOADING;
             case SERVER_STOPPED -> StudioStartupState.SERVER_STOPPED;
+            case SECURE_CONNECTION_REPAIR -> StudioStartupState.SETUP;
         };
     }
 
@@ -1659,11 +8548,27 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             return;
         }
         reSyncUpdateProbeRunning = true;
-        UiTasks.runBackground(() -> reSyncProvisioningService.isReSyncUpdateAvailable(serverId, startupServer).whenComplete((available, error) ->
+        long generation = lifecycleTaskGeneration;
+        if (!submitLifecycleTask(() -> {
+            if (!lifecycleTaskCurrent(generation)) {
+                return;
+            }
+            boolean available = false;
+            try {
+                available = Boolean.TRUE.equals(reSyncProvisioningService.isReSyncUpdateAvailable(serverId, startupServer).join());
+            } catch (Exception ignored) {
+            }
+            boolean resolved = available;
             ScreenManager.getInstance().execute(() -> {
+                if (!lifecycleTaskCurrent(generation)) {
+                    return;
+                }
                 reSyncUpdateProbeRunning = false;
-                updateReSyncAvailability(error == null && Boolean.TRUE.equals(available));
-            })));
+                updateReSyncAvailability(resolved);
+            });
+        })) {
+            reSyncUpdateProbeRunning = false;
+        }
     }
 
     @Override
@@ -1682,23 +8587,6 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private void enterStudioReadyState() {
-        FlowManager manager = FlowManager.getInstance();
-        if (manager == null) {
-            setStartupState(StudioStartupState.NOT_SUPPORTED, "Not Supported\nReSync Is Missing", "stop.png", false);
-            return;
-        }
-        manager.ensureFlowClientForStartup(serverId, startupServer, true);
-        if (!manager.isFlowClientReady(serverId)) {
-            ReSyncFlowClient.ReadinessState readiness = manager.getFlowClientReadiness(serverId);
-            ReSyncFlowClient client = manager.existingFlowClient(serverId);
-            if (readiness == ReSyncFlowClient.ReadinessState.INCOMPATIBLE) {
-                String message = client != null ? client.readinessFailureMessage() : "ReSync Flow Contract Mismatch. Update ReSync And Remotely";
-                setStartupState(StudioStartupState.SECURE_CONNECTION_REPAIR, message, "ReSync.png", true);
-            } else {
-                setStartupState(StudioStartupState.LOADING, "Loading...\nLoading Flow Nodes", "remotely.png", false);
-            }
-            return;
-        }
         startupState = StudioStartupState.READY;
         startupIcon = null;
         startupCloseButton = null;
@@ -1709,16 +8597,15 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             createStudioWorkspaceChrome(!liveStudioFullEditorMode);
             studioChromeBuilt = true;
         }
+        FlowManager manager = FlowManager.getInstance();
         if (manager != null) {
-            manager.onStudioReady(serverId);
+            manager.ensureFlowClientForStartup(serverId, startupServer, true);
             if (liveStudioFullEditorMode) {
-                ScreenManager.getInstance().execute(() -> {
-                    ensureStudioWorkspacePanels(true);
-                    updateStudioLayout();
-                    manager.requestInitialFlowData(serverId);
-                    WorldGenManager.getInstance().requestProjectListIfMissing(serverId);
-                });
+                ensureStudioWorkspacePanels(true);
+                updateStudioLayout();
+                manager.onStudioReady(serverId);
             } else {
+                manager.onStudioReady(serverId);
                 manager.requestInitialFlowData(serverId);
                 WorldGenManager.getInstance().requestProjectListIfMissing(serverId);
             }
@@ -1728,11 +8615,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private void runReSyncStartupAction() {
-        if (startupState == StudioStartupState.SECURE_CONNECTION_REPAIR) {
-            runUpdateFlow();
-        } else {
-            runSetupFlow();
-        }
+        runSetupFlow();
     }
 
     private void runSetupFlow() {
@@ -1741,40 +8624,55 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         }
         setupRunning = true;
         setStartupState(StudioStartupState.INSTALLING, "Installing ReSync...", "remotely.png", false);
-        UiTasks.runBackground(this::setupReSyncAsync);
-    }
-
-    private void setupReSyncAsync() {
-        try {
-            FlowManager manager = FlowManager.getInstance();
-            if (manager != null && manager.isFlowClientReady(serverId)) {
-                ScreenManager.getInstance().execute(() -> finishSetup(true, true, ""));
-                return;
-            }
-            reSyncProvisioningService.setup(serverId, startupServer).whenComplete((result, error) -> ScreenManager.getInstance().execute(() -> {
-                boolean success = error == null && result != null && result.success();
-                String reason = error == null && result != null ? result.failureMessage() : errorMessage(error, "Setup Failed");
-                finishSetup(success, success, reason);
-            }));
-        } catch (Exception error) {
-            ScreenManager.getInstance().execute(() -> finishSetup(false, false, errorMessage(error, "Setup Failed")));
+        long generation = lifecycleTaskGeneration;
+        if (!submitLifecycleTask(() -> setupReSyncAsync(generation))) {
+            setupRunning = false;
+            setStartupState(StudioStartupState.SETUP, "Setup ReSync\nInstall And Configure", "ReSync.png", true);
         }
     }
 
-    private void finishSetup(boolean completed, boolean shouldRestart, String reason) {
-        setupRunning = false;
-        if (completed) {
-            if (shouldRestart) {
-                showInstalledState();
-            } else {
-                beginStartupProbe(true);
-            }
+    private void setupReSyncAsync(long generation) {
+        if (!lifecycleTaskCurrent(generation)) {
             return;
         }
-        if (reason != null && !reason.isBlank()) {
-            new Notification("ReSync", reason, Notification.Type.ERROR);
+        boolean success;
+        boolean needsRestart = false;
+        String failureMessage = "";
+        try {
+            FlowManager manager = FlowManager.getInstance();
+            if (manager != null && manager.isFlowClientConnected(serverId)) {
+                success = true;
+            } else {
+                ReSyncProvisioningService.OperationResult result = reSyncProvisioningService.setup(serverId, startupServer).join();
+                success = result.success();
+                failureMessage = result.failureMessage();
+                needsRestart = success;
+            }
+        } catch (Exception error) {
+            success = false;
+            failureMessage = error.getMessage() == null || error.getMessage().isBlank() ? "Setup Failed" : error.getMessage();
         }
-        setStartupState(StudioStartupState.SETUP, "Setup ReSync\nInstall And Configure", "ReSync.png", true);
+        boolean completed = success;
+        boolean shouldRestart = needsRestart;
+        String reason = failureMessage;
+        ScreenManager.getInstance().execute(() -> {
+            if (!lifecycleTaskCurrent(generation)) {
+                return;
+            }
+            setupRunning = false;
+            if (completed) {
+                if (shouldRestart) {
+                    showInstalledState();
+                } else {
+                    beginStartupProbe(true);
+                }
+                return;
+            }
+            if (reason != null && !reason.isBlank()) {
+                new Notification("ReSync", reason, Notification.Type.ERROR);
+            }
+            setStartupState(StudioStartupState.SETUP, "Setup ReSync\nInstall And Configure", "ReSync.png", true);
+        });
     }
 
     private void runUpdateFlow() {
@@ -1783,62 +8681,64 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         }
         reSyncUpdateRunning = true;
         new Notification("ReSync", "Updating ReSync...", Notification.Type.INFO);
-        UiTasks.runBackground(this::updateReSyncAsync);
+        long generation = lifecycleTaskGeneration;
+        if (!submitLifecycleTask(() -> updateReSyncAsync(generation))) {
+            reSyncUpdateRunning = false;
+            new Notification("ReSync", "Update Queue Busy", Notification.Type.ERROR);
+        }
     }
 
-    private void updateReSyncAsync() {
+    private void updateReSyncAsync(long generation) {
+        if (!lifecycleTaskCurrent(generation)) {
+            return;
+        }
+        boolean success;
+        String failureMessage = "";
         try {
-            reSyncProvisioningService.update(serverId, startupServer).whenComplete((result, error) -> ScreenManager.getInstance().execute(() -> {
-                boolean completed = error == null && result != null && result.success();
-                String reason = error == null && result != null ? result.failureMessage() : errorMessage(error, "Update Failed");
-                reSyncUpdateRunning = false;
-                setupRunning = false;
-                if (completed) {
-                    reSyncProvisioningService.clearReleaseCache();
-                    updateReSyncAvailability(false);
-                    if (startupState == StudioStartupState.READY) {
-                        showUpdatedNotification();
-                    } else {
-                        new Notification("ReSync", "Updated! Restart Server To Activate", Notification.Type.SUCCESS);
-                    }
-                    return;
-                }
-                if (reason != null && !reason.isBlank()) {
-                    new Notification("ReSync", reason, Notification.Type.ERROR);
-                }
-                updateReSyncAvailability(true);
-            }));
+            ReSyncProvisioningService.OperationResult result = reSyncProvisioningService.update(serverId, startupServer).join();
+            success = result.success();
+            failureMessage = result.failureMessage();
         } catch (Exception error) {
-            ScreenManager.getInstance().execute(() -> {
-                reSyncUpdateRunning = false;
-                setupRunning = false;
-                new Notification("ReSync", errorMessage(error, "Update Failed"), Notification.Type.ERROR);
-                updateReSyncAvailability(true);
-            });
+            success = false;
+            failureMessage = error.getMessage() == null || error.getMessage().isBlank() ? "Update Failed" : error.getMessage();
         }
-    }
-
-    private String errorMessage(Throwable error, String fallback) {
-        Throwable current = error;
-        while (current != null && current.getCause() != null) {
-            current = current.getCause();
-        }
-        String message = current == null ? "" : current.getMessage();
-        return message == null || message.isBlank() ? fallback : message;
+        boolean completed = success;
+        String reason = failureMessage;
+        ScreenManager.getInstance().execute(() -> {
+            if (!lifecycleTaskCurrent(generation)) {
+                return;
+            }
+            reSyncUpdateRunning = false;
+            setupRunning = false;
+            if (completed) {
+                reSyncProvisioningService.clearReleaseCache();
+                updateReSyncAvailability(false);
+                if (startupState == StudioStartupState.READY) {
+                    showUpdatedNotification();
+                } else {
+                    new Notification("ReSync", "Updated! Restart Server To Activate", Notification.Type.SUCCESS);
+                }
+                return;
+            }
+            if (reason != null && !reason.isBlank()) {
+                new Notification("ReSync", reason, Notification.Type.ERROR);
+            }
+            updateReSyncAvailability(true);
+        });
     }
 
     private void showUpdatedNotification() {
-        String message = safeText(reSyncProvisioningService.updatedMessage(serverId, startupServer));
-        new Notification("ReSync", message.isBlank() ? "Updated! Restart Server To Activate" : message, Notification.Type.SUCCESS);
+        String message = reSyncProvisioningService.updatedMessage(serverId, startupServer);
+        new Notification("ReSync", message == null || message.isBlank() ? "Updated! Restart Server To Activate" : message, Notification.Type.SUCCESS);
     }
 
     private void showInstalledState() {
-        String message = safeText(reSyncProvisioningService.installedMessage(serverId, startupServer));
-        if (message.isBlank()) {
+        String message = reSyncProvisioningService.installedMessage(serverId, startupServer);
+        if (message == null || message.isBlank()) {
             message = "ReSync Installed!\nRestart Your Server To Activate";
         }
         setStartupState(StudioStartupState.INSTALLED, message, "ReSync.png", false);
-        new Notification("ReSync", message.replace("ReSync Installed!\n", ""), Notification.Type.SUCCESS);
+        new Notification("ReSync", "Installed! Restart Server To Activate", Notification.Type.SUCCESS);
     }
 
     private void openServerScreen() {
@@ -1846,8 +8746,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (manager == null || startupServer == null) {
             return;
         }
-        ApplicationHost host = ApplicationHostRegistry.current();
-        if (host == null) host = manager.getApplicationHost();
+        ApplicationHost host = manager.getApplicationHost();
         FlowManagerUiAdapter.forHost(host).openServerScreen(manager, host, this, serverId, startupServer);
     }
 
@@ -1855,8 +8754,12 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (paletteSidePanel == null) {
             return;
         }
-        if (NodeRegistry.getInstance() != null && NodeRegistry.getInstance().hasDefinitions(nodeRegistryServerId())) {
-            populateCategoryPopups();
+        if (hasTypedCatalogProjection()) {
+            beginPaletteRefresh(typedCatalogPalette().orElse(null));
+        } else if (!legacyCatalogDefinitions().isEmpty()) {
+            populateLegacyCategoryPopups();
+        } else if (catalogAuthorityRequired() && !catalogAuthorityAllowsInteraction()) {
+            clearUnavailableCategoryPopups();
         } else {
             populateFallbackPopups();
         }
@@ -1864,7 +8767,6 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
     private void createPaletteSidePanel() {
         paletteStudioPanel = rightStudioPanel("palettePanel")
-            .collapsible("Node Palette")
             .show();
         paletteSidePanel = paletteStudioPanel.sidePanel();
         paletteStudioPanel.padding(studioPanelState.padding());
@@ -1872,7 +8774,8 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         categoryPopups.clear();
         categoryOrder = resolveCategoryOrder();
         for (NodeDefinition.NodeCategory category : categoryOrder) {
-            PopupWidget popup = new PopupWidget.Builder(getCategoryLabel(category)).enableCollapseOnClose(true).build();
+            PopupWidget popup = new PopupWidget.Builder(getCategoryLabel(category)).enableCollapseOnClose(true)
+                .virtualizeRows(true).build();
             popup.setTitleBadge(catalogGroupName(category));
             ReSyncStudioPanelState.disableEntrance(popup);
             popup.collapse(true);
@@ -1880,11 +8783,113 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             paletteSidePanel.addWidget(popup);
         }
 
-        if (NodeRegistry.getInstance() != null && NodeRegistry.getInstance().hasDefinitions(nodeRegistryServerId())) {
-            populateCategoryPopups();
+        if (hasTypedCatalogProjection()) {
+            beginPaletteRefresh(typedCatalogPalette().orElse(null));
+        } else if (!legacyCatalogDefinitions().isEmpty()) {
+            populateLegacyCategoryPopups();
+        } else if (catalogAuthorityRequired() && !catalogAuthorityAllowsInteraction()) {
+            clearUnavailableCategoryPopups();
         } else {
             populateFallbackPopups();
         }
+    }
+
+    private void retainCoreEditor() {
+        long startedAtNanos = lifecycleNowNanos();
+        restoreCoreStructuralPreview(coreMutationCommitPending, false);
+        CoreGraphEditorSession session = activeCoreGraphSession();
+        if (activeStudioDocument == null || session == null || coreProjectionSnapshot == null
+            || !coreProjectionSnapshot.currentFor(session) || coreProjectionResult == null
+            || coreWidgetTopology == null || coreWidgetTopology.graph() != graph
+            || pendingCoreWidgetTopology != null || catalogRefresh != null || nodeCatalogRefreshQueued
+            || hasPendingCoreMutation(session) || !currentGraphRenderIndex(graphRenderIndex)) {
+            return;
+        }
+        retainedCoreEditors.put(activeStudioDocument.key(), new RetainedCoreEditor(coreProjectionSnapshot,
+            corePublicationIdentity(session), typedInteractionProjection().orElse(null), coreProjectionResult, coreWidgetTopology, graphRenderIndex,
+            graphRenderMutationVersion, graphRenderNodeTopology, graphRenderConnectionTopology,
+            graphRenderConnectionsByNode, graphRenderTopologyRevision, graphRenderFrontOrder,
+            new HashMap<>(editorDiagnostics), Set.copyOf(selectedNodeIds)));
+        coreWidgetTopology = null;
+        widgetCache = new HashMap<>();
+        widgetNodeIds = new IdentityHashMap<>();
+        ReSyncLifecycleDiagnostics.offer(serverId, "core_editor_retained", "resourceKey", activeStudioDocument.key(),
+            "widgetCount", graph.getNodes().size(), "captureMicros", elapsedMicros(startedAtNanos, lifecycleNowNanos()));
+    }
+
+    private void detachCoreEditor() {
+        coreVisualPreview = null;
+        retirePreparedWidgets(catalogRefresh);
+        catalogRefresh = null;
+        nodeCatalogRefreshQueued = false;
+        nodeCatalogPublicationToken = nextProjectionGeneration(nodeCatalogPublicationToken);
+        if (coreWidgetTopology != null) {
+            retireCoreWidgets(coreWidgetTopology.widgets());
+        } else {
+            retireCoreWidgets(widgetCache.values());
+        }
+        if (pendingCoreWidgetTopology != null) {
+            retireCoreWidgets(pendingCoreWidgetTopology.retireIfAbandoned());
+        }
+        coreWidgetTopology = null;
+        pendingCoreWidgetTopology = null;
+        graphRenderContinuityTopology = null;
+        graphRenderContinuityIndex = null;
+        graphRenderIndex = null;
+        graphRenderPendingBuild.set(null);
+        graphRenderBuildResult.set(null);
+        graphRenderNodeTopology = BrowserSafeState.map();
+        graphRenderConnectionTopology = BrowserSafeState.map();
+        graphRenderConnectionsByNode = BrowserSafeState.map();
+        graphRenderTopologyRevision = new BrowserSafeState.LongValue();
+        graphRenderGeometryDirtyNodeIds.clear();
+        graphRenderMutationPending = false;
+        widgetCache = new HashMap<>();
+        widgetNodeIds = new IdentityHashMap<>();
+        editorDiagnostics.clear();
+        worldWidgets.clear();
+        publishedWidgetProjectionGeneration = 0L;
+        publishedWidgetTopologyChecksum = "";
+        coreWidgetPublicationFailure = null;
+        invalidateGraphRenderTopology();
+    }
+
+    private boolean restoreCoreEditor(StudioDocument document) {
+        long startedAtNanos = lifecycleNowNanos();
+        RetainedCoreEditor retained = retainedCoreEditors.remove(document.key());
+        if (retained == null) {
+            return false;
+        }
+        if (!retained.currentFor(document.coreSession())
+            || retained.catalog() != typedInteractionProjection().orElse(null)) {
+            retireCoreWidgets(retained.topology().widgets());
+            return false;
+        }
+        graph = retained.projection().graph();
+        coreProjectionSnapshot = retained.snapshot();
+        coreProjectionRequestedSnapshot = coreProjectionSnapshot;
+        coreProjectionResult = retained.projection();
+        coreProjectionChecksum = coreProjectionResult.documentChecksum();
+        coreTopologyChecksum = coreProjectionResult.topologyChecksum();
+        coreProjectionGeneration = retained.topology().projectionGeneration();
+        coreWidgetTopology = retained.topology();
+        widgetCache = coreWidgetTopology.widgetsById();
+        widgetNodeIds = coreWidgetTopology.nodeIds();
+        publishedWidgetProjectionGeneration = coreProjectionGeneration;
+        publishedWidgetTopologyChecksum = coreTopologyChecksum;
+        graphRenderIndex = retained.renderIndex();
+        graphRenderMutationVersion = retained.renderVersion();
+        graphRenderNodeTopology = retained.nodes();
+        graphRenderConnectionTopology = retained.connections();
+        graphRenderConnectionsByNode = retained.connectionsByNode();
+        graphRenderTopologyRevision = retained.topologyRevision();
+        graphRenderFrontOrder = retained.frontOrder();
+        editorDiagnostics.putAll(retained.diagnostics());
+        selectedNodeIds.addAll(retained.selectedNodes());
+        updateCoreEditorReadiness(true);
+        ReSyncLifecycleDiagnostics.offer(serverId, "core_editor_restored", "resourceKey", document.key(),
+            "widgetCount", widgetCache.size(), "applyMicros", elapsedMicros(startedAtNanos, lifecycleNowNanos()));
+        return true;
     }
 
     @Override
@@ -1893,32 +8898,66 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             syncNodePositions();
             saveActiveStudioViewport();
         }
+        retainCoreEditor();
     }
 
     @Override
     protected void openStudioGraphDocument(String type, String id, String title, FlowGraph targetGraph) {
-        super.openStudioGraphDocument(type, id, title, targetGraph);
+        submitStudioGraphOpen(type, id, title, targetGraph, null);
         requestInitialViewportFit();
     }
 
     @Override
     protected void afterStudioDocumentSelected(StudioDocument document) {
+        long selectionStartedAtNanos = lifecycleNowNanos();
+        boolean retained = false;
+        detachCoreEditor();
+        selectedNodeIds.clear();
         restoreStudioViewport(document.viewport());
         activeNodeRegistryServerId = ReSyncResourceDragPayload.WORLDGEN.equals(document.type()) ? WorldGenManager.registryServerId(serverId) : serverId;
-        graph = document.view() == null && document.graph() != null ? document.graph() : studioEmptyGraph;
-        selectedNodeIds.clear();
+        if (document.view() == null && document.coreSession() != null) {
+            coreGraphSession = document.coreSession();
+            coreGraphSessionDocumentKey = document.key();
+            invalidateCoreProjectionRequests();
+            coreProjectionChecksum = "";
+            coreProjectionFailureChecksum = "";
+            coreTopologyChecksum = "";
+            coreProjectionResult = null;
+            coreEditorReadiness = StudioDocument.EditorReadiness.unavailable();
+            retained = restoreCoreEditor(document);
+            if (!retained) {
+                graph = studioEmptyGraph;
+                requestCoreProjection(coreGraphSession, true);
+            }
+        } else {
+            coreGraphSession = null;
+            coreGraphSessionDocumentKey = "";
+            invalidateCoreProjectionRequests();
+            coreProjectionChecksum = "";
+            coreProjectionFailureChecksum = "";
+            coreTopologyChecksum = "";
+            coreProjectionResult = null;
+            coreEditorReadiness = StudioDocument.EditorReadiness.unavailable();
+            graph = document.view() == null && document.graph() != null ? document.graph() : studioEmptyGraph;
+        }
         selectionBase.clear();
         selectedDragStartPositions.clear();
+        selectedNodeMove.clear();
+        movingSelectedNodes = false;
         focusedNode = null;
         dragState.isDragging = false;
         pendingSourceNodeId = null;
         pendingSourcePin = null;
         if (document.view() == null) {
-            graphHistory(document);
+            if (document.coreSession() == null) {
+                graphHistory(document);
+            }
             if (usesStudioPalette(document) && shouldCreatePaletteSidePanel() && paletteSidePanel == null) {
                 createPaletteSidePanel();
             }
-            refreshNodeRegistry();
+            if (document.coreSession() == null) {
+                refreshNodeRegistry();
+            }
         }
         if (paletteSidePanel != null) {
             if (usesStudioPalette(document) && shouldCreatePaletteSidePanel()) {
@@ -1927,34 +8966,112 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                 paletteSidePanel.hide();
             }
         }
+        activateWorkspaceGraph(graph);
+        CoreGraphEditorSession selectedSession = document.coreSession();
+        ReSyncFlowClient.traceLifecycle(serverId, "studio_document_selected", "serverId", serverId,
+            "resourceKey", document.key(), "requestId", "studio-selection", "mutationId",
+            graph != null ? graph.getResourceMutationId() : null, "generation", workspacePublicationGeneration,
+            "authorityEpoch", 0L, "revision", selectedSession != null ? selectedSession.revision()
+                : graph != null ? graph.getResourceRevision() : -1L, "documentType", document.type(), "documentId",
+            document.id(), "documentKind", document.view() != null ? "view" : selectedSession != null ? "core"
+                : document.graph() != null ? "graph" : "empty", "sessionId", coreSessionIdentity(selectedSession),
+            "publicationId", corePublicationIdentity(selectedSession), "projectionGeneration", coreProjectionGeneration,
+            "documentChecksum", coreProjectionChecksum.isBlank() ? "pending" : coreProjectionChecksum,
+            "topologyChecksum", coreTopologyChecksum.isBlank() ? "pending" : coreTopologyChecksum, "nodeCount",
+            graph != null && graph.getNodes() != null ? graph.getNodes().size() : 0, "connectionCount",
+            graph != null && graph.getConnections() != null ? graph.getConnections().size() : 0, "widgetCount",
+            widgetCache.size(), "retained", retained, "selectionMicros", elapsedMicros(selectionStartedAtNanos, lifecycleNowNanos()));
     }
 
     @Override
     protected boolean isStudioDocumentDirty(StudioDocument document) {
+        if (document != null && document.view() == null && document.coreSession() != null) {
+            return coreSessionDirty(document, document.coreSession());
+        }
         if (document != null && document.view() == null && document.graph() != null) {
             StudioScreen.History<GraphSnapshot> history = graphHistories.get(document.key());
-            return history != null && history.isDirty((current, saved) -> current.editableDocument.equals(saved.editableDocument));
+            return history != null && history.isDirty((current, saved) ->
+                editableGraphDocumentsEqual(current.document, saved.document));
         }
         return super.isStudioDocumentDirty(document);
     }
 
+    static boolean editableGraphDocumentsEqual(JsonObject current, JsonObject saved) {
+        if (current == saved) {
+            return true;
+        }
+        if (current == null || saved == null) {
+            return false;
+        }
+        return current.equals(saved)
+            || FlowWorkspaceDocument.editableWorkspace(current).equals(FlowWorkspaceDocument.editableWorkspace(saved));
+    }
+
+    @Override
+    protected boolean discardStudioDocumentForClose(StudioDocument document) {
+        if (document != null && document == activeStudioDocument && document.view() == null
+            && document.coreSession() == null && document.graph() != null) {
+            retireWorkspaceCaptureForDiscard();
+            if (workspaceSnapshotPending()) {
+                new Notification("Discard", "Editor Busy, Try Again", Notification.Type.ERROR);
+                return false;
+            }
+        }
+        return super.discardStudioDocumentForClose(document);
+    }
+
+    private void retireWorkspaceCaptureForDiscard() {
+        WorkspaceCaptureJob job = workspaceCaptureJob;
+        workspaceCaptureJob = null;
+        workspaceFrozenLeaseCancellation++;
+        workspaceSnapshotResult.set(null);
+        collaborativeWorkspaceCaptureResult.set(null);
+        workspaceSnapshotFrozen = false;
+        clearWorkspaceSnapshotRetry();
+        clearWorkspaceCaptureFailures();
+        deferredWorkspaceMutations.clear();
+        deferredWorkspaceMutationSequences.clear();
+        deferredWorkspaceOverflowMutation = null;
+        deferredWorkspaceOverflowSequence = -1L;
+        clearDeferredWorkspaceMutationTarget();
+        if (job != null) {
+            failWorkspaceCapture(job, "Discarded");
+            if (job.saveAdmission().started() && workspaceGraphSaveRequest == job.saveRequest()) {
+                workspaceGraphSaveRequest = null;
+            }
+        }
+    }
+
     @Override
     protected void discardStudioDocument(StudioDocument document) {
+        if (deferWorkspaceMutation(() -> discardStudioDocument(document))) {
+            return;
+        }
+        if (document != null && document.view() == null && document.coreSession() != null) {
+            FlowManager manager = FlowManager.getInstance();
+            ReSyncResourceType type = ReSyncResourceType.byTypeId(document.type());
+            if (manager == null || type == null || !manager.discardCoreGraphSession(serverId, type, document.id())) {
+                coreOperationUnavailable("Discard");
+                return;
+            }
+            if (document == activeStudioDocument) {
+                refreshCoreProjection();
+                resetGraphEditorState(false);
+            }
+            pendingStudioTabDiscards.remove(document.key());
+            syncStudioDocumentTabs();
+            updateStudioTabStates();
+            return;
+        }
         if (document != null && document.view() == null && document.graph() != null) {
             FlowManager manager = FlowManager.getInstance();
             StudioScreen.History<GraphSnapshot> history = graphHistories.get(document.key());
-            if (history != null) {
-                history.discardChanges();
-            }
-            if (document == activeStudioDocument && manager != null && manager.isFlowClientReady(serverId)) {
-                ReSyncFlowClient client = manager.existingFlowClient(serverId);
-                if (client != null) {
-                    publishWorkspaceDocumentChanges(client);
-                }
-            }
             ReSyncResourceType type = ReSyncResourceType.byTypeId(document.type());
             if (manager != null && type != null && type.isGraph()) {
-                manager.discardGraphDraft(serverId, type, document.id());
+                FlowManager.ResourceReadLease lease = manager.snapshotAuthoritativeResource(serverId, type.typeId(), document.id());
+                if (lease == null || !submitDiscardGraphRestore(document, history, type, lease)) {
+                    new Notification("Discard", "Discard Failed", Notification.Type.ERROR);
+                }
             }
             return;
         }
@@ -1964,6 +9081,9 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     @Override
     public void markStudioDocumentSaving(String type, String id, long sequence) {
         StudioDocument document = findStudioDocument(ReSyncProjectMetadata.resourceKey(type, id));
+        if (document != null && document.view() == null && document.coreSession() != null) {
+            return;
+        }
         if (document != null && document.view() == null && document.graph() != null) {
             graphHistory(document).markSaving(sequence);
             return;
@@ -1975,6 +9095,15 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     public void markStudioDocumentSaved(String type, String id, long sequence) {
         String key = ReSyncProjectMetadata.resourceKey(type, id);
         StudioDocument document = findStudioDocument(key);
+        if (document != null && document.view() == null && document.coreSession() != null) {
+            if (document == activeStudioDocument) {
+                refreshCoreProjectionIfChanged();
+            }
+            pendingStudioTabDiscards.remove(key);
+            syncStudioDocumentTabs();
+            updateStudioTabStates();
+            return;
+        }
         if (document != null && document.view() == null && document.graph() != null) {
             graphHistory(document).markSaved(sequence);
             pendingStudioTabDiscards.remove(key);
@@ -1986,10 +9115,30 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     public void markStudioDocumentSaved(String type, String id, long sequence, long revision, String hash) {
+        markStudioDocumentSaved(type, id, sequence, revision, hash, null);
+    }
+
+    public void markStudioDocumentSaved(String type, String id, long sequence, long revision, String hash,
+                                        String mutationId) {
         StudioDocument document = findStudioDocument(ReSyncProjectMetadata.resourceKey(type, id));
-        if (document != null && document.graph() != null && revision > 0L) {
+        if (document != null && document.coreSession() != null) {
+            if (document == activeStudioDocument) {
+                refreshCoreProjectionIfChanged();
+            }
+            pendingStudioTabDiscards.remove(document.key());
+            syncStudioDocumentTabs();
+            updateStudioTabStates();
+            return;
+        }
+        if (document != null && document.view() == null && document.graph() != null && revision > 0L) {
+            if (deferWorkspaceMutation(() -> markStudioDocumentSaved(type, id, sequence, revision, hash, mutationId))) {
+                return;
+            }
             document.graph().setResourceRevision(revision);
             document.graph().setResourceHash(hash != null ? hash : "");
+            if (mutationId != null && !mutationId.isBlank()) {
+                document.graph().setResourceMutationId(mutationId);
+            }
         }
         markStudioDocumentSaved(type, id, sequence);
     }
@@ -1997,7 +9146,21 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     @Override
     protected void studioDocumentClosed(StudioDocument document) {
         if (document != null) {
+            RetainedCoreEditor retained = retainedCoreEditors.remove(document.key());
+            if (retained != null) {
+                retireCoreWidgets(retained.topology().widgets());
+            }
+            initialViewportFittedKeys.remove(document.key());
             graphHistories.remove(document.key());
+            if (document.key().equals(coreGraphSessionDocumentKey)) {
+                coreGraphSession = null;
+                coreGraphSessionDocumentKey = "";
+                coreProjectionChecksum = "";
+                coreProjectionFailureChecksum = "";
+                coreTopologyChecksum = "";
+                coreProjectionResult = null;
+                coreEditorReadiness = StudioDocument.EditorReadiness.unavailable();
+            }
         }
     }
 
@@ -2015,9 +9178,18 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     private boolean usesStudioPalette(StudioDocument document) {
         return document != null
             && document.view() == null
+            && document.coreSession() == null
             && document.graph() != null
             && !ReSyncResourceDragPayload.CUSTOM_CONTENT.equals(document.type())
             && !ReSyncResourceDragPayload.COMMAND.equals(document.type());
+    }
+
+    @Override
+    protected boolean activeStudioDocumentUsesFlowGraphCanvas() {
+        if (isActiveCoreStudioDocument()) {
+            return true;
+        }
+        return super.activeStudioDocumentUsesFlowGraphCanvas();
     }
 
     private void saveActiveStudioViewport() {
@@ -2057,6 +9229,8 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         selectedNodeIds.clear();
         selectionBase.clear();
         selectedDragStartPositions.clear();
+        selectedNodeMove.clear();
+        movingSelectedNodes = false;
         focusedNode = null;
         dragState.isDragging = false;
         pendingSourceNodeId = null;
@@ -2068,16 +9242,106 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private void populateCategoryPopups() {
-        List<NodeDefinition.NodeCategory> order = categoryOrder.isEmpty() ? resolveCategoryOrder() : categoryOrder;
+        beginPaletteRefresh(typedCatalogPalette().orElse(null));
+    }
+
+    private void beginPaletteRefresh(ReSyncTypedInteractionProjection.Palette palette) {
+        if (paletteSidePanel == null) {
+            paletteRefresh = null;
+            return;
+        }
+        categoryOrder = palette != null ? palette.categoryOrder() : List.of();
+        paletteRefresh = new PaletteRefresh(palette, List.copyOf(categoryPopups.keySet()));
+    }
+
+    private void drainPaletteRefresh() {
+        PaletteRefresh refresh = paletteRefresh;
+        if (refresh == null || paletteSidePanel == null) {
+            return;
+        }
+        if (refresh.palette != null) {
+            Optional<ReSyncTypedInteractionProjection.Palette> current = typedCatalogPalette();
+            if (current.isEmpty() || current.orElseThrow() != refresh.palette) {
+                beginPaletteRefresh(current.orElse(null));
+                return;
+            }
+        }
+        int remaining = CATALOG_PALETTE_ROWS_PER_TICK;
+        Map<PopupWidget, List<PopupWidget.PopupRow>> addedRows = new LinkedHashMap<>();
+        List<NodeDefinition.NodeCategory> order = refresh.palette != null
+            ? refresh.palette.categoryOrder() : List.of();
+        while (remaining > 0 && refresh.categoryIndex < order.size()) {
+            NodeDefinition.NodeCategory category = order.get(refresh.categoryIndex);
+            ensureCategoryPopup(category);
+            PopupWidget popup = getCategoryPopup(category);
+            List<NodeDefinition> definitions = addableNodeDefinitions(
+                refresh.palette.categories().getOrDefault(category, List.of()));
+            if (refresh.rowIndex == 0 && popup != null) {
+                popup.clearRows();
+                popup.setVisible(true);
+                popup.setActive(true);
+                if (isContentEditor() && category == NodeDefinition.NodeCategory.ABILITY && !definitions.isEmpty()) {
+                    popup.collapse(false);
+                }
+            }
+            if (popup == null || refresh.rowIndex >= definitions.size()) {
+                refresh.categoryIndex++;
+                refresh.rowIndex = 0;
+                continue;
+            }
+            NodeDefinition definition = definitions.get(refresh.rowIndex++);
+            IconButton button = new IconButton.Builder()
+                .label(definition.getDisplayName())
+                .entranceAnimation(false)
+                .onClick(() -> {
+                    captureSnapshot();
+                    addNodeAtCenter(catalogNodeType(definition));
+                })
+                .build();
+            ReSyncStudioPanelState.disableEntrance(button);
+            addedRows.computeIfAbsent(popup, ignored -> new ArrayList<>())
+                .add(new PopupWidget.PopupRow.Builder("", button).build());
+            remaining--;
+        }
+        addedRows.forEach(PopupWidget::addRows);
+        while (remaining > 0 && refresh.categoryIndex >= order.size()
+            && refresh.obsoleteIndex < refresh.obsolete.size()) {
+            PopupWidget popup = getCategoryPopup(refresh.obsolete.get(refresh.obsoleteIndex++));
+            if (popup != null) {
+                popup.clearRows();
+                popup.setVisible(false);
+                popup.setActive(false);
+            }
+            remaining--;
+        }
+        if (refresh.categoryIndex >= order.size() && refresh.obsoleteIndex >= refresh.obsolete.size()) {
+            paletteRefresh = null;
+        }
+    }
+
+    private void populateLegacyCategoryPopups() {
+        populateCategoryPopups(legacyCatalogDefinitions());
+    }
+
+    private void populateCategoryPopups(List<NodeDefinition> definitions) {
+        definitions = addableNodeDefinitions(definitions);
+        List<NodeDefinition.NodeCategory> order = new ArrayList<>(categoryOrder.isEmpty() ? resolveCategoryOrder() : categoryOrder);
+        for (NodeDefinition definition : definitions) {
+            NodeDefinition.NodeCategory category = selectorCategory(definition);
+            if (!order.contains(category)) {
+                order.add(category);
+            }
+        }
+        categoryOrder = List.copyOf(order);
+        for (NodeDefinition.NodeCategory category : order) {
+            ensureCategoryPopup(category);
+        }
         Map<NodeDefinition.NodeCategory, List<NodeDefinition>> categories = new HashMap<>();
         for (NodeDefinition.NodeCategory category : order) {
             categories.put(category, new ArrayList<>());
         }
 
-        for (NodeDefinition def : NodeRegistry.getInstance().getAllDefinitions(nodeRegistryServerId()).values()) {
-            if (def.isHidden()) {
-                continue;
-            }
+        for (NodeDefinition def : definitions) {
             NodeDefinition.NodeCategory category = def.getCategory();
             if (def.getId().startsWith("event:")) {
                 category = NodeDefinition.NodeCategory.EVENT;
@@ -2094,6 +9358,8 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             if (targetPopup == null) {
                 continue;
             }
+            targetPopup.setVisible(true);
+            targetPopup.setActive(true);
             targetPopup.clearRows();
             List<NodeDefinition> nodes = categories.getOrDefault(category, new ArrayList<>());
             nodes.sort(comparator);
@@ -2106,7 +9372,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                         .entranceAnimation(false)
                         .onClick(() -> {
                             captureSnapshot();
-                            addNodeAtCenter(def.getId());
+                            addNodeAtCenter(catalogNodeType(def));
                         })
                         .build();
                 ReSyncStudioPanelState.disableEntrance(btn);
@@ -2116,7 +9382,17 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private List<NodeDefinition.NodeCategory> resolveCategoryOrder() {
-        List<FlowCategoryMetadata> meta = NodeRegistry.getInstance().getServerCategories(nodeRegistryServerId());
+        if (hasTypedCatalogProjection()) {
+            return typedCatalogPalette().map(ReSyncTypedInteractionProjection.Palette::categoryOrder).orElse(List.of());
+        }
+        if (!legacyCatalogAllowed()) {
+            return List.of();
+        }
+        NodeRegistry registry = NodeRegistry.getInstance();
+        if (registry == null) {
+            return List.of();
+        }
+        List<FlowCategoryMetadata> meta = registry.getServerCategories(nodeRegistryServerId());
         List<NodeDefinition.NodeCategory> result = new ArrayList<>();
         for (FlowCategoryMetadata m : meta) {
             result.add(NodeDefinition.NodeCategory.fromString(m.getId()));
@@ -2153,6 +9429,9 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private FlowCategoryMetadata categoryMetadata(NodeDefinition.NodeCategory category) {
+        if (hasTypedCatalogProjection() || !legacyCatalogAllowed()) {
+            return null;
+        }
         NodeRegistry registry = NodeRegistry.getInstance();
         if (category == null || registry == null) {
             return null;
@@ -2163,6 +9442,39 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             }
         }
         return null;
+    }
+
+    private List<NodeDefinition> typedCatalogDefinitions() {
+        return typedCatalogPalette().map(ReSyncTypedInteractionProjection.Palette::definitions).orElse(List.of());
+    }
+
+    private Optional<ReSyncTypedInteractionProjection.Palette> typedCatalogPalette() {
+        return typedInteractionProjection().map(projection -> projection.palette(isWorldGenDocument()));
+    }
+
+    private List<NodeDefinition> legacyCatalogDefinitions() {
+        if (!legacyCatalogAllowed()) {
+            return List.of();
+        }
+        NodeRegistry registry = NodeRegistry.getInstance();
+        if (registry == null || !registry.hasDefinitions(nodeRegistryServerId())) {
+            return List.of();
+        }
+        return registry.getAllDefinitions(nodeRegistryServerId()).values().stream()
+            .filter(definition -> definition != null && !definition.isHidden())
+            .toList();
+    }
+
+    private boolean hasTypedCatalogProjection() {
+        ReSyncFlowClient client = typedCatalogClient();
+        return client != null && allowsCatalogDescriptorResolution(client.catalogAuthority())
+            && ReSyncTypedCatalogConsumer.authoritative(client);
+    }
+
+    private boolean legacyCatalogAllowed() {
+        ReSyncFlowClient client = typedCatalogClient();
+        return client != null ? allowsLegacyCatalogEditing(client.catalogAuthority())
+            : !catalogAuthorityRequired();
     }
 
     private String catalogGroupName(NodeDefinition.NodeCategory category) {
@@ -2228,9 +9540,11 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
         addHeaderButton(headerButton("save.png", "Save", this::onSave));
 
-        addHeaderButton(headerButton("layout.png", "Layout", this::organizeGraph));
+        workspaceConflictButton = headerButton("report.png", "Resolve Conflict", this::showWorkspaceConflictPopup);
+        addHeaderButton(workspaceConflictButton);
+        workspaceConflictButton.visible = workspaceConflict != null;
 
-        addHeaderButton(headerButton("info.png", "Registry Inspector", this::showRegistryInspector));
+        addHeaderButton(headerButton("layout.png", "Layout", this::organizeGraph));
 
         if (graph != null && graph.isFunction()) {
             addHeaderButton(headerButton("start.png", "Test Function", this::showFunctionTestPopup));
@@ -2355,10 +9669,30 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private boolean shouldExposeStudioHeaderButton(AnimatedWidget button) {
+        if (isActiveCoreStudioDocument() && isCoreUnavailableHeaderButton(button)) {
+            return false;
+        }
+        if (button == workspaceConflictButton) {
+            return workspaceConflict != null;
+        }
         if (button == debugResumeButton || button == debugStepButton || button == debugStopButton) {
             return debugMode;
         }
         return true;
+    }
+
+    @Override
+    protected List<AnimatedWidget> visibleStudioHeaderButtons() {
+        List<AnimatedWidget> buttons = super.visibleStudioHeaderButtons();
+        if (!isActiveCoreStudioDocument()) {
+            return buttons;
+        }
+        return buttons.stream().filter(button -> !isCoreUnavailableHeaderButton(button)).toList();
+    }
+
+    private boolean isCoreUnavailableHeaderButton(AnimatedWidget button) {
+        String hint = button == null ? "" : safeText(button.hint);
+        return "Test Function".equals(hint) || "Extract Function".equals(hint);
     }
 
     protected boolean showExtractButton() {
@@ -2373,13 +9707,23 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private void showRegistryInspector() {
+        if (hasTypedCatalogProjection()) {
+            showTypedCatalogInspector();
+            return;
+        }
+        if (!legacyCatalogAllowed()) {
+            showUnavailableRegistryInspector();
+            return;
+        }
         NodeRegistry registry = NodeRegistry.getInstance();
         NodeRegistry.RegistrySessionMetadata session = registry != null ? registry.getRegistrySessionMetadata(nodeRegistryServerId()) : null;
         NodeRegistryCache.CacheDiagnostic cache = NodeRegistryCache.getInstance().getDiagnostic(nodeRegistryServerId());
         PopupWidget.Builder builder = new PopupWidget.Builder("Registry Inspector")
             .width(460)
             .setResizable(true)
-            .setMinSize(380, 260);
+            .setMinSize(380, 260)
+            .setAntiOutOfBound(true)
+            .virtualizeRows(true);
         if (registry == null || session == null) {
             addRegistryInspectorRow(builder, "Status", "Registry Unavailable", "No compatible live or cached registry is loaded", "danger");
         } else {
@@ -2399,7 +9743,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             addRegistryInspectorRow(builder, "Checksum", abbreviate(session.checksum(), 18), session.checksum(), "calm");
             addRegistryInspectorRow(builder, "Cache", cache.present() ? "Ready · Schema " + cache.schemaVersion() : "Unavailable", cache.invalidationReason(), cache.present() ? "nice" : "warning");
             addRegistryInspectorRow(builder, "Capabilities", String.valueOf(capabilities.size()), String.join(", ", capabilities), "calm");
-            addRegistryInspectorRow(builder, "Definitions", String.valueOf(registry.getAllDefinitions(nodeRegistryServerId()).size()), diagnosticDetails(diagnostics, "definitionParity"), "calm");
+            addRegistryInspectorRow(builder, "Definitions", String.valueOf(registry.getAuthoritativeDefinitions(nodeRegistryServerId()).size()), diagnosticDetails(diagnostics, "definitionParity"), "calm");
             addRegistryInspectorRow(builder, "Types", String.valueOf(registry.getServerDataTypes(nodeRegistryServerId()).size()), diagnosticDetails(diagnostics, "typeInventory"), "calm");
             addRegistryInspectorRow(builder, "Unresolved Types", String.valueOf(unresolvedTypes.size()), String.join(", ", unresolvedTypes), unresolvedTypes.isEmpty() ? "nice" : "danger");
             addRegistryInspectorRow(builder, "Catalog Providers", String.valueOf(catalogProviders.size()), String.join(", ", catalogProviders), "calm");
@@ -2416,19 +9760,121 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         popup.show();
     }
 
+    private void showTypedCatalogInspector() {
+        ReSyncFlowClient client = typedCatalogClient();
+        PopupWidget.Builder builder = new PopupWidget.Builder("Catalog Inspector")
+            .width(520)
+            .setResizable(true)
+            .setMinSize(420, 280)
+            .setAntiOutOfBound(true)
+            .virtualizeRows(true);
+        Optional<ReSyncCatalogPublicationProjection.Snapshot> active = client != null
+            ? client.catalogPublicationProjection().active() : Optional.empty();
+        if (active.isEmpty()) {
+            addRegistryInspectorRow(builder, "Status", "Catalog Unavailable", "No typed catalog projection is loaded; no legacy fallback is used", "warning");
+        } else {
+            ReSyncCatalogPublicationProjection.Snapshot snapshot = active.orElseThrow();
+            List<ReSyncOpaqueCatalogInspector.Inspection> unavailable = ReSyncOpaqueCatalogInspector.inspect(client,
+                this::supportsTypedDescriptor);
+            addRegistryInspectorRow(builder, "Status", "Ready", "Read-only entries are preserved without editing", "nice");
+            addRegistryInspectorRow(builder, "Server", snapshot.publication().serverId().canonicalText(), snapshot.publication().serverId().canonicalText(), "calm");
+            addRegistryInspectorRow(builder, "Generation", String.valueOf(snapshot.publication().catalogGeneration()), "Typed catalog generation", "calm");
+            addRegistryInspectorRow(builder, "Revision", String.valueOf(snapshot.publication().revision()), "Typed catalog publication revision", "calm");
+            addRegistryInspectorRow(builder, "Read-Only Entries", String.valueOf(unavailable.size()), "Opaque, unavailable, removed, or unsupported entries", unavailable.isEmpty() ? "nice" : "warning");
+            for (ReSyncOpaqueCatalogInspector.Inspection inspection : unavailable) {
+                addOpaqueCatalogInspectorRows(builder, inspection);
+            }
+        }
+        PopupWidget popup = builder.build();
+        addDrawableChild(popup);
+        popup.show();
+    }
+
+    private void showUnavailableRegistryInspector() {
+        ReSyncFlowClient client = typedCatalogClient();
+        String diagnostic = client != null ? client.catalogAuthorityDiagnostic().orElse("CATALOG_PUBLICATION_UNAVAILABLE")
+            : "CATALOG_CLIENT_UNAVAILABLE";
+        PopupWidget.Builder builder = new PopupWidget.Builder("Catalog Inspector")
+            .width(460)
+            .setResizable(true)
+            .setMinSize(380, 260)
+            .setAntiOutOfBound(true)
+            .virtualizeRows(true);
+        addRegistryInspectorRow(builder, "Status", "Catalog Unavailable", diagnostic, "warning");
+        addRegistryInspectorRow(builder, "Authority", "Read Only", "No legacy registry is used while typed catalog authority is unavailable", "calm");
+        PopupWidget popup = builder.build();
+        addDrawableChild(popup);
+        popup.show();
+    }
+
+    private boolean supportsTypedDescriptor(CatalogCachePublication.Entry entry) {
+        return entry != null && typedInteractionProjection()
+            .flatMap(projection -> projection.widgetDefinition(entry.definitionKey()))
+            .filter(widget -> !widget.readOnly())
+            .isPresent();
+    }
+
+    private void ensureCategoryPopup(NodeDefinition.NodeCategory category) {
+        if (category == null || paletteSidePanel == null || categoryPopups.containsKey(category)) {
+            return;
+        }
+        PopupWidget popup = new PopupWidget.Builder(getCategoryLabel(category)).enableCollapseOnClose(true)
+            .virtualizeRows(true).build();
+        popup.setTitleBadge(catalogGroupName(category));
+        ReSyncStudioPanelState.disableEntrance(popup);
+        popup.collapse(true);
+        categoryPopups.put(category, popup);
+        paletteSidePanel.addWidget(popup);
+    }
+
+    private void addOpaqueCatalogInspectorRows(PopupWidget.Builder builder,
+                                               ReSyncOpaqueCatalogInspector.Inspection inspection) {
+        String key = inspection.definitionKey().canonicalText();
+        String status = switch (inspection.status()) {
+            case OPAQUE -> "Opaque";
+            case UNAVAILABLE -> "Unavailable";
+            case TOMBSTONED -> "Removed";
+            case READ_ONLY -> "Read-Only";
+            case UNSUPPORTED -> "Read-Only";
+        };
+        String data = inspection.canonicalData().orElse("No entry data");
+        addRegistryInspectorRow(builder, key, status, inspection.reason(), "warning");
+        addRegistryInspectorRow(builder, "Revision", String.valueOf(inspection.revision()), key, "calm");
+        addRegistryInspectorRow(builder, "Data", abbreviate(data, 72), data, "calm");
+        if (!inspection.requiredCapabilities().isEmpty()) {
+            addRegistryInspectorRow(builder, "Required Capabilities", String.valueOf(inspection.requiredCapabilities().size()),
+                inspection.requiredCapabilities().stream().map(value -> value.canonicalText()).sorted().toList().toString(), "warning");
+        }
+        if (!inspection.unknown().isEmpty()) {
+            addRegistryInspectorRow(builder, "Preserved Fields", String.valueOf(inspection.unknown().size()), inspection.unknown().toString(), "calm");
+        }
+    }
+
+    private void clearUnavailableCategoryPopups() {
+        categoryOrder = List.of();
+        for (PopupWidget popup : categoryPopups.values()) {
+            popup.clearRows();
+            popup.setVisible(false);
+            popup.setActive(false);
+        }
+    }
+
     private void addRegistryInspectorRow(PopupWidget.Builder builder, String label, String value, String hint, String accent) {
         AnimatedButton widget = new AnimatedButton.Builder()
             .label(value != null && !value.isBlank() ? value : "None")
             .hint(hint != null && !hint.isBlank() ? hint : "None")
             .active(false)
-            .accentType(ThemeManager.getAccent(accent))
+            .accentType(ThemeManager.getAccent("warning".equals(accent) ? "copper" : accent))
             .build();
         builder.addRow(label, widget);
     }
 
     private Set<String> unresolvedRegistryTypes(NodeRegistry registry) {
+        if (!legacyCatalogAllowed() || registry == null) {
+            return Set.of();
+        }
         Set<String> unresolved = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
-        for (NodeDefinition definition : registry.getAllDefinitions(nodeRegistryServerId()).values()) {
+        for (NodeDefinition definition : registry.getAuthoritativeDefinitions(nodeRegistryServerId()).values()) {
             List<NodeDefinition.PinDefinition> pins = new ArrayList<>();
             pins.addAll(definition.getInputs());
             pins.addAll(definition.getOutputs());
@@ -2440,7 +9886,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private void collectUnresolvedTypeRefs(NodeRegistry registry, FlowTypeRef typeRef, Set<String> unresolved) {
-        if (typeRef == null) {
+        if (!legacyCatalogAllowed() || registry == null || typeRef == null) {
             return;
         }
         if (!registry.resolveType(nodeRegistryServerId(), typeRef.getTypeId()).isResolved()) {
@@ -2463,8 +9909,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
     private String diagnosticDetails(Map<String, Object> diagnostics, String key) {
         Object value = diagnostics != null ? diagnostics.get(key) : null;
-        String text = FlowJson.text(value);
-        return text.isBlank() ? "None" : text;
+        return value != null ? value.toString() : "None";
     }
 
     private String missingBindingDetails(Map<String, Object> diagnostics) {
@@ -2481,6 +9926,10 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private void showExtractFunctionPopup() {
+        if (isActiveCoreStudioDocument()) {
+            coreOperationUnavailable("Extract Function");
+            return;
+        }
         if (selectedNodeIds.isEmpty()) {
             new Notification("Error", "Select Nodes", Notification.Type.ERROR);
             return;
@@ -2517,6 +9966,10 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private void showFunctionTestPopup() {
+        if (isActiveCoreStudioDocument()) {
+            coreOperationUnavailable("Test Function");
+            return;
+        }
         if (graph == null || !graph.isFunction()) {
             return;
         }
@@ -2548,14 +10001,21 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                     if (manager == null) {
                         throw new IllegalStateException("Flow Manager Unavailable");
                     }
-                    ReSyncFlowClient client = manager.ensureFlowClient(serverId);
-                    if (client == null) {
-                        throw new IllegalStateException("ReSync Is Not Connected");
-                    }
+                    FlowGraph requestGraph = FlowSerializer.deserialize(FlowSerializer.toSnapshotJsonObject(graph));
                     new Notification("Function Test", "Running", Notification.Type.INFO);
-                    client.requestFunctionTest(graph, nameInput.getText(), inputs, expected, context,
-                        instantInput.getText(), zoneInput.getText(), 5000L,
-                        result -> ScreenManager.getInstance().execute(() -> showFunctionTestResult(result)));
+                    manager.withFlowClient(serverId, flowClient -> {
+                        flowClient.requestFunctionTest(requestGraph, nameInput.getText(), inputs, expected, context,
+                            instantInput.getText(), zoneInput.getText(), 5000L,
+                            result -> ScreenManager.getInstance().execute(() -> showFunctionTestResult(result)));
+                        return null;
+                    }).whenComplete((settlement, error) -> {
+                        if (error == null && settlement != null && settlement.delivered()) {
+                            return;
+                        }
+                        ScreenManager.getInstance().execute(() -> new Notification("Function Test",
+                            error != null && error.getMessage() != null ? error.getMessage() : "ReSync Unavailable",
+                            Notification.Type.ERROR));
+                    });
                 } catch (RuntimeException exception) {
                     new Notification("Function Test", exception.getMessage() != null ? exception.getMessage() : "Invalid Fixture", Notification.Type.ERROR);
                 }
@@ -2571,24 +10031,24 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         JsonObject values = new JsonObject();
         if (graph.getFunctionInputs() != null) {
             for (FlowGraph.FunctionParameter input : graph.getFunctionInputs()) {
-                if (input != null && input.getName() != null && !input.getName().isBlank()) {
+                String parameterId = functionParameterIdentity(input);
+                if (!parameterId.isBlank()) {
                     String value = input.getDefaultValue();
-                    values.addProperty(input.getName(), value != null ? value : "");
+                    values.addProperty(parameterId, value != null ? value : "");
                 }
             }
         }
-        return FlowJson.write(values);
+        return GSON.toJson(values);
     }
 
     private Map<String, Object> parseFixtureMap(String text) {
-        JsonElement parsed = FlowJson.parse(text != null && !text.isBlank() ? text : "{}");
+        JsonElement parsed = JsonParser.parseString(text != null && !text.isBlank() ? text : "{}");
         if (!parsed.isJsonObject()) {
             throw new IllegalArgumentException("Fixture Values Must Be A JSON Object");
         }
-        Object decoded = FlowJson.value(parsed);
-        if (!(decoded instanceof Map<?, ?> raw)) throw new IllegalArgumentException("Fixture Values Must Be A JSON Object");
+        Map<?, ?> raw = GSON.fromJson(parsed, Map.class);
         Map<String, Object> values = new LinkedHashMap<>();
-        raw.forEach((key, value) -> values.put(FlowJson.text(key), value));
+        raw.forEach((key, value) -> values.put(String.valueOf(key), value));
         return values;
     }
 
@@ -2621,10 +10081,17 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private String jsonValue(JsonObject root, String key) {
-        return root != null && root.has(key) && !root.get(key).isJsonNull() ? FlowJson.write(root.get(key)) : "None";
+        return root != null && root.has(key) && !root.get(key).isJsonNull() ? root.get(key).toString() : "None";
     }
 
     private boolean extractSelectionToFunction(String functionId) {
+        if (isActiveCoreStudioDocument()) {
+            coreOperationUnavailable("Extract Function");
+            return false;
+        }
+        if (deferWorkspaceMutation(() -> extractSelectionToFunction(functionId))) {
+            return true;
+        }
         FlowManager flowManager = FlowManager.getInstance();
         if (flowManager == null || serverId == null || functionId == null || functionId.isBlank()) {
             return false;
@@ -2635,6 +10102,10 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         }
         if (selectedNodeIds.isEmpty()) {
             new Notification("Error", "Select Nodes", Notification.Type.ERROR);
+            return false;
+        }
+        if (selectedNodeIds.stream().anyMatch(nodeId -> !isEditableNode(nodeId))) {
+            new Notification("Error", "Unavailable Nodes Are Read-Only", Notification.Type.ERROR);
             return false;
         }
         captureSnapshot();
@@ -2675,14 +10146,23 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             }
         }
 
+        FlowNodeWidget.FunctionBoundaryCatalog boundaryCatalog = legacyCatalogAllowed()
+            ? FlowNodeWidget.boundaryCatalogForServer(serverId) : FlowNodeWidget.FunctionBoundaryCatalog.unavailable();
+        FlowNodeWidget.FunctionBoundaryIntent inputBoundary = boundaryCatalog.intent(FlowNodeWidget.FunctionBoundaryRole.INPUTS);
+        FlowNodeWidget.FunctionBoundaryIntent outputBoundary = boundaryCatalog.intent(FlowNodeWidget.FunctionBoundaryRole.OUTPUTS);
+        if (!boundaryCatalog.isTypedProjectionAvailable() || inputBoundary == null || outputBoundary == null) {
+            return false;
+        }
         FlowGraph functionGraph = flowManager.createFlow(serverId, functionId, true);
+        if (functionGraph == null) {
+            return false;
+        }
         functionGraph.getNodes().clear();
         functionGraph.getConnections().clear();
         functionGraph.getLocalVariables().clear();
         functionGraph.setFunction(true);
         functionGraph.setFunctionInputs(new ArrayList<>());
         functionGraph.setFunctionOutputs(new ArrayList<>());
-
         double minX = Double.MAX_VALUE;
         double minY = Double.MAX_VALUE;
         double maxX = Double.MIN_VALUE;
@@ -2720,8 +10200,8 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         String functionStartId = UUID.randomUUID().toString();
         String functionEndId = UUID.randomUUID().toString();
 
-        functionGraph.getNodes().put(functionStartId, new FlowNode("function_start", minX - 220, minY, new HashMap<>()));
-        functionGraph.getNodes().put(functionEndId, new FlowNode("function_end", maxX + 220, maxY, new HashMap<>()));
+        functionGraph.getNodes().put(functionStartId, new FlowNode(inputBoundary.nodeReference(), minX - 220, minY, new HashMap<>()));
+        functionGraph.getNodes().put(functionEndId, new FlowNode(outputBoundary.nodeReference(), maxX + 220, maxY, new HashMap<>()));
 
         Set<String> entryTargets = new HashSet<>();
         Set<String> exitSources = new HashSet<>();
@@ -2736,10 +10216,10 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             }
         }
         for (String entryTarget : entryTargets) {
-            functionGraph.getConnections().add(new FlowConnection(functionStartId, "flow", entryTarget, "flow"));
+            functionGraph.getConnections().add(new FlowConnection(functionStartId, inputBoundary.flowPin(), entryTarget, "flow"));
         }
         for (String exitSource : exitSources) {
-            functionGraph.getConnections().add(new FlowConnection(exitSource, "flow", functionEndId, "flow"));
+            functionGraph.getConnections().add(new FlowConnection(exitSource, "flow", functionEndId, outputBoundary.flowPin()));
         }
 
         Map<InboundBoundary, String> inboundParams = new HashMap<>();
@@ -2753,10 +10233,13 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             }
             String parameterName = uniqueParameterName(connection.targetPin(), usedInputNames);
             usedInputNames.add(parameterName);
+            String parameterId = UUID.randomUUID().toString();
             FlowDataType parameterType = resolveTargetPinType(connection.targetNodeId(), connection.targetPin());
-            functionGraph.getFunctionInputs().add(new FlowGraph.FunctionParameter(parameterName, parameterType));
-            functionGraph.getConnections().add(new FlowConnection(functionStartId, parameterName, connection.targetNodeId(), connection.targetPin()));
-            inboundParams.put(connection, parameterName);
+            FlowGraph.FunctionParameter parameter = new FlowGraph.FunctionParameter(parameterId, parameterName, parameterType);
+            functionGraph.getFunctionInputs().add(parameter);
+            functionGraph.getConnections().add(FlowConnection.stable(functionStartId,
+                functionParameterPinId(parameter, NodeDefinition.PinDirection.OUTPUT), connection.targetNodeId(), connection.targetPin()));
+            inboundParams.put(connection, parameterId);
         }
 
         for (OutboundBoundary connection : outbound) {
@@ -2765,23 +10248,27 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             }
             String parameterName = uniqueParameterName(connection.sourcePin(), usedOutputNames);
             usedOutputNames.add(parameterName);
+            String parameterId = UUID.randomUUID().toString();
             FlowDataType parameterType = resolveSourcePinType(connection.sourceNodeId(), connection.sourcePin());
-            functionGraph.getFunctionOutputs().add(new FlowGraph.FunctionParameter(parameterName, parameterType));
-            functionGraph.getConnections().add(new FlowConnection(connection.sourceNodeId(), connection.sourcePin(), functionEndId, parameterName));
-            outboundParams.put(connection, parameterName);
+            FlowGraph.FunctionParameter parameter = new FlowGraph.FunctionParameter(parameterId, parameterName, parameterType);
+            functionGraph.getFunctionOutputs().add(parameter);
+            functionGraph.getConnections().add(FlowConnection.stable(connection.sourceNodeId(), connection.sourcePin(), functionEndId,
+                functionParameterPinId(parameter, NodeDefinition.PinDirection.INPUT)));
+            outboundParams.put(connection, parameterId);
         }
 
         flowManager.saveFlow(serverId, functionGraph);
 
         String callNodeType = CUSTOM_FUNCTION_NODE_PREFIX + functionId;
         NodeDefinition callDef = buildCustomFunctionNodeDefinition(callNodeType, functionId, functionGraph);
-        if (NodeRegistry.getInstance() != null) {
+        ReSyncFlowClient typedClient = typedCatalogClient();
+        if (legacyCatalogAllowed() && allowsLegacyCustomFunctionRegistration(typedClient) && NodeRegistry.getInstance() != null) {
             NodeRegistry.getInstance().registerServerDefinition(serverId, callDef);
         }
 
         graph.getConnections().removeIf(connection -> selected.contains(connection.getSourceNodeId()) || selected.contains(connection.getTargetNodeId()));
         for (String nodeId : selected) {
-            FlowNodeWidget widget = widgetCache.remove(nodeId);
+            FlowNodeWidget widget = removeCachedNodeWidget(nodeId);
             if (widget != null) {
                 removeWorldWidget(widget);
             }
@@ -2793,19 +10280,20 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         graph.getNodes().put(callNodeId, callNode);
         FlowNodeWidget callWidget = createNodeWidget(callNodeId, callNode);
         addWorldWidget(callWidget);
-        widgetCache.put(callNodeId, callWidget);
+        cacheNodeWidget(callNodeId, callWidget);
 
         for (InboundBoundary connection : inbound) {
             if ("flow".equals(connection.targetPin())) {
                 graph.getConnections().add(new FlowConnection(connection.sourceNodeId(), connection.sourcePin(), callNodeId, "flow"));
                 continue;
             }
-            String parameterName = inboundParams.get(connection);
-            if (parameterName == null) {
+            String parameterId = inboundParams.get(connection);
+            if (parameterId == null) {
                 continue;
             }
-            removeExistingInputConnection(callNodeId, parameterName);
-            graph.getConnections().add(new FlowConnection(connection.sourceNodeId(), connection.sourcePin(), callNodeId, parameterName));
+            String parameterPin = functionParameterPinId(parameterId, NodeDefinition.PinDirection.INPUT);
+            removeExistingInputConnection(callNodeId, parameterPin);
+            graph.getConnections().add(FlowConnection.stable(connection.sourceNodeId(), connection.sourcePin(), callNodeId, parameterPin));
         }
 
         for (OutboundBoundary connection : outbound) {
@@ -2814,12 +10302,13 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                 graph.getConnections().add(new FlowConnection(callNodeId, "flow", connection.targetNodeId(), connection.targetPin()));
                 continue;
             }
-            String parameterName = outboundParams.get(connection);
-            if (parameterName == null) {
+            String parameterId = outboundParams.get(connection);
+            if (parameterId == null) {
                 continue;
             }
             removeExistingInputConnection(connection.targetNodeId(), connection.targetPin());
-            graph.getConnections().add(new FlowConnection(callNodeId, parameterName, connection.targetNodeId(), connection.targetPin()));
+            graph.getConnections().add(FlowConnection.stable(callNodeId, functionParameterPinId(parameterId, NodeDefinition.PinDirection.OUTPUT),
+                connection.targetNodeId(), connection.targetPin()));
         }
 
         refreshInputWidgets(callNodeId);
@@ -2883,14 +10372,14 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         builder.output("flow", NodeDefinition.PinType.FLOW, FlowDataType.EXECUTION);
         if (functionGraph.getFunctionInputs() != null) {
             for (FlowGraph.FunctionParameter param : functionGraph.getFunctionInputs()) {
-                if (param != null && param.getName() != null && !param.getName().isBlank()) {
+                if (!functionParameterIdentity(param).isBlank()) {
                     builder.input(functionParameterPin(param, NodeDefinition.PinDirection.INPUT));
                 }
             }
         }
         if (functionGraph.getFunctionOutputs() != null) {
             for (FlowGraph.FunctionParameter param : functionGraph.getFunctionOutputs()) {
-                if (param != null && param.getName() != null && !param.getName().isBlank()) {
+                if (!functionParameterIdentity(param).isBlank()) {
                     builder.output(functionParameterPin(param, NodeDefinition.PinDirection.OUTPUT));
                 }
             }
@@ -2900,7 +10389,8 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private NodeDefinition.PinDefinition functionParameterPin(FlowGraph.FunctionParameter parameter, NodeDefinition.PinDirection direction) {
-        NodeDefinition.PinBuilder builder = new NodeDefinition.PinBuilder(parameter.getName(), NodeDefinition.PinType.DATA, direction, parameter.getType() != null ? parameter.getType() : FlowDataType.ANY)
+        NodeDefinition.PinBuilder builder = new NodeDefinition.PinBuilder(PinId.of(functionParameterPinId(parameter, direction)),
+            functionParameterDisplayName(parameter), NodeDefinition.PinType.DATA, direction, parameter.getType() != null ? parameter.getType() : FlowDataType.ANY)
             .typeRef(parameter.getTypeRef());
         NodeDefinition.WidgetType widget = functionParameterWidget(parameter);
         if (widget != null) {
@@ -2915,11 +10405,49 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         return builder.build();
     }
 
+    private static String functionParameterIdentity(FlowGraph.FunctionParameter parameter) {
+        if (parameter == null) {
+            return "";
+        }
+        String parameterId = parameter.getParameterId();
+        if (parameterId != null && !parameterId.isBlank()) {
+            return parameterId;
+        }
+        return parameter.getName() != null ? parameter.getName().trim() : "";
+    }
+
+    private static String functionParameterDisplayName(FlowGraph.FunctionParameter parameter) {
+        if (parameter == null) {
+            return "";
+        }
+        String displayName = parameter.getDisplayName();
+        return displayName != null && !displayName.isBlank() ? displayName : functionParameterIdentity(parameter);
+    }
+
+    private static String functionParameterPinId(FlowGraph.FunctionParameter parameter, NodeDefinition.PinDirection direction) {
+        return functionParameterPinId(functionParameterIdentity(parameter), direction);
+    }
+
+    private static String functionParameterPinId(String parameterId, NodeDefinition.PinDirection direction) {
+        String identity = parameterId != null ? parameterId.trim() : "";
+        if (identity.isBlank()) {
+            return "";
+        }
+        String inputPrefix = "function-input-";
+        String outputPrefix = "function-output-";
+        if (identity.startsWith(inputPrefix)) {
+            identity = identity.substring(inputPrefix.length());
+        } else if (identity.startsWith(outputPrefix)) {
+            identity = identity.substring(outputPrefix.length());
+        }
+        return (direction == NodeDefinition.PinDirection.INPUT ? inputPrefix : outputPrefix) + identity;
+    }
+
     private NodeDefinition.WidgetType functionParameterWidget(FlowGraph.FunctionParameter parameter) {
         String widget = parameter.getWidget();
         if (widget != null && !widget.isBlank()) {
             try {
-                return NodeDefinition.WidgetType.valueOf(widget.trim().toUpperCase(Locale.ROOT));
+                return NodeDefinition.WidgetType.fromSerializedName(widget);
             } catch (IllegalArgumentException ignored) {
             }
         }
@@ -3013,8 +10541,6 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (graph.getNodes() == null || graph.getNodes().isEmpty()) {
             return;
         }
-        captureSnapshot();
-
         Map<String, List<String>> predecessors = new HashMap<>();
         for (String nodeId : graph.getNodes().keySet()) {
             predecessors.put(nodeId, new ArrayList<>());
@@ -3069,28 +10595,66 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
         int xSpacing = Math.max(280, maxWidth + 120);
         int ySpacing = 48;
+        Map<String, NodePosition> positions = new LinkedHashMap<>();
         for (int layer = 0; layer <= maxLayer; layer++) {
             List<String> nodes = layerNodes.getOrDefault(layer, new ArrayList<>());
-            nodes.sort(Comparator
-                .comparingInt(this::organizeSortPriority)
-                .thenComparingDouble(id -> graph.getNodes().get(id).getY())
-                .thenComparingDouble(id -> graph.getNodes().get(id).getX())
-                .thenComparing(id -> id));
+            sortOrganizeNodes(nodes, graph.getNodes(), this::organizeSortPriority);
             int y = minY;
             for (String nodeId : nodes) {
                 FlowNode node = graph.getNodes().get(nodeId);
                 FlowNodeWidget widget = widgetCache.get(nodeId);
-                if (node == null || widget == null) {
+                if (node == null || widget == null || !isEditableNode(nodeId)) {
                     continue;
                 }
                 int x = minX + layer * xSpacing;
-                widget.setX(x);
-                widget.setY(y);
-                node.setX(x);
-                node.setY(y);
+                if (roundedGraphRenderPositionChanged(widget.getX(), widget.getY(), x, y)) {
+                    positions.put(nodeId, new NodePosition(x, y));
+                }
                 y += widget.getHeight() + ySpacing;
             }
         }
+        if (positions.isEmpty()) {
+            return;
+        }
+        CoreGraphEditorSession coreSession = activeCoreGraphSession();
+        if (isActiveCoreStudioDocument()) {
+            Map<NodeInstanceId, double[]> corePositions = changedCoreNodePositions(coreGraphDocument(coreSession),
+                positions.keySet(), nodeId -> {
+                    NodePosition position = positions.get(nodeId);
+                    return position != null ? new double[]{position.x(), position.y()} : null;
+                });
+            if (!corePositions.isEmpty()) {
+                commitCoreMoveMutation("Layout", "layout", current -> applyCoreNodePositions(current, corePositions),
+                    corePositions.keySet().stream().map(NodeInstanceId::canonicalText).toArray(String[]::new));
+            }
+            return;
+        }
+        captureSnapshot();
+        for (Map.Entry<String, NodePosition> entry : positions.entrySet()) {
+            FlowNode node = graph.getNodes().get(entry.getKey());
+            FlowNodeWidget widget = widgetCache.get(entry.getKey());
+            NodePosition position = entry.getValue();
+            if (node == null || widget == null || position == null || !isEditableNode(entry.getKey())) {
+                continue;
+            }
+            widget.setX(position.x());
+            widget.setY(position.y());
+            node.setX(position.x());
+            node.setY(position.y());
+        }
+        queueGraphRenderGeometry(positions.keySet());
+    }
+
+    static void sortOrganizeNodes(List<String> nodeIds, Map<String, FlowNode> graphNodes, ToIntFunction<String> priority) {
+        nodeIds.sort(Comparator
+            .comparingInt(priority)
+            .thenComparingDouble(id -> organizeCoordinate(graphNodes.get(id), false))
+            .thenComparingDouble(id -> organizeCoordinate(graphNodes.get(id), true))
+            .thenComparing(id -> id));
+    }
+
+    private static double organizeCoordinate(FlowNode node, boolean horizontal) {
+        return node == null ? Double.POSITIVE_INFINITY : horizontal ? node.getX() : node.getY();
     }
 
     private int computeOrganizeLayer(String nodeId, Map<String, List<String>> predecessors, Map<String, Integer> layers, Set<String> visiting) {
@@ -3129,11 +10693,23 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private boolean isFunctionStartType(String type) {
-        return "function_start".equals(type) || "function.start".equals(type) || "function.function_start".equals(type);
+        return FlowNodeWidget.isBuiltinFunctionStartType(type)
+            || !hasTypedCatalogProjection() && isLegacyFunctionStartType(type);
     }
 
     private boolean isFunctionEndType(String type) {
-        return "function_end".equals(type) || "function.end".equals(type) || "function.function_end".equals(type);
+        return FlowNodeWidget.isBuiltinFunctionEndType(type)
+            || !hasTypedCatalogProjection() && isLegacyFunctionEndType(type);
+    }
+
+    private boolean isLegacyFunctionStartType(String type) {
+        return "function_start".equals(type) || "function.start".equals(type)
+            || "function.function_start".equals(type);
+    }
+
+    private boolean isLegacyFunctionEndType(String type) {
+        return "function_end".equals(type) || "function.end".equals(type)
+            || "function.function_end".equals(type);
     }
 
     public void showNodeInputSelector(List<String> options, String selected, Consumer<String> onSelected, int worldX, int worldY) {
@@ -3212,7 +10788,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                 previousGroup = item.getGroup();
             }
             Object aliases = item.getMetadata().get("aliases");
-            String searchTerms = String.join(" ", item.getValue(), item.getLabel(), item.getDescription(), item.getGroup(), aliases != null ? FlowJson.text(aliases) : "");
+            String searchTerms = String.join(" ", item.getValue(), item.getLabel(), item.getDescription(), item.getGroup(), aliases != null ? aliases.toString() : "");
             selector.addItem(item.getLabel(), item.getIcon(), item.getDescription(), searchTerms, () -> onSelected.accept(item.getValue()));
             if (item.getValue().equals(selected)) {
                 selectedLabel = item.getLabel();
@@ -3226,17 +10802,16 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
     @Override
     public void close() {
-        leaveWorkspace(null);
-        clearWorkspaceState();
-        if (studioMode && liveStudioFullEditorMode) {
+        saveActiveStudioViewport();
+        if (studioMode && liveStudioFullEditorMode && serverId != null && !serverId.isBlank()) {
             FlowManager manager = FlowManager.getInstance();
             if (manager != null) {
-                manager.requestCloseLiveStudioSuperScreen(serverId);
+                CLOSING_LIVE_SCREENS.put(serverId, new WeakReference<>(this));
+                requestCloseFullEditorStudioScreen();
                 return;
             }
         }
-        saveActiveStudioViewport();
-        OPEN_SCREENS.remove(this);
+        closeLifecycle();
         if (parent != null) {
             client.setScreen(parent);
         }
@@ -3244,19 +10819,119 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
     @Override
     public void removed() {
-        leaveWorkspace(null);
-        clearWorkspaceState();
+        closeLifecycle();
+        cleanupCoreWidgetTopology();
         super.removed();
     }
 
+    private void cleanupCoreWidgetTopology() {
+        coreVisualPreview = null;
+        restoreCoreStructuralPreview(coreMutationCommitPending, false);
+        Set<FlowNodeWidget> widgets = Collections.newSetFromMap(new IdentityHashMap<>());
+        retainedCoreEditors.values().forEach(retained -> widgets.addAll(retained.topology().widgets()));
+        retainedCoreEditors.clear();
+        CoreWidgetTopology published = coreWidgetTopology;
+        CoreWidgetTopology pending = pendingCoreWidgetTopology;
+        CoreWidgetTopology continuity = graphRenderContinuityTopology;
+        CatalogRefresh preparing = catalogRefresh;
+        if (published != null) {
+            published.widgets().stream().filter(widget -> !retiredCoreWidgets.contains(widget)).forEach(widgets::add);
+        }
+        if (pending != null) {
+            pending.widgets().stream().filter(widget -> !retiredCoreWidgets.contains(widget)).forEach(widgets::add);
+        }
+        if (continuity != null) {
+            continuity.widgets().stream().filter(widget -> !retiredCoreWidgets.contains(widget)).forEach(widgets::add);
+        }
+        if (preparing != null) {
+            preparing.preparedWidgetOrder.stream().filter(widget -> !retiredCoreWidgets.contains(widget)).forEach(widgets::add);
+        }
+        for (RetiredWidgetBatch batch : retiredWidgetBatches) {
+            for (int index = batch.index; index < batch.widgets.size(); index++) {
+                widgets.add(batch.widgets.get(index));
+            }
+        }
+        widgets.forEach(this::cleanupCoreWidget);
+        retiredWidgetBatches.clear();
+        retiredCoreWidgets.clear();
+        coreWidgetTopology = null;
+        pendingCoreWidgetTopology = null;
+        graphRenderContinuityTopology = null;
+        graphRenderContinuityIndex = null;
+        catalogRefresh = null;
+        nodeCatalogRefreshQueued = false;
+    }
+
+    private boolean isWorkspaceLifecycleActive() {
+        return !lifecycleClosed && OPEN_SCREENS.contains(this);
+    }
+
+    private void closeLifecycle() {
+        if (lifecycleClosed) {
+            return;
+        }
+        lifecycleClosed = true;
+        lifecycleTaskGeneration++;
+        lifecycleTasks.close();
+        leaveWorkspace(null);
+        clearWorkspaceState();
+        clearWorkspaceUpdates();
+        OPEN_SCREENS.remove(this);
+        if (serverId != null) {
+            CLOSING_LIVE_SCREENS.remove(serverId);
+        }
+    }
+
     private void syncWorkspace(int mouseX, int mouseY, float delta) {
-        Runnable update;
-        while ((update = workspaceUpdates.poll()) != null) {
-            update.run();
+        completeWorkspaceMutation();
+        applyCollaborativeWorkspaceCaptureResult();
+        applyWorkspaceSnapshotResult();
+        expireWorkspaceCapture();
+        applyWorkspaceGraphApplyResult();
+        applyWorkspaceHistoryRestoreResult();
+        applyWorkspaceInboundPreparationResult();
+        applyWorkspaceGraphSaveResult();
+        applyWorkspaceFrozenGraphResult();
+        applyWorkspacePublicationResult();
+        applyWorkspaceAwarenessPublicationResult();
+        notifyWorkspaceMutationBackpressure();
+        retryWorkspaceSnapshotCapture();
+        WorkspaceGraphSaveRequest saveRequest = workspaceGraphSaveRequest;
+        if (saveRequest != null && !workspaceSnapshotPending()) {
+            if (isWorkspaceFenceCurrent(saveRequest.fence())) {
+                captureStableWorkspaceDocument(saveRequest.fence().mutationVersion());
+            } else {
+                workspaceGraphSaveRequest = null;
+                if (!workspaceGraphSaveAuthorityCurrent(saveRequest)) {
+                    coreOperationUnavailable("Editor Loading");
+                } else {
+                    notifyWorkspaceGraphSaveIssue(saveRequest, "Save Preparation Expired");
+                }
+            }
+        }
+        WorkspaceFrozenGraphRequest frozenRequest = workspaceFrozenGraphRequest;
+        if (frozenRequest != null && !workspaceSnapshotPending() && isWorkspaceFenceCurrent(frozenRequest.fence())) {
+            captureStableWorkspaceDocument(frozenRequest.fence().mutationVersion());
+        }
+        if (!isWorkspaceLifecycleActive()) {
+            clearWorkspaceUpdates();
+            return;
+        }
+        GraphEditorScreen updateOwner = workspaceDocumentOwner();
+        boolean workspaceTargetCurrent = activeStudioDocument != null && workspaceType.equals(activeStudioDocument.type())
+            && workspaceResourceId.equals(activeStudioDocument.id());
+        if ((workspaceTargetCurrent || hasDeferredWorkspaceInputs() || deferredWorkspaceSnapshot != null)
+            && !workspaceSnapshotPending() && (updateOwner == null || !updateOwner.workspaceSnapshotPending())
+            && !workspacePublicationInFlight) {
+            drainWorkspaceUpdates();
         }
         FlowManager manager = FlowManager.getInstance();
         ReSyncFlowClient client = manager != null && studioMode ? manager.existingFlowClient(serverId) : null;
-        boolean connected = client != null && manager.isFlowClientReady(serverId);
+        boolean connected = client != null && manager.isFlowClientConnected(serverId);
+        if (!connected && workspaceConnectionWasConnected) {
+            invalidateWorkspacePendingRepublishOnDisconnect();
+        }
+        workspaceConnectionWasConnected = connected;
         String nextType = "";
         String nextResourceId = "";
         if (client != null && activeStudioDocument != null && supportsWorkspace(activeStudioDocument.type())) {
@@ -3272,22 +10947,45 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             clearWorkspaceState();
             workspaceType = nextType;
             workspaceResourceId = nextResourceId;
-            if (!workspaceType.isBlank() && connected) {
-                workspaceJoinDocument = currentWorkspaceDocument();
-                client.joinWorkspace(workspaceType, workspaceResourceId, workspaceListener);
+            workspaceJoinPending = !workspaceType.isBlank();
+        }
+        if (workspaceJoinPending && connected && !workspaceType.isBlank()) {
+            GraphEditorScreen owner = workspaceDocumentOwner();
+            StableWorkspaceDocument snapshot = owner != null ? owner.stableWorkspaceDocument() : null;
+            if (owner != null && (snapshot == null || snapshot.generation() != owner.workspacePublicationGeneration
+                || snapshot.mutationVersion() != owner.workspaceMutationVersion)) {
+                requestStableWorkspaceCapture(owner);
+            } else if (snapshot != null) {
+                workspaceJoinDocument = snapshot.document();
+                workspaceJoinPending = false;
+                joinedWorkspaceListener = workspaceListener(workspacePublicationGeneration, workspaceType, workspaceResourceId);
+                client.joinWorkspace(workspaceType, workspaceResourceId, joinedWorkspaceListener);
             }
         }
         if (connected && workspaceResyncPending && !workspaceType.isBlank()) {
             workspaceResyncPending = false;
             client.resyncWorkspace(workspaceType, workspaceResourceId);
         }
-        if (!connected || workspaceDocument == null || workspaceScanDocument == null || workspaceType.isBlank() || applyingWorkspace) {
+        if (connected && workspacePendingRepublish && !workspaceType.isBlank()
+            && !workspacePendingRepublishAwaitingSnapshot
+            && catalogAuthorityAllowsWorkspacePublication()) {
+            if (!republishWorkspacePendingOperations(client)) {
+                requestWorkspaceSnapshot();
+            }
+        }
+        if (workspaceConflict != null || !connected || workspaceDocument == null || workspaceScanDocument == null
+            || workspaceType.isBlank() || applyingWorkspace) {
             return;
         }
         long now = System.currentTimeMillis();
-        GraphEditorScreen editor = workspaceEditor();
-        boolean nestedGraphChanged = editor == this || editor.workspaceMutationVersion != workspacePublishedMutationVersion;
-        if (now - lastWorkspaceScanAt >= 35L && (!isNestedWorkspaceGraph() || nestedGraphChanged)) {
+        GraphEditorScreen owner = workspaceDocumentOwner();
+        if (owner == null || owner.activeCoreGraphSession() != null) {
+            return;
+        }
+        StableWorkspaceDocument snapshot = owner.stableWorkspaceDocument();
+        if (snapshot != null && snapshot.generation() == owner.workspacePublicationGeneration
+            && workspacePublicationDue(snapshot.mutationVersion(), workspacePublishedMutationVersion,
+            now, lastWorkspaceScanAt)) {
             lastWorkspaceScanAt = now;
             publishWorkspaceDocumentChanges(client);
         }
@@ -3295,6 +10993,643 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (isWorkspaceGraphView()) {
             applyWorkspaceDragPositions(delta);
         }
+    }
+
+    private void applyWorkspaceSnapshotResult() {
+        WorkspaceSnapshotResult result = workspaceSnapshotResult.getAndSet(null);
+        if (result == null) {
+            return;
+        }
+        WorkspaceCaptureJob captureJob = workspaceCaptureJob;
+        if (captureJob == null || captureJob.attempt() != result.captureAttempt()
+            || !captureJob.fence().equals(result.fence())) {
+            return;
+        }
+        workspaceCaptureJob = null;
+        workspaceSnapshotFrozen = false;
+        if (captureJob.cancellation() != workspaceFrozenLeaseCancellation
+            || !workspaceCaptureFenceCurrent(result.fence())
+            || captureJob.collaborative() == null && captureJob.graph() != graph) {
+            return;
+        }
+        if (!isCollaborativeSnapshotCurrent(result.collaborativeSnapshot())
+            || result.failed() || !publishStableWorkspaceDocument(result.fence(), result.document())) {
+            if (workspaceFrozenGraphRequest == null && workspaceGraphSaveRequest == null) {
+                scheduleWorkspaceSnapshotRetry(result.fence());
+            }
+        }
+    }
+
+    private void expireWorkspaceCapture() {
+        WorkspaceCaptureJob job = workspaceCaptureJob;
+        if (job == null || System.currentTimeMillis() < job.expiresAt()) {
+            return;
+        }
+        WorkspaceSnapshotResult result = workspaceSnapshotResult.get();
+        if (result != null && result.captureAttempt() == job.attempt()) {
+            return;
+        }
+        CollaborativeWorkspaceCaptureResult collaborativeResult = collaborativeWorkspaceCaptureResult.get();
+        if (collaborativeResult != null && collaborativeResult.job().attempt() == job.attempt()) {
+            return;
+        }
+        if (workspaceCaptureJob != job) {
+            return;
+        }
+        workspaceCaptureJob = null;
+        workspaceFrozenLeaseCancellation++;
+        workspaceSnapshotFrozen = false;
+        failWorkspaceCapture(job, "Save Preparation Timed Out");
+        if (job.saveAdmission().started() && workspaceGraphSaveRequest == job.saveRequest()) {
+            workspaceGraphSaveRequest = null;
+        }
+        scheduleWorkspaceSnapshotRetry(job.fence());
+    }
+
+    private boolean isCollaborativeSnapshotCurrent(
+        ReSyncCollaborativeView.CollaborationDocumentSnapshot snapshot) {
+        if (snapshot == null) {
+            return true;
+        }
+        ReSyncCollaborativeView collaborative;
+        try {
+            collaborative = workspaceCollaborativeView();
+        } catch (RuntimeException | Error exception) {
+            return false;
+        }
+        return collaborative != null && snapshot.owner() == collaborative
+            && snapshot.lifecycle() == collaborative.collaborationLifecycle()
+            && snapshot.editVersion() == collaborative.collaborationEditVersion()
+            && snapshot.successful();
+    }
+
+    private void applyWorkspaceHistoryRestoreResult() {
+        WorkspaceHistoryRestoreResult result = workspaceHistoryRestoreResult.getAndSet(null);
+        if (result == null) {
+            return;
+        }
+        WorkspaceHistoryRestoreRequest request = workspaceHistoryRestoreRequest;
+        if (request != result.request()) {
+            return;
+        }
+        workspaceHistoryRestoreRequest = null;
+        FlowGraph target = workspaceHistoryRestoreTarget;
+        workspaceHistoryRestoreTarget = null;
+        if (result.failed()) {
+            new Notification("History", "History Restore Failed", Notification.Type.ERROR);
+            return;
+        }
+        if (result.graph() == null || target == null || request.generation() != workspaceHistoryGeneration
+            || !isWorkspaceHistoryFenceCurrent(request, target)
+            || request.commit() && (request.history() != graphHistory() || target != graph)) {
+            return;
+        }
+        try {
+            if (!request.commit()) {
+                applyPreparedHistoryGraph(request, result.graph(), target);
+                return;
+            }
+            Consumer<GraphSnapshot> restore = ignored -> applyPreparedHistoryGraph(request, result.graph(), target);
+            boolean changed = request.undo() ? request.history().undoPrepared(request.snapshot(), restore)
+                : request.history().redoPrepared(request.snapshot(), restore);
+            if (!changed) {
+                return;
+            }
+        } catch (RuntimeException | Error exception) {
+            new Notification("History", "History Restore Failed", Notification.Type.ERROR);
+        }
+    }
+
+    private void applyWorkspaceInboundPreparationResult() {
+        WorkspaceInboundPreparationResult result = workspaceInboundPreparationResult.getAndSet(null);
+        if (result == null) {
+            return;
+        }
+        WorkspaceInboundPreparationRequest request = workspaceInboundPreparationRequest;
+        if (request != result.request()) {
+            return;
+        }
+        workspaceInboundPreparationRequest = null;
+        if (!isWorkspaceInboundFenceCurrent(request) || result.failed()) {
+            requestWorkspaceSnapshot();
+            return;
+        }
+        try {
+            if (result.conflict()) {
+                applyWorkspaceInboundConflict(result);
+                return;
+            }
+            if (request.kind() == WorkspaceInboundPreparationKind.SNAPSHOT
+                && request.pendingRepublishInFlight() != null) {
+                invalidateWorkspacePendingRepublishForSnapshot();
+            }
+            if (result.preparedHistory() != null) {
+                if (request.history() == null || !request.history().commitRebase(request.historyState(), result.preparedHistory())) {
+                    requestWorkspaceSnapshot();
+                    return;
+                }
+            } else if (request.collaborative() && !result.historyPatches().isEmpty()) {
+                rebaseWorkspaceDocumentHistory(result.historyPatches());
+            }
+            workspaceDocument = result.authoritative();
+            workspaceScanDocument = result.scanDocument();
+            workspaceJoinDocument = result.clearJoin() ? null : workspaceJoinDocument;
+            if (request.kind() == WorkspaceInboundPreparationKind.SNAPSHOT && request.workspaceDocument() == null) {
+                clearWorkspacePendingOperations();
+                workspacePendingRepublish = false;
+                workspacePendingRepublishAwaitingSnapshot = false;
+                workspacePendingRepublishQueued = null;
+                workspacePendingRepublishInFlight = null;
+            } else {
+                if (!replaceWorkspacePendingOperations(result.pendingOperations())) {
+                    requestWorkspaceSnapshot();
+                    return;
+                }
+                if (result.replayEcho()) {
+                    workspacePendingRepublishInFlight = null;
+                }
+                workspacePendingRepublish = !workspacePendingOperations.isEmpty();
+                if (result.pendingReplayActive() || result.replayEcho()) {
+                    refreshWorkspacePendingRepublishQueue(true);
+                }
+                workspacePendingRepublishAwaitingSnapshot = false;
+            }
+            workspaceSequence = request.sequence();
+            if (!result.changed()) {
+                return;
+            }
+            if (request.collaborative()) {
+                applyWorkspaceDocument(result.mergedDocument(), result.adapterPatches(), false);
+            } else if (!applyPreparedWorkspaceGraph(result.mergedDocument(), result.adapterPatches(), result.preparedGraph())) {
+                requestWorkspaceSnapshot();
+            }
+        } catch (RuntimeException | Error exception) {
+            requestWorkspaceSnapshot();
+        }
+    }
+
+    private boolean isWorkspaceInboundFenceCurrent(WorkspaceInboundPreparationRequest request) {
+        if (request == null || lifecycleClosed || request.generation() != workspacePublicationGeneration
+            || !request.type().equals(workspaceType) || !request.resourceId().equals(workspaceResourceId)
+            || request.baseSequence() != workspaceSequence || !isWorkspaceFenceCurrent(request.fence())) {
+            return false;
+        }
+        if (workspaceDocument != request.workspaceDocument() || workspaceScanDocument != request.workspaceScanDocument()
+            || workspaceJoinDocument != request.workspaceJoinDocument()) {
+            return false;
+        }
+        return currentWorkspaceDocument() == request.currentDocument();
+    }
+
+    private void applyWorkspaceInboundConflict(WorkspaceInboundPreparationResult result) {
+        JsonObject authoritative = result.authoritative();
+        if (authoritative == null) {
+            requestWorkspaceSnapshot();
+            return;
+        }
+        if (workspaceConflict != null && result.sameConflictAuthoritative()) {
+            refreshWorkspaceConflictDraft();
+            return;
+        }
+        workspaceConflict = new WorkspaceConflict(
+            result.conflictBase() != null ? result.conflictBase() : authoritative,
+            result.conflictDraft() != null ? result.conflictDraft() : authoritative,
+            authoritative, result.request().sequence(), result.conflictPath());
+        workspaceDocument = authoritative;
+        workspaceScanDocument = authoritative;
+        workspaceJoinDocument = null;
+        clearWorkspacePendingOperations();
+        workspacePendingRepublish = false;
+        workspacePendingRepublishAwaitingSnapshot = false;
+        workspacePendingRepublishQueued = null;
+        workspacePendingRepublishInFlight = null;
+        workspaceSequence = result.request().sequence();
+        workspaceResyncPending = false;
+        clearWorkspaceUpdates();
+        updateWorkspaceConflictUi();
+        new Notification("Workspace", "Conflict: Local Draft Saved", Notification.Type.WARN);
+    }
+
+    private void prepareWorkspaceInbound(WorkspaceInboundPreparationRequest request) {
+        WorkspaceInboundPreparationResult result;
+        try {
+            result = request.kind() == WorkspaceInboundPreparationKind.SNAPSHOT
+                ? prepareWorkspaceSnapshot(request) : prepareWorkspaceOperation(request);
+        } catch (RuntimeException | Error exception) {
+            result = new WorkspaceInboundPreparationResult(request, null, null, null, Map.of(), List.of(), List.of(), null,
+                false, request.own(), request.replayEcho(), false, false, false, null, null, "", null, false, true);
+        }
+        if (request.generation() == workspacePublicationGeneration && workspaceInboundPreparationRequest == request) {
+            workspaceInboundPreparationResult.compareAndSet(null, result);
+        }
+    }
+
+    private WorkspaceInboundPreparationResult prepareWorkspaceSnapshot(WorkspaceInboundPreparationRequest request) {
+        JsonObject authoritative = request.snapshot().document().deepCopy();
+        JsonObject current = request.currentDocument().deepCopy();
+        if (request.conflictActive()) {
+            JsonObject conflictBase = request.workspaceDocument() != null
+                ? request.workspaceDocument().deepCopy() : authoritative.deepCopy();
+            return new WorkspaceInboundPreparationResult(request, authoritative, authoritative, authoritative, Map.of(),
+                List.of(), List.of(), null, true, request.own(), request.replayEcho(), false, true,
+                request.conflictAuthoritative() != null && request.conflictAuthoritative().equals(authoritative), conflictBase, current, "", null,
+                false, false);
+        }
+        if (request.workspaceDocument() == null) {
+            JsonObject merged = authoritative.deepCopy();
+            List<WorkspacePatch<JsonElement>> historyPatches = List.of();
+            if (request.workspaceJoinDocument() != null) {
+                historyPatches = diffWorkspaceDocuments(request.workspaceJoinDocument(), authoritative);
+                merged = FlowWorkspaceDocument.rebase(request.workspaceJoinDocument(), current, authoritative);
+            }
+            List<WorkspacePatch<JsonElement>> adapterPatches = diffWorkspaceDocuments(current, merged);
+            FlowGraph preparedGraph = prepareWorkspaceGraph(request, merged, current);
+            StudioScreen.History.PreparedRebase<GraphSnapshot> preparedHistory = prepareWorkspaceHistoryRebase(request,
+                historyPatches);
+            return new WorkspaceInboundPreparationResult(request, authoritative, authoritative.deepCopy(), merged,
+                Map.of(), historyPatches, adapterPatches, preparedHistory, true, request.own(), request.replayEcho(), false, false, false, null, null,
+                "", preparedGraph, !current.equals(merged), false);
+        }
+        JsonObject workspaceDocument = request.workspaceDocument().deepCopy();
+        JsonObject workspaceScanDocument = request.workspaceScanDocument().deepCopy();
+        List<WorkspacePatch<JsonElement>> remote = diffWorkspaceDocuments(workspaceDocument, authoritative);
+        List<WorkspacePatch<JsonElement>> local = diffWorkspaceDocuments(workspaceScanDocument, current);
+        PendingWorkspaceProjection pending = reconcileWorkspacePendingOperations(authoritative, request.sequence(),
+            request.pendingOperations());
+        JsonObject merged = local.isEmpty()
+            ? pending.document().deepCopy()
+            : FlowWorkspaceDocument.rebase(workspaceScanDocument, current, pending.document());
+        FlowGraph preparedGraph = prepareWorkspaceGraph(request, merged, current);
+        StudioScreen.History.PreparedRebase<GraphSnapshot> preparedHistory = prepareWorkspaceHistoryRebase(request, remote);
+        return new WorkspaceInboundPreparationResult(request, authoritative, pending.document().deepCopy(), merged,
+            pending.operations(), remote, remote, preparedHistory, true, request.own(), request.replayEcho(),
+            request.pendingRepublishActive(), false, false, null, null, "", preparedGraph, !current.equals(merged), false);
+    }
+
+    private WorkspaceInboundPreparationResult prepareWorkspaceOperation(WorkspaceInboundPreparationRequest request) {
+        JsonObject workspaceDocument = Objects.requireNonNull(request.workspaceDocument(), "Workspace document is required").deepCopy();
+        JsonObject workspaceScanDocument = Objects.requireNonNull(request.workspaceScanDocument(), "Workspace scan document is required")
+            .deepCopy();
+        List<WorkspacePatch<JsonElement>> patches = copyWorkspacePatches(request.operation().patches());
+        JsonObject authoritative = workspaceDocument.deepCopy();
+        FlowWorkspaceDocument.apply(authoritative, patches);
+        JsonObject current = request.currentDocument().deepCopy();
+        List<WorkspacePatch<JsonElement>> local = diffWorkspaceDocuments(workspaceScanDocument, current);
+        Map<String, PendingWorkspaceOperation> sourceOperations = new LinkedHashMap<>(request.pendingOperations());
+        if (request.own()) {
+            sourceOperations.remove(request.operation().operationId());
+        }
+        PendingWorkspaceProjection pending = reconcileWorkspacePendingOperations(authoritative, request.sequence(), sourceOperations);
+        JsonObject merged = local.isEmpty()
+            ? pending.document().deepCopy()
+            : FlowWorkspaceDocument.rebase(workspaceScanDocument, current, pending.document());
+        FlowGraph preparedGraph = prepareWorkspaceGraph(request, merged, current);
+        StudioScreen.History.PreparedRebase<GraphSnapshot> preparedHistory = prepareWorkspaceHistoryRebase(request,
+            request.own() ? List.of() : patches);
+        return new WorkspaceInboundPreparationResult(request, authoritative, pending.document().deepCopy(), merged,
+            pending.operations(), request.own() ? List.of() : patches, patches, preparedHistory, true, request.own(), request.replayEcho(),
+            request.pendingRepublishActive(), false, false, null, null, "", preparedGraph, !current.equals(merged), false);
+    }
+
+    private FlowGraph prepareWorkspaceGraph(WorkspaceInboundPreparationRequest request, JsonObject merged, JsonObject current) {
+        if (request.collaborative() || merged == null || merged.equals(current)) {
+            return null;
+        }
+        return FlowSerializer.deserialize(merged.toString());
+    }
+
+    private StudioScreen.History.PreparedRebase<GraphSnapshot> prepareWorkspaceHistoryRebase(
+        WorkspaceInboundPreparationRequest request, List<WorkspacePatch<JsonElement>> patches) {
+        if (request.history() == null || request.historyState() == null || patches == null || patches.isEmpty()) {
+            return null;
+        }
+        return request.history().prepareRebase(request.historyState(), snapshot -> {
+            JsonObject document = snapshot.document.deepCopy();
+            FlowWorkspaceDocument.apply(document, patches);
+            Set<String> selection = new HashSet<>(snapshot.selectedIds);
+            JsonObject nodes = document.getAsJsonObject("nodes");
+            if (nodes != null) {
+                selection.retainAll(nodes.keySet());
+            } else {
+                selection.clear();
+            }
+            return new GraphSnapshot(document, selection);
+        });
+    }
+
+    private static List<WorkspacePatch<JsonElement>> copyWorkspacePatches(List<WorkspacePatch<JsonElement>> patches) {
+        if (patches == null || patches.isEmpty()) {
+            return List.of();
+        }
+        ArrayList<WorkspacePatch<JsonElement>> copy = new ArrayList<>(patches.size());
+        for (WorkspacePatch<JsonElement> patch : patches) {
+            if (patch == null) {
+                throw new IllegalArgumentException("Workspace patch is required");
+            }
+            JsonElement value = patch.value();
+            copy.add(new WorkspacePatch<>(patch.op(), patch.path(), value != null ? value.deepCopy() : null));
+        }
+        return List.copyOf(copy);
+    }
+
+    private static Map<String, PendingWorkspaceOperation> immutableWorkspacePendingOperations(
+        Map<String, PendingWorkspaceOperation> operations) {
+        Objects.requireNonNull(operations, "Workspace pending operations are required");
+        if (operations.isEmpty()) {
+            return Map.of();
+        }
+        if (operations.size() > WORKSPACE_PENDING_OPERATION_LIMIT) {
+            throw new IllegalArgumentException("Workspace pending operation limit exceeded");
+        }
+        LinkedHashMap<String, PendingWorkspaceOperation> snapshot = new LinkedHashMap<>(operations.size());
+        for (Map.Entry<String, PendingWorkspaceOperation> entry : operations.entrySet()) {
+            String operationId = entry.getKey();
+            PendingWorkspaceOperation operation = entry.getValue();
+            if (operationId == null || operation == null) {
+                throw new IllegalArgumentException("Workspace pending operation is required");
+            }
+            PendingWorkspaceOperation copy = new PendingWorkspaceOperation(operation.operationId(),
+                operation.baseSequence(), operation.base(), operation.patches(), operation.desired(), operation.retainedBytes());
+            snapshot.put(operationId, copy);
+        }
+        return Collections.unmodifiableMap(snapshot);
+    }
+
+    private boolean isWorkspaceHistoryFenceCurrent(WorkspaceHistoryRestoreRequest request, FlowGraph target) {
+        if (request == null || target == null || lifecycleClosed || request.fence().generation() != workspacePublicationGeneration
+            || request.fence().topologyRevision() != graphRenderTopologyRevision.get()
+            || !request.fence().catalogFence().equals(workspaceCatalogFence())) {
+            return false;
+        }
+        if (target == graph) {
+            return request.fence().mutationVersion() == workspaceMutationVersion
+                && request.targetKey().equals(workspaceDocumentKey());
+        }
+        return request.targetKey().equals(graphDocumentKey(target));
+    }
+
+    private void applyWorkspaceGraphSaveResult() {
+        WorkspaceGraphSaveResult result = workspaceGraphSaveResult.getAndSet(null);
+        if (result == null) {
+            return;
+        }
+        if (workspaceGraphSaveRequest == result.request()) {
+            workspaceGraphSaveRequest = null;
+        }
+        String issue = result.issue();
+        if (!result.admitted() && issue.isBlank() && !isWorkspaceFenceCurrent(result.request().fence())) {
+            issue = "Save Preparation Expired";
+        }
+        if (!result.admitted() && !issue.isBlank()) {
+            if ("Editor Loading".equals(issue)) {
+                coreOperationUnavailable("Editor Loading");
+            } else {
+                notifyWorkspaceGraphSaveIssue(result.request(), issue);
+            }
+        }
+    }
+
+    private void notifyWorkspaceGraphSaveIssue(WorkspaceGraphSaveRequest request, String issue) {
+        if (request == null || issue == null || issue.isBlank()) {
+            return;
+        }
+        DesignerSaveNotifications.SaveTicket ticket = request.ticket();
+        if (ticket != null) {
+            DesignerSaveNotifications.failExact(ticket, issue);
+            return;
+        }
+        new Notification(request.type().displayName(), issue, Notification.Type.ERROR);
+    }
+
+    private void applyWorkspaceFrozenGraphResult() {
+        WorkspaceFrozenGraphResult result = workspaceFrozenGraphResult.getAndSet(null);
+        if (result == null) {
+            return;
+        }
+        if (workspaceFrozenGraphRequest != result.request()) {
+            return;
+        }
+        workspaceFrozenGraphRequest = null;
+        Consumer<Boolean> completion = result.request().completion();
+        if (completion != null && result.request().fence().generation() == workspacePublicationGeneration) {
+            completion.accept(result.succeeded() && isWorkspaceFenceCurrent(result.request().fence()));
+        }
+    }
+
+    private boolean deferWorkspaceMutation(Runnable mutation) {
+        if (isActiveCoreStudioDocument() || activeStudioView() != null) {
+            return false;
+        }
+        if (!workspaceSnapshotPending()) {
+            return false;
+        }
+        if (mutation == null) {
+            return true;
+        }
+        if (deferredWorkspaceOverflowMutation != null) {
+            workspaceMutationBackpressure = true;
+            return true;
+        }
+        long sequence = workspaceInputSequence.incrementAndGet();
+        if (deferredWorkspaceMutations.size() >= WORKSPACE_DEFERRED_MUTATION_LIMIT - 1) {
+            deferredWorkspaceOverflowMutation = mutation;
+            deferredWorkspaceOverflowSequence = sequence;
+            deferredWorkspaceMutationSequences.put(mutation, sequence);
+            workspaceFrozenLeaseCancellation++;
+            workspaceMutationBackpressure = true;
+            return true;
+        }
+        if (deferredWorkspaceMutations.isEmpty()) {
+            retainDeferredWorkspaceMutationTarget();
+        }
+        deferredWorkspaceMutations.addLast(mutation);
+        deferredWorkspaceMutationSequences.put(mutation, sequence);
+        return true;
+    }
+
+    private void notifyWorkspaceMutationBackpressure() {
+        if (!workspaceMutationBackpressure) {
+            return;
+        }
+        workspaceMutationBackpressure = false;
+        new Notification("Workspace", "Editor Busy, Try Again", Notification.Type.ERROR);
+    }
+
+    private boolean hasDeferredWorkspaceInputs() {
+        return !deferredWorkspaceMutations.isEmpty() || deferredWorkspaceOverflowMutation != null;
+    }
+
+    protected final boolean deferFrozenWorkspaceMutation(Runnable mutation) {
+        return deferWorkspaceMutation(mutation);
+    }
+
+    private void retainDeferredWorkspaceMutationTarget() {
+        if (activeStudioDocument != null) {
+            deferredWorkspaceMutationType = activeStudioDocument.type();
+            deferredWorkspaceMutationResourceId = activeStudioDocument.id();
+            deferredWorkspaceMutationGraph = null;
+            return;
+        }
+        deferredWorkspaceMutationType = "";
+        deferredWorkspaceMutationResourceId = "";
+        deferredWorkspaceMutationGraph = graph;
+    }
+
+    private boolean matchesDeferredWorkspaceMutationTarget() {
+        if (!deferredWorkspaceMutationType.isBlank() || !deferredWorkspaceMutationResourceId.isBlank()) {
+            return activeStudioDocument != null && deferredWorkspaceMutationType.equals(activeStudioDocument.type())
+                && deferredWorkspaceMutationResourceId.equals(activeStudioDocument.id());
+        }
+        return graph == deferredWorkspaceMutationGraph;
+    }
+
+    private void clearDeferredWorkspaceMutationTarget() {
+        deferredWorkspaceMutationType = "";
+        deferredWorkspaceMutationResourceId = "";
+        deferredWorkspaceMutationGraph = null;
+    }
+
+    private void offerWorkspaceUpdate(WorkspaceUpdateKind kind, Runnable action) {
+        if (kind == null || action == null || workspaceUpdateOverflow) {
+            return;
+        }
+        long sequence = workspaceInputSequence.incrementAndGet();
+        synchronized (workspaceUpdateLock) {
+            if (workspaceUpdateOverflow) {
+                return;
+            }
+            if (workspaceUpdates.size() >= WORKSPACE_UPDATE_LIMIT) {
+                workspaceUpdateOverflow = true;
+                return;
+            }
+            workspaceUpdates.add(new WorkspaceUpdate(sequence, kind, action));
+        }
+    }
+
+    private void drainWorkspaceUpdates() {
+        if (workspaceUpdateOverflow) {
+            clearWorkspaceUpdates();
+            requestWorkspaceSnapshot();
+            return;
+        }
+        long deadline = System.nanoTime() + WORKSPACE_UPDATE_FRAME_NANOS;
+        int handled = 0;
+        while (!workspaceSnapshotPending() && handled < WORKSPACE_UPDATE_FRAME_LIMIT && System.nanoTime() < deadline) {
+            WorkspaceInput input = pollWorkspaceInput();
+            if (input == null) {
+                break;
+            }
+            if (input.deferredMutation() && !matchesDeferredWorkspaceMutationTarget()) {
+                deferredWorkspaceMutations.clear();
+                deferredWorkspaceMutationSequences.clear();
+                deferredWorkspaceOverflowMutation = null;
+                deferredWorkspaceOverflowSequence = -1L;
+                clearDeferredWorkspaceMutationTarget();
+                workspaceMutationBackpressure = true;
+                return;
+            }
+            try {
+                input.action().run();
+            } catch (RuntimeException | Error exception) {
+                clearWorkspaceUpdates();
+                requestWorkspaceSnapshot();
+                return;
+            }
+            if (!matchesDeferredWorkspaceMutationTarget()
+                && (!deferredWorkspaceMutations.isEmpty() || deferredWorkspaceOverflowMutation != null)) {
+                deferredWorkspaceMutations.clear();
+                deferredWorkspaceMutationSequences.clear();
+                deferredWorkspaceOverflowMutation = null;
+                deferredWorkspaceOverflowSequence = -1L;
+                clearDeferredWorkspaceMutationTarget();
+                workspaceMutationBackpressure = true;
+                return;
+            }
+            handled++;
+        }
+        if (handled >= WORKSPACE_UPDATE_FRAME_LIMIT || System.nanoTime() >= deadline) {
+            return;
+        }
+        for (Map.Entry<String, Runnable> entry : workspaceAwarenessUpdates.entrySet()) {
+            if (handled >= WORKSPACE_UPDATE_FRAME_LIMIT || System.nanoTime() >= deadline) {
+                break;
+            }
+            if (workspaceAwarenessUpdates.remove(entry.getKey(), entry.getValue())) {
+                entry.getValue().run();
+                handled++;
+            }
+        }
+    }
+
+    private WorkspaceInput pollWorkspaceInput() {
+        WorkspaceUpdate update;
+        synchronized (workspaceUpdateLock) {
+            update = workspaceUpdates.peek();
+        }
+        long deferredSnapshotSequence = deferredWorkspaceSnapshot != null
+            ? deferredWorkspaceSnapshotSequence : Long.MAX_VALUE;
+        Runnable deferred = deferredWorkspaceMutations.peekFirst();
+        long deferredSequence = deferred != null
+            ? deferredWorkspaceMutationSequences.getOrDefault(deferred, Long.MAX_VALUE)
+            : deferredWorkspaceOverflowMutation != null ? deferredWorkspaceOverflowSequence : Long.MAX_VALUE;
+        if (update != null && update.sequence() <= deferredSequence && update.sequence() <= deferredSnapshotSequence) {
+            synchronized (workspaceUpdateLock) {
+                WorkspaceUpdate current = workspaceUpdates.poll();
+                return current != null ? new WorkspaceInput(current.sequence(), current.action(), false) : null;
+            }
+        }
+        if (deferred != null && deferredSequence <= deferredSnapshotSequence) {
+            deferredWorkspaceMutations.pollFirst();
+            deferredWorkspaceMutationSequences.remove(deferred);
+            return new WorkspaceInput(deferredSequence, deferred, true);
+        }
+        Runnable overflow = deferredWorkspaceOverflowMutation;
+        if (overflow != null && deferredWorkspaceOverflowSequence <= deferredSnapshotSequence) {
+            deferredWorkspaceOverflowMutation = null;
+            deferredWorkspaceMutationSequences.remove(overflow);
+            long sequence = deferredWorkspaceOverflowSequence;
+            deferredWorkspaceOverflowSequence = -1L;
+            return new WorkspaceInput(sequence, overflow, true);
+        }
+        if (deferredWorkspaceSnapshot != null) {
+            if (!deferredWorkspaceSnapshotReady()) {
+                return null;
+            }
+            ReSyncWorkspaceClient.Snapshot snapshot = deferredWorkspaceSnapshot;
+            long sequence = deferredWorkspaceSnapshotSequence;
+            deferredWorkspaceSnapshot = null;
+            deferredWorkspaceSnapshotSequence = -1L;
+            return new WorkspaceInput(sequence, () -> applyWorkspaceSnapshot(snapshot), false);
+        }
+        clearDeferredWorkspaceMutationTarget();
+        return null;
+    }
+
+    private boolean deferredWorkspaceSnapshotReady() {
+        ReSyncWorkspaceClient.Snapshot snapshot = deferredWorkspaceSnapshot;
+        if (snapshot == null || !workspaceType.equals(snapshot.type()) || !workspaceResourceId.equals(snapshot.resourceId())
+            || activeStudioDocument == null || !snapshot.type().equals(activeStudioDocument.type())
+            || !snapshot.resourceId().equals(activeStudioDocument.id())) {
+            return false;
+        }
+        GraphEditorScreen owner = workspaceDocumentOwner();
+        StableWorkspaceDocument stable = owner != null ? owner.stableWorkspaceDocument() : null;
+        if (owner == null || stable == null || stable.generation() != owner.workspacePublicationGeneration
+            || stable.mutationVersion() != owner.workspaceMutationVersion()) {
+            if (owner != null) {
+                requestStableWorkspaceCapture(owner);
+            }
+            return false;
+        }
+        return true;
+    }
+
+    private void clearWorkspaceUpdates() {
+        synchronized (workspaceUpdateLock) {
+            workspaceUpdates.clear();
+            workspaceUpdateOverflow = false;
+        }
+        workspaceAwarenessUpdates.clear();
     }
 
     private void leaveWorkspace(ReSyncFlowClient client) {
@@ -3308,11 +11643,18 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         }
         if (current != null) {
             current.publishWorkspaceAwareness(workspaceType, workspaceResourceId, new JsonObject());
-            current.leaveWorkspace(workspaceType, workspaceResourceId, workspaceListener);
+            ReSyncWorkspaceClient.Listener listener = joinedWorkspaceListener;
+            if (listener != null) {
+                current.leaveWorkspace(workspaceType, workspaceResourceId, listener);
+            }
         }
+        joinedWorkspaceListener = null;
     }
 
     private boolean supportsWorkspace(String type) {
+        if (isCoreOwnedStudioDocument()) {
+            return false;
+        }
         return workspaceCollaborativeView() != null || ReSyncResourceDragPayload.FLOW.equals(type) || ReSyncResourceDragPayload.FUNCTION.equals(type)
             || ReSyncResourceDragPayload.COMMAND.equals(type) || ReSyncResourceDragPayload.CUSTOM_CONTENT.equals(type);
     }
@@ -3339,77 +11681,1281 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         return workspaceEditor() != this || activeStudioView() == null;
     }
 
-    private boolean isNestedWorkspaceGraph() {
-        return workspaceEditor() != this;
+    private GraphEditorScreen activeWorkspaceEditor() {
+        if (!isWorkspaceLifecycleActive()) {
+            return null;
+        }
+        try {
+            GraphEditorScreen editor = workspaceEditor();
+            return editor != null && editor.isWorkspaceLifecycleActive() ? editor : null;
+        } catch (RuntimeException exception) {
+            return null;
+        }
+    }
+
+    private GraphEditorScreen workspaceDocumentOwner() {
+        return workspaceCollaborativeView() != null ? this : activeWorkspaceEditor();
+    }
+
+    private String workspaceDocumentKey() {
+        if (activeStudioDocument != null) {
+            return activeStudioDocument.key();
+        }
+        if (!workspaceType.isBlank() || !workspaceResourceId.isBlank()) {
+            return ReSyncProjectMetadata.resourceKey(workspaceType, workspaceResourceId);
+        }
+        if (graph == null) {
+            return "";
+        }
+        String type = graph.getResourceType();
+        if (type == null || type.isBlank()) {
+            type = graph.isFunction() ? ReSyncResourceType.FUNCTION.typeId() : ReSyncResourceType.FLOW.typeId();
+        }
+        return ReSyncProjectMetadata.resourceKey(type, graph.getId());
+    }
+
+    private String graphDocumentKey(FlowGraph target) {
+        if (target == null) {
+            return "";
+        }
+        String type = target.getResourceType();
+        if (type == null || type.isBlank()) {
+            type = target.isFunction() ? ReSyncResourceType.FUNCTION.typeId() : ReSyncResourceType.FLOW.typeId();
+        }
+        return ReSyncProjectMetadata.resourceKey(type, target.getId());
+    }
+
+    protected String workspaceCatalogFence() {
+        StringBuilder fence = new StringBuilder();
+        ReSyncFlowClient client = typedCatalogClient();
+        if (client != null) {
+            appendWorkspaceFencePart(fence, "authority", String.valueOf(client.catalogAuthority()));
+            ReSyncCatalogPublicationProjection publication = client.catalogPublicationProjection();
+            publication.active().map(snapshot -> snapshot.publication().key().canonicalText())
+                .ifPresent(value -> appendWorkspaceFencePart(fence, "active", value));
+            publication.acknowledgedKey().map(CatalogCacheKey::canonicalText)
+                .ifPresent(value -> appendWorkspaceFencePart(fence, "acknowledged", value));
+            client.activeCatalogAuthoringChecksum().map(value -> value.canonicalText())
+                .ifPresent(value -> appendWorkspaceFencePart(fence, "authoring", value));
+        } else {
+            appendWorkspaceFencePart(fence, "authority", "none");
+        }
+        NodeRegistry registry = NodeRegistry.getInstance();
+        if (registry != null) {
+            NodeRegistry.SnapshotAuthority authority = registry.getSnapshotAuthority(nodeRegistryServerId());
+            if (authority != null) {
+                appendWorkspaceFencePart(fence, "registry", authority.serverId() + ":" + authority.generation() + ":" + authority.checksum());
+            }
+            appendWorkspaceFencePart(fence, "projection", registry.getSnapshotProjectionIdentity(nodeRegistryServerId()));
+        }
+        return fence.toString();
+    }
+
+    private static void appendWorkspaceFencePart(StringBuilder fence, String name, String value) {
+        fence.append('|').append(name).append('=').append(value != null ? value : "");
+    }
+
+    private WorkspaceFence workspaceFence(long generation, long mutationVersion) {
+        return new WorkspaceFence(generation, mutationVersion, graphRenderTopologyRevision.get(),
+            workspaceDocumentKey(), workspaceCatalogFence());
+    }
+
+    private boolean isWorkspaceFenceCurrent(WorkspaceFence fence) {
+        return fence != null && !lifecycleClosed && fence.generation() == workspacePublicationGeneration
+            && fence.mutationVersion() == workspaceMutationVersion
+            && fence.topologyRevision() == graphRenderTopologyRevision.get()
+            && fence.documentKey().equals(workspaceDocumentKey())
+            && fence.catalogFence().equals(workspaceCatalogFence());
+    }
+
+    private boolean workspaceGraphMutationBlocked() {
+        GraphEditorScreen owner = workspaceDocumentOwner();
+        return workspaceSnapshotPending() || owner != null && owner.workspaceSnapshotPending();
+    }
+
+    private void retainStableWorkspaceDocument(JsonObject document) {
+        GraphEditorScreen owner = workspaceDocumentOwner();
+        if (owner != null && document != null) {
+            StableWorkspaceDocument stable = new StableWorkspaceDocument(owner.workspacePublicationGeneration,
+                owner.workspaceMutationVersion, document);
+            owner.stableWorkspaceDocument = stable;
+            if (owner.graph != null) {
+                owner.stableWorkspaceDocuments.put(owner.graph, stable);
+            }
+        }
     }
 
     private JsonObject currentWorkspaceDocument() {
-        ReSyncCollaborativeView collaborative = workspaceCollaborativeView();
-        return collaborative == null ? FlowWorkspaceDocument.fromGraph(workspaceEditor().graph) : collaborative.collaborationDocument();
+        GraphEditorScreen editor = activeWorkspaceEditor();
+        if (editor == null || editor.activeCoreGraphSession() != null) {
+            return null;
+        }
+        try {
+            GraphEditorScreen owner = workspaceDocumentOwner();
+            StableWorkspaceDocument snapshot = owner != null ? owner.stableWorkspaceDocument() : null;
+            if (snapshot != null && snapshot.generation() == owner.workspacePublicationGeneration
+                && snapshot.mutationVersion() == owner.workspaceMutationVersion) {
+                return snapshot.document();
+            }
+            if (owner != null && owner.workspaceSnapshotPending()) {
+                return null;
+            }
+            return null;
+        } catch (RuntimeException exception) {
+            return null;
+        }
     }
 
-    private List<WorkspacePatch<JsonElement>> diffWorkspaceDocuments(JsonObject before, JsonObject after) {
+    private JsonObject safeCurrentWorkspaceDocument() {
+        try {
+            return currentWorkspaceDocument();
+        } catch (RuntimeException exception) {
+            return null;
+        }
+    }
+
+    private static List<WorkspacePatch<JsonElement>> diffWorkspaceDocuments(JsonObject before, JsonObject after) {
         return FlowWorkspaceDocument.diffEditableWorkspace(before, after);
     }
 
     @Override
     protected void applyStudioCollaborationInteraction(Runnable mutation) {
-        if (mutation == null) {
+        if (isActiveCoreStudioDocument()) {
+            coreOperationUnavailable("Collaboration");
+            return;
+        }
+        if (mutation == null || !catalogAuthorityAllowsWorkspacePublication()) {
+            return;
+        }
+        if (deferWorkspaceMutation(() -> applyStudioCollaborationInteraction(mutation))) {
             return;
         }
         if (!applyingWorkspace) {
             graphHistory().capture();
-            markWorkspaceMutation();
         }
         mutation.run();
+        markWorkspaceMutation();
+        refreshWorkspaceConflictDraft();
         FlowManager manager = FlowManager.getInstance();
-        ReSyncFlowClient client = manager != null && studioMode && manager.isFlowClientReady(serverId) ? manager.existingFlowClient(serverId) : null;
+        ReSyncFlowClient client = manager != null && studioMode && manager.isFlowClientConnected(serverId) ? manager.existingFlowClient(serverId) : null;
         if (client != null) {
             publishWorkspaceDocumentChanges(client);
         }
     }
 
     private void publishWorkspaceDocumentChanges(ReSyncFlowClient client) {
-        if (client == null || workspaceDocument == null || workspaceScanDocument == null || workspaceType.isBlank() || applyingWorkspace) {
+        if (isActiveCoreStudioDocument()) {
             return;
         }
-        JsonObject current = currentWorkspaceDocument();
-        if (current == null) {
+        refreshWorkspaceConflictDraft();
+        GraphEditorScreen owner = workspaceDocumentOwner();
+        StableWorkspaceDocument snapshot = owner != null ? owner.stableWorkspaceDocument() : null;
+        if (!workspacePendingOperations.isEmpty() && owner != null && snapshot != null
+            && snapshot.generation() == owner.workspacePublicationGeneration
+            && snapshot.mutationVersion() != workspacePublishedMutationVersion) {
+            if (!workspacePublicationSettlementBackpressure) {
+                workspacePublicationSettlementBackpressure = true;
+                new Notification("Workspace", "Changes Waiting To Sync", Notification.Type.WARN);
+            }
+            return;
+        }
+        if (workspaceConflict != null || workspacePendingRepublishActive() || workspacePublicationInFlight || client == null
+            || workspaceInboundPreparationRequest != null
+            || !catalogAuthorityAllowsWorkspacePublication()
+            || workspaceDocument == null || workspaceScanDocument == null
+            || workspaceType.isBlank() || applyingWorkspace) {
+            return;
+        }
+        if (snapshot == null || snapshot.generation() != owner.workspacePublicationGeneration
+            || snapshot.mutationVersion() == workspacePublishedMutationVersion
+            || snapshot.mutationVersion() == workspacePublicationBackpressureVersion) {
+            return;
+        }
+        WorkspacePublicationJob job = new WorkspacePublicationJob(workspacePublicationGeneration, workspaceType,
+            workspaceResourceId, snapshot, workspaceScanDocument, nextWorkspaceBaseSequence(client),
+            WORKSPACE_PENDING_RETAINED_BYTE_LIMIT - workspacePendingRetainedBytes, client, workspaceDocument, workspaceSequence);
+        workspacePublicationInFlight = true;
+        try {
+            WORKSPACE_PUBLICATIONS.execute(() -> prepareWorkspacePublication(job));
+        } catch (IllegalStateException exception) {
+            workspacePublicationInFlight = false;
+        }
+    }
+
+    private WorkspacePublicationResult publicationResult(WorkspacePublicationJob job,
+                                                          PendingWorkspaceOperation operation, boolean failed,
+                                                          boolean backpressured) {
+        return new WorkspacePublicationResult(job.generation(), job.type(), job.resourceId(), job.snapshot(), operation,
+            failed, backpressured, job.workspaceDocument(), job.workspaceSequence());
+    }
+
+    private void prepareWorkspacePublication(WorkspacePublicationJob job) {
+        WorkspacePublicationResult result;
+        try {
+            if (job.generation() != workspacePublicationGeneration) {
+                result = publicationResult(job, null, true, false);
+            } else {
+                List<WorkspacePatch<JsonElement>> patches = diffWorkspaceDocuments(job.base(), job.snapshot().document());
+                PendingWorkspaceOperation operation = null;
+                if (!patches.isEmpty()) {
+                    long retainedBytes = workspaceOperationRetainedBytes(job.base(), patches, job.snapshot().document());
+                    if (retainedBytes > job.retainedByteBudget()) {
+                        result = publicationResult(job, null, false, true);
+                    } else {
+                        String operationId = job.client().publishWorkspaceOperation(job.type(), job.resourceId(), patches);
+                        if (operationId == null || operationId.isBlank()) {
+                            result = publicationResult(job, null, true, false);
+                        } else {
+                            operation = new PendingWorkspaceOperation(operationId, job.baseSequence(), job.base(), patches,
+                                job.snapshot().document(), retainedBytes);
+                            result = publicationResult(job, operation, false, false);
+                        }
+                    }
+                } else {
+                    result = publicationResult(job, null, false, false);
+                }
+            }
+        } catch (RuntimeException | Error exception) {
+            result = publicationResult(job, null, true, false);
+        }
+        if (job.generation() == workspacePublicationGeneration) {
+            workspacePublicationResult.compareAndSet(null, result);
+        }
+    }
+
+    private void applyWorkspacePublicationResult() {
+        if (workspaceInboundPreparationRequest != null) {
+            return;
+        }
+        WorkspacePublicationResult result = workspacePublicationResult.get();
+        if (result == null || workspaceInboundPreparationRequest != null
+            || !workspacePublicationResult.compareAndSet(result, null)) {
+            return;
+        }
+        workspacePublicationInFlight = false;
+        if (result.generation() != workspacePublicationGeneration) {
+            return;
+        }
+        if (result.workspaceDocument() != workspaceDocument || result.workspaceSequence() != workspaceSequence) {
             requestWorkspaceSnapshot();
             return;
         }
-        List<WorkspacePatch<JsonElement>> patches = diffWorkspaceDocuments(workspaceScanDocument, current);
-        if (patches.isEmpty()) {
-            workspaceScanDocument = current;
-            workspacePublishedMutationVersion = workspaceEditor().workspaceMutationVersion;
+        if (workspaceConflict != null) {
+            requestWorkspaceSnapshot();
             return;
         }
-        String operationId = client.publishWorkspaceOperation(workspaceType, workspaceResourceId, patches);
-        if (!operationId.isBlank()) {
-            workspacePendingOperations.put(operationId, patches);
-            workspaceScanDocument = current;
-            workspacePublishedMutationVersion = workspaceEditor().workspaceMutationVersion;
+        if (!workspaceType.equals(result.type()) || !workspaceResourceId.equals(result.resourceId())) {
+            requestWorkspaceSnapshot();
+            return;
         }
+        if (result.failed()) {
+            requestWorkspaceSnapshot();
+            return;
+        }
+        if (result.backpressured()) {
+            workspacePublicationBackpressureVersion = result.snapshot().mutationVersion();
+            workspaceMutationBackpressure = true;
+            return;
+        }
+        PendingWorkspaceOperation operation = result.operation();
+        if (operation != null && !addWorkspacePendingOperation(operation)) {
+            requestWorkspaceSnapshot();
+            return;
+        }
+        workspaceScanDocument = result.snapshot().document();
+        workspacePublishedMutationVersion = result.snapshot().mutationVersion();
+        workspacePublicationBackpressureVersion = -1L;
+    }
+
+    static <T> boolean registerWorkspacePublication(Map<String, T> pendingOperations, Supplier<String> publisher,
+                                                    Function<String, T> operationFactory) {
+        if (pendingOperations == null || publisher == null || operationFactory == null) {
+            return false;
+        }
+        String operationId;
+        try {
+            operationId = publisher.get();
+        } catch (RuntimeException exception) {
+            return false;
+        }
+        if (operationId == null || operationId.isBlank()) {
+            return false;
+        }
+        T operation;
+        try {
+            operation = operationFactory.apply(operationId);
+        } catch (RuntimeException exception) {
+            return false;
+        }
+        if (operation == null) {
+            return false;
+        }
+        pendingOperations.put(operationId, operation);
+        return true;
+    }
+
+    static boolean workspacePublicationDue(long mutationVersion, long publishedMutationVersion, long now, long lastPublicationAt) {
+        return mutationVersion != publishedMutationVersion && now - lastPublicationAt >= 35L;
+    }
+
+    private long nextWorkspaceBaseSequence(ReSyncFlowClient client) {
+        if (workspacePendingNextBaseSequence >= 0L) {
+            return workspacePendingNextBaseSequence;
+        }
+        long clientSequence = client.workspaces().sequence(workspaceType, workspaceResourceId);
+        return Math.max(workspaceSequence, clientSequence);
+    }
+
+    private static long workspaceOperationRetainedBytes(JsonObject base, List<WorkspacePatch<JsonElement>> patches,
+                                                        JsonObject desired) {
+        long characters = (long) GSON.toJson(base).length() + GSON.toJson(patches).length() + GSON.toJson(desired).length();
+        return Math.max(1L, Math.multiplyExact(characters, 4L));
+    }
+
+    private boolean addWorkspacePendingOperation(PendingWorkspaceOperation operation) {
+        if (operation == null || workspacePendingOperations.size() >= WORKSPACE_PENDING_OPERATION_LIMIT
+            || operation.retainedBytes() > WORKSPACE_PENDING_RETAINED_BYTE_LIMIT - workspacePendingRetainedBytes) {
+            return false;
+        }
+        workspacePendingOperations.put(operation.operationId(), operation);
+        workspacePendingRetainedBytes += operation.retainedBytes();
+        workspacePendingNextBaseSequence = Math.addExact(operation.baseSequence(), 1L);
+        return true;
+    }
+
+    private PendingWorkspaceOperation removeWorkspacePendingOperation(String operationId) {
+        PendingWorkspaceOperation removed = workspacePendingOperations.remove(operationId);
+        if (removed != null) {
+            workspacePendingRetainedBytes = Math.max(0L, workspacePendingRetainedBytes - removed.retainedBytes());
+            workspacePendingNextBaseSequence = workspacePendingOperations.isEmpty()
+                ? -1L : Math.addExact(workspacePendingOperations.values().iterator().next().baseSequence(), 1L);
+            if (workspacePendingOperations.isEmpty()) {
+                workspacePublicationSettlementBackpressure = false;
+            }
+        }
+        return removed;
+    }
+
+    private boolean replaceWorkspacePendingOperations(Map<String, PendingWorkspaceOperation> operations) {
+        clearWorkspacePendingOperations();
+        if (operations == null || operations.isEmpty()) {
+            return true;
+        }
+        for (PendingWorkspaceOperation operation : operations.values()) {
+            if (!addWorkspacePendingOperation(operation)) {
+                clearWorkspacePendingOperations();
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void clearWorkspacePendingOperations() {
+        workspacePendingOperations.clear();
+        workspacePendingRetainedBytes = 0L;
+        workspacePendingNextBaseSequence = -1L;
+        workspacePublicationSettlementBackpressure = false;
     }
 
     protected final void markWorkspaceMutation() {
-        if (!applyingWorkspace) {
+        if (isActiveCoreStudioDocument() && !applyingWorkspace) {
+            synchronizeCoreWorkspaceMutation();
+            return;
+        }
+        if (!isActiveCoreStudioDocument() && !applyingWorkspace) {
+            clearWorkspaceCaptureFailures();
+            if (workspaceSnapshotPending()) {
+                workspaceMutationVersion++;
+                workspaceFrozenLeaseCancellation++;
+                workspaceMutationPending = true;
+                return;
+            }
+            completeGraphRenderMutation();
             workspaceMutationVersion++;
+            workspaceMutationPending = false;
+            captureStableWorkspaceDocument(workspaceMutationVersion);
         }
     }
 
+    protected void captureStableWorkspaceDocument(long mutationVersion) {
+        if (isCoreOwnedStudioDocument()) {
+            return;
+        }
+        WorkspaceGraphSaveRequest saveRequest = workspaceGraphSaveRequest;
+        WorkspaceFrozenGraphRequest frozenRequest = workspaceFrozenGraphRequest;
+        ReSyncCollaborativeView collaborative = workspaceCollaborativeView();
+        FlowGraph liveGraph = graph;
+        long generation = workspacePublicationGeneration;
+        long cancellation = workspaceFrozenLeaseCancellation;
+        if ((collaborative == null && liveGraph == null) || workspaceSnapshotPending()
+            || generation != workspacePublicationGeneration || mutationVersion != workspaceMutationVersion) {
+            return;
+        }
+        String documentKey = workspaceDocumentKey();
+        if (workspaceCaptureTerminal(generation, mutationVersion, documentKey)) {
+            settleTerminalWorkspaceCapture(generation, mutationVersion, documentKey);
+            return;
+        }
+        WorkspaceFence fence = workspaceFence(generation, mutationVersion);
+        WorkspaceCaptureJob captureJob = null;
+        try {
+            workspaceSnapshotFrozen = true;
+            workspaceCaptureAttempt = workspaceCaptureAttempt == Long.MAX_VALUE ? 1L : workspaceCaptureAttempt + 1L;
+            captureJob = new WorkspaceCaptureJob(workspaceCaptureAttempt,
+                System.currentTimeMillis() + WORKSPACE_CAPTURE_TIMEOUT_MILLIS, fence, liveGraph, collaborative,
+                cancellation, saveRequest, frozenRequest, null, new WorkspaceSaveAdmission());
+            workspaceCaptureJob = captureJob;
+            if (collaborative != null) {
+                WorkspaceCaptureJob requestedJob = captureJob;
+                boolean accepted = collaborative.requestCollaborationDocument(snapshot ->
+                    completeCollaborativeWorkspaceCapture(requestedJob, snapshot));
+                if (!accepted && workspaceCaptureJob == requestedJob) {
+                    failWorkspaceCaptureAdmission(requestedJob, "Save Preparation Failed");
+                }
+            } else {
+                submitWorkspaceCapture(captureJob);
+            }
+            if (workspaceCaptureJob != null && workspaceSnapshotRetryGeneration == generation
+                && workspaceSnapshotRetryMutationVersion <= mutationVersion) {
+                clearWorkspaceSnapshotRetry();
+            }
+        } catch (IllegalStateException exception) {
+            if (captureJob != null) {
+                failWorkspaceCaptureAdmission(captureJob, "Save Preparation Busy");
+            } else {
+                workspaceSnapshotFrozen = false;
+                scheduleWorkspaceSnapshotRetry(fence);
+            }
+        } catch (RuntimeException | Error exception) {
+            if (captureJob != null) {
+                failWorkspaceCaptureAdmission(captureJob, "Save Preparation Failed");
+            } else {
+                workspaceSnapshotFrozen = false;
+                scheduleWorkspaceSnapshotRetry(fence);
+            }
+        }
+    }
+
+    private void completeCollaborativeWorkspaceCapture(WorkspaceCaptureJob job,
+                                                        ReSyncCollaborativeView.CollaborationDocumentSnapshot snapshot) {
+        CollaborativeWorkspaceCaptureResult offered = new CollaborativeWorkspaceCaptureResult(job, snapshot);
+        collaborativeWorkspaceCaptureResult.accumulateAndGet(offered, (current, next) ->
+            current == null || next.job().attempt() > current.job().attempt() ? next : current);
+    }
+
+    private void applyCollaborativeWorkspaceCaptureResult() {
+        CollaborativeWorkspaceCaptureResult result = collaborativeWorkspaceCaptureResult.getAndSet(null);
+        if (result == null) {
+            return;
+        }
+        WorkspaceCaptureJob job = result.job();
+        if (workspaceCaptureJob != job || lifecycleClosed) {
+            return;
+        }
+        WorkspaceCaptureJob admittedJob = job;
+        ReSyncCollaborativeView.CollaborationDocumentSnapshot snapshot = result.snapshot();
+        try {
+            ReSyncCollaborativeView collaborative = job.collaborative();
+            if (System.currentTimeMillis() >= job.expiresAt() || snapshot == null || !snapshot.successful()
+                || snapshot.owner() != collaborative
+                || snapshot.lifecycle() != collaborative.collaborationLifecycle()
+                || snapshot.editVersion() != collaborative.collaborationEditVersion()
+                || job.cancellation() != workspaceFrozenLeaseCancellation
+                || !workspaceFenceActive(job.fence())) {
+                failWorkspaceCaptureAdmission(job, "Save Preparation Expired");
+                return;
+            }
+            WorkspaceCaptureJob prepared = job.withCollaborativeSnapshot(snapshot);
+            workspaceCaptureJob = prepared;
+            admittedJob = prepared;
+            submitWorkspaceCapture(prepared);
+        } catch (RuntimeException | Error exception) {
+            failWorkspaceCaptureAdmission(admittedJob, "Save Preparation Failed");
+        }
+    }
+
+    private void submitWorkspaceCapture(WorkspaceCaptureJob job) {
+        if (job == null || workspaceCaptureJob != job || lifecycleClosed) {
+            return;
+        }
+        if (System.currentTimeMillis() >= job.expiresAt() || job.cancellation() != workspaceFrozenLeaseCancellation
+            || !workspaceFenceActive(job.fence())) {
+            failWorkspaceCaptureAdmission(job, "Save Preparation Expired");
+            return;
+        }
+        try {
+            WORKSPACE_PUBLICATIONS.execute(() -> prepareWorkspaceCapture(job));
+        } catch (IllegalStateException exception) {
+            failWorkspaceCaptureAdmission(job, "Save Preparation Busy");
+        }
+    }
+
+    private void failWorkspaceCaptureAdmission(WorkspaceCaptureJob job, String issue) {
+        if (workspaceCaptureJob != job) {
+            return;
+        }
+        workspaceCaptureJob = null;
+        workspaceSnapshotFrozen = false;
+        failWorkspaceCapture(job, issue);
+        scheduleWorkspaceSnapshotRetry(job.fence());
+    }
+
+    private void prepareWorkspaceCapture(WorkspaceCaptureJob job) {
+        WorkspaceSnapshot snapshot = null;
+        WorkspaceSnapshotResult result = null;
+        try {
+            JsonObject document = job.collaborative() != null
+                ? job.collaborativeSnapshot() != null ? job.collaborativeSnapshot().document() : null
+                : FlowWorkspaceDocument.snapshot(job.graph());
+            if (document == null) {
+                throw new IllegalStateException("Workspace document is required");
+            }
+            snapshot = new WorkspaceSnapshot(job.fence(), document);
+            String saveIssue = "";
+            boolean saveAdmitted = false;
+            if (job.saveRequest() != null && job.saveRequest().fence().equals(snapshot.fence())) {
+                FlowGraph saveGraph = null;
+                if (job.cancellation() != workspaceFrozenLeaseCancellation) {
+                    saveIssue = "Editor Busy, Try Again";
+                } else {
+                    try {
+                        saveGraph = snapshot.materializeGraph();
+                    } catch (RuntimeException | Error exception) {
+                        saveIssue = "Save Preparation Failed";
+                    }
+                }
+                if (saveIssue.isBlank() && job.cancellation() != workspaceFrozenLeaseCancellation) {
+                    saveIssue = "Editor Busy, Try Again";
+                }
+                if (saveIssue.isBlank()) {
+                    WorkspaceGraphSaveRequest request = job.saveRequest();
+                    FlowGraph immutableSaveGraph = saveGraph;
+                    String snapshotIdentity;
+                    try {
+                        snapshotIdentity = FlowSerializer.serialize(immutableSaveGraph);
+                    } catch (RuntimeException | Error exception) {
+                        snapshotIdentity = "";
+                        saveIssue = "Save Preparation Failed";
+                    }
+                    if (saveIssue.isBlank()) {
+                        GraphSaveAuthorityToken expected = request.authority().withSnapshot(snapshotIdentity);
+                        String exactSnapshotIdentity = snapshotIdentity;
+                        BrowserSafeState.ReferenceValue<String> dispatchIssue = new BrowserSafeState.ReferenceValue<>("");
+                        Optional<Boolean> dispatched = dispatchAuthorityFencedSave(expected, () -> {
+                            GraphSaveAuthorityToken current = captureGraphSaveAuthority(request.manager(), request.type(),
+                                immutableSaveGraph.getId(), null);
+                            return current != null ? current.withSnapshot(exactSnapshotIdentity) : null;
+                        }, () -> {
+                            if (!job.saveAdmission().begin()) {
+                                dispatchIssue.set("Save Preparation Expired");
+                                return false;
+                            }
+                            DesignerSaveNotifications.SaveTicket ticket = request.startTicket();
+                            if (ticket == null) {
+                                dispatchIssue.set("Save Preparation Rejected");
+                                return false;
+                            }
+                            try {
+                                request.manager().saveGraph(request.serverId(), request.type(), immutableSaveGraph,
+                                    ticket);
+                                return true;
+                            } catch (RuntimeException | Error exception) {
+                                dispatchIssue.set("Save Preparation Failed");
+                                DesignerSaveNotifications.failExact(ticket, "Save Preparation Failed");
+                                String detail = exception.getMessage() == null || exception.getMessage().isBlank()
+                                    ? TaskIdentities.failureName(exception) : exception.getMessage();
+                                ReLog.logger(LogTypes.FLOW).source(LogSource.server(request.serverId(), request.serverId()))
+                                    .component(GraphEditorScreen.class).operation("Workspace Graph Save Admission")
+                                    .error("Admitted save dispatch failed: type=" + request.type().typeId() + ",resource="
+                                        + job.fence().documentKey() + ",reason=" + detail);
+                                return false;
+                            }
+                        });
+                        if (dispatched.isEmpty()) {
+                            saveIssue = "Editor Loading";
+                        } else {
+                            saveAdmitted = dispatched.orElse(false);
+                            saveIssue = dispatchIssue.get();
+                        }
+                    }
+                }
+                if (!saveAdmitted && !saveIssue.isBlank() && job.saveAdmission().cancel()) {
+                    DesignerSaveNotifications.failExact(job.saveRequest().ticket(), saveIssue);
+                }
+                workspaceGraphSaveResult.compareAndSet(null,
+                    new WorkspaceGraphSaveResult(snapshot.fence().generation(), job.saveRequest(), saveIssue,
+                        saveAdmitted));
+            }
+            if (job.frozenRequest() != null && job.frozenRequest().fence().equals(snapshot.fence())) {
+                boolean succeeded;
+                try {
+                    succeeded = job.cancellation() == workspaceFrozenLeaseCancellation
+                        && Boolean.TRUE.equals(job.frozenRequest().action().apply(snapshot.materializeGraph()));
+                } catch (RuntimeException | Error exception) {
+                    succeeded = false;
+                }
+                workspaceFrozenGraphResult.compareAndSet(null,
+                    new WorkspaceFrozenGraphResult(job.frozenRequest(), succeeded));
+            }
+            result = new WorkspaceSnapshotResult(job, snapshot.document(), false, job.collaborativeSnapshot());
+        } catch (RuntimeException | Error exception) {
+            failWorkspaceCapture(job, "Save Preparation Failed");
+            result = new WorkspaceSnapshotResult(job, null, true);
+        } finally {
+            if (result != null && workspaceCaptureJob == job) {
+                offerWorkspaceSnapshotResult(result);
+            }
+        }
+    }
+
+    private void offerWorkspaceSnapshotResult(WorkspaceSnapshotResult offered) {
+        workspaceSnapshotResult.accumulateAndGet(offered, (current, next) ->
+            current == null || next.captureAttempt() > current.captureAttempt() ? next : current);
+    }
+
+    private void failWorkspaceCapture(WorkspaceCaptureJob job, String issue) {
+        if (job.saveRequest() != null && job.saveRequest().fence().equals(job.fence())
+            && job.saveAdmission().cancel()) {
+            DesignerSaveNotifications.failExact(job.saveRequest().ticket(), issue);
+            workspaceGraphSaveResult.compareAndSet(null,
+                new WorkspaceGraphSaveResult(job.fence().generation(), job.saveRequest(), issue, false));
+        }
+        if (job.frozenRequest() != null && job.frozenRequest().fence().equals(job.fence())) {
+            workspaceFrozenGraphResult.compareAndSet(null, new WorkspaceFrozenGraphResult(job.frozenRequest(), false));
+        }
+    }
+
+    private boolean workspaceFenceActive(WorkspaceFence fence) {
+        return workspaceCaptureFenceCurrent(fence);
+    }
+
+    private boolean workspaceCaptureFenceCurrent(WorkspaceFence fence) {
+        return fence != null && !lifecycleClosed && !isCoreOwnedStudioDocument()
+            && fence.generation() == workspacePublicationGeneration
+            && fence.mutationVersion() == workspaceMutationVersion
+            && fence.documentKey().equals(workspaceDocumentKey());
+    }
+
+    protected final void scheduleWorkspaceSnapshotRetry(long generation, long mutationVersion) {
+        scheduleWorkspaceSnapshotRetry(workspaceFence(generation, mutationVersion));
+    }
+
+    private void scheduleWorkspaceSnapshotRetry(WorkspaceFence fence) {
+        if (!workspaceCaptureFenceCurrent(fence)) {
+            return;
+        }
+        long generation = fence.generation();
+        long mutationVersion = fence.mutationVersion();
+        String documentKey = fence.documentKey();
+        if (workspaceCaptureFailureGeneration != generation || workspaceCaptureFailureMutationVersion != mutationVersion
+            || !workspaceCaptureFailureDocumentKey.equals(documentKey)) {
+            workspaceCaptureFailureGeneration = generation;
+            workspaceCaptureFailureMutationVersion = mutationVersion;
+            workspaceCaptureFailureDocumentKey = documentKey;
+            workspaceCaptureFailureCount = 0;
+        }
+        workspaceCaptureFailureCount++;
+        if (workspaceCaptureFailureCount > WORKSPACE_CAPTURE_RETRY_LIMIT) {
+            clearWorkspaceSnapshotRetry();
+            workspaceSnapshotFrozen = false;
+            if (workspaceCaptureFailureCount == WORKSPACE_CAPTURE_RETRY_LIMIT + 1) {
+                new Notification("Workspace", "Snapshot Failed, Reopen Editor", Notification.Type.ERROR);
+            }
+            return;
+        }
+        workspaceSnapshotRetryGeneration = generation;
+        workspaceSnapshotRetryMutationVersion = mutationVersion;
+        workspaceSnapshotRetryDocumentKey = documentKey;
+        workspaceSnapshotRetryAt = System.currentTimeMillis() + 50L * workspaceCaptureFailureCount;
+    }
+
+    private void retryWorkspaceSnapshotCapture() {
+        if (workspaceSnapshotRetryGeneration < 0L || workspaceCaptureJob != null
+            || System.currentTimeMillis() < workspaceSnapshotRetryAt) {
+            return;
+        }
+        long generation = workspaceSnapshotRetryGeneration;
+        long mutationVersion = workspaceSnapshotRetryMutationVersion;
+        String documentKey = workspaceSnapshotRetryDocumentKey;
+        if (generation != workspacePublicationGeneration || mutationVersion != workspaceMutationVersion || lifecycleClosed
+            || isCoreOwnedStudioDocument() || !documentKey.equals(workspaceDocumentKey())) {
+            clearWorkspaceSnapshotRetry();
+            workspaceSnapshotFrozen = false;
+            return;
+        }
+        clearWorkspaceSnapshotRetry();
+        workspaceSnapshotFrozen = false;
+        captureStableWorkspaceDocument(mutationVersion);
+    }
+
+    private void clearWorkspaceSnapshotRetry() {
+        workspaceSnapshotRetryGeneration = -1L;
+        workspaceSnapshotRetryMutationVersion = -1L;
+        workspaceSnapshotRetryDocumentKey = "";
+        workspaceSnapshotRetryAt = 0L;
+    }
+
+    private void clearWorkspaceCaptureFailures() {
+        workspaceCaptureFailureGeneration = -1L;
+        workspaceCaptureFailureMutationVersion = -1L;
+        workspaceCaptureFailureDocumentKey = "";
+        workspaceCaptureFailureCount = 0;
+    }
+
+    private boolean workspaceCaptureTerminal(long generation, long mutationVersion, String documentKey) {
+        return workspaceCaptureFailureGeneration == generation && workspaceCaptureFailureMutationVersion == mutationVersion
+            && workspaceCaptureFailureDocumentKey.equals(documentKey)
+            && workspaceCaptureFailureCount > WORKSPACE_CAPTURE_RETRY_LIMIT;
+    }
+
+    private void settleTerminalWorkspaceCapture(long generation, long mutationVersion, String documentKey) {
+        WorkspaceGraphSaveRequest saveRequest = workspaceGraphSaveRequest;
+        if (saveRequest != null && saveRequest.fence().generation() == generation
+            && saveRequest.fence().mutationVersion() == mutationVersion
+            && saveRequest.fence().documentKey().equals(documentKey)) {
+            workspaceGraphSaveRequest = null;
+            notifyWorkspaceGraphSaveIssue(saveRequest, "Snapshot Failed, Reopen Editor");
+        }
+        WorkspaceFrozenGraphRequest frozenRequest = workspaceFrozenGraphRequest;
+        if (frozenRequest != null && frozenRequest.fence().generation() == generation
+            && frozenRequest.fence().mutationVersion() == mutationVersion
+            && frozenRequest.fence().documentKey().equals(documentKey)) {
+            workspaceFrozenGraphRequest = null;
+            if (frozenRequest.completion() != null) {
+                frozenRequest.completion().accept(false);
+            }
+        }
+    }
+
+    private void activateWorkspaceGraph(FlowGraph target) {
+        StableWorkspaceDocument prepared = target != null ? stableWorkspaceDocuments.get(target) : null;
+        stableWorkspaceDocument = prepared != null
+            && prepared.generation() == workspacePublicationGeneration
+            && prepared.mutationVersion() == workspaceMutationVersion ? prepared : null;
+        if (stableWorkspaceDocument == null && target != null && !isActiveCoreStudioDocument()) {
+            captureStableWorkspaceDocument(workspaceMutationVersion);
+        }
+    }
+
+    protected final boolean publishStableWorkspaceDocument(long mutationVersion, JsonObject document) {
+        return publishStableWorkspaceDocument(workspacePublicationGeneration, mutationVersion, document);
+    }
+
+    protected final boolean publishStableWorkspaceDocument(long generation, long mutationVersion, JsonObject document) {
+        if (document == null || generation != workspacePublicationGeneration || mutationVersion != workspaceMutationVersion
+            || applyingWorkspace || lifecycleClosed) {
+            return false;
+        }
+        StableWorkspaceDocument stable = new StableWorkspaceDocument(generation, mutationVersion, document);
+        stableWorkspaceDocument = stable;
+        if (graph != null) {
+            stableWorkspaceDocuments.put(graph, stable);
+        }
+        clearWorkspaceCaptureFailures();
+        if (workspaceSnapshotRetryGeneration == generation && workspaceSnapshotRetryMutationVersion <= mutationVersion) {
+            clearWorkspaceSnapshotRetry();
+            if (workspaceCaptureJob == null) {
+                workspaceSnapshotFrozen = false;
+            }
+        }
+        return true;
+    }
+
+    private boolean publishStableWorkspaceDocument(WorkspaceFence fence, JsonObject document) {
+        if (document == null || !workspaceCaptureFenceCurrent(fence) || applyingWorkspace) {
+            return false;
+        }
+        StableWorkspaceDocument stable = new StableWorkspaceDocument(fence.generation(), fence.mutationVersion(), document);
+        stableWorkspaceDocument = stable;
+        if (graph != null) {
+            stableWorkspaceDocuments.put(graph, stable);
+        }
+        clearWorkspaceCaptureFailures();
+        if (workspaceSnapshotRetryGeneration == fence.generation()
+            && workspaceSnapshotRetryMutationVersion <= fence.mutationVersion()) {
+            clearWorkspaceSnapshotRetry();
+            if (workspaceCaptureJob == null) {
+                workspaceSnapshotFrozen = false;
+            }
+        }
+        return true;
+    }
+
+    protected final StableWorkspaceDocument stableWorkspaceDocument() {
+        return stableWorkspaceDocument;
+    }
+
+    protected final long workspaceMutationVersion() {
+        return workspaceMutationVersion;
+    }
+
+    protected final long workspaceSnapshotGeneration() {
+        return workspacePublicationGeneration;
+    }
+
+    protected final boolean submitFrozenWorkspaceGraph(Function<FlowGraph, Boolean> action, Consumer<Boolean> completion) {
+        if (action == null || graph == null || isActiveCoreStudioDocument() || workspaceFrozenGraphRequest != null) {
+            return false;
+        }
+        clearWorkspaceCaptureFailures();
+        completeWorkspaceMutation();
+        WorkspaceFence fence = workspaceFence(workspacePublicationGeneration, workspaceMutationVersion);
+        workspaceFrozenGraphRequest = new WorkspaceFrozenGraphRequest(fence, action, completion);
+        captureStableWorkspaceDocument(workspaceMutationVersion);
+        return true;
+    }
+
+    protected boolean workspaceSnapshotPending() {
+        return workspaceSnapshotFrozen || workspaceCaptureJob != null || workspaceGraphApplyFrozen
+            || workspaceHistoryRestoreRequest != null
+            || workspaceInboundPreparationRequest != null || discardGraphRequest != null;
+    }
+
+    protected final void queueWorkspaceMutation() {
+        if (!isActiveCoreStudioDocument() && !applyingWorkspace) {
+            WorkspaceCaptureJob captureJob = workspaceCaptureJob;
+            if (workspaceSnapshotPending() && captureJob != null
+                && captureJob.cancellation() == workspaceFrozenLeaseCancellation) {
+                workspaceFrozenLeaseCancellation++;
+            }
+            workspaceMutationPending = true;
+        }
+    }
+
+    private void queueGraphWidgetMutation(String nodeId) {
+        if (isActiveCoreStudioDocument() || applyingWorkspace) {
+            return;
+        }
+        FlowNodeWidget widget = widgetCache.get(nodeId);
+        if (widget != null) {
+            updateGraphRenderNodeTopology(widget, null);
+        }
+        graphRenderMutationPending = true;
+        invalidateGraphRenderTopology();
+        queueWorkspaceMutation();
+    }
+
+    private void completeWorkspaceMutation() {
+        if (workspaceSnapshotPending()) {
+            return;
+        }
+        completeGraphRenderMutation();
+        if (workspaceMutationPending) {
+            markWorkspaceMutation();
+        }
+    }
+
+    private void completeWorkspaceInteraction() {
+        completeWorkspaceMutation();
+        workspaceAwarenessSurfaceVersion++;
+    }
+
+    protected final void completeQueuedWorkspaceMutation() {
+        completeWorkspaceInteraction();
+    }
+
+    protected void completeGraphRenderMutation() {
+        if (!graphRenderMutationPending) {
+            return;
+        }
+        normalizePassthroughConnections();
+        graphRenderMutationPending = false;
+        invalidateGraphRenderTopology();
+        scheduleGraphRenderIndexBuild();
+    }
+
+    protected final void invalidateGraphRenderTopology() {
+        graphRenderMutationVersion = nextGraphRenderMutationVersion(graphRenderMutationVersion);
+        graphRenderFailureVersion = -1L;
+        graphRenderFailureGraph = null;
+    }
+
+    static long nextGraphRenderMutationVersion(long version) {
+        return Math.incrementExact(version);
+    }
+
+    protected final void refreshGraphRenderGeometry(Collection<String> nodeIds) {
+        if (nodeIds == null || nodeIds.isEmpty()) {
+            return;
+        }
+        Set<String> remaining = new LinkedHashSet<>(nodeIds);
+        CoreStructuralPreview preview = visibleCorePreview();
+        if (preview != null && preview.graph() == graph && preview.overlay() != null) {
+            GraphRenderIndex overlay = preview.overlay();
+            Set<String> changed = new LinkedHashSet<>();
+            for (String nodeId : nodeIds) {
+                FlowNodeWidget widget = widgetCache.get(nodeId);
+                if (widget != null && overlay.nodeOrder.containsKey(widget)) {
+                    updateGraphRenderNodeTopology(widget, null);
+                    changed.add(nodeId);
+                    remaining.remove(nodeId);
+                }
+            }
+            refreshGraphRenderGeometryBatch(changed, nodeId -> putNodeGeometry(overlay, widgetCache.get(nodeId)),
+                nodeId -> overlay.groupsByNode.getOrDefault(nodeId, List.of()),
+                group -> refreshWireGroupGeometry(overlay, group), () -> rebuildOverflowWireIndex(overlay));
+            if (!changed.isEmpty() && coreStructuralPreview == null) {
+                scheduleGraphRenderIndexBuild();
+            }
+        }
+        if (remaining.isEmpty()) {
+            return;
+        }
+        for (String nodeId : remaining) {
+            FlowNodeWidget widget = graphRenderWidget(nodeId);
+            if (widget != null) {
+                updateGraphRenderNodeTopology(widget, null);
+            }
+        }
+        GraphRenderIndex index = graphRenderIndex;
+        if (!currentGraphRenderIndex(index)) {
+            scheduleGraphRenderIndexBuild();
+            return;
+        }
+        refreshGraphRenderGeometryBatch(remaining, nodeId -> {
+            FlowNodeWidget widget = graphRenderWidget(nodeId);
+            if (widget != null) {
+                putNodeGeometry(index, widget);
+            }
+        }, nodeId -> index.groupsByNode.getOrDefault(nodeId, List.of()),
+            group -> refreshWireGroupGeometry(index, group), () -> rebuildOverflowWireIndex(index));
+    }
+
+    private FlowNodeWidget graphRenderWidget(String nodeId) {
+        if (activeCoreGraphSession() == null) {
+            return widgetCache.get(nodeId);
+        }
+        CoreWidgetTopology topology = pendingCoreWidgetTopology != null ? pendingCoreWidgetTopology : coreWidgetTopology;
+        return topology != null && topology.graph() == graph ? topology.widgetsById().get(nodeId) : null;
+    }
+
+    private boolean ownsGraphRenderWidget(FlowNodeWidget widget) {
+        if (widget == null) {
+            return false;
+        }
+        if (activeCoreGraphSession() == null) {
+            return true;
+        }
+        CoreWidgetTopology topology = pendingCoreWidgetTopology != null ? pendingCoreWidgetTopology : coreWidgetTopology;
+        String nodeId = topology != null ? topology.nodeIds().get(widget) : null;
+        return nodeId != null && topology.graph() == graph && topology.widgetsById().get(nodeId) == widget;
+    }
+
+    private void queueGraphRenderGeometry(Collection<String> nodeIds) {
+        if (nodeIds == null) {
+            return;
+        }
+        for (String nodeId : nodeIds) {
+            if (nodeId != null && !nodeId.isBlank()) {
+                graphRenderGeometryDirtyNodeIds.add(nodeId);
+            }
+        }
+    }
+
+    private void beginGraphRenderFrame() {
+        graphRenderFrameSequence = nextGraphRenderMutationVersion(graphRenderFrameSequence);
+        graphRenderGeometryDirtyCount = 0;
+        drainSelectedNodeMove();
+    }
+
+    private int drainSelectedNodeMove() {
+        return selectedNodeMove.drain(selectedDragStartPositions, widgetCache, this::queueGraphRenderGeometry);
+    }
+
+    private int flushGraphRenderGeometry() {
+        if (!graphRenderGeometryFlushDue(graphRenderFrameSequence, graphRenderGeometryFlushedFrame,
+            graphRenderGeometryDirtyNodeIds.size())) {
+            return 0;
+        }
+        graphRenderGeometryFlushedFrame = graphRenderFrameSequence;
+        Set<String> dirtyNodeIds = new LinkedHashSet<>(graphRenderGeometryDirtyNodeIds);
+        graphRenderGeometryDirtyNodeIds.clear();
+        graphRenderGeometryDirtyCount = dirtyNodeIds.size();
+        graphRenderGeometryFlushCount++;
+        refreshGraphRenderGeometry(dirtyNodeIds);
+        return dirtyNodeIds.size();
+    }
+
+    static boolean graphRenderGeometryFlushDue(long frameSequence, long flushedFrame, int dirtyCount) {
+        return dirtyCount > 0 && frameSequence != flushedFrame;
+    }
+
+    static boolean roundedGraphRenderPositionChanged(int currentX, int currentY, double nextX, double nextY) {
+        return currentX != (int) Math.round(nextX) || currentY != (int) Math.round(nextY);
+    }
+
+    static boolean graphRenderWidgetBoundsChanged(int previousX, int previousY, int previousWidth, int previousHeight,
+                                                  int currentX, int currentY, int currentWidth, int currentHeight) {
+        return previousX != currentX || previousY != currentY || previousWidth != currentWidth
+            || previousHeight != currentHeight;
+    }
+
+    static boolean queueGraphRenderGeometryIfBoundsChanged(Set<String> dirtyNodeIds, String nodeId,
+                                                           int previousX, int previousY, int previousWidth,
+                                                           int previousHeight, int currentX, int currentY,
+                                                           int currentWidth, int currentHeight) {
+        if (dirtyNodeIds == null || nodeId == null || nodeId.isBlank()
+            || !graphRenderWidgetBoundsChanged(previousX, previousY, previousWidth, previousHeight,
+                currentX, currentY, currentWidth, currentHeight)) {
+            return false;
+        }
+        dirtyNodeIds.add(nodeId);
+        return true;
+    }
+
+    static <T> int refreshGraphRenderGeometryBatch(Collection<String> nodeIds, Consumer<String> nodeRefresh,
+                                                   Function<String, ? extends Collection<T>> groupsByNode,
+                                                   Consumer<T> groupRefresh, Runnable overflowRefresh) {
+        if (nodeIds == null || nodeIds.isEmpty()) {
+            return 0;
+        }
+        Set<T> groups = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (String nodeId : nodeIds) {
+            nodeRefresh.accept(nodeId);
+            Collection<T> connected = groupsByNode.apply(nodeId);
+            if (connected != null) {
+                groups.addAll(connected);
+            }
+        }
+        groups.forEach(groupRefresh);
+        overflowRefresh.run();
+        return groups.size();
+    }
+
+    private void adoptGraphRenderState() {
+        normalizePassthroughConnections();
+        graphRenderMutationPending = false;
+        invalidateGraphRenderTopology();
+        scheduleGraphRenderIndexBuild();
+    }
+
+    private void adoptPreparedGraphRenderState() {
+        graphRenderMutationPending = false;
+        invalidateGraphRenderTopology();
+        scheduleGraphRenderIndexBuild();
+    }
+
+    private void scheduleGraphRenderIndexBuild() {
+        if (activeCoreGraphSession() != null && (publishedWidgetProjectionGeneration != coreProjectionGeneration
+            || !Objects.equals(publishedWidgetTopologyChecksum, coreTopologyChecksum))) {
+            return;
+        }
+        long revision = graphRenderTopologyRevision.get();
+        if ((revision & 1L) != 0L) {
+            return;
+        }
+        GraphRenderTopologyPointer pointer = new GraphRenderTopologyPointer(graph, graphRenderMutationVersion, revision,
+            coreProjectionGeneration, coreTopologyChecksum, graphRenderNodeTopology, graphRenderConnectionTopology,
+            graphRenderTopologyRevision, lifecycleNowNanos());
+        graphRenderPendingBuild.set(pointer);
+        queueGraphRenderWorker();
+    }
+
+    private void queueGraphRenderWorker() {
+        if (!graphRenderWorkerQueued.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            GRAPH_RENDER_INDEXES.execute(this::drainGraphRenderBuilds);
+        } catch (IllegalStateException exception) {
+            graphRenderWorkerQueued.set(false);
+        }
+    }
+
+    private void drainGraphRenderBuilds() {
+        try {
+            GraphRenderTopologyPointer pointer;
+            while ((pointer = graphRenderPendingBuild.getAndSet(null)) != null) {
+                GraphRenderBuildResult result;
+                long startedAtNanos = lifecycleNowNanos();
+                try {
+                    GraphRenderSnapshot snapshot = materializeGraphRenderSnapshot(pointer);
+                    result = new GraphRenderBuildResult(snapshot.graph(), snapshot.version(), snapshot.revision(),
+                        snapshot.projectionGeneration(), snapshot.topologyChecksum(), buildGraphRenderIndex(snapshot), false,
+                        pointer.queuedAtNanos(), startedAtNanos, lifecycleNowNanos());
+                } catch (RuntimeException exception) {
+                    String reason = exception.getMessage() == null || exception.getMessage().isBlank()
+                        ? TaskIdentities.failureName(exception) : exception.getMessage();
+                    ReSyncFlowClient.traceLifecycle(serverId, "render_index_build_failed", "serverId", serverId,
+                        "resourceKey", temporaryLifecycleGraphKey(pointer.graph()), "requestId", "render-index",
+                        "mutationId", pointer.version(), "generation", workspacePublicationGeneration,
+                        "authorityEpoch", 0L, "revision", pointer.graph() != null ? pointer.graph().getResourceRevision() : -1L,
+                        "topologyRevision", pointer.revision(), "projectionGeneration", pointer.projectionGeneration(),
+                        "topologyChecksum", pointer.topologyChecksum(), "indexedNodeCount", pointer.nodes().size(),
+                        "reason", reason);
+                    result = new GraphRenderBuildResult(pointer.graph(), pointer.version(), pointer.revision(),
+                        pointer.projectionGeneration(), pointer.topologyChecksum(), null, true, pointer.queuedAtNanos(),
+                        startedAtNanos, lifecycleNowNanos());
+                }
+                publishGraphRenderBuildResult(result);
+            }
+        } finally {
+            graphRenderWorkerQueued.set(false);
+            if (graphRenderPendingBuild.get() != null) {
+                queueGraphRenderWorker();
+            }
+        }
+    }
+
+    private void updateGraphRenderNodeTopology(FlowNodeWidget widget, Integer order) {
+        CoreStructuralPreview preview = coreStructuralPreview;
+        if (preview != null && preview.graph() == graph && preview.overlay() != null
+            && preview.overlay().nodeOrder.containsKey(widget)) {
+            if (order != null) {
+                preview.overlay().nodeOrder.put(widget, order);
+            }
+            return;
+        }
+        if (!ownsGraphRenderWidget(widget)) {
+            return;
+        }
+        graphRenderTopologyRevision.incrementAndGet();
+        GraphRenderNodeSnapshot current = graphRenderNodeTopology.get(widget);
+        int nodeOrder = order != null ? order : current != null ? current.order() : graphRenderNodeTopology.size();
+        graphRenderNodeTopology.put(widget, new GraphRenderNodeSnapshot(widget,
+            new WorldBounds(widget.getX(), widget.getY(), widget.getX() + widget.getWidth(), widget.getY() + widget.getHeight()), nodeOrder,
+            widget.hasLoadedDefinition()));
+        String nodeId = widgetNodeIds.get(widget);
+        if (nodeId != null) {
+            for (FlowConnection connection : graphRenderConnectionsByNode.getOrDefault(nodeId, Set.of())) {
+                GraphRenderConnectionSnapshot snapshot = graphRenderConnectionSnapshot(connection);
+                if (snapshot != null) {
+                    graphRenderConnectionTopology.put(connection, snapshot);
+                }
+            }
+        }
+        graphRenderTopologyRevision.incrementAndGet();
+    }
+
+    private void indexGraphRenderConnection(FlowConnection connection) {
+        GraphRenderConnectionSnapshot snapshot = graphRenderConnectionSnapshot(connection);
+        if (snapshot == null) {
+            return;
+        }
+        graphRenderConnectionTopology.put(connection, snapshot);
+        graphRenderConnectionsByNode.computeIfAbsent(snapshot.editorSourceNodeId(), ignored -> BrowserSafeState.set()).add(connection);
+        graphRenderConnectionsByNode.computeIfAbsent(snapshot.targetNodeId(), ignored -> BrowserSafeState.set()).add(connection);
+    }
+
+    private GraphRenderConnectionSnapshot graphRenderConnectionSnapshot(FlowConnection connection) {
+        return graphRenderConnectionSnapshot(connection, widgetCache);
+    }
+
+    private GraphRenderConnectionSnapshot graphRenderConnectionSnapshot(FlowConnection connection,
+                                                                          Map<String, FlowNodeWidget> widgets) {
+        if (connection == null) {
+            return null;
+        }
+        String editorNodeId = editorSourceNodeId(connection);
+        String editorPin = editorSourcePin(connection);
+        FlowNodeWidget sourceWidget = widgets.get(editorNodeId);
+        FlowNodeWidget targetWidget = widgets.get(connection.getTargetNodeId());
+        String sourceViewPin = coreConnectionViewPin(sourceWidget, editorPin, connection, true);
+        String targetViewPin = coreConnectionViewPin(targetWidget, connection.getTargetPin(), connection, false);
+        return new GraphRenderConnectionSnapshot(connection, safeString(connection.getSourceNodeId()), safeString(connection.getSourcePin()),
+            editorNodeId, sourceViewPin, safeString(connection.getTargetNodeId()), safeString(connection.getTargetPin()),
+            pinPoint(sourceWidget, sourceViewPin, false), pinPoint(targetWidget, targetViewPin, true),
+            sourceWidget != null && sourceWidget.getPinKind(sourceViewPin, false) == NodeDefinition.PinType.DATA,
+            targetWidget != null ? targetWidget.getX() : Double.MAX_VALUE,
+            targetWidget != null ? targetWidget.getY() : Double.MAX_VALUE);
+    }
+
+    private void publishGraphRenderBuildResult(GraphRenderBuildResult result) {
+        GraphRenderBuildResult selected = graphRenderBuildResult.accumulateAndGet(result,
+            (current, next) -> current == null || next.projectionGeneration() > current.projectionGeneration()
+            || next.projectionGeneration() == current.projectionGeneration() && next.version() > current.version()
+            || next.projectionGeneration() == current.projectionGeneration() && next.version() == current.version()
+                && next.revision() >= current.revision() ? next : current);
+        boolean published = selected == result && !result.failed() && result.index() != null;
+        GraphRenderIndex index = result.index();
+        String stage = published ? "render_index_published" : "render_index_rejected";
+        if (!result.failed() && !claimGraphRenderTrace(serverId, temporaryLifecycleGraphKey(result.graph()), stage,
+            lifecycleNowNanos())) {
+            return;
+        }
+        ReSyncFlowClient.traceLifecycle(serverId, stage,
+            "serverId", serverId, "resourceKey", temporaryLifecycleGraphKey(result.graph()), "requestId", "render-index",
+            "mutationId", result.version(), "generation", workspacePublicationGeneration, "authorityEpoch", 0L,
+            "revision", result.graph() != null ? result.graph().getResourceRevision() : -1L, "topologyRevision",
+            result.revision(), "projectionGeneration", result.projectionGeneration(), "topologyChecksum",
+            result.topologyChecksum(), "bounds", index != null ? index.worldBounds : null, "indexedNodeCount",
+            index != null ? index.nodeBounds.size() : 0, "unresolvedDefinitions",
+            index != null ? index.unresolvedDefinitions : -1, "nodeCellCount", index != null ? index.nodeCells.size() : -1,
+            "wireCellCount", index != null ? index.wireCells.size() : -1, "coarseWireCellCount",
+            index != null ? index.coarseWireCells.size() : -1, "overflowWireCount",
+            index != null ? index.overflowWireGroups.size() : -1, "connectionGroupCount",
+            index != null ? index.groupsByConnection.size() : -1, "fanoutCount", index != null ? index.fanouts.size() : -1,
+            "queueMicros", elapsedMicros(result.queuedAtNanos(), result.startedAtNanos()), "buildMicros",
+            elapsedMicros(result.startedAtNanos(), result.finishedAtNanos()), "totalMicros",
+            elapsedMicros(result.queuedAtNanos(), result.finishedAtNanos()), "reason", result.failed() ? "build_failed"
+                : selected != result ? "superseded" : "accepted");
+    }
+
+    private String temporaryLifecycleGraphKey(FlowGraph source) {
+        if (source == null) {
+            return "graph:missing";
+        }
+        String type = source.getResourceType();
+        return (type == null || type.isBlank() ? "graph" : type) + ":" + safeString(source.getId());
+    }
+
+    private static GraphRenderSnapshot materializeGraphRenderSnapshot(GraphRenderTopologyPointer pointer) {
+        if ((pointer.revision() & 1L) != 0L || pointer.currentRevision().get() != pointer.revision()) {
+            throw new IllegalStateException();
+        }
+        List<GraphRenderNodeSnapshot> nodes = List.copyOf(pointer.nodes().values());
+        List<GraphRenderConnectionSnapshot> connections = List.copyOf(pointer.connections().values());
+        if (pointer.currentRevision().get() != pointer.revision()) {
+            throw new IllegalStateException();
+        }
+        return new GraphRenderSnapshot(pointer.graph(), pointer.version(), pointer.revision(),
+            pointer.projectionGeneration(), pointer.topologyChecksum(), nodes, connections);
+    }
+
     private void publishWorkspaceAwareness(ReSyncFlowClient client, int mouseX, int mouseY, long now) {
-        GraphEditorScreen editor = workspaceEditor();
-        Screen screen = workspaceScreen();
+        if (mouseX != workspaceAwarenessMouseX || mouseY != workspaceAwarenessMouseY) {
+            workspaceAwarenessMouseX = mouseX;
+            workspaceAwarenessMouseY = mouseY;
+            workspaceAwarenessPointerVersion++;
+        }
+        boolean keepalive = now - lastWorkspaceAwarenessAt >= 500L;
+        boolean changed = workspaceAwarenessPointerVersion != workspacePublishedAwarenessPointerVersion
+            || workspaceAwarenessSurfaceVersion != workspacePublishedAwarenessSurfaceVersion;
+        if (workspaceAwarenessPublicationInFlight || !keepalive && (!changed || now - lastWorkspaceAwarenessAt < 35L)) {
+            return;
+        }
+        GraphEditorScreen editor = activeWorkspaceEditor();
+        if (editor == null) {
+            return;
+        }
+        Screen screen;
+        try {
+            screen = workspaceScreen();
+        } catch (RuntimeException exception) {
+            return;
+        }
         ItemSelectorWidget selector = activeWorkspaceSelector();
         Widget pointerTarget = DesignerCollaborationAuthority.hit(screen, mouseX, mouseY, selector);
         boolean graphPointer = isWorkspaceGraphView() && pointerTarget == null && (selector == null || !selector.isMouseOver(mouseX, mouseY));
+        if (workspaceWidgetStatesVersion != workspaceAwarenessSurfaceVersion) {
+            workspaceWidgetStates = DesignerCollaborationAuthority.widgetStates(screen);
+            workspaceWidgetStatesVersion = workspaceAwarenessSurfaceVersion;
+        }
         JsonObject state = new JsonObject();
         if (isWorkspaceGraphView()) {
             addGraphWorkspaceAwareness(state, editor, mouseX, mouseY, graphPointer);
         }
-        addDesignerWorkspaceAwareness(state, screen, editor, selector, mouseX, mouseY, graphPointer);
-        publishWorkspaceAwareness(client, state, now);
+        addDesignerWorkspaceAwareness(state, screen, editor, selector, mouseX, mouseY, graphPointer, workspaceWidgetStates);
+        WorkspaceAwarenessPublicationJob job = new WorkspaceAwarenessPublicationJob(workspacePublicationGeneration,
+            workspaceType, workspaceResourceId, workspaceAwarenessPointerVersion, workspaceAwarenessSurfaceVersion,
+            state, lastWorkspaceAwareness, keepalive, client);
+        workspaceAwarenessPublicationInFlight = true;
+        try {
+            WORKSPACE_PUBLICATIONS.execute(() -> prepareWorkspaceAwarenessPublication(job));
+            lastWorkspaceAwarenessAt = now;
+        } catch (IllegalStateException exception) {
+            workspaceAwarenessPublicationInFlight = false;
+        }
     }
 
     private void addGraphWorkspaceAwareness(JsonObject state, GraphEditorScreen editor, int mouseX, int mouseY, boolean graphPointer) {
@@ -3448,7 +12994,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private void addDesignerWorkspaceAwareness(JsonObject state, Screen screen, GraphEditorScreen editor, ItemSelectorWidget selector,
-                                               int mouseX, int mouseY, boolean graphPointer) {
+                                               int mouseX, int mouseY, boolean graphPointer, JsonObject widgetStates) {
         if (screen == null) {
             return;
         }
@@ -3464,9 +13010,9 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (!graphPointer) {
             state.add("pointer", DesignerCollaborationAuthority.pointer(screen, mouseX, mouseY, selector));
         }
-        Widget focused = DesignerCollaborationAuthority.focused(screen);
+        Widget focused = DesignerCollaborationAuthority.cachedFocus(screen);
         if (focused != null && focused != selector && focused.isVisible()) {
-            JsonArray focusPath = DesignerCollaborationAuthority.path(screen, focused);
+            JsonArray focusPath = DesignerCollaborationAuthority.cachedPath(screen, focused);
             if (!focusPath.isEmpty()) {
                 state.add("focusPath", focusPath);
             }
@@ -3474,18 +13020,17 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (screen instanceof CollaborativeSlotView slotView) {
             state.add("slotSelection", slotView.collaborationSlots());
         }
-        JsonObject widgetStates = DesignerCollaborationAuthority.widgetStates(screen);
-        if (!widgetStates.isEmpty()) {
+        if (widgetStates != null && !widgetStates.isEmpty()) {
             state.add("widgetStates", widgetStates);
         }
         if (selector == null || !selector.isOpen() || !selector.isVisible()) {
             return;
         }
         JsonObject selectorState = new JsonObject();
-        selectorState.add("state", ItemSelectorCollaborationJson.write(selector.collaborationState()));
+        selectorState.add("state", GSON.toJsonTree(selector.collaborationState()));
         selectorState.addProperty("screenX", screen.width > 0 ? Math.clamp((double) selector.getX() / screen.width, 0.0, 1.0) : 0.0);
         selectorState.addProperty("screenY", screen.height > 0 ? Math.clamp((double) selector.getY() / screen.height, 0.0, 1.0) : 0.0);
-        JsonArray anchorPath = DesignerCollaborationAuthority.path(screen, selector.getCollaborationAnchor());
+        JsonArray anchorPath = DesignerCollaborationAuthority.cachedPath(screen, selector.getCollaborationAnchor());
         if (!anchorPath.isEmpty()) {
             Widget anchor = DesignerCollaborationAuthority.resolve(screen, anchorPath);
             selectorState.add("anchorPath", anchorPath);
@@ -3500,11 +13045,20 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private ItemSelectorWidget activeWorkspaceSelector() {
-        GraphEditorScreen editor = workspaceEditor();
+        GraphEditorScreen editor = activeWorkspaceEditor();
+        if (editor == null) {
+            return null;
+        }
         if (editor.nodeItemSelector != null && editor.nodeItemSelector.isOpen() && editor.nodeItemSelector.isVisible()) {
             return editor.nodeItemSelector;
         }
-        List<Widget> transientWidgets = workspaceScreen().getTransientWidgets();
+        Screen screen;
+        try {
+            screen = workspaceScreen();
+        } catch (RuntimeException exception) {
+            return null;
+        }
+        List<Widget> transientWidgets = screen.getTransientWidgets();
         for (int index = transientWidgets.size() - 1; index >= 0; index--) {
             if (transientWidgets.get(index) instanceof ItemSelectorWidget selector && !selector.isEmbedded() && selector.isOpen()) {
                 return selector;
@@ -3514,7 +13068,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (popupOverlay != null) {
             List<Widget> popupTransients = popupOverlay.getTransientWidgets();
             for (int index = popupTransients.size() - 1; index >= 0; index--) {
-                if (popupTransients.get(index) instanceof ItemSelectorWidget selector && selector.getCollaborationOwner() == workspaceScreen()
+                if (popupTransients.get(index) instanceof ItemSelectorWidget selector && selector.getCollaborationOwner() == screen
                     && !selector.isEmbedded() && selector.isOpen()) {
                     return selector;
                 }
@@ -3531,12 +13085,41 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         return selector != null && selector.isOpen() && selector.isVisible() ? selector : null;
     }
 
-    private void publishWorkspaceAwareness(ReSyncFlowClient client, JsonObject state, long now) {
-        String signature = FlowJson.write(state);
-        if ((!signature.equals(lastWorkspaceAwareness) && now - lastWorkspaceAwarenessAt >= 35L) || now - lastWorkspaceAwarenessAt >= 500L) {
-            lastWorkspaceAwareness = signature;
-            lastWorkspaceAwarenessAt = now;
-            client.publishWorkspaceAwareness(workspaceType, workspaceResourceId, state);
+    private void prepareWorkspaceAwarenessPublication(WorkspaceAwarenessPublicationJob job) {
+        if (job.generation() != workspacePublicationGeneration) {
+            return;
+        }
+        WorkspaceAwarenessPublicationResult result;
+        try {
+            String signature = GSON.toJson(job.state());
+            boolean publish = job.keepalive() || !signature.equals(job.previousSignature());
+            if (publish) {
+                job.client().publishWorkspaceAwareness(job.type(), job.resourceId(), job.state());
+            }
+            result = new WorkspaceAwarenessPublicationResult(job.generation(), job.type(), job.resourceId(),
+                job.pointerVersion(), job.surfaceVersion(), signature, publish, false);
+        } catch (RuntimeException exception) {
+            result = new WorkspaceAwarenessPublicationResult(job.generation(), job.type(), job.resourceId(),
+                job.pointerVersion(), job.surfaceVersion(), job.previousSignature(), false, true);
+        }
+        if (job.generation() == workspacePublicationGeneration) {
+            workspaceAwarenessPublicationResult.compareAndSet(null, result);
+        }
+    }
+
+    private void applyWorkspaceAwarenessPublicationResult() {
+        WorkspaceAwarenessPublicationResult result = workspaceAwarenessPublicationResult.getAndSet(null);
+        if (result == null || result.generation() != workspacePublicationGeneration) {
+            return;
+        }
+        workspaceAwarenessPublicationInFlight = false;
+        if (result.failed() || !workspaceType.equals(result.type()) || !workspaceResourceId.equals(result.resourceId())) {
+            return;
+        }
+        workspacePublishedAwarenessPointerVersion = result.pointerVersion();
+        workspacePublishedAwarenessSurfaceVersion = result.surfaceVersion();
+        if (result.published()) {
+            lastWorkspaceAwareness = result.signature();
         }
     }
 
@@ -3554,94 +13137,303 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private void applyWorkspaceSnapshot(ReSyncWorkspaceClient.Snapshot snapshot) {
-        if (!workspaceType.equals(snapshot.type()) || !workspaceResourceId.equals(snapshot.resourceId()) || snapshot.document() == null) {
+        if (isActiveCoreStudioDocument()) {
             return;
         }
-        JsonObject authoritative = snapshot.document().deepCopy();
-        if (workspaceDocument == null) {
-            JsonObject current = currentWorkspaceDocument();
-            if (current == null) {
-                workspaceDocument = authoritative;
-                workspaceScanDocument = authoritative.deepCopy();
-                workspaceJoinDocument = null;
-                workspacePendingOperations.clear();
-                applyWorkspaceDocument(authoritative, List.of(), true);
-                return;
-            }
-            List<WorkspacePatch<JsonElement>> local = workspaceJoinDocument != null
-                ? diffWorkspaceDocuments(workspaceJoinDocument, current) : List.of();
-            if (workspaceJoinDocument != null) {
-                rebaseWorkspaceDocumentHistory(FlowWorkspaceDocument.diff(workspaceJoinDocument, authoritative));
-            }
-            JsonObject merged = authoritative.deepCopy();
-            FlowWorkspaceDocument.apply(merged, local);
-            workspaceDocument = authoritative;
-            workspaceScanDocument = authoritative.deepCopy();
-            workspaceJoinDocument = null;
-            workspacePendingOperations.clear();
-            if (!current.equals(merged)) {
-                applyWorkspaceDocument(merged, local, false);
-            }
+        if (!isWorkspaceLifecycleActive() || snapshot == null || !workspaceType.equals(snapshot.type())
+            || !workspaceResourceId.equals(snapshot.resourceId())
+            || snapshot.document() == null) {
             return;
+        }
+        if (workspaceGraphMutationBlocked()) {
+            deferWorkspaceSnapshot(snapshot);
+            return;
+        }
+        if (!submitWorkspaceInboundSnapshot(snapshot)) {
+            requestWorkspaceSnapshot();
+        }
+    }
+
+    private boolean submitWorkspaceInboundSnapshot(ReSyncWorkspaceClient.Snapshot snapshot) {
+        if (workspaceInboundPreparationRequest != null) {
+            return false;
         }
         JsonObject current = currentWorkspaceDocument();
         if (current == null) {
+            deferWorkspaceSnapshot(snapshot);
+            return true;
+        }
+        long generation = workspacePublicationGeneration;
+        long mutationVersion = workspaceMutationVersion;
+        WorkspaceFence fence = workspaceFence(generation, mutationVersion);
+        boolean collaborative;
+        try {
+            collaborative = workspaceCollaborativeView() != null;
+        } catch (RuntimeException exception) {
+            return false;
+        }
+        StudioScreen.History<GraphSnapshot> history = null;
+        StudioScreen.History.RebaseState<GraphSnapshot> historyState = null;
+        if (!collaborative) {
+            GraphEditorScreen editor = activeWorkspaceEditor();
+            if (editor != null && editor.activeCoreGraphSession() == null) {
+                history = editor.graphHistory();
+                historyState = history.captureRebaseState();
+            }
+        }
+        WorkspaceInboundPreparationRequest request;
+        try {
+            request = new WorkspaceInboundPreparationRequest(
+                WorkspaceInboundPreparationKind.SNAPSHOT, snapshot, null, false, false, collaborative,
+                workspaceConflict != null, workspacePendingRepublishActive(), generation, workspaceSequence, fence, current, workspaceDocument,
+                workspaceScanDocument, workspaceJoinDocument, workspacePendingOperations,
+                workspacePendingRepublishInFlight, workspaceConflict != null ? workspaceConflict.authoritative() : null,
+                history, historyState);
+        } catch (RuntimeException exception) {
+            return false;
+        }
+        workspaceInboundPreparationRequest = request;
+        try {
+            WORKSPACE_INBOUND_PREPARATIONS.execute(() -> prepareWorkspaceInbound(request));
+            return true;
+        } catch (IllegalStateException exception) {
+            if (workspaceInboundPreparationRequest == request) {
+                workspaceInboundPreparationRequest = null;
+            }
+            return false;
+        }
+    }
+
+    private PendingWorkspaceProjection reconcileWorkspacePendingOperations(JsonObject authoritative, long sequence) {
+        return reconcileWorkspacePendingOperations(authoritative, sequence, workspacePendingOperations);
+    }
+
+    private static PendingWorkspaceProjection reconcileWorkspacePendingOperations(JsonObject authoritative, long sequence,
+                                                                                   Map<String, PendingWorkspaceOperation> operations) {
+        JsonObject projection = authoritative.deepCopy();
+        LinkedHashMap<String, PendingWorkspaceOperation> rebased = new LinkedHashMap<>();
+        for (PendingWorkspaceOperation operation : operations.values()) {
+            JsonObject desired = FlowWorkspaceDocument.rebase(operation.base(), operation.desired(), projection);
+            List<WorkspacePatch<JsonElement>> patches = FlowWorkspaceDocument.diffEditableWorkspace(projection, desired);
+            if (patches.isEmpty()) {
+                continue;
+            }
+            long baseSequence = Math.addExact(sequence, rebased.size());
+            long retainedBytes = workspaceOperationRetainedBytes(projection, patches, desired);
+            PendingWorkspaceOperation next = new PendingWorkspaceOperation(operation.operationId(), baseSequence,
+                projection, patches, desired, retainedBytes);
+            rebased.put(next.operationId(), next);
+            projection = desired;
+        }
+        return new PendingWorkspaceProjection(projection, rebased);
+    }
+
+    private boolean republishWorkspacePendingOperations(ReSyncFlowClient client) {
+        if (workspacePendingRepublishInFlight != null) {
+            workspacePendingRepublish = true;
+            return true;
+        }
+        if (workspacePendingRepublishQueued != null
+            && !workspacePendingOperations.containsKey(workspacePendingRepublishQueued.operationId())) {
+            workspacePendingRepublishQueued = null;
+        }
+        if (workspacePendingRepublishQueued == null) {
+            workspacePendingRepublish = false;
+            return true;
+        }
+        if (client == null) {
+            workspacePendingRepublish = true;
+            return false;
+        }
+        PendingWorkspaceOperation operation = workspacePendingRepublishQueued;
+        String operationId;
+        try {
+            operationId = client.publishWorkspaceOperation(workspaceType, workspaceResourceId, operation.patches());
+        } catch (RuntimeException exception) {
+            workspacePendingRepublish = true;
+            return false;
+        }
+        if (operationId == null || operationId.isBlank()) {
+            workspacePendingRepublish = true;
+            return false;
+        }
+        workspacePendingRepublishQueued = null;
+        PendingWorkspaceOperation republished = new PendingWorkspaceOperation(operationId, operation.baseSequence(),
+            operation.base(), operation.patches(), operation.desired(), operation.retainedBytes());
+        if (!replaceWorkspacePendingOperation(operation, republished)) {
+            workspacePendingRepublish = true;
+            return false;
+        }
+        workspacePendingRepublishInFlight = republished;
+        workspacePendingRepublish = true;
+        return true;
+    }
+
+    private void invalidateWorkspacePendingRepublishOnDisconnect() {
+        invalidateWorkspacePendingRepublish(true);
+    }
+
+    private void invalidateWorkspacePendingRepublishForSnapshot() {
+        invalidateWorkspacePendingRepublish(false);
+    }
+
+    private void invalidateWorkspacePendingRepublish(boolean requestSnapshot) {
+        workspacePendingRepublishInFlight = null;
+        if (workspacePendingOperations.isEmpty()) {
+            workspacePendingRepublishQueued = null;
+            workspacePendingRepublish = false;
+            workspacePendingRepublishAwaitingSnapshot = false;
             return;
         }
-        List<WorkspacePatch<JsonElement>> remote = FlowWorkspaceDocument.diff(workspaceDocument, authoritative);
-        rebaseWorkspaceDocumentHistory(remote);
-        List<WorkspacePatch<JsonElement>> local = workspaceScanDocument != null
-            ? diffWorkspaceDocuments(workspaceScanDocument, current) : List.of();
-        JsonObject merged = authoritative.deepCopy();
-        workspacePendingOperations.values().forEach(patches -> FlowWorkspaceDocument.apply(merged, patches));
-        FlowWorkspaceDocument.apply(merged, local);
-        workspaceDocument = authoritative;
-        workspaceScanDocument = authoritative.deepCopy();
-        workspacePendingOperations.clear();
-        workspaceJoinDocument = null;
-        applyWorkspaceDocument(merged, remote, false);
+        workspacePendingRepublish = true;
+        workspacePendingRepublishAwaitingSnapshot = true;
+        refreshWorkspacePendingRepublishQueue(true);
+        if (requestSnapshot) {
+            workspaceResyncPending = !workspaceType.isBlank();
+        }
+    }
+
+    private void deferWorkspaceSnapshot(ReSyncWorkspaceClient.Snapshot snapshot) {
+        if (snapshot == null || snapshot.document() == null) {
+            return;
+        }
+        ReSyncWorkspaceClient.Snapshot deferred = deferredWorkspaceSnapshot;
+        if (deferred == null || snapshot.sequence() >= deferred.sequence()) {
+            deferredWorkspaceSnapshot = snapshot;
+            deferredWorkspaceSnapshotSequence = workspaceInputSequence.incrementAndGet();
+        }
+        GraphEditorScreen owner = workspaceDocumentOwner();
+        if (owner != null) {
+            requestStableWorkspaceCapture(owner);
+        }
+    }
+
+    private void requestStableWorkspaceCapture(GraphEditorScreen owner) {
+        if (owner == null || owner.workspaceSnapshotPending()) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (now - lastWorkspaceSnapshotCaptureAt < 100L) {
+            return;
+        }
+        lastWorkspaceSnapshotCaptureAt = now;
+        owner.captureStableWorkspaceDocument(owner.workspaceMutationVersion());
+    }
+
+    private boolean replaceWorkspacePendingOperation(PendingWorkspaceOperation previous, PendingWorkspaceOperation next) {
+        removeWorkspacePendingOperation(previous.operationId());
+        if (!addWorkspacePendingOperation(next)) {
+            clearWorkspacePendingOperations();
+            requestWorkspaceSnapshot();
+            return false;
+        }
+        return true;
+    }
+
+    private boolean workspacePendingRepublishActive() {
+        return workspacePendingRepublish || workspacePendingRepublishInFlight != null
+            || workspacePendingRepublishQueued != null;
+    }
+
+    private void refreshWorkspacePendingRepublishQueue(boolean force) {
+        if (!force && !workspacePendingRepublishActive()) {
+            return;
+        }
+        if (workspacePendingRepublishInFlight != null) {
+            PendingWorkspaceOperation current = workspacePendingOperations.get(workspacePendingRepublishInFlight.operationId());
+            if (current == null || !current.equals(workspacePendingRepublishInFlight)) {
+                workspacePendingRepublishInFlight = null;
+            }
+        }
+        workspacePendingRepublishQueued = null;
+        for (PendingWorkspaceOperation operation : workspacePendingOperations.values()) {
+            if (workspacePendingRepublishInFlight == null
+                || !operation.operationId().equals(workspacePendingRepublishInFlight.operationId())) {
+                workspacePendingRepublishQueued = operation;
+                break;
+            }
+        }
+        workspacePendingRepublish = workspacePendingRepublishQueued != null
+            || workspacePendingRepublishInFlight != null;
     }
 
     private void applyWorkspaceOperation(ReSyncWorkspaceClient.Operation operation, boolean own) {
-        if (!workspaceType.equals(operation.type()) || !workspaceResourceId.equals(operation.resourceId()) || workspaceDocument == null
-            || workspaceScanDocument == null) {
+        if (workspaceGraphMutationBlocked()) {
+            boolean requestedOwn = own;
+            offerWorkspaceUpdate(WorkspaceUpdateKind.OPERATION, () -> applyWorkspaceOperation(operation, requestedOwn));
             return;
         }
-        JsonObject authoritative = workspaceDocument.deepCopy();
-        FlowWorkspaceDocument.apply(authoritative, operation.patches());
+        if (isActiveCoreStudioDocument()) {
+            return;
+        }
+        if (!isWorkspaceLifecycleActive() || workspaceConflict != null || operation == null
+            || !workspaceType.equals(operation.type()) || !workspaceResourceId.equals(operation.resourceId())
+            || workspaceDocument == null || workspaceScanDocument == null) {
+            return;
+        }
+        boolean replayEcho = workspacePendingRepublishInFlight != null
+            && workspacePendingRepublishInFlight.operationId().equals(operation.operationId())
+            && operation.patches() != null
+            && workspacePendingRepublishInFlight.patches().equals(operation.patches());
+        boolean effectiveOwn = own || replayEcho || isOwnWorkspaceActor(operation.authorSessionId());
+        if (!submitWorkspaceInboundOperation(operation, effectiveOwn, replayEcho)) {
+            requestWorkspaceSnapshot();
+        }
+    }
+
+    private boolean submitWorkspaceInboundOperation(ReSyncWorkspaceClient.Operation operation, boolean own,
+                                                     boolean replayEcho) {
+        if (workspaceInboundPreparationRequest != null) {
+            return false;
+        }
         JsonObject current = currentWorkspaceDocument();
         if (current == null) {
-            return;
+            clearWorkspaceUpdates();
+            return false;
         }
-        List<WorkspacePatch<JsonElement>> local = diffWorkspaceDocuments(workspaceScanDocument, current);
-        own = own || isOwnWorkspaceActor(operation.authorSessionId());
-        if (own) {
-            workspacePendingOperations.remove(operation.operationId());
-        } else {
-            rebaseWorkspaceDocumentHistory(operation.patches());
+        long generation = workspacePublicationGeneration;
+        long mutationVersion = workspaceMutationVersion;
+        WorkspaceFence fence = workspaceFence(generation, mutationVersion);
+        boolean collaborative;
+        try {
+            collaborative = workspaceCollaborativeView() != null;
+        } catch (RuntimeException exception) {
+            return false;
         }
-        JsonObject projection = authoritative.deepCopy();
-        workspacePendingOperations.values().forEach(patches -> FlowWorkspaceDocument.apply(projection, patches));
-        JsonObject merged = projection.deepCopy();
-        FlowWorkspaceDocument.apply(merged, local);
-        workspaceDocument = authoritative;
-        workspaceScanDocument = projection;
-        if (current.equals(merged)) {
-            return;
+        StudioScreen.History<GraphSnapshot> history = null;
+        StudioScreen.History.RebaseState<GraphSnapshot> historyState = null;
+        if (!collaborative) {
+            GraphEditorScreen editor = activeWorkspaceEditor();
+            if (editor != null && editor.activeCoreGraphSession() == null) {
+                history = editor.graphHistory();
+                historyState = history.captureRebaseState();
+            }
         }
-        if (workspaceCollaborativeView() != null) {
-            applyWorkspaceDocument(merged, operation.patches(), false);
-        } else if (local.isEmpty() && isPositionOperation(operation.patches())) {
-            applyWorkspacePositions(merged, operation.patches(), operation.authorSessionId(), own);
-        } else if (local.isEmpty() && isMetadataOperation(operation.patches())) {
-            applyWorkspaceMetadata(merged);
-        } else if (!applyWorkspaceChanges(merged, operation.patches())) {
-            applyWorkspaceGraph(merged);
+        WorkspaceInboundPreparationRequest request;
+        try {
+            request = new WorkspaceInboundPreparationRequest(
+                WorkspaceInboundPreparationKind.OPERATION, null, operation, own, replayEcho, collaborative,
+                false, workspacePendingRepublishActive(), generation, workspaceSequence, fence, current, workspaceDocument, workspaceScanDocument,
+                workspaceJoinDocument, workspacePendingOperations, workspacePendingRepublishInFlight,
+                workspaceConflict != null ? workspaceConflict.authoritative() : null, history, historyState);
+        } catch (RuntimeException exception) {
+            return false;
+        }
+        workspaceInboundPreparationRequest = request;
+        try {
+            WORKSPACE_INBOUND_PREPARATIONS.execute(() -> prepareWorkspaceInbound(request));
+            return true;
+        } catch (IllegalStateException exception) {
+            if (workspaceInboundPreparationRequest == request) {
+                workspaceInboundPreparationRequest = null;
+            }
+            return false;
         }
     }
 
     private void applyWorkspaceAwareness(ReSyncWorkspaceClient.Awareness awareness) {
-        if (!workspaceType.equals(awareness.type()) || !workspaceResourceId.equals(awareness.resourceId())) {
+        if (!isWorkspaceLifecycleActive() || awareness == null || !workspaceType.equals(awareness.type())
+            || !workspaceResourceId.equals(awareness.resourceId())) {
             return;
         }
         if (isOwnWorkspaceActor(awareness.authorSessionId())) {
@@ -3666,68 +13458,468 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         return client.collaboration().isOwnSession(sessionId);
     }
 
+    public boolean hasWorkspaceConflict() {
+        return workspaceConflict != null;
+    }
+
+    public String workspaceConflictMessage() {
+        return workspaceConflict == null ? "" : "Local Draft Saved";
+    }
+
+    public String workspaceConflictPath() {
+        return workspaceConflict == null ? "" : workspaceConflict.path();
+    }
+
+    public JsonObject workspaceConflictDraft() {
+        return workspaceConflict == null ? null : workspaceConflict.draft().deepCopy();
+    }
+
+    public boolean reapplyWorkspaceConflict() {
+        return resolveWorkspaceConflict(true);
+    }
+
+    public boolean rebaseWorkspaceConflict() {
+        return resolveWorkspaceConflict(false);
+    }
+
+    public boolean discardWorkspaceConflict() {
+        if (workspaceConflict == null || !isWorkspaceLifecycleActive()) {
+            return false;
+        }
+        refreshWorkspaceConflictDraft();
+        WorkspaceConflict conflict = workspaceConflict;
+        JsonObject current = safeCurrentWorkspaceDocument();
+        JsonObject authoritative = conflict.authoritative();
+        if (current == null) {
+            return false;
+        }
+        try {
+            List<WorkspacePatch<JsonElement>> patches = FlowWorkspaceDocument.diff(current, authoritative);
+            if (!patches.isEmpty()) {
+                applyWorkspaceDocument(authoritative, patches, true);
+            }
+            JsonObject applied = safeCurrentWorkspaceDocument();
+            if (applied == null || !FlowWorkspaceDocument.editableWorkspace(authoritative)
+                .equals(FlowWorkspaceDocument.editableWorkspace(applied))) {
+                return false;
+            }
+            if (!finishWorkspaceConflict(conflict, authoritative, false)) {
+                return false;
+            }
+            new Notification("Workspace", "Local Draft Discarded", Notification.Type.INFO);
+            return true;
+        } catch (RuntimeException exception) {
+            return false;
+        }
+    }
+
+    private boolean resolveWorkspaceConflict(boolean reapply) {
+        if (workspaceConflict == null || !isWorkspaceLifecycleActive()) {
+            return false;
+        }
+        refreshWorkspaceConflictDraft();
+        WorkspaceConflict conflict = workspaceConflict;
+        JsonObject current = safeCurrentWorkspaceDocument();
+        if (current == null) {
+            return false;
+        }
+        JsonObject resolved;
+        try {
+            resolved = reapply
+                ? FlowWorkspaceDocument.reapply(conflict.draft(), conflict.authoritative())
+                : FlowWorkspaceDocument.rebase(conflict.base(), conflict.draft(), conflict.authoritative());
+        } catch (FlowWorkspaceDocument.RebaseConflictException exception) {
+            enterWorkspaceConflict(conflict.base(), conflict.draft(), conflict.authoritative(), conflict.sequence(), exception.path());
+            new Notification("Workspace", "Conflict Remains", Notification.Type.WARN);
+            return false;
+        } catch (RuntimeException exception) {
+            return false;
+        }
+        try {
+            List<WorkspacePatch<JsonElement>> patches = FlowWorkspaceDocument.diff(current, resolved);
+            if (!patches.isEmpty()) {
+                applyWorkspaceDocument(resolved, patches, false);
+            }
+            JsonObject applied = safeCurrentWorkspaceDocument();
+            if (applied == null || !FlowWorkspaceDocument.editableWorkspace(resolved)
+                .equals(FlowWorkspaceDocument.editableWorkspace(applied))) {
+                return false;
+            }
+            if (!finishWorkspaceConflict(conflict, conflict.authoritative(), true)) {
+                return false;
+            }
+            new Notification("Workspace", reapply ? "Local Draft Reapplied" : "Local Draft Rebased", Notification.Type.SUCCESS);
+            return true;
+        } catch (RuntimeException exception) {
+            return false;
+        }
+    }
+
+    private boolean finishWorkspaceConflict(WorkspaceConflict conflict, JsonObject authoritative, boolean publishLocalChanges) {
+        GraphEditorScreen owner = workspaceDocumentOwner();
+        if (owner == null) {
+            return false;
+        }
+        workspaceConflict = null;
+        workspaceDocument = authoritative.deepCopy();
+        workspaceScanDocument = authoritative.deepCopy();
+        workspaceJoinDocument = null;
+        clearWorkspacePendingOperations();
+        workspacePendingRepublish = false;
+        workspacePendingRepublishAwaitingSnapshot = false;
+        workspacePendingRepublishQueued = null;
+        workspacePendingRepublishInFlight = null;
+        workspaceSequence = conflict.sequence();
+        workspaceResyncPending = false;
+        if (publishLocalChanges) {
+            owner.markWorkspaceMutation();
+        } else {
+            retainStableWorkspaceDocument(authoritative);
+            workspacePublishedMutationVersion = owner.workspaceMutationVersion;
+        }
+        updateWorkspaceConflictUi();
+        FlowManager manager = FlowManager.getInstance();
+        ReSyncFlowClient client = manager != null && studioMode && manager.isFlowClientConnected(serverId)
+            ? manager.existingFlowClient(serverId) : null;
+        if (client != null) {
+            publishWorkspaceDocumentChanges(client);
+        }
+        return true;
+    }
+
+    private void enterWorkspaceConflict(JsonObject base, JsonObject draft, JsonObject authoritative,
+                                        long sequence, String path) {
+        if (!isWorkspaceLifecycleActive() || authoritative == null) {
+            return;
+        }
+        WorkspaceConflict previous = workspaceConflict;
+        if (previous != null && previous.sameAuthoritative(authoritative)) {
+            refreshWorkspaceConflictDraft();
+            return;
+        }
+        workspaceConflict = new WorkspaceConflict(base != null ? base : authoritative,
+            draft != null ? draft : authoritative, authoritative, sequence, path);
+        workspaceDocument = authoritative.deepCopy();
+        workspaceScanDocument = authoritative.deepCopy();
+        workspaceJoinDocument = null;
+        clearWorkspacePendingOperations();
+        workspacePendingRepublish = false;
+        workspacePendingRepublishAwaitingSnapshot = false;
+        workspacePendingRepublishQueued = null;
+        workspacePendingRepublishInFlight = null;
+        workspaceSequence = sequence;
+        workspaceResyncPending = false;
+        clearWorkspaceUpdates();
+        updateWorkspaceConflictUi();
+        new Notification("Workspace", "Conflict: Local Draft Saved", Notification.Type.WARN);
+    }
+
+    private void refreshWorkspaceConflictDraft() {
+        if (workspaceConflict == null || applyingWorkspace) {
+            return;
+        }
+        try {
+            JsonObject current = currentWorkspaceDocument();
+            if (current != null && !current.equals(workspaceConflict.draft())) {
+                WorkspaceConflict conflict = workspaceConflict;
+                workspaceConflict = new WorkspaceConflict(conflict.base(), current, conflict.authoritative(),
+                    conflict.sequence(), conflict.path());
+            }
+        } catch (RuntimeException ignored) {
+        }
+    }
+
+    private void updateWorkspaceConflictUi() {
+        if (!isWorkspaceLifecycleActive()) {
+            return;
+        }
+        if (workspaceConflictButton != null) {
+            workspaceConflictButton.visible = workspaceConflict != null;
+        }
+        notifyStudioHeaderButtonsChanged();
+        if (!studioMode) {
+            layoutHeaderButtons();
+        }
+    }
+
+    private void showWorkspaceConflictPopup() {
+        if (workspaceConflict == null) {
+            return;
+        }
+        WorkspaceConflict conflict = workspaceConflict;
+        PopupWidget.Builder builder = new PopupWidget.Builder("Workspace Conflict").setResizable(false).width(420);
+        builder.addRow("Status", readOnlyButton("Local Draft Saved"));
+        if (!conflict.path().isBlank()) {
+            builder.addRow("Conflict", readOnlyButton(conflict.path()));
+        }
+        PopupWidget[] popupRef = new PopupWidget[1];
+        builder.addTitleAction("Reapply", () -> {
+            if (reapplyWorkspaceConflict() && popupRef[0] != null) {
+                popupRef[0].hide();
+            }
+        }, PopupWidget.TitleActionRole.PRIMARY);
+        builder.addTitleAction("Rebase", () -> {
+            if (rebaseWorkspaceConflict() && popupRef[0] != null) {
+                popupRef[0].hide();
+            }
+        }, PopupWidget.TitleActionRole.SECONDARY);
+        builder.addTitleAction("Discard", () -> {
+            if (discardWorkspaceConflict() && popupRef[0] != null) {
+                popupRef[0].hide();
+            }
+        }, PopupWidget.TitleActionRole.DESTRUCTIVE);
+        popupRef[0] = builder.build();
+        addDrawableChild(popupRef[0]);
+        popupRef[0].show();
+    }
+
     private void requestWorkspaceSnapshot() {
+        if (workspaceConflict != null || lifecycleClosed) {
+            return;
+        }
         workspaceResyncPending = !workspaceType.isBlank();
     }
 
     private void handleWorkspaceResync(String reason) {
+        if (!isWorkspaceLifecycleActive() || workspaceConflict != null) {
+            return;
+        }
         workspaceAwareness.clear();
+        if ("Disconnected".equals(reason)) {
+            workspaceConnectionWasConnected = false;
+            invalidateWorkspacePendingRepublishOnDisconnect();
+            return;
+        }
         if ("Resource Unavailable".equals(reason) || "Invalid Workspace".equals(reason)) {
             workspaceDocument = null;
             workspaceScanDocument = null;
             workspaceJoinDocument = null;
-            workspacePendingOperations.clear();
+            clearWorkspacePendingOperations();
+            workspacePendingRepublish = false;
+            workspacePendingRepublishAwaitingSnapshot = false;
+            workspacePendingRepublishQueued = null;
+            workspacePendingRepublishInFlight = null;
+            workspaceSequence = -1L;
             workspaceResyncPending = false;
             return;
+        }
+        if (workspacePendingRepublishInFlight != null) {
+            invalidateWorkspacePendingRepublishOnDisconnect();
         }
         requestWorkspaceSnapshot();
     }
 
     private void clearWorkspaceState() {
-        Screen screen = workspaceScreen();
-        DesignerCollaborationAuthority.clearFocusAccents(screen);
-        DesignerCollaborationAuthority.clearWidgetStates(screen);
-        GraphEditorScreen editor = workspaceEditor();
+        WorkspaceCaptureJob captureJob = workspaceCaptureJob;
+        workspacePublicationGeneration++;
+        workspaceFrozenLeaseCancellation++;
+        workspaceCaptureJob = null;
+        studioGraphOpenGeneration++;
+        studioGraphOpenRequest = null;
+        studioGraphOpenResult.set(null);
+        preparedGraphGeneration++;
+        preparedGraphRequest = null;
+        preparedGraphResult.set(null);
+        discardGraphGeneration++;
+        discardGraphRequest = null;
+        discardGraphResult.set(null);
+        workspaceHistoryGeneration++;
+        workspaceHistoryRestoreRequest = null;
+        workspaceHistoryRestoreTarget = null;
+        workspaceHistoryRestoreResult.set(null);
+        workspaceGraphApplyGeneration++;
+        workspaceGraphApplyRequest = null;
+        workspaceGraphApplyResult.set(null);
+        workspaceGraphApplyFrozen = false;
+        workspaceInboundPreparationRequest = null;
+        workspaceInboundPreparationResult.set(null);
+        joinedWorkspaceListener = null;
+        if (workspaceGraphSaveRequest != null) {
+            if (captureJob == null || captureJob.saveRequest() != workspaceGraphSaveRequest
+                || captureJob.saveAdmission().cancel()) {
+                DesignerSaveNotifications.failExact(workspaceGraphSaveRequest.ticket(), "Save Preparation Expired");
+            }
+            workspaceGraphSaveRequest = null;
+        }
+        WorkspaceFrozenGraphRequest frozenRequest = workspaceFrozenGraphRequest;
+        workspaceFrozenGraphRequest = null;
+        workspaceSnapshotResult.set(null);
+        collaborativeWorkspaceCaptureResult.set(null);
+        workspacePublicationResult.set(null);
+        workspaceGraphSaveResult.set(null);
+        workspaceFrozenGraphResult.set(null);
+        workspaceAwarenessPublicationResult.set(null);
+        workspaceSnapshotFrozen = false;
+        clearWorkspaceSnapshotRetry();
+        clearWorkspaceCaptureFailures();
+        workspacePublicationInFlight = false;
+        workspacePublicationBackpressureVersion = -1L;
+        workspaceAwarenessPublicationInFlight = false;
+        workspaceJoinPending = false;
+        deferredWorkspaceMutations.clear();
+        deferredWorkspaceMutationSequences.clear();
+        deferredWorkspaceOverflowMutation = null;
+        deferredWorkspaceOverflowSequence = -1L;
+        clearDeferredWorkspaceMutationTarget();
+        workspaceMutationBackpressure = false;
+        Screen screen;
+        try {
+            screen = workspaceScreen();
+        } catch (RuntimeException exception) {
+            screen = null;
+        }
+        if (screen != null) {
+            DesignerCollaborationAuthority.clearFocusAccents(screen);
+            DesignerCollaborationAuthority.clearWidgetStates(screen);
+        }
+        GraphEditorScreen editor;
+        try {
+            editor = workspaceEditor();
+        } catch (RuntimeException exception) {
+            editor = null;
+        }
         if (editor != this) {
-            editor.delegatedWorkspaceAwareness = null;
+            if (editor != null) {
+                editor.delegatedWorkspaceAwareness = null;
+            }
         }
         workspaceType = "";
         workspaceResourceId = "";
         workspaceDocument = null;
         workspaceScanDocument = null;
         workspaceJoinDocument = null;
-        workspacePendingOperations.clear();
+        deferredWorkspaceSnapshot = null;
+        deferredWorkspaceSnapshotSequence = -1L;
+        lastWorkspaceSnapshotCaptureAt = 0L;
+        clearWorkspacePendingOperations();
+        workspacePendingRepublish = false;
+        workspacePendingRepublishAwaitingSnapshot = false;
+        workspacePendingRepublishQueued = null;
+        workspacePendingRepublishInFlight = null;
+        workspaceConflict = null;
+        workspaceConnectionWasConnected = false;
+        workspaceSequence = -1L;
         workspaceAwareness.clear();
         workspaceCursorPositions.clear();
         workspaceDesignerCursorPositions.clear();
         workspaceNodePositions.clear();
         workspaceNodeAuthors.clear();
         workspaceNodeAwarenessWatermarks.clear();
-        workspaceSelectorMirrors.values().forEach(screen::unregisterTransientWidget);
+        workspaceAccents.clear();
+        workspaceSelectionColors.clear();
+        workspaceSelectionSnapshots.clear();
+        if (screen != null) {
+            workspaceSelectorMirrors.values().forEach(screen::unregisterTransientWidget);
+        }
         workspaceSelectorMirrors.clear();
         lastWorkspaceAwareness = "";
+        lastWorkspaceAwarenessAt = 0L;
+        workspacePublishedAwarenessPointerVersion = -1L;
+        workspacePublishedAwarenessSurfaceVersion = -1L;
+        workspaceWidgetStatesVersion = -1L;
+        workspaceWidgetStates = new JsonObject();
+        workspaceAwarenessSurfaceVersion++;
         workspaceResyncPending = false;
         workspacePublishedMutationVersion = -1L;
+        clearWorkspaceUpdates();
+        updateWorkspaceConflictUi();
+        if (frozenRequest != null && frozenRequest.completion() != null) {
+            frozenRequest.completion().accept(false);
+        }
     }
 
     private void applyWorkspaceGraph(JsonObject document) {
         applyWorkspaceGraph(document, false);
     }
 
-    private void applyWorkspaceDocument(JsonObject document, List<WorkspacePatch<JsonElement>> patches, boolean clearHistory) {
-        ReSyncCollaborativeView collaborative = workspaceCollaborativeView();
-        if (collaborative == null) {
-            applyWorkspaceGraph(document, clearHistory);
-            return;
+    private boolean applyPreparedWorkspaceGraph(JsonObject document, List<WorkspacePatch<JsonElement>> patches,
+                                                FlowGraph prepared) {
+        return applyPreparedWorkspaceGraph(document, patches, prepared, false);
+    }
+
+    private boolean applyPreparedWorkspaceGraph(JsonObject document, List<WorkspacePatch<JsonElement>> patches,
+                                                FlowGraph prepared, boolean clearHistory) {
+        if (isActiveCoreStudioDocument() || !isWorkspaceLifecycleActive() || document == null || prepared == null) {
+            return false;
         }
-        GraphEditorScreen editor = workspaceEditor();
+        GraphEditorScreen editor = activeWorkspaceEditor();
+        if (editor == null || editor.activeCoreGraphSession() != null || editor.graph == null) {
+            return false;
+        }
         boolean editorApplying = editor.applyingWorkspace;
         try {
             applyingWorkspace = true;
             editor.applyingWorkspace = true;
-            collaborative.applyCollaborationDocument(document, patches);
-            refreshStudioResourcePanel();
+            Set<String> selection = new HashSet<>(editor.selectedNodeIds);
+            copyPreparedGraphState(editor.graph, prepared);
+            editor.resetGraphEditorState(clearHistory, true, document);
+            selection.stream().filter(editor.graph.getNodes()::containsKey).forEach(editor.selectedNodeIds::add);
+            editor.onWorkspaceGraphApplied(document, patches != null ? patches : List.of());
+            retainStableWorkspaceDocument(document);
+            return true;
+        } catch (RuntimeException | Error exception) {
+            return false;
+        } finally {
+            editor.applyingWorkspace = editorApplying;
+            applyingWorkspace = false;
+        }
+    }
+
+    private void applyWorkspaceDocument(JsonObject document, List<WorkspacePatch<JsonElement>> patches, boolean clearHistory) {
+        if (isActiveCoreStudioDocument()) {
+            return;
+        }
+        if (!isWorkspaceLifecycleActive()) {
+            return;
+        }
+        if (workspaceGraphMutationBlocked()) {
+            requestWorkspaceSnapshot();
+            return;
+        }
+        ReSyncCollaborativeView collaborative;
+        try {
+            collaborative = workspaceCollaborativeView();
         } catch (RuntimeException exception) {
+            return;
+        }
+        if (collaborative == null) {
+            applyWorkspaceGraph(document, clearHistory);
+            return;
+        }
+        GraphEditorScreen editor = activeWorkspaceEditor();
+        if (editor == null || editor.activeCoreGraphSession() != null) {
+            return;
+        }
+        GraphEditorScreen owner = workspaceDocumentOwner();
+        long workspaceGeneration = owner != null ? owner.workspacePublicationGeneration : workspacePublicationGeneration;
+        long workspaceMutationVersion = owner != null ? owner.workspaceMutationVersion : this.workspaceMutationVersion;
+        WorkspaceFence workspaceFence = owner != null
+            ? owner.workspaceFence(workspaceGeneration, workspaceMutationVersion)
+            : workspaceFence(workspaceGeneration, workspaceMutationVersion);
+        boolean editorApplying = editor.applyingWorkspace;
+        try {
+            applyingWorkspace = true;
+            editor.applyingWorkspace = true;
+            boolean admitted = collaborative.applyCollaborationDocument(document, patches, result -> {
+                try {
+                    boolean committed = result != null && result.owner() == collaborative && result.successful()
+                        && result.lifecycle() == collaborative.collaborationLifecycle()
+                        && result.afterEditVersion() == collaborative.collaborationEditVersion()
+                        && owner != null && owner.isWorkspaceFenceCurrent(workspaceFence);
+                    if (!committed) {
+                        requestWorkspaceSnapshot();
+                        return;
+                    }
+                    refreshStudioResourcePanel();
+                    retainStableWorkspaceDocument(document);
+                } catch (RuntimeException | Error exception) {
+                    requestWorkspaceSnapshot();
+                }
+            });
+            if (!admitted) {
+                requestWorkspaceSnapshot();
+            }
+        } catch (RuntimeException | Error exception) {
             requestWorkspaceSnapshot();
         } finally {
             editor.applyingWorkspace = editorApplying;
@@ -3736,7 +13928,15 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private void rebaseWorkspaceDocumentHistory(List<WorkspacePatch<JsonElement>> patches) {
-        ReSyncCollaborativeView collaborative = workspaceCollaborativeView();
+        if (isActiveCoreStudioDocument()) {
+            return;
+        }
+        ReSyncCollaborativeView collaborative;
+        try {
+            collaborative = workspaceCollaborativeView();
+        } catch (RuntimeException exception) {
+            return;
+        }
         if (collaborative == null) {
             rebaseWorkspaceHistory(patches);
         } else {
@@ -3745,34 +13945,121 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private void applyWorkspaceGraph(JsonObject document, boolean clearHistory) {
-        GraphEditorScreen editor = workspaceEditor();
-        boolean editorApplying = editor.applyingWorkspace;
-        try {
-            applyingWorkspace = true;
-            editor.applyingWorkspace = true;
-            Set<String> selection = new HashSet<>(editor.selectedNodeIds);
-            editor.applyGraph(FlowSerializer.deserialize(JsonTreeParser.write(document)), clearHistory);
-            selection.stream().filter(editor.graph.getNodes()::containsKey).forEach(editor.selectedNodeIds::add);
-            editor.onWorkspaceGraphApplied(document, List.of());
-        } catch (RuntimeException exception) {
+        if (!submitWorkspaceGraphApply(document, List.of(), clearHistory, null)) {
+            workspaceMutationBackpressure = true;
             requestWorkspaceSnapshot();
-        } finally {
-            editor.applyingWorkspace = editorApplying;
-            applyingWorkspace = false;
         }
     }
 
+    private boolean submitWorkspaceGraphApply(JsonObject document, List<WorkspacePatch<JsonElement>> patches,
+                                               boolean clearHistory, Runnable completion) {
+        if (isActiveCoreStudioDocument() || !isWorkspaceLifecycleActive() || document == null
+            || workspaceGraphMutationBlocked() || workspaceGraphApplyRequest != null) {
+            return false;
+        }
+        GraphEditorScreen editor = activeWorkspaceEditor();
+        if (editor == null || editor.activeCoreGraphSession() != null || editor.graph == null) {
+            return false;
+        }
+        JsonObject current = currentWorkspaceDocument();
+        if (current == null) {
+            return false;
+        }
+        long generation;
+        try {
+            workspaceGraphApplyGeneration = Math.incrementExact(workspaceGraphApplyGeneration);
+            generation = workspaceGraphApplyGeneration;
+        } catch (ArithmeticException exception) {
+            workspaceGraphApplyGeneration = 1L;
+            generation = 1L;
+        }
+        WorkspaceGraphApplyRequest request = new WorkspaceGraphApplyRequest(generation, lifecycleTaskGeneration,
+            workspaceFence(workspacePublicationGeneration, workspaceMutationVersion), document, patches, clearHistory,
+            completion, editor, workspaceDocument, workspaceScanDocument, current);
+        workspaceGraphApplyRequest = request;
+        workspaceGraphApplyFrozen = true;
+        try {
+            WORKSPACE_INBOUND_PREPARATIONS.execute(() -> prepareWorkspaceGraphApply(request));
+            return true;
+        } catch (IllegalStateException exception) {
+            if (workspaceGraphApplyRequest == request) {
+                workspaceGraphApplyRequest = null;
+            }
+            workspaceGraphApplyFrozen = false;
+            workspaceMutationBackpressure = true;
+            return false;
+        }
+    }
+
+    private void prepareWorkspaceGraphApply(WorkspaceGraphApplyRequest request) {
+        FlowGraph prepared = null;
+        boolean failed = false;
+        try {
+            prepared = FlowSerializer.deserialize(request.document());
+        } catch (RuntimeException | Error exception) {
+            failed = true;
+        }
+        WorkspaceGraphApplyResult result = new WorkspaceGraphApplyResult(request, prepared, failed);
+        if (request.generation() == workspaceGraphApplyGeneration && workspaceGraphApplyRequest == request) {
+            workspaceGraphApplyResult.compareAndSet(null, result);
+        }
+    }
+
+    private void applyWorkspaceGraphApplyResult() {
+        WorkspaceGraphApplyResult result = workspaceGraphApplyResult.getAndSet(null);
+        if (result == null) {
+            return;
+        }
+        WorkspaceGraphApplyRequest request = workspaceGraphApplyRequest;
+        if (request != result.request()) {
+            return;
+        }
+        workspaceGraphApplyRequest = null;
+        workspaceGraphApplyFrozen = false;
+        if (result.failed() || result.graph() == null || !isWorkspaceGraphApplyFenceCurrent(request)
+            || !applyPreparedWorkspaceGraph(request.document(), request.patches(), result.graph(), request.clearHistory())) {
+            requestWorkspaceSnapshot();
+            if (request.completion() != null) {
+                request.completion().run();
+            }
+            return;
+        }
+        if (request.completion() != null) {
+            request.completion().run();
+        }
+    }
+
+    private boolean isWorkspaceGraphApplyFenceCurrent(WorkspaceGraphApplyRequest request) {
+        return request != null && !lifecycleClosed && request.generation() == workspaceGraphApplyGeneration
+            && request.lifecycleGeneration() == lifecycleTaskGeneration && isWorkspaceFenceCurrent(request.fence())
+            && workspaceDocument == request.expectedWorkspaceDocument()
+            && workspaceScanDocument == request.expectedScanDocument()
+            && currentWorkspaceDocument() == request.expectedCurrentDocument()
+            && activeWorkspaceEditor() == request.editor();
+    }
+
     private void rebaseWorkspaceHistory(List<WorkspacePatch<JsonElement>> patches) {
+        if (isActiveCoreStudioDocument()) {
+            return;
+        }
         if (patches == null || patches.isEmpty()) {
             return;
         }
-        workspaceEditor().graphHistory().rebase(snapshot -> {
+        GraphEditorScreen editor = activeWorkspaceEditor();
+        if (editor == null || editor.activeCoreGraphSession() != null) {
+            return;
+        }
+        editor.graphHistory().rebase(snapshot -> {
             JsonObject document = snapshot.document.deepCopy();
             FlowWorkspaceDocument.apply(document, patches);
-            FlowGraph rebased = FlowSerializer.deserialize(JsonTreeParser.write(document));
             Set<String> selection = new HashSet<>(snapshot.selectedIds);
-            selection.retainAll(rebased.getNodes().keySet());
-            return new GraphSnapshot(rebased, selection);
+            JsonObject nodes = document.getAsJsonObject("nodes");
+            if (nodes != null) {
+                selection.retainAll(nodes.keySet());
+            } else {
+                selection.clear();
+            }
+            return new GraphSnapshot(document, selection);
         });
     }
 
@@ -3798,7 +14085,18 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private void applyWorkspaceMetadata(JsonObject document) {
-        FlowGraph target = workspaceEditor().graph;
+        if (isActiveCoreStudioDocument()) {
+            return;
+        }
+        if (workspaceGraphMutationBlocked()) {
+            requestWorkspaceSnapshot();
+            return;
+        }
+        GraphEditorScreen editor = activeWorkspaceEditor();
+        if (editor == null || editor.activeCoreGraphSession() != null || editor.graph == null) {
+            return;
+        }
+        FlowGraph target = editor.graph;
         if (document.has("resourceRevision")) {
             target.setResourceRevision(document.get("resourceRevision").getAsLong());
         }
@@ -3811,85 +14109,39 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private boolean applyWorkspaceChanges(JsonObject document, List<WorkspacePatch<JsonElement>> patches) {
-        GraphEditorScreen editor = workspaceEditor();
+        if (isActiveCoreStudioDocument()) {
+            return false;
+        }
+        if (!isWorkspaceLifecycleActive()) {
+            return false;
+        }
+        if (workspaceGraphMutationBlocked()) {
+            requestWorkspaceSnapshot();
+            return false;
+        }
+        GraphEditorScreen editor = activeWorkspaceEditor();
+        if (editor == null || editor.activeCoreGraphSession() != null || editor.graph == null) {
+            return false;
+        }
         boolean editorApplying = editor.applyingWorkspace;
         try {
             applyingWorkspace = true;
             editor.applyingWorkspace = true;
             if (editor.applyWorkspaceDocumentChanges(document, patches)) {
                 editor.onWorkspaceGraphApplied(document, patches);
+                editor.adoptGraphRenderState();
                 return true;
             }
         } finally {
             editor.applyingWorkspace = editorApplying;
             applyingWorkspace = false;
         }
-        Set<String> nodeIds = new HashSet<>();
-        boolean connectionsChanged = false;
-        for (WorkspacePatch<JsonElement> patch : patches) {
-            String[] path = patch.path().split("/");
-            if (path.length >= 3 && "nodes".equals(path[1])) {
-                nodeIds.add(path[2].replace("~1", "/").replace("~0", "~"));
-            } else if ("/connections".equals(patch.path())) {
-                connectionsChanged = true;
-            } else if (!Set.of("/resourceRevision", "/resourceHash", "/resourceMutationId").contains(patch.path())) {
-                return false;
-            }
-        }
-        FlowGraph incoming;
-        try {
-            incoming = FlowSerializer.deserialize(JsonTreeParser.write(document));
-        } catch (RuntimeException exception) {
-            return false;
-        }
-        applyingWorkspace = true;
-        editorApplying = editor.applyingWorkspace;
-        try {
-            editor.applyingWorkspace = true;
-            for (String nodeId : nodeIds) {
-                FlowNode next = incoming.getNodes().get(nodeId);
-                FlowNode current = editor.graph.getNodes().get(nodeId);
-                FlowNodeWidget previousWidget = editor.widgetCache.get(nodeId);
-                if (next == null) {
-                    editor.widgetCache.remove(nodeId);
-                    if (previousWidget != null) {
-                        editor.removeWorldWidget(previousWidget);
-                    }
-                    editor.graph.getNodes().remove(nodeId);
-                    editor.selectedNodeIds.remove(nodeId);
-                    continue;
-                }
-                if (current != null && previousWidget != null && Objects.equals(current.getType(), next.getType())) {
-                    current.setVersion(next.getVersion());
-                    current.setX(next.getX());
-                    current.setY(next.getY());
-                    current.setInputValues(new LinkedHashMap<>(next.getInputValues()));
-                    previousWidget.setX((int) Math.round(next.getX()));
-                    previousWidget.setY((int) Math.round(next.getY()));
-                    previousWidget.refreshInputWidgets();
-                    continue;
-                }
-                editor.widgetCache.remove(nodeId);
-                if (previousWidget != null) {
-                    editor.removeWorldWidget(previousWidget);
-                }
-                editor.graph.getNodes().put(nodeId, next);
-                FlowNodeWidget nextWidget = editor.createNodeWidget(nodeId, next);
-                editor.widgetCache.put(nodeId, nextWidget);
-                editor.addWorldWidget(nextWidget);
-            }
-            if (connectionsChanged) {
-                editor.graph.getConnections().clear();
-                editor.graph.getConnections().addAll(incoming.getConnections());
-                editor.graph.getNodes().keySet().forEach(editor::refreshInputWidgets);
-            }
-            applyWorkspaceMetadata(document);
-            editor.onWorkspaceGraphApplied(document, patches);
+        if (submitWorkspaceGraphApply(document, patches, false, null)) {
             return true;
-        } finally {
-            editor.applyingWorkspace = editorApplying;
-            applyingWorkspace = false;
         }
+        workspaceMutationBackpressure = true;
+        requestWorkspaceSnapshot();
+        return false;
     }
 
     protected boolean applyWorkspaceDocumentChanges(JsonObject document, List<WorkspacePatch<JsonElement>> patches) {
@@ -3897,10 +14149,23 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     protected final void applyCollaborativeGraph(FlowGraph incoming) {
+        if (isActiveCoreStudioDocument()) {
+            return;
+        }
         if (incoming == null) {
             return;
         }
-        JsonObject current = FlowWorkspaceDocument.fromGraph(graph);
+        if (deferWorkspaceMutation(() -> applyCollaborativeGraph(incoming))) {
+            return;
+        }
+        if (workspaceGraphMutationBlocked()) {
+            requestWorkspaceSnapshot();
+            return;
+        }
+        JsonObject current = currentWorkspaceDocument();
+        if (current == null) {
+            return;
+        }
         JsonObject next = FlowWorkspaceDocument.fromGraph(incoming);
         List<WorkspacePatch<JsonElement>> patches = FlowWorkspaceDocument.diff(current, next);
         if (!patches.isEmpty() && !applyWorkspaceChanges(next, patches)) {
@@ -3913,6 +14178,13 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private void applyWorkspacePositions(JsonObject document, List<WorkspacePatch<JsonElement>> patches, String authorSessionId, boolean own) {
+        if (isActiveCoreStudioDocument()) {
+            return;
+        }
+        if (workspaceGraphMutationBlocked()) {
+            requestWorkspaceSnapshot();
+            return;
+        }
         Set<String> nodeIds = new HashSet<>();
         for (WorkspacePatch<JsonElement> patch : patches) {
             String[] path = patch.path().split("/");
@@ -3924,7 +14196,11 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (nodes == null) {
             return;
         }
-        GraphEditorScreen editor = workspaceEditor();
+        GraphEditorScreen editor = activeWorkspaceEditor();
+        if (editor == null || editor.activeCoreGraphSession() != null || editor.graph == null) {
+            return;
+        }
+        Set<String> changedNodeIds = new LinkedHashSet<>();
         for (String nodeId : nodeIds) {
             JsonObject source = nodes.has(nodeId) && nodes.get(nodeId).isJsonObject() ? nodes.getAsJsonObject(nodeId) : null;
             FlowNode node = editor.graph.getNodes().get(nodeId);
@@ -3940,6 +14216,9 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                 continue;
             }
             if (own) {
+                if (roundedGraphRenderPositionChanged(widget.getX(), widget.getY(), x, y)) {
+                    changedNodeIds.add(nodeId);
+                }
                 widget.setX(x);
                 widget.setY(y);
                 workspaceNodePositions.remove(nodeId);
@@ -3958,11 +14237,19 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                 workspaceNodeAwarenessWatermarks.put(nodeId, awareness.updatedAt());
             }
         }
+        editor.queueGraphRenderGeometry(changedNodeIds);
     }
 
     private void applyWorkspaceDragPositions(float delta) {
-        GraphEditorScreen editor = workspaceEditor();
+        if (isActiveCoreStudioDocument()) {
+            return;
+        }
+        GraphEditorScreen editor = activeWorkspaceEditor();
+        if (editor == null || editor.activeCoreGraphSession() != null) {
+            return;
+        }
         Set<String> dragging = new HashSet<>();
+        Set<String> changed = new HashSet<>();
         for (ReSyncWorkspaceClient.Awareness awareness : activeWorkspaceAwareness()) {
             JsonObject state = awareness.state();
             JsonObject positions = state != null && state.has("nodePositions") && state.get("nodePositions").isJsonObject()
@@ -4005,33 +14292,70 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             }
             WorkspacePoint position = entry.getValue();
             position.update(delta);
-            widget.setX((int) Math.round(position.x));
-            widget.setY((int) Math.round(position.y));
+            if (roundedGraphRenderPositionChanged(widget.getX(), widget.getY(), position.x, position.y)) {
+                widget.setX((int) Math.round(position.x));
+                widget.setY((int) Math.round(position.y));
+                changed.add(nodeId);
+            }
             if (!dragging.contains(nodeId) && position.settled()) {
                 iterator.remove();
                 workspaceNodeAuthors.remove(nodeId);
                 workspaceNodeAwarenessWatermarks.remove(nodeId);
             }
         }
+        editor.queueGraphRenderGeometry(changed);
     }
 
-    private Integer workspaceSelectionColor(String nodeId) {
-        List<Integer> colors = new ArrayList<>();
+    private void prepareWorkspaceSelectionColors(Collection<FlowNodeWidget> visibleNodes) {
+        Set<String> activeSessions = new HashSet<>();
         for (ReSyncWorkspaceClient.Awareness awareness : activeWorkspaceAwareness()) {
+            String sessionId = awareness.authorSessionId();
+            activeSessions.add(sessionId);
+            WorkspaceSelectionSnapshot current = workspaceSelectionSnapshots.get(sessionId);
+            if (current != null && current.updatedAt() == awareness.updatedAt()) {
+                continue;
+            }
             JsonObject state = awareness.state();
             JsonArray selected = state != null && state.has("selectedNodeIds") && state.get("selectedNodeIds").isJsonArray()
                 ? state.getAsJsonArray("selectedNodeIds") : null;
-            if (selected == null) {
+            WorkspaceSelectionSnapshot next = workspaceSelectionSnapshot(current, awareness.updatedAt(), workspaceColor(sessionId), selected);
+            if (next != current) {
+                workspaceSelectionSnapshots.put(sessionId, next);
+            }
+        }
+        workspaceSelectionSnapshots.keySet().removeIf(sessionId -> !activeSessions.contains(sessionId));
+        workspaceSelectionColors.clear();
+        for (FlowNodeWidget widget : visibleNodes) {
+            String nodeId = findNodeId(widget);
+            if (nodeId == null) {
                 continue;
             }
+            List<Integer> colors = new ArrayList<>();
+            for (WorkspaceSelectionSnapshot selection : workspaceSelectionSnapshots.values()) {
+                if (selection.nodeIds().contains(nodeId)) {
+                    colors.add(selection.color());
+                }
+            }
+            if (!colors.isEmpty()) {
+                workspaceSelectionColors.put(nodeId, CollaborationVisuals.blend(colors, 0xFF4E8CFF));
+            }
+        }
+    }
+
+    static WorkspaceSelectionSnapshot workspaceSelectionSnapshot(WorkspaceSelectionSnapshot current, long updatedAt, int color,
+                                                                  JsonArray selected) {
+        if (current != null && current.updatedAt() == updatedAt) {
+            return current;
+        }
+        Set<String> selectedNodeIds = new HashSet<>();
+        if (selected != null) {
             for (JsonElement value : selected) {
-                if (value.isJsonPrimitive() && nodeId.equals(value.getAsString())) {
-                    colors.add(workspaceColor(awareness.authorSessionId()));
-                    break;
+                if (value.isJsonPrimitive()) {
+                    selectedNodeIds.add(value.getAsString());
                 }
             }
         }
-        return colors.isEmpty() ? null : CollaborationVisuals.blend(colors, 0xFF4E8CFF);
+        return new WorkspaceSelectionSnapshot(updatedAt, color, selectedNodeIds);
     }
 
     private int workspaceColor(String sessionId) {
@@ -4050,6 +14374,9 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
     @Override
     public void renderHandler(IDrawContext context, int mouseX, int mouseY, float delta) {
+        long frameStartedAtNanos = ReSyncFlowClient.TEMP_LIFECYCLE_DEBUG ? System.nanoTime() : 0L;
+        lifecycle(new ReLifecycleEvent(this, this, System.nanoTime(), ScreenManager.getInstance().inputState().modifiers(),
+            ReLifecycleEvent.Action.TICK, width, height));
         updateTransforms(delta);
         syncWorkspace(mouseX, mouseY, delta);
         if (delegatedWorkspaceAwareness == null) {
@@ -4080,7 +14407,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             activeView.resize(width, studioEditorHeight());
             activeView.render(context, mouseX, mouseY, delta);
             boolean nestedGraph = activeView instanceof ScreenBackedStudioView screenView && screenView.screen() instanceof GraphEditorScreen;
-            if (nestedGraph) {
+            if (nestedGraph || !(activeView instanceof StudioSelectorView)) {
                 workspaceCursorPositions.clear();
                 workspaceDesignerCursorPositions.clear();
                 workspaceSelectorMirrors.values().forEach(workspaceScreen()::unregisterTransientWidget);
@@ -4099,6 +14426,8 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         }
 
         applyInitialViewportFitIfReady();
+        beginGraphRenderFrame();
+        long workspaceFinishedAtNanos = ReSyncFlowClient.TEMP_LIFECYCLE_DEBUG ? System.nanoTime() : 0L;
 
         context.getMatrices().push();
         context.getMatrices().translate(getWidth() / 2.0f, getHeight() / 2.0f, 0);
@@ -4110,44 +14439,190 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         int worldMouseY = (int) worldMouse[1];
         IDrawContext worldContext = createWorldDrawContext(context);
 
-        renderWires(worldContext);
+        long visibilityStartedAtNanos = ReSyncFlowClient.TEMP_LIFECYCLE_DEBUG ? System.nanoTime() : 0L;
+        flushGraphRenderGeometry();
+        WorldBounds renderBounds = graphViewportBounds();
+        List<FlowNodeWidget> visibleNodes = visibleGraphNodes(renderBounds);
+        long visibilityFinishedAtNanos = ReSyncFlowClient.TEMP_LIFECYCLE_DEBUG ? System.nanoTime() : 0L;
+        if (ReSyncFlowClient.TEMP_LIFECYCLE_DEBUG && graph != null) {
+            long revision = graph.getResourceRevision();
+            boolean first = temporaryLifecycleRenderedGraph != graph || temporaryLifecycleRenderedVersion != revision;
+            boolean becameVisible = !temporaryLifecycleRenderedVisible && !visibleNodes.isEmpty();
+            boolean firstVisible = !visibleNodes.isEmpty()
+                && (firstVisibleRenderedGraph != graph || firstVisibleRenderedRevision != revision);
+            if (firstVisible) {
+                firstVisibleRenderedGraph = graph;
+                firstVisibleRenderedRevision = revision;
+            }
+            if (first || becameVisible || firstVisible) {
+                temporaryLifecycleRenderedGraph = graph;
+                temporaryLifecycleRenderedVersion = revision;
+                temporaryLifecycleRenderedVisible = !visibleNodes.isEmpty();
+                String type = graph.getResourceType() == null || graph.getResourceType().isBlank()
+                    ? graph.isFunction() ? ReSyncResourceType.FUNCTION.typeId() : ReSyncResourceType.FLOW.typeId()
+                    : graph.getResourceType();
+                ReSyncFlowClient.traceLifecycle(serverId, firstVisible ? "graph_render_first_visible" : "graph_render_visibility",
+                    "serverId", serverId,
+                    "resourceKey", type + ":" + graph.getId(), "requestId", "render", "mutationId",
+                    graph.getResourceMutationId(), "generation", workspacePublicationGeneration, "authorityEpoch", 0L,
+                    "revision", revision, "nodeCount", graph.getNodes() != null ? graph.getNodes().size() : 0,
+                    "widgetCount", widgetCache.size(), "visibleNodeCount", visibleNodes.size(), "renderIndexReady",
+                    graphRenderIndex != null && graphRenderIndex.graph == graph
+                        && graphRenderIndex.version == graphRenderMutationVersion, "firstVisible", firstVisible,
+                    "projectionGeneration", coreProjectionGeneration, "topologyChecksum", coreTopologyChecksum);
+            }
+        }
+        prepareWorkspaceSelectionColors(visibleNodes);
+        renderWires(worldContext, renderBounds, visibleNodes);
         renderDebugWireOverlay(worldContext);
+        long wiresFinishedAtNanos = ReSyncFlowClient.TEMP_LIFECYCLE_DEBUG ? System.nanoTime() : 0L;
 
         FlowDebugController debug = debugController();
-        for (Widget widget : worldWidgets) {
-            if (widget instanceof FlowNodeWidget flowNodeWidget) {
-                String nodeId = findNodeId(flowNodeWidget);
-                flowNodeWidget.setSelected(nodeId != null && selectedNodeIds.contains(nodeId));
-                boolean breakpoint = debug != null && nodeId != null && debug.hasBreakpoint(graph, nodeId);
-                boolean pausedHere = debug != null && nodeId != null && debug.isPausedAt(graph.getId(), nodeId);
-                Integer collaboratorColor = nodeId != null && !selectedNodeIds.contains(nodeId) ? workspaceSelectionColor(nodeId) : null;
-                flowNodeWidget.setCollaborationAccent(collaboratorColor != null
-                    ? workspaceAccents.computeIfAbsent(collaboratorColor, CollaborationVisuals::accent) : null);
-                if (pausedHere && breakpoint) {
-                    flowNodeWidget.setAccent(ThemeManager.getAccent("calm"));
-                } else if (pausedHere) {
-                    flowNodeWidget.setAccent(ThemeManager.getAccent("nice"));
-                } else {
-                    flowNodeWidget.setAccent(breakpoint ? ThemeManager.getAccent("danger") : ThemeManager.getDefaultAccent());
-                }
+        for (FlowNodeWidget flowNodeWidget : visibleNodes) {
+            String nodeId = findNodeId(flowNodeWidget);
+            flowNodeWidget.setSelected(nodeId != null && selectedNodeIds.contains(nodeId));
+            boolean breakpoint = debug != null && nodeId != null && debug.hasBreakpoint(graph, nodeId);
+            boolean pausedHere = debug != null && nodeId != null && debug.isPausedAt(graph.getId(), nodeId);
+            Integer collaboratorColor = nodeId != null && !selectedNodeIds.contains(nodeId) ? workspaceSelectionColors.get(nodeId) : null;
+            flowNodeWidget.setCollaborationAccent(collaboratorColor != null
+                ? workspaceAccents.computeIfAbsent(collaboratorColor, CollaborationVisuals::accent) : null);
+            if (pausedHere && breakpoint) {
+                flowNodeWidget.setAccent(ThemeManager.getAccent("calm"));
+            } else if (pausedHere) {
+                flowNodeWidget.setAccent(ThemeManager.getAccent("nice"));
+            } else {
+                flowNodeWidget.setAccent(breakpoint ? ThemeManager.getAccent("danger") : ThemeManager.getDefaultAccent());
             }
-            widget.render(worldContext, worldMouseX, worldMouseY, delta);
+            int previousX = flowNodeWidget.getX();
+            int previousY = flowNodeWidget.getY();
+            int previousWidth = flowNodeWidget.getWidth();
+            int previousHeight = flowNodeWidget.getHeight();
+            flowNodeWidget.render(worldContext, worldMouseX, worldMouseY, delta);
+            queueGraphRenderGeometryIfBoundsChanged(graphRenderGeometryDirtyNodeIds, nodeId, previousX, previousY,
+                previousWidth, previousHeight, flowNodeWidget.getX(), flowNodeWidget.getY(), flowNodeWidget.getWidth(),
+                flowNodeWidget.getHeight());
         }
         renderWorkspaceNodeLabels(worldContext);
         renderDebugNodeOverlay(worldContext);
-        for (Widget widget : worldWidgets) {
-            if (widget instanceof AnimatedWidget animated) {
-                animated.renderHintOverlay(worldContext);
-            }
+        for (FlowNodeWidget flowNodeWidget : visibleNodes) {
+            flowNodeWidget.renderHintOverlay(worldContext);
         }
+        long nodesFinishedAtNanos = ReSyncFlowClient.TEMP_LIFECYCLE_DEBUG ? System.nanoTime() : 0L;
         context.getMatrices().pop();
 
+        renderCoreWidgetPublicationFailure(context);
         renderWorkspaceSelectors(context);
         renderWireCompatibilityPreview(context, worldMouseX, worldMouseY);
         renderSelectionBox(context);
         renderStudioDocumentPreview(context);
 
         renderStudioOverlays(context, mouseX, mouseY, delta);
+        traceSlowGraphFrame(frameStartedAtNanos, workspaceFinishedAtNanos, visibilityStartedAtNanos,
+            visibilityFinishedAtNanos, wiresFinishedAtNanos, nodesFinishedAtNanos, System.nanoTime(), visibleNodes.size(),
+            graphRenderGeometryDirtyCount);
+    }
+
+    private void traceSlowGraphFrame(long frameStartedAtNanos, long workspaceFinishedAtNanos,
+                                     long visibilityStartedAtNanos, long visibilityFinishedAtNanos,
+                                     long wiresFinishedAtNanos, long nodesFinishedAtNanos, long frameFinishedAtNanos,
+                                     int visibleNodeCount, int geometryDirtyCount) {
+        if (!ReSyncFlowClient.TEMP_LIFECYCLE_DEBUG || frameStartedAtNanos <= 0L || graph == null) {
+            return;
+        }
+        long elapsedNanos = frameFinishedAtNanos - frameStartedAtNanos;
+        if (elapsedNanos < GRAPH_FRAME_WARN_NANOS) {
+            return;
+        }
+        String resourceKey = temporaryLifecycleGraphKey(graph);
+        if (!claimGraphFrameSlowTrace(serverId, resourceKey, elapsedNanos, frameFinishedAtNanos)) {
+            return;
+        }
+        CatalogRefresh refresh = catalogRefresh;
+        int catalogRemaining = refresh == null ? 0
+            : Math.max(0, refresh.nodes.size() - refresh.nodeIndex)
+                + Math.max(0, refresh.connections.size() - refresh.connectionIndex)
+                + Math.max(0, refresh.obsoleteNodeIds.size() - refresh.obsoleteNodeIndex);
+        ReSyncFlowClient.traceLifecycle(serverId, "graph_frame_slow", "serverId", serverId, "resourceKey",
+            resourceKey, "requestId", "render", "mutationId", graphRenderMutationVersion, "generation",
+            workspacePublicationGeneration, "authorityEpoch", 0L, "revision", graph.getResourceRevision(),
+            "severity", elapsedNanos >= GRAPH_FRAME_CRITICAL_NANOS ? "critical" : "warning", "totalMicros",
+            BrowserSafeState.nanosToMicros(elapsedNanos), "workspaceMicros",
+            BrowserSafeState.nanosToMicros(workspaceFinishedAtNanos - frameStartedAtNanos), "visibilityMicros",
+            BrowserSafeState.nanosToMicros(visibilityFinishedAtNanos - visibilityStartedAtNanos), "wireMicros",
+            BrowserSafeState.nanosToMicros(wiresFinishedAtNanos - visibilityFinishedAtNanos), "nodeMicros",
+            BrowserSafeState.nanosToMicros(nodesFinishedAtNanos - wiresFinishedAtNanos), "overlayMicros",
+            BrowserSafeState.nanosToMicros(frameFinishedAtNanos - nodesFinishedAtNanos), "nodeCount",
+            graph.getNodes() != null ? graph.getNodes().size() : 0, "connectionCount",
+            graph.getConnections() != null ? graph.getConnections().size() : 0, "widgetCount", widgetCache.size(),
+            "visibleNodeCount", visibleNodeCount, "geometryDirtyCount", geometryDirtyCount, "geometryFlushCount",
+            graphRenderGeometryFlushCount, "catalogProcessedCount", catalogDrainProcessedCount, "catalogRemainingCount",
+            catalogRemaining);
+    }
+
+    static boolean graphFrameSlowTraceDue(long elapsedNanos, long previousTraceNanos, long nowNanos) {
+        return elapsedNanos >= GRAPH_FRAME_WARN_NANOS
+            && (previousTraceNanos < 0L || nowNanos - previousTraceNanos >= GRAPH_FRAME_TRACE_INTERVAL_NANOS);
+    }
+
+    private static boolean claimGraphFrameSlowTrace(String serverId, String resourceKey, long elapsedNanos,
+                                                    long nowNanos) {
+        String key = serverId + '|' + resourceKey;
+        synchronized (GRAPH_FRAME_TRACE_LOCK) {
+            long previousTrace = GRAPH_FRAME_SLOW_TRACES.getOrDefault(key, -1L);
+            if (!graphFrameSlowTraceDue(elapsedNanos, previousTrace, nowNanos)) {
+                return false;
+            }
+            if (!GRAPH_FRAME_SLOW_TRACES.containsKey(key)
+                && GRAPH_FRAME_SLOW_TRACES.size() >= GRAPH_FRAME_TRACE_RESOURCE_LIMIT) {
+                GRAPH_FRAME_SLOW_TRACES.remove(GRAPH_FRAME_SLOW_TRACES.keySet().iterator().next());
+            }
+            GRAPH_FRAME_SLOW_TRACES.put(key, nowNanos);
+            return true;
+        }
+    }
+
+    private static boolean claimGraphRenderTrace(String serverId, String resourceKey, String stage, long nowNanos) {
+        if (!ReSyncFlowClient.TEMP_LIFECYCLE_DEBUG) {
+            return false;
+        }
+        String key = serverId + '|' + resourceKey + '|' + stage;
+        synchronized (GRAPH_RENDER_TRACE_LOCK) {
+            long previousTrace = GRAPH_RENDER_TRACES.getOrDefault(key, -1L);
+            if (previousTrace >= 0L && nowNanos - previousTrace < GRAPH_RENDER_TRACE_INTERVAL_NANOS) {
+                return false;
+            }
+            if (!GRAPH_RENDER_TRACES.containsKey(key) && GRAPH_RENDER_TRACES.size() >= GRAPH_RENDER_TRACE_KEY_LIMIT) {
+                GRAPH_RENDER_TRACES.remove(GRAPH_RENDER_TRACES.keySet().iterator().next());
+            }
+            GRAPH_RENDER_TRACES.put(key, nowNanos);
+            return true;
+        }
+    }
+
+    protected void renderCoreWidgetPublicationFailure(IDrawContext context) {
+        CoreWidgetPublicationFailure failure = coreWidgetPublicationFailure;
+        if (!hasTerminalCoreWidgetPublicationFailure()) {
+            return;
+        }
+        String title = "Node Display Failed";
+        String identity = "Node " + failure.nodeId();
+        String recovery = "Refresh Or Reopen Editor";
+        int panelWidth = Math.max(240, Math.max(tr.getWidth(identity), tr.getWidth(recovery)) + 32);
+        int left = (width - panelWidth) / 2;
+        int top = Math.max(viewportFitTop() + 20, (height - 76) / 2);
+        int right = left + panelWidth;
+        int bottom = top + 76;
+        context.fill(left, top, right, bottom, ThemeManager.getColor(ThemeColor.background));
+        context.fillBorder(left, top, right, bottom, 1, ThemeManager.getAccent("danger").getAccentColor());
+        context.drawText(title, left + 16, top + 13, ThemeManager.getColor(ThemeColor.text), shadow);
+        context.drawText(identity, left + 16, top + 32, ThemeManager.getColor(ThemeColor.textDark), shadow);
+        context.drawText(recovery, left + 16, top + 51, ThemeManager.getColor(ThemeColor.textDark), shadow);
+    }
+
+    public boolean hasTerminalCoreWidgetPublicationFailure() {
+        CoreWidgetPublicationFailure failure = coreWidgetPublicationFailure;
+        return failure != null && failure.projectionGeneration() == coreProjectionGeneration
+            && Objects.equals(failure.topologyChecksum(), coreTopologyChecksum);
     }
 
     @Override
@@ -4238,7 +14713,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             }
             ItemSelectorWidget.CollaborationState selectorState;
             try {
-                selectorState = ItemSelectorCollaborationJson.read(selector.get("state"));
+                selectorState = GSON.fromJson(selector.get("state"), ItemSelectorWidget.CollaborationState.class);
             } catch (RuntimeException exception) {
                 continue;
             }
@@ -4438,23 +14913,17 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         }
     }
 
-    private void renderWires(IDrawContext context) {
+    private void renderWires(IDrawContext context, WorldBounds renderBounds, Collection<FlowNodeWidget> visibleNodes) {
         updateConnectionAutoPan();
-        if (graph.getConnections() == null) return;
-
-        normalizePassthroughConnections();
-        Set<FanoutKey> renderedFanouts = new HashSet<>();
-        for (FlowConnection conn : graph.getConnections()) {
-            int wireColor = wireColor(conn);
-            List<FlowConnection> fanout = fanoutConnections(conn);
-            if (fanout.size() > 1) {
-                FanoutKey key = new FanoutKey(editorSourceNodeId(conn), editorSourcePin(conn));
-                if (renderedFanouts.add(key)) {
-                    drawFanoutGroup(context, fanout, wireColor);
+        GraphRenderIndex index = visibleGraphRenderIndex();
+        if (index != null) {
+            for (WireRenderGroup group : visibleWireGroups(index, renderBounds, visibleNodes)) {
+                if (!group.connections.isEmpty()) {
+                    drawWireSegments(context, visibleWireSegments(group, renderBounds), wireColor(group.connections.getFirst()));
                 }
-                continue;
             }
-            drawDirectConnection(context, conn, wireColor);
+        } else {
+            renderFallbackWires(context, renderBounds, visibleNodes);
         }
 
         if (dragState.isDragging && dragState.sourceNodeId != null) {
@@ -4478,6 +14947,909 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             }
         }
         renderWorkspaceWires(context);
+    }
+
+    private void renderFallbackWires(IDrawContext context, WorldBounds renderBounds,
+                                     Collection<FlowNodeWidget> visibleNodes) {
+        if (graph == null || graph.getConnections() == null || graph.getConnections().isEmpty()) {
+            return;
+        }
+        Set<String> visibleNodeIds = visibleNodes.stream().map(this::findNodeId)
+            .filter(Objects::nonNull).collect(Collectors.toSet());
+        int inspected = 0;
+        int rendered = 0;
+        for (FlowConnection connection : graph.getConnections()) {
+            if (inspected++ >= GRAPH_RENDER_FALLBACK_CONNECTION_SCAN_LIMIT
+                || rendered >= GRAPH_RENDER_FALLBACK_CONNECTION_LIMIT) {
+                break;
+            }
+            String sourceNodeId = editorSourceNodeId(connection);
+            String targetNodeId = connection.getTargetNodeId();
+            if (!visibleNodeIds.contains(sourceNodeId) && !visibleNodeIds.contains(targetNodeId)) {
+                continue;
+            }
+            PinPoint source = sourceOutputPoint(connection);
+            PinPoint target = targetInputPoint(connection);
+            if (source == null || target == null) {
+                continue;
+            }
+            List<WireSegment> segments = graphWireSegments(source.x(), source.y(), target.x(), target.y());
+            WorldBounds bounds = wireBounds(segments);
+            if (boundedWireCoordinates(bounds) && (bounds.intersects(renderBounds)
+                || Objects.equals(sourceNodeId, dragState.sourceNodeId))) {
+                drawWireSegments(context, graphRenderVisibleSegments(segments, renderBounds), wireColor(connection));
+                rendered++;
+            }
+        }
+    }
+
+    private Map<FanoutKey, List<FlowConnection>> indexedFanoutConnections() {
+        GraphRenderIndex index = ensureGraphRenderIndex();
+        return index != null ? index.fanouts : Map.of();
+    }
+
+    private GraphRenderIndex ensureGraphRenderIndex() {
+        GraphRenderIndex current = graphRenderIndex;
+        if (current != null && current.graph == graph && current.version == graphRenderMutationVersion
+            && current.projectionGeneration == coreProjectionGeneration
+            && Objects.equals(current.topologyChecksum, coreTopologyChecksum)) {
+            GraphRenderBuildResult completed = graphRenderBuildResult.get();
+            if (completed != null && (completed.graph() != graph || completed.version() != graphRenderMutationVersion
+                || completed.projectionGeneration() != coreProjectionGeneration
+                || !Objects.equals(completed.topologyChecksum(), coreTopologyChecksum))) {
+                graphRenderBuildResult.compareAndSet(completed, null);
+            }
+            return current;
+        }
+        if (graphRenderFailureGraph == graph && graphRenderFailureVersion == graphRenderMutationVersion) {
+            return null;
+        }
+        GraphRenderBuildResult result = graphRenderBuildResult.get();
+        if (result == null || !graphRenderBuildMatches(graph, graphRenderMutationVersion, graphRenderTopologyRevision.get(),
+            coreProjectionGeneration, coreTopologyChecksum, result.graph(), result.version(), result.revision(),
+            result.projectionGeneration(), result.topologyChecksum())) {
+            if (graphRenderPendingBuild.get() != null) {
+                queueGraphRenderWorker();
+            }
+            if (result != null && result.version() < graphRenderMutationVersion) {
+                graphRenderBuildResult.compareAndSet(result, null);
+            }
+            return null;
+        }
+        graphRenderBuildResult.compareAndSet(result, null);
+        if (result.failed() || result.index() == null) {
+            graphRenderFailureVersion = graphRenderMutationVersion;
+            graphRenderFailureGraph = graph;
+            return null;
+        }
+        List<FlowNodeWidget> retiredWidgets = adoptPendingCoreWidgetTopology();
+        graphRenderIndex = result.index();
+        graphRenderContinuityIndex = null;
+        graphRenderContinuityTopology = null;
+        coreVisualPreview = null;
+        retireCoreWidgets(retiredWidgets);
+        graphRenderFailureVersion = -1L;
+        graphRenderFailureGraph = null;
+        updateCoreEditorReadiness(catalogRefresh == null && !nodeCatalogRefreshQueued);
+        return graphRenderIndex;
+    }
+
+    private List<FlowNodeWidget> adoptPendingCoreWidgetTopology() {
+        CoreWidgetTopology pending = pendingCoreWidgetTopology;
+        if (pending == null || pending.graph() != graph || pending.projectionGeneration() != coreProjectionGeneration
+            || !Objects.equals(pending.topologyChecksum(), coreTopologyChecksum)) {
+            return List.of();
+        }
+        widgetCache = pending.widgetsById();
+        widgetNodeIds = pending.nodeIds();
+        List<FlowNodeWidget> retiredWidgets = pending.retireAfterAdoption();
+        coreWidgetTopology = pending.withoutRetirementPayloads();
+        pendingCoreWidgetTopology = null;
+        return retiredWidgets;
+    }
+
+    static boolean graphRenderBuildMatches(Object graph, long version, long revision, long projectionGeneration,
+                                           String topologyChecksum, Object resultGraph, long resultVersion,
+                                           long resultRevision, long resultProjectionGeneration,
+                                           String resultTopologyChecksum) {
+        return graphRenderBuildMatches(graph, version, revision, resultGraph, resultVersion, resultRevision)
+            && projectionGeneration == resultProjectionGeneration
+            && Objects.equals(topologyChecksum, resultTopologyChecksum);
+    }
+
+    static boolean graphRenderBuildMatches(Object graph, long version, long revision, Object resultGraph, long resultVersion,
+                                           long resultRevision) {
+        return graph == resultGraph && version == resultVersion && revision == resultRevision && (revision & 1L) == 0L;
+    }
+
+    private static GraphRenderIndex buildGraphRenderIndex(GraphRenderSnapshot snapshot) {
+        Map<FanoutKey, List<GraphRenderConnectionSnapshot>> fanoutSnapshots = new LinkedHashMap<>();
+        for (GraphRenderConnectionSnapshot connection : snapshot.connections()) {
+            if (connection.dataSource() && connection.source() != null && connection.target() != null) {
+                fanoutSnapshots.computeIfAbsent(new FanoutKey(connection.editorSourceNodeId(), connection.editorSourcePin()),
+                    ignored -> new ArrayList<>()).add(connection);
+            }
+        }
+        Comparator<GraphRenderConnectionSnapshot> fanoutOrder = Comparator
+            .comparingDouble((GraphRenderConnectionSnapshot connection) ->
+                connection.target() != null ? connection.target().y() : Double.MAX_VALUE)
+            .thenComparingDouble(connection -> connection.targetNodeY())
+            .thenComparingDouble(connection -> connection.targetNodeX())
+            .thenComparing(connection -> connection.targetNodeId())
+            .thenComparing(connection -> connection.targetPin());
+        fanoutSnapshots.replaceAll((key, connections) -> {
+            List<GraphRenderConnectionSnapshot> ordered = new ArrayList<>(connections);
+            ordered.sort(fanoutOrder);
+            return List.copyOf(ordered);
+        });
+        Map<FanoutKey, List<FlowConnection>> fanouts = new LinkedHashMap<>();
+        fanoutSnapshots.forEach((key, connections) -> fanouts.put(key,
+            connections.stream().map(GraphRenderConnectionSnapshot::connection).toList()));
+        GraphRenderIndex index = new GraphRenderIndex(snapshot.graph(), snapshot.version(), snapshot.projectionGeneration(),
+            snapshot.topologyChecksum(), Collections.unmodifiableMap(fanouts));
+        for (GraphRenderNodeSnapshot node : snapshot.nodes()) {
+            if (!boundedWireCoordinates(node.bounds())
+                || graphRenderCells(node.bounds(), GRAPH_RENDER_CELL_SIZE, GRAPH_RENDER_MAX_WIRE_CELLS) == null) {
+                throw new IllegalStateException("Node render bounds exceed safe limits");
+            }
+            index.nodeOrder.put(node.widget(), node.order());
+            index.nodeBounds.put(node.widget(), node.bounds());
+            addSpatialEntry(index.nodeCells, node.bounds(), node.widget());
+            index.worldBounds = index.worldBounds == null ? node.bounds() : unionBounds(index.worldBounds, node.bounds());
+            index.worldSignature += 31 * node.bounds().hashCode() + node.order();
+            if (!node.definitionLoaded()) {
+                index.unresolvedDefinitions++;
+            }
+        }
+        Set<FanoutKey> groupedFanouts = new HashSet<>();
+        int wireOrder = 0;
+        for (GraphRenderConnectionSnapshot connection : snapshot.connections()) {
+            ConnectionRouteKey routeKey = new ConnectionRouteKey(connection.sourceNodeId(), connection.sourcePin(),
+                connection.targetNodeId(), connection.targetPin());
+            index.connectionsByRoute.computeIfAbsent(routeKey, ignored -> new ArrayList<>()).add(connection.connection());
+            FanoutKey key = new FanoutKey(connection.editorSourceNodeId(), connection.editorSourcePin());
+            List<GraphRenderConnectionSnapshot> connections = fanoutSnapshots.getOrDefault(key, List.of());
+            if (connections.size() > 1) {
+                if (!groupedFanouts.add(key)) {
+                    continue;
+                }
+            } else {
+                connections = List.of(connection);
+            }
+            Set<String> nodeIds = new LinkedHashSet<>();
+            for (GraphRenderConnectionSnapshot grouped : connections) {
+                nodeIds.add(grouped.editorSourceNodeId());
+                nodeIds.add(grouped.targetNodeId());
+            }
+            nodeIds.removeIf(nodeId -> nodeId == null || nodeId.isBlank());
+            List<FlowConnection> groupedConnections = connections.stream().map(GraphRenderConnectionSnapshot::connection).toList();
+            WireRenderGroup group = new WireRenderGroup(wireOrder++, groupedConnections, nodeIds);
+            for (FlowConnection grouped : groupedConnections) {
+                index.groupsByConnection.put(grouped, group);
+            }
+            for (String nodeId : nodeIds) {
+                index.groupsByNode.computeIfAbsent(nodeId, ignored -> new ArrayList<>()).add(group);
+            }
+            applySnapshotWireGeometry(index, group, connections);
+        }
+        rebuildOverflowWireIndex(index);
+        return index;
+    }
+
+    private static void applySnapshotWireGeometry(GraphRenderIndex index, WireRenderGroup group,
+                                                  List<GraphRenderConnectionSnapshot> connections) {
+        List<WireSegment> segments = new ArrayList<>();
+        Map<FlowConnection, List<WireSegment>> connectionSegments = new IdentityHashMap<>();
+        Map<FlowConnection, List<WireSegment>> hitSegments = new IdentityHashMap<>();
+        if (connections.size() > 1) {
+            PinPoint source = connections.getFirst().source();
+            if (source != null) {
+                double branchX = snapshotFanoutBranchX(source, connections);
+                double minY = source.y();
+                double maxY = source.y();
+                for (GraphRenderConnectionSnapshot connection : connections) {
+                    PinPoint target = connection.target();
+                    if (target != null) {
+                        minY = Math.min(minY, target.y());
+                        maxY = Math.max(maxY, target.y());
+                        WireSegment arm = new WireSegment(branchX, target.y(), target.x(), target.y());
+                        segments.add(arm);
+                        hitSegments.put(connection.connection(), List.of(arm));
+                        connectionSegments.put(connection.connection(), List.of(
+                            new WireSegment(source.x(), source.y(), branchX, source.y()),
+                            new WireSegment(branchX, source.y(), branchX, target.y()), arm));
+                    }
+                }
+                segments.addFirst(new WireSegment(branchX, minY, branchX, maxY));
+                segments.addFirst(new WireSegment(source.x(), source.y(), branchX, source.y()));
+            }
+        } else if (!connections.isEmpty()) {
+            GraphRenderConnectionSnapshot connection = connections.getFirst();
+            if (connection.source() != null && connection.target() != null) {
+                List<WireSegment> route = graphWireSegments(connection.source().x(), connection.source().y(),
+                    connection.target().x(), connection.target().y());
+                segments.addAll(route);
+                connectionSegments.put(connection.connection(), route);
+                hitSegments.put(connection.connection(), route);
+            }
+        }
+        group.segments = List.copyOf(segments);
+        group.connectionSegments = Collections.unmodifiableMap(connectionSegments);
+        group.hitSegments = Collections.unmodifiableMap(hitSegments);
+        applyFanoutSegments(group, connections.size() > 1);
+        group.bounds = wireBounds(segments);
+        indexWireGroup(index, group, segments);
+    }
+
+    private static double snapshotFanoutBranchX(PinPoint source, List<GraphRenderConnectionSnapshot> connections) {
+        double minTargetX = Double.MAX_VALUE;
+        for (GraphRenderConnectionSnapshot connection : connections) {
+            if (connection.target() != null) {
+                minTargetX = Math.min(minTargetX, connection.target().x());
+            }
+        }
+        double targetX = minTargetX == Double.MAX_VALUE ? source.x() + 180 : minTargetX;
+        if (targetX > source.x() + WIRE_OUT_OFFSET * 3) {
+            return Math.round(source.x() + Math.clamp((targetX - source.x()) * 0.45, WIRE_OUT_OFFSET, 220));
+        }
+        return Math.round(source.x() + WIRE_OUT_OFFSET);
+    }
+
+    private WorldBounds graphViewportBounds() {
+        double[] first = screenToWorld(viewportFitLeft(), viewportFitTop());
+        double[] second = screenToWorld(viewportFitLeft() + viewportFitWidth(), viewportFitTop() + viewportFitHeight());
+        double margin = GRAPH_RENDER_MARGIN / Math.max(zoomLevel, 0.1F);
+        return new WorldBounds(Math.min(first[0], second[0]), Math.min(first[1], second[1]),
+            Math.max(first[0], second[0]), Math.max(first[1], second[1])).expand(margin);
+    }
+
+    private List<FlowNodeWidget> visibleGraphNodes(WorldBounds bounds) {
+        GraphRenderIndex index = visibleGraphRenderIndex();
+        if (index == null) {
+            return graphRenderFallbackValues(widgetCache.values(), widget -> widgetBounds(widget).intersects(bounds),
+                graphRenderPriorityNodes(null), GRAPH_RENDER_FALLBACK_BOUNDS_SCAN_LIMIT, GRAPH_RENDER_FALLBACK_NODE_LIMIT);
+        }
+        Set<FlowNodeWidget> visible = Collections.newSetFromMap(new IdentityHashMap<>());
+        collectSpatialEntries(index.nodeCells, bounds, visible);
+        visible.removeIf(widget -> {
+            WorldBounds nodeBounds = index.nodeBounds.get(widget);
+            return nodeBounds == null || !nodeBounds.intersects(bounds);
+        });
+        visible.addAll(graphRenderPriorityNodes(index));
+        List<FlowNodeWidget> ordered = new ArrayList<>(visible);
+        ordered.sort(Comparator.comparingInt(widget -> index.nodeOrder.getOrDefault(widget, Integer.MAX_VALUE)));
+        return corePreviewNodes(ordered, bounds, false);
+    }
+
+    private List<? extends Widget> graphNodeWidgets() {
+        CoreWidgetTopology topology = graphRenderContinuityIndex != null && graphRenderContinuityTopology != null
+            ? graphRenderContinuityTopology : coreWidgetTopology;
+        if (activeCoreGraphSession() != null && topology != null) {
+            CoreStructuralPreview preview = visibleCorePreview();
+            if (preview != null && preview.graph() == graph) {
+                List<FlowNodeWidget> widgets = new ArrayList<>(topology.widgets());
+                widgets.removeAll(preview.removedWidgets().values());
+                widgets.removeAll(preview.addedWidgets().values());
+                widgets.addAll(preview.addedWidgets().values());
+                return widgets;
+            }
+            return topology.widgets();
+        }
+        return worldWidgets;
+    }
+
+    private List<FlowNodeWidget> graphNodeCandidates(WorldBounds bounds, boolean topmost,
+                                                      Collection<FlowNodeWidget> priority) {
+        GraphRenderIndex index = visibleGraphRenderIndex();
+        if (index != null) {
+            return corePreviewNodes(graphRenderNodeCandidates(index.nodeCells, index.nodeBounds, index.nodeOrder, bounds, topmost,
+                priority), bounds, topmost);
+        }
+        List<? extends Widget> widgets = graphNodeWidgets();
+        if (!topmost && widgets.size() > GRAPH_RENDER_FALLBACK_BOUNDS_SCAN_LIMIT) {
+            return List.of();
+        }
+        LinkedHashSet<FlowNodeWidget> matches = new LinkedHashSet<>();
+        if (priority != null) {
+            priority.stream().filter(Objects::nonNull).forEach(matches::add);
+        }
+        int inspected = 0;
+        for (int position = widgets.size() - 1; position >= 0
+            && inspected++ < GRAPH_RENDER_FALLBACK_BOUNDS_SCAN_LIMIT; position--) {
+            Widget widget = widgets.get(position);
+            if (widget instanceof FlowNodeWidget nodeWidget && widgetBounds(nodeWidget).intersects(bounds)) {
+                matches.add(nodeWidget);
+            }
+        }
+        List<FlowNodeWidget> ordered = new ArrayList<>(matches);
+        if (!topmost) {
+            Collections.reverse(ordered);
+        }
+        return ordered;
+    }
+
+    static <T> List<T> graphRenderNodeCandidates(Map<Long, List<T>> cells, Map<T, WorldBounds> nodeBounds,
+                                                  Map<T, Integer> nodeOrder, WorldBounds bounds, boolean topmost,
+                                                  Collection<T> priority) {
+        Set<T> matches = Collections.newSetFromMap(new IdentityHashMap<>());
+        collectSpatialEntries(cells, bounds, matches, GRAPH_RENDER_CELL_SIZE);
+        matches.removeIf(value -> {
+            WorldBounds valueBounds = nodeBounds.get(value);
+            return valueBounds == null || !valueBounds.intersects(bounds);
+        });
+        if (priority != null) {
+            priority.stream().filter(Objects::nonNull).filter(nodeOrder::containsKey).forEach(matches::add);
+        }
+        List<T> ordered = new ArrayList<>(matches);
+        ordered.sort(Comparator.comparingInt(value -> nodeOrder.getOrDefault(value, Integer.MIN_VALUE)));
+        if (topmost) {
+            Collections.reverse(ordered);
+        }
+        return ordered;
+    }
+
+    private List<FlowNodeWidget> corePreviewNodes(List<FlowNodeWidget> baseline, WorldBounds bounds, boolean topmost) {
+        CoreStructuralPreview preview = visibleCorePreview();
+        if (preview == null || preview.graph() != graph || preview.overlay() == null) {
+            return baseline;
+        }
+        GraphRenderIndex overlay = preview.overlay();
+        List<FlowNodeWidget> nodes = new ArrayList<>(baseline);
+        nodes.removeIf(widget -> preview.removedWidgets().containsValue(widget) || overlay.nodeOrder.containsKey(widget));
+        List<FlowNodeWidget> changed = graphRenderNodeCandidates(overlay.nodeCells, overlay.nodeBounds, overlay.nodeOrder,
+            bounds, topmost, List.of());
+        if (topmost) {
+            nodes.addAll(0, changed);
+        } else {
+            nodes.addAll(changed);
+        }
+        return nodes;
+    }
+
+    private List<FlowNodeWidget> graphPointCandidates(double worldX, double worldY) {
+        FlowNodeWidget dragged = draggedWidget instanceof FlowNodeWidget widget ? widget : null;
+        return graphNodeCandidates(new WorldBounds(worldX, worldY, worldX, worldY), true,
+            dragged != null ? List.of(dragged) : List.of());
+    }
+
+    private List<FlowNodeWidget> graphNearbyCandidates(double worldX, double worldY, double margin) {
+        double safeMargin = Math.max(0.0, margin);
+        return graphNodeCandidates(new WorldBounds(worldX - safeMargin, worldY - safeMargin,
+            worldX + safeMargin, worldY + safeMargin), true, List.of());
+    }
+
+    private GraphRenderIndex visibleGraphRenderIndex() {
+        GraphRenderIndex current = ensureGraphRenderIndex();
+        if (current != null) {
+            return current;
+        }
+        return graphRenderContinuityIndex;
+    }
+
+    private List<FlowNodeWidget> graphRenderPriorityNodes(GraphRenderIndex index) {
+        FlowNodeWidget dragged = draggedWidget instanceof FlowNodeWidget widget ? widget : null;
+        FlowNodeWidget source = dragState.isDragging && dragState.sourceNodeId != null
+            ? widgetCache.get(dragState.sourceNodeId) : null;
+        List<FlowNodeWidget> priority = new ArrayList<>(2);
+        if (index == null || index.nodeOrder.containsKey(dragged)) {
+            priority.add(dragged);
+        }
+        if (index == null || index.nodeOrder.containsKey(source)) {
+            priority.add(source);
+        }
+        return mergeGraphRenderFallbacks(List.of(), priority);
+    }
+
+    static <T> List<T> graphRenderFallbackValues(Iterable<T> values, Predicate<T> visible, Collection<T> priority,
+                                                  int scanLimit, int resultLimit) {
+        LinkedHashSet<T> viewport = new LinkedHashSet<>();
+        int inspected = 0;
+        if (values != null && visible != null && scanLimit > 0 && resultLimit > 0) {
+            for (T value : values) {
+                if (inspected++ >= scanLimit || viewport.size() >= resultLimit) {
+                    break;
+                }
+                if (value != null && visible.test(value)) {
+                    viewport.add(value);
+                }
+            }
+        }
+        return mergeGraphRenderFallbacks(viewport, priority);
+    }
+
+    static <T> List<T> mergeGraphRenderFallbacks(Collection<T> viewport, Collection<T> priority) {
+        LinkedHashSet<T> merged = new LinkedHashSet<>();
+        if (viewport != null) {
+            viewport.stream().filter(Objects::nonNull).forEach(merged::add);
+        }
+        if (priority != null) {
+            priority.stream().filter(Objects::nonNull).forEach(merged::add);
+        }
+        return List.copyOf(merged);
+    }
+
+    private static WorldBounds widgetBounds(FlowNodeWidget widget) {
+        return new WorldBounds(widget.getX(), widget.getY(), widget.getX() + widget.getWidth(),
+            widget.getY() + widget.getHeight());
+    }
+
+    private List<WireRenderGroup> visibleWireGroups(GraphRenderIndex index, WorldBounds bounds,
+                                                     Collection<FlowNodeWidget> visibleNodes) {
+        Set<WireRenderGroup> visible = Collections.newSetFromMap(new IdentityHashMap<>());
+        String draggedNodeId = draggedWidget instanceof FlowNodeWidget widget ? findNodeId(widget) : null;
+        String wireSourceNodeId = dragState.isDragging ? dragState.sourceNodeId : null;
+        collectSpatialEntries(index.wireCells, bounds, visible);
+        collectSpatialEntries(index.coarseWireCells, bounds, visible, GRAPH_RENDER_COARSE_CELL_SIZE);
+        collectSpatialBounds(index.overflowWireRoot, bounds, visible);
+        for (FlowNodeWidget widget : visibleNodes) {
+            String nodeId = findNodeId(widget);
+            if (nodeId != null) {
+                visible.addAll(index.groupsByNode.getOrDefault(nodeId, List.of()));
+            }
+        }
+        visible.removeIf(group -> group.bounds == null || group.segments.isEmpty()
+            || !group.bounds.intersects(bounds) && (wireSourceNodeId == null || !group.nodeIds.contains(wireSourceNodeId))
+            && (draggedNodeId == null || !group.nodeIds.contains(draggedNodeId)));
+        CoreStructuralPreview preview = visibleCorePreview();
+        if (preview != null && preview.graph() == graph && preview.overlay() != null && index != preview.overlay()) {
+            visible.removeAll(preview.hiddenGroups());
+            visible.addAll(visibleWireGroups(preview.overlay(), bounds, visibleNodes));
+        }
+        List<WireRenderGroup> ordered = new ArrayList<>(visible);
+        ordered.sort(Comparator.comparingInt(group -> group.order));
+        return ordered;
+    }
+
+    private static <T> void collectSpatialEntries(Map<Long, List<T>> cells, WorldBounds bounds, Set<T> target) {
+        collectSpatialEntries(cells, bounds, target, GRAPH_RENDER_CELL_SIZE);
+    }
+
+    private static <T> void collectSpatialEntries(Map<Long, List<T>> cells, WorldBounds bounds, Set<T> target, int cellSize) {
+        int minCellX = graphRenderCell(bounds.minX(), cellSize);
+        int maxCellX = graphRenderCell(bounds.maxX(), cellSize);
+        int minCellY = graphRenderCell(bounds.minY(), cellSize);
+        int maxCellY = graphRenderCell(bounds.maxY(), cellSize);
+        long width = (long) maxCellX - minCellX + 1L;
+        long height = (long) maxCellY - minCellY + 1L;
+        if (width <= 0L || height <= 0L || width > GRAPH_RENDER_MAX_QUERY_CELLS
+            || height > GRAPH_RENDER_MAX_QUERY_CELLS || width * height > GRAPH_RENDER_MAX_QUERY_CELLS) {
+            for (List<T> entries : cells.values()) {
+                target.addAll(entries);
+            }
+            return;
+        }
+        for (int cellX = minCellX; cellX <= maxCellX; cellX++) {
+            for (int cellY = minCellY; cellY <= maxCellY; cellY++) {
+                target.addAll(cells.getOrDefault(graphRenderCellKey(cellX, cellY), List.of()));
+                if (cellY == Integer.MAX_VALUE) {
+                    break;
+                }
+            }
+            if (cellX == Integer.MAX_VALUE) {
+                break;
+            }
+        }
+    }
+
+    private static void rebuildOverflowWireIndex(GraphRenderIndex index) {
+        if (!index.overflowWireDirty) {
+            return;
+        }
+        List<SpatialBoundsEntry<WireRenderGroup>> entries = new ArrayList<>(index.overflowWireGroups.size());
+        for (WireRenderGroup group : index.overflowWireGroups) {
+            if (validWorldBounds(group.bounds)) {
+                entries.add(new SpatialBoundsEntry<>(group.bounds, group));
+            }
+        }
+        index.overflowWireRoot = buildSpatialBounds(entries, 0);
+        index.overflowWireDirty = false;
+    }
+
+    private static <T> SpatialBoundsNode<T> buildSpatialBounds(List<SpatialBoundsEntry<T>> entries, int depth) {
+        if (entries.isEmpty()) {
+            return null;
+        }
+        if (entries.size() == 1) {
+            SpatialBoundsEntry<T> entry = entries.getFirst();
+            return new SpatialBoundsNode<>(entry.bounds, null, null, entry.value);
+        }
+        boolean horizontal = (depth & 1) == 0;
+        entries.sort(Comparator.comparingDouble(entry -> spatialBoundsMidpoint(entry.bounds, horizontal)));
+        int middle = entries.size() / 2;
+        SpatialBoundsNode<T> left = buildSpatialBounds(new ArrayList<>(entries.subList(0, middle)), depth + 1);
+        SpatialBoundsNode<T> right = buildSpatialBounds(new ArrayList<>(entries.subList(middle, entries.size())), depth + 1);
+        return new SpatialBoundsNode<>(unionBounds(left.bounds, right.bounds), left, right, null);
+    }
+
+    private static double spatialBoundsMidpoint(WorldBounds bounds, boolean horizontal) {
+        double min = horizontal ? bounds.minX() : bounds.minY();
+        double max = horizontal ? bounds.maxX() : bounds.maxY();
+        return min / 2.0 + max / 2.0;
+    }
+
+    private static WorldBounds unionBounds(WorldBounds first, WorldBounds second) {
+        return new WorldBounds(Math.min(first.minX(), second.minX()), Math.min(first.minY(), second.minY()),
+            Math.max(first.maxX(), second.maxX()), Math.max(first.maxY(), second.maxY()));
+    }
+
+    private static boolean validWorldBounds(WorldBounds bounds) {
+        return bounds != null && Double.isFinite(bounds.minX()) && Double.isFinite(bounds.minY())
+            && Double.isFinite(bounds.maxX()) && Double.isFinite(bounds.maxY())
+            && bounds.minX() <= bounds.maxX() && bounds.minY() <= bounds.maxY();
+    }
+
+    private static <T> void collectSpatialBounds(SpatialBoundsNode<T> node, WorldBounds bounds, Collection<T> target) {
+        if (node == null || !node.bounds.intersects(bounds)) {
+            return;
+        }
+        if (node.value != null) {
+            target.add(node.value);
+            return;
+        }
+        collectSpatialBounds(node.left, bounds, target);
+        collectSpatialBounds(node.right, bounds, target);
+    }
+
+    static Set<Integer> graphRenderIntersectingBounds(List<WorldBounds> entries, WorldBounds bounds) {
+        List<SpatialBoundsEntry<Integer>> indexed = new ArrayList<>();
+        for (int i = 0; i < entries.size(); i++) {
+            WorldBounds entry = entries.get(i);
+            if (validWorldBounds(entry)) {
+                indexed.add(new SpatialBoundsEntry<>(entry, i));
+            }
+        }
+        Set<Integer> matches = new LinkedHashSet<>();
+        collectSpatialBounds(buildSpatialBounds(indexed, 0), bounds, matches);
+        return Set.copyOf(matches);
+    }
+
+    private void putNodeGeometry(GraphRenderIndex index, FlowNodeWidget widget) {
+        WorldBounds previous = index.nodeBounds.remove(widget);
+        if (previous != null) {
+            removeSpatialEntry(index.nodeCells, previous, widget);
+        }
+        WorldBounds bounds = new WorldBounds(widget.getX(), widget.getY(), widget.getX() + widget.getWidth(), widget.getY() + widget.getHeight());
+        index.nodeBounds.put(widget, bounds);
+        addSpatialEntry(index.nodeCells, bounds, widget);
+    }
+
+    private void refreshWireGroupGeometry(GraphRenderIndex index, WireRenderGroup group) {
+        for (long cell : group.cells) {
+            List<WireRenderGroup> groups = index.wireCells.get(cell);
+            if (groups != null) {
+                groups.remove(group);
+                if (groups.isEmpty()) {
+                    index.wireCells.remove(cell);
+                }
+            }
+        }
+        for (long cell : group.coarseCells) {
+            List<WireRenderGroup> groups = index.coarseWireCells.get(cell);
+            if (groups != null) {
+                groups.remove(group);
+                if (groups.isEmpty()) {
+                    index.coarseWireCells.remove(cell);
+                }
+            }
+        }
+        if (group.overflow) {
+            index.overflowWireGroups.remove(group);
+            index.overflowWireDirty = true;
+        }
+        List<WireSegment> segments = new ArrayList<>();
+        Map<FlowConnection, List<WireSegment>> connectionSegments = new IdentityHashMap<>();
+        Map<FlowConnection, List<WireSegment>> hitSegments = new IdentityHashMap<>();
+        if (group.connections.size() > 1) {
+            FlowConnection first = group.connections.getFirst();
+            PinPoint source = sourceOutputPoint(first);
+            if (source != null) {
+                double branchX = fanoutBranchX(source, group.connections);
+                double minY = source.y();
+                double maxY = source.y();
+                for (FlowConnection connection : group.connections) {
+                    PinPoint target = targetInputPoint(connection);
+                    if (target != null) {
+                        minY = Math.min(minY, target.y());
+                        maxY = Math.max(maxY, target.y());
+                        WireSegment arm = new WireSegment(branchX, target.y(), target.x(), target.y());
+                        segments.add(arm);
+                        hitSegments.put(connection, List.of(arm));
+                        connectionSegments.put(connection, List.of(
+                            new WireSegment(source.x(), source.y(), branchX, source.y()),
+                            new WireSegment(branchX, source.y(), branchX, target.y()), arm));
+                    }
+                }
+                segments.addFirst(new WireSegment(branchX, minY, branchX, maxY));
+                segments.addFirst(new WireSegment(source.x(), source.y(), branchX, source.y()));
+            }
+        } else if (!group.connections.isEmpty()) {
+            FlowConnection connection = group.connections.getFirst();
+            PinPoint source = sourceOutputPoint(connection);
+            PinPoint target = targetInputPoint(connection);
+            if (source != null && target != null) {
+                List<WireSegment> route = wireSegments(source.x(), source.y(), target.x(), target.y());
+                segments.addAll(route);
+                connectionSegments.put(connection, route);
+                hitSegments.put(connection, route);
+            }
+        }
+        group.segments = List.copyOf(segments);
+        group.connectionSegments = Collections.unmodifiableMap(connectionSegments);
+        group.hitSegments = Collections.unmodifiableMap(hitSegments);
+        applyFanoutSegments(group, group.connections.size() > 1);
+        group.bounds = wireBounds(segments);
+        indexWireGroup(index, group, segments);
+    }
+
+    private static void applyFanoutSegments(WireRenderGroup group, boolean fanout) {
+        if (!fanout || group.segments.size() < 2) {
+            group.fanoutTrunks = List.of();
+            group.fanoutArms = List.of();
+            group.fanoutHitIndex = FanoutArmHitIndex.empty();
+            group.fanoutConnectionsByArm = Map.of();
+            return;
+        }
+        group.fanoutTrunks = List.copyOf(group.segments.subList(0, 2));
+        List<WireSegment> arms = new ArrayList<>(group.segments.subList(2, group.segments.size()));
+        arms.sort(Comparator.comparingDouble(WireSegment::y1));
+        group.fanoutArms = List.copyOf(arms);
+        group.fanoutHitIndex = graphRenderFanoutArmIndex(group.fanoutArms);
+        Map<WireSegment, FlowConnection> connectionsByArm = new IdentityHashMap<>();
+        group.hitSegments.forEach((connection, segments) -> {
+            if (segments.size() == 1) {
+                connectionsByArm.put(segments.getFirst(), connection);
+            }
+        });
+        group.fanoutConnectionsByArm = Collections.unmodifiableMap(connectionsByArm);
+    }
+
+    static FanoutArmHitIndex graphRenderFanoutArmIndex(List<WireSegment> sortedArms) {
+        return new FanoutArmHitIndex(sortedArms);
+    }
+
+    static int graphRenderFanoutHitIndex(List<WireSegment> trunks, FanoutArmHitIndex armIndex,
+                                         double worldX, double worldY, double hitRadius) {
+        int arm = armIndex != null ? armIndex.hit(worldX, worldY, hitRadius) : -1;
+        if (arm >= 0) {
+            return arm;
+        }
+        if (trunks != null) {
+            for (WireSegment trunk : trunks) {
+                if (isNearWireSegment(worldX, worldY, trunk, hitRadius)) {
+                    return -2;
+                }
+            }
+        }
+        return -1;
+    }
+
+    private static List<WireSegment> visibleWireSegments(WireRenderGroup group, WorldBounds bounds) {
+        if (!group.fanoutArms.isEmpty()) {
+            return graphRenderVisibleFanoutSegments(group.fanoutTrunks, group.fanoutArms, bounds);
+        }
+        return graphRenderVisibleSegments(group.segments, bounds);
+    }
+
+    static List<WireSegment> graphRenderVisibleFanoutSegments(List<WireSegment> trunks, List<WireSegment> sortedArms,
+                                                               WorldBounds bounds) {
+        List<WireSegment> visible = new ArrayList<>();
+        appendVisibleWireSegments(visible, trunks, bounds);
+        if (sortedArms == null || sortedArms.isEmpty() || bounds == null) {
+            return List.copyOf(visible);
+        }
+        int low = 0;
+        int high = sortedArms.size();
+        while (low < high) {
+            int middle = (low + high) >>> 1;
+            if (sortedArms.get(middle).y1() < bounds.minY()) {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        for (int index = low; index < sortedArms.size(); index++) {
+            WireSegment arm = sortedArms.get(index);
+            if (arm.y1() > bounds.maxY()) {
+                break;
+            }
+            WireSegment clipped = clipWireSegment(arm, bounds);
+            if (clipped != null) {
+                visible.add(clipped);
+            }
+        }
+        return List.copyOf(visible);
+    }
+
+    static List<WireSegment> graphRenderVisibleSegments(Collection<WireSegment> segments, WorldBounds bounds) {
+        List<WireSegment> visible = new ArrayList<>();
+        appendVisibleWireSegments(visible, segments, bounds);
+        return List.copyOf(visible);
+    }
+
+    private static void appendVisibleWireSegments(Collection<WireSegment> target, Collection<WireSegment> segments,
+                                                  WorldBounds bounds) {
+        if (segments == null || bounds == null) {
+            return;
+        }
+        for (WireSegment segment : segments) {
+            WireSegment clipped = clipWireSegment(segment, bounds);
+            if (clipped != null) {
+                target.add(clipped);
+            }
+        }
+    }
+
+    static WireSegment clipWireSegment(WireSegment segment, WorldBounds bounds) {
+        if (segment == null || !validWorldBounds(bounds)) {
+            return null;
+        }
+        if (segment.x1() == segment.x2()) {
+            if (segment.x1() < bounds.minX() || segment.x1() > bounds.maxX()) {
+                return null;
+            }
+            double minY = Math.max(Math.min(segment.y1(), segment.y2()), bounds.minY());
+            double maxY = Math.min(Math.max(segment.y1(), segment.y2()), bounds.maxY());
+            if (minY > maxY) {
+                return null;
+            }
+            return segment.y1() <= segment.y2() ? new WireSegment(segment.x1(), minY, segment.x2(), maxY)
+                : new WireSegment(segment.x1(), maxY, segment.x2(), minY);
+        }
+        if (segment.y1() == segment.y2()) {
+            if (segment.y1() < bounds.minY() || segment.y1() > bounds.maxY()) {
+                return null;
+            }
+            double minX = Math.max(Math.min(segment.x1(), segment.x2()), bounds.minX());
+            double maxX = Math.min(Math.max(segment.x1(), segment.x2()), bounds.maxX());
+            if (minX > maxX) {
+                return null;
+            }
+            return segment.x1() <= segment.x2() ? new WireSegment(minX, segment.y1(), maxX, segment.y2())
+                : new WireSegment(maxX, segment.y1(), minX, segment.y2());
+        }
+        return null;
+    }
+
+    private static WorldBounds wireBounds(List<WireSegment> segments) {
+        if (segments.isEmpty()) {
+            return null;
+        }
+        double minX = Double.MAX_VALUE;
+        double minY = Double.MAX_VALUE;
+        double maxX = -Double.MAX_VALUE;
+        double maxY = -Double.MAX_VALUE;
+        for (WireSegment segment : segments) {
+            minX = Math.min(minX, Math.min(segment.x1(), segment.x2()));
+            minY = Math.min(minY, Math.min(segment.y1(), segment.y2()));
+            maxX = Math.max(maxX, Math.max(segment.x1(), segment.x2()));
+            maxY = Math.max(maxY, Math.max(segment.y1(), segment.y2()));
+        }
+        return new WorldBounds(minX, minY, maxX, maxY).expand(3.0);
+    }
+
+    private static void indexWireGroup(GraphRenderIndex index, WireRenderGroup group, List<WireSegment> segments) {
+        group.cells = wireCells(segments, GRAPH_RENDER_CELL_SIZE);
+        group.coarseCells = Set.of();
+        group.overflow = false;
+        if (group.cells != null) {
+            for (long cell : group.cells) {
+                index.wireCells.computeIfAbsent(cell, ignored -> new ArrayList<>()).add(group);
+            }
+            return;
+        }
+        group.cells = Set.of();
+        group.coarseCells = wireCells(segments, GRAPH_RENDER_COARSE_CELL_SIZE);
+        if (group.coarseCells != null) {
+            for (long cell : group.coarseCells) {
+                index.coarseWireCells.computeIfAbsent(cell, ignored -> new ArrayList<>()).add(group);
+            }
+            return;
+        }
+        group.coarseCells = Set.of();
+        group.overflow = true;
+        index.overflowWireGroups.add(group);
+        index.overflowWireDirty = true;
+    }
+
+    private static Set<Long> wireCells(List<WireSegment> segments, int cellSize) {
+        Set<Long> cells = new LinkedHashSet<>();
+        for (WireSegment segment : segments) {
+            WorldBounds bounds = new WorldBounds(Math.min(segment.x1(), segment.x2()), Math.min(segment.y1(), segment.y2()),
+                Math.max(segment.x1(), segment.x2()), Math.max(segment.y1(), segment.y2())).expand(3.0);
+            if (!boundedWireCoordinates(bounds) || !collectSpatialCells(bounds, cells, cellSize, GRAPH_RENDER_MAX_WIRE_CELLS)) {
+                return null;
+            }
+        }
+        return Set.copyOf(cells);
+    }
+
+    static boolean boundedWireCoordinates(WorldBounds bounds) {
+        return bounds != null && Double.isFinite(bounds.minX()) && Double.isFinite(bounds.minY())
+            && Double.isFinite(bounds.maxX()) && Double.isFinite(bounds.maxY())
+            && Math.abs(bounds.minX()) <= GRAPH_RENDER_MAX_COORDINATE && Math.abs(bounds.minY()) <= GRAPH_RENDER_MAX_COORDINATE
+            && Math.abs(bounds.maxX()) <= GRAPH_RENDER_MAX_COORDINATE && Math.abs(bounds.maxY()) <= GRAPH_RENDER_MAX_COORDINATE;
+    }
+
+    private static <T> void addSpatialEntry(Map<Long, List<T>> cells, WorldBounds bounds, T entry) {
+        Set<Long> keys = graphRenderCells(bounds, GRAPH_RENDER_CELL_SIZE, GRAPH_RENDER_MAX_WIRE_CELLS);
+        if (keys == null) {
+            return;
+        }
+        for (long key : keys) {
+            cells.computeIfAbsent(key, ignored -> new ArrayList<>()).add(entry);
+        }
+    }
+
+    private <T> void removeSpatialEntry(Map<Long, List<T>> cells, WorldBounds bounds, T entry) {
+        Set<Long> keys = graphRenderCells(bounds, GRAPH_RENDER_CELL_SIZE, GRAPH_RENDER_MAX_WIRE_CELLS);
+        if (keys == null) {
+            return;
+        }
+        for (long key : keys) {
+            List<T> entries = cells.get(key);
+            if (entries != null) {
+                entries.remove(entry);
+                if (entries.isEmpty()) {
+                    cells.remove(key);
+                }
+            }
+        }
+    }
+
+    private static void collectSpatialCells(WorldBounds bounds, Set<Long> cells) {
+        collectSpatialCells(bounds, cells, GRAPH_RENDER_CELL_SIZE, GRAPH_RENDER_MAX_WIRE_CELLS);
+    }
+
+    static Set<Long> graphRenderCells(WorldBounds bounds, int cellSize, int limit) {
+        if (!boundedWireCoordinates(bounds) || cellSize <= 0 || limit <= 0) {
+            return null;
+        }
+        Set<Long> cells = new LinkedHashSet<>();
+        return collectSpatialCells(bounds, cells, cellSize, limit) ? Set.copyOf(cells) : null;
+    }
+
+    private static boolean collectSpatialCells(WorldBounds bounds, Set<Long> cells, int cellSize, int limit) {
+        int minCellX = graphRenderCell(bounds.minX(), cellSize);
+        int maxCellX = graphRenderCell(bounds.maxX(), cellSize);
+        int minCellY = graphRenderCell(bounds.minY(), cellSize);
+        int maxCellY = graphRenderCell(bounds.maxY(), cellSize);
+        long width = (long) maxCellX - minCellX + 1L;
+        long height = (long) maxCellY - minCellY + 1L;
+        if (width <= 0L || height <= 0L || width > limit || height > limit || width * height > limit
+            || cells.size() + width * height > limit) {
+            return false;
+        }
+        for (int cellX = minCellX; cellX <= maxCellX; cellX++) {
+            for (int cellY = minCellY; cellY <= maxCellY; cellY++) {
+                cells.add(graphRenderCellKey(cellX, cellY));
+                if (cellY == Integer.MAX_VALUE) {
+                    break;
+                }
+            }
+            if (cellX == Integer.MAX_VALUE) {
+                break;
+            }
+        }
+        return true;
+    }
+
+    private static int graphRenderCell(double coordinate) {
+        return graphRenderCell(coordinate, GRAPH_RENDER_CELL_SIZE);
+    }
+
+    private static int graphRenderCell(double coordinate, int cellSize) {
+        double cell = Math.floor(coordinate / cellSize);
+        if (cell <= Integer.MIN_VALUE) {
+            return Integer.MIN_VALUE;
+        }
+        if (cell >= Integer.MAX_VALUE) {
+            return Integer.MAX_VALUE;
+        }
+        return (int) cell;
+    }
+
+    private static long graphRenderCellKey(int cellX, int cellY) {
+        return ((long) cellX << 32) ^ (cellY & 0xFFFFFFFFL);
     }
 
     private void renderWorkspaceWires(IDrawContext context) {
@@ -4525,9 +15897,8 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             return null;
         }
         boolean targetIsInput = !dragState.sourceIsInput;
-        for (int index = worldWidgets.size() - 1; index >= 0; index--) {
-            Widget widget = worldWidgets.get(index);
-            if (!(widget instanceof FlowNodeWidget targetWidget) || targetWidget == dragPinWidget) {
+        for (FlowNodeWidget targetWidget : graphPointCandidates(worldMouseX, worldMouseY)) {
+            if (targetWidget == dragPinWidget) {
                 continue;
             }
             String pinName = targetWidget.getPinAtPosition(worldMouseX, worldMouseY);
@@ -4556,9 +15927,19 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         }
         FlowTypeRef sourceRef = sourceWidget.getPinTypeRef(sourcePin, false);
         FlowTypeRef targetRef = targetWidget.getPinTypeRef(targetPin, true);
+        if (hasTypedCatalogProjection()) {
+            return sourceRef != null && targetRef != null && sourceRef.equals(targetRef)
+                ? new WireCompatibilityPreview("Direct", validColor)
+                : sourceType != null && sourceType.equals(targetType)
+                    ? new WireCompatibilityPreview("Direct", validColor)
+                    : new WireCompatibilityPreview("Incompatible · " + sourceLabel + " → " + targetLabel, invalidColor);
+        }
+        if (!legacyCatalogAllowed()) {
+            return new WireCompatibilityPreview("Catalog Unavailable", invalidColor);
+        }
         NodeRegistry registry = NodeRegistry.getInstance();
         if (registry != null && sourceRef != null && targetRef != null && registry.canAssignTypes(nodeRegistryServerId(), sourceRef, targetRef)) {
-            String inferred = !targetRef.getArguments().isEmpty() ? " · " + FlowJson.text(targetRef) : "";
+            String inferred = !targetRef.getArguments().isEmpty() ? " · " + targetRef : "";
             return new WireCompatibilityPreview("Direct" + inferred, validColor);
         }
         if (targetType != null && sourceType != null && targetType.isAssignableFrom(sourceType)) {
@@ -4632,6 +16013,26 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
     @Override
     public boolean mouseDragged(ReMouseEvent event) {
+        if (!validateNodeChildAuthority()) {
+            return true;
+        }
+        if (routeStudioContextMenuMouseDragged(event)) {
+            return true;
+        }
+        if (handleNodeItemSelectorMouseDragged(event)) {
+            return true;
+        }
+        if (handlePopupWidgetMouseDragged(event)) {
+            return true;
+        }
+        if (routePointerOwnerMouseDragged(event)) {
+            completeWorkspaceInteraction();
+            return true;
+        }
+        if (studioMode && handleStudioWorkspaceMouseDragged(event)) {
+            return true;
+        }
+        try {
         double mouseX = event.x();
         double mouseY = event.y();
         int button = mouseButtonCode(event);
@@ -4642,16 +16043,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             updateConnectionDragMouse(undistortedCoords[0], undistortedCoords[1]);
             return true;
         }
-        if (handleNodeItemSelectorMouseDragged(event)) {
-            return true;
-        }
-        if (handlePopupWidgetMouseDragged(event)) {
-            return true;
-        }
-        if (dispatchSidePanelMouseDragged(event)) {
-            return true;
-        }
-        if (handleStudioWorkspaceMouseDragged(event)) {
+        if (paletteSidePanel != null && paletteSidePanel.mouseDragged(event.retarget(paletteSidePanel, mouseX, mouseY, deltaX, deltaY))) {
             return true;
         }
 
@@ -4677,35 +16069,44 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             if (draggedStart != null) {
                 int moveX = newX - draggedStart[0];
                 int moveY = newY - draggedStart[1];
-                for (String nodeId : selectedNodeIds) {
-                    FlowNodeWidget widget = widgetCache.get(nodeId);
-                    int[] start = selectedDragStartPositions.get(nodeId);
-                    if (widget != null && start != null) {
-                        widget.setX(start[0] + moveX);
-                        widget.setY(start[1] + moveY);
-                    }
+                selectedNodeMove.queue(moveX, moveY);
+                return true;
+            }
+        }
+
+        for (FlowNodeWidget widget : graphPointCandidates(wx, wy)) {
+            int previousX = widget.getX();
+            int previousY = widget.getY();
+            if (Widget.dispatchMouseDragged(widget, event.retarget(widget, wx, wy, deltaX, deltaY))) {
+                String nodeId = findNodeId(widget);
+                if (nodeId != null && roundedGraphRenderPositionChanged(previousX, previousY, widget.getX(), widget.getY())) {
+                    graphRenderGeometryDirtyNodeIds.add(nodeId);
                 }
                 return true;
             }
         }
 
-        for (int i = worldWidgets.size() - 1; i >= 0; i--) {
-            FlowNodeWidget widget = (FlowNodeWidget) worldWidgets.get(i);
-            if (Widget.dispatchMouseDragged(widget, event.retarget(widget, wx, wy, deltaX, deltaY))) {
-                return true;
-            }
-        }
-
         return super.mouseDragged(event);
+        } finally {
+            completeWorkspaceInteraction();
+        }
     }
 
     private int wireColor(FlowConnection connection) {
         FlowNodeWidget source = widgetCache.get(editorSourceNodeId(connection));
-        FlowDataType sourceType = source != null ? source.getPinType(editorSourcePin(connection), false) : null;
+        String pin = coreConnectionViewPin(source, editorSourcePin(connection), connection, true);
+        FlowDataType sourceType = source != null ? source.getPinType(pin, false) : null;
         return sourceType != null ? sourceType.getColor() : ThemeManager.getColor(ThemeColor.innerBorder);
     }
 
     private void drawConnectionRoute(IDrawContext context, FlowConnection connection, int color) {
+        GraphRenderIndex index = ensureGraphRenderIndex();
+        WireRenderGroup group = index != null ? index.groupsByConnection.get(connection) : null;
+        List<WireSegment> cached = group != null ? group.connectionSegments.get(connection) : null;
+        if (cached != null) {
+            drawWireSegments(context, cached, color);
+            return;
+        }
         List<FlowConnection> fanout = fanoutConnections(connection);
         if (fanout.size() > 1) {
             drawWireSegments(context, fanoutSegments(connection, fanout, true), color);
@@ -4732,11 +16133,10 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (source == null) {
             return;
         }
-        List<FlowConnection> sorted = sortedFanoutConnections(connections);
-        double branchX = fanoutBranchX(source, sorted);
+        double branchX = fanoutBranchX(source, connections);
         double minY = source.y();
         double maxY = source.y();
-        for (FlowConnection connection : sorted) {
+        for (FlowConnection connection : connections) {
             PinPoint end = targetInputPoint(connection);
             if (end == null) {
                 continue;
@@ -4748,7 +16148,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             new WireSegment(source.x(), source.y(), branchX, source.y()),
             new WireSegment(branchX, minY, branchX, maxY)
         ), color);
-        for (FlowConnection connection : sorted) {
+        for (FlowConnection connection : connections) {
             PinPoint end = targetInputPoint(connection);
             if (end == null) {
                 continue;
@@ -4763,8 +16163,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (source == null || end == null) {
             return List.of();
         }
-        List<FlowConnection> sorted = sortedFanoutConnections(connections);
-        double branchX = fanoutBranchX(source, sorted);
+        double branchX = fanoutBranchX(source, connections);
         List<WireSegment> segments = new ArrayList<>();
         if (includeShared) {
             segments.add(new WireSegment(source.x(), source.y(), branchX, source.y()));
@@ -4778,33 +16177,36 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (!isDataSourceConnection(seed) || graph.getConnections() == null) {
             return List.of();
         }
-        String sourceNodeId = editorSourceNodeId(seed);
-        String sourcePin = editorSourcePin(seed);
-        List<FlowConnection> connections = new ArrayList<>();
-        for (FlowConnection connection : graph.getConnections()) {
-            if (!sourceNodeId.equals(editorSourceNodeId(connection)) || !sourcePin.equals(editorSourcePin(connection))) {
-                continue;
-            }
-            if (sourceOutputPoint(connection) != null && targetInputPoint(connection) != null) {
-                connections.add(connection);
-            }
-        }
-        return sortedFanoutConnections(connections);
+        FlowNodeWidget source = widgetCache.get(editorSourceNodeId(seed));
+        String pin = coreConnectionViewPin(source, editorSourcePin(seed), seed, true);
+        return indexedFanoutConnections().getOrDefault(new FanoutKey(editorSourceNodeId(seed), pin), List.of());
     }
 
     private boolean isDataSourceConnection(FlowConnection connection) {
         FlowNodeWidget source = widgetCache.get(editorSourceNodeId(connection));
-        return source != null && source.getPinKind(editorSourcePin(connection), false) == NodeDefinition.PinType.DATA;
+        String pin = coreConnectionViewPin(source, editorSourcePin(connection), connection, true);
+        return source != null && source.getPinKind(pin, false) == NodeDefinition.PinType.DATA;
     }
 
     private PinPoint sourceOutputPoint(FlowConnection connection) {
         FlowNodeWidget source = widgetCache.get(editorSourceNodeId(connection));
-        return pinPoint(source, editorSourcePin(connection), false);
+        return pinPoint(source, coreConnectionViewPin(source, editorSourcePin(connection), connection, true), false);
     }
 
     private PinPoint targetInputPoint(FlowConnection connection) {
         FlowNodeWidget target = widgetCache.get(connection.getTargetNodeId());
-        return pinPoint(target, connection.getTargetPin(), true);
+        return pinPoint(target, coreConnectionViewPin(target, connection.getTargetPin(), connection, false), true);
+    }
+
+    private String coreConnectionViewPin(FlowNodeWidget widget, String pin, FlowConnection connection,
+                                         boolean source) {
+        RepeatableElementId elementId = coreEndpointElement(connection, source);
+        PinId pinId = corePinId(pin);
+        if (widget == null || elementId == null || pinId == null) {
+            return pin;
+        }
+        String viewPin = widget.coreViewPin(pinId, elementId);
+        return viewPin != null ? viewPin : pin;
     }
 
     private PinPoint pinPoint(FlowNodeWidget widget, String pin, boolean input) {
@@ -4878,6 +16280,10 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private List<WireSegment> wireSegments(double x1, double y1, double x2, double y2) {
+        return graphWireSegments(x1, y1, x2, y2);
+    }
+
+    private static List<WireSegment> graphWireSegments(double x1, double y1, double x2, double y2) {
         int startX = Math.round((float) x1);
         int startY = Math.round((float) y1);
         int endX = Math.round((float) x2);
@@ -4960,14 +16366,14 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             return;
         }
         int color = (ThemeManager.getDefaultAccent().getAccentColor() & 0x00FFFFFF) | 0xCC000000;
-        for (FlowConnection conn : graph.getConnections()) {
-            if (!conn.getSourceNodeId().equals(activeConnection.sourceNodeId())
-                || !conn.getSourcePin().equals(activeConnection.sourcePin())
-                || !conn.getTargetNodeId().equals(activeConnection.targetNodeId())
-                || !conn.getTargetPin().equals(activeConnection.targetPin())) {
-                continue;
-            }
-            drawConnectionRoute(context, conn, color);
+        GraphRenderIndex index = ensureGraphRenderIndex();
+        if (index == null) {
+            return;
+        }
+        ConnectionRouteKey key = new ConnectionRouteKey(activeConnection.sourceNodeId(), activeConnection.sourcePin(),
+            activeConnection.targetNodeId(), activeConnection.targetPin());
+        for (FlowConnection connection : index.connectionsByRoute.getOrDefault(key, List.of())) {
+            drawConnectionRoute(context, connection, color);
         }
     }
 
@@ -4976,30 +16382,38 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (debug == null) {
             return;
         }
-        for (Map.Entry<String, FlowNodeWidget> entry : widgetCache.entrySet()) {
-            String nodeId = entry.getKey();
-            FlowNodeWidget widget = entry.getValue();
-            FlowDebugController.DebugRecord record = debug.getLatestRecordForNode(graph.getId(), nodeId);
-            boolean activeRecord = record != null && "failure".equals(record.status());
-            if (!activeRecord) {
+        List<FlowDebugController.DebugRecord> records = debug.getRecentRecords();
+        if (records.isEmpty()) {
+            return;
+        }
+        Map<String, FlowDebugController.DebugRecord> latestByNode = new HashMap<>();
+        for (int index = records.size() - 1; index >= 0; index--) {
+            FlowDebugController.DebugRecord record = records.get(index);
+            if (safeString(graph.getId()).equals(record.graphId())) {
+                latestByNode.putIfAbsent(safeString(record.nodeId()), record);
+            }
+        }
+        for (Map.Entry<String, FlowDebugController.DebugRecord> entry : latestByNode.entrySet()) {
+            FlowNodeWidget widget = widgetCache.get(entry.getKey());
+            if (widget == null || !"failure".equals(entry.getValue().status())) {
                 continue;
             }
-            int color = 0x00000000;
-            color = 0xFFFF4D4D;
+            int color = 0xFFFF4D4D;
             context.fillBorder(widget.getX() - 2, widget.getY() - 2, widget.getX() + widget.getWidth() + 2, widget.getY() + widget.getHeight() + 2, 2, color);
         }
     }
 
     @Override
     public boolean mouseClicked(ReMouseEvent event) {
+        validateNodeChildAuthority();
+        clearPointerOwner();
         double mouseX = event.x();
         double mouseY = event.y();
-        int button = mouseButtonCode(event);
+        if (routeStudioContextMenuMouseClicked(event)) {
+            return true;
+        }
         if (studioMode && startupState != StudioStartupState.READY) {
             return handleStartupMouseClicked(event);
-        }
-        if (handleContextMenuMouseClicked(event)) {
-            return true;
         }
         if (handleNodeItemSelectorMouseClicked(event)) {
             return true;
@@ -5011,10 +16425,12 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (handleHeaderButtonsClick(event, (int) headerCoords[0], (int) headerCoords[1])) {
             return true;
         }
-        if (dispatchSidePanelMouseClicked(event)) {
+        if (studioMode && handleStudioWorkspaceMouseClicked(event)) {
             return true;
         }
-        if (studioMode && handleStudioWorkspaceMouseClicked(event)) {
+        try {
+        int button = mouseButtonCode(event);
+        if (paletteSidePanel != null && paletteSidePanel.mouseClicked(event.retarget(paletteSidePanel, mouseX, mouseY))) {
             return true;
         }
         cancelInitialViewportFit();
@@ -5022,10 +16438,6 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         double[] worldMouse = screenToWorld(headerCoords[0], headerCoords[1]);
         int wx = (int)worldMouse[0];
         int wy = (int)worldMouse[1];
-
-        if (handleHeaderButtonsClick(event, (int) headerCoords[0], (int) headerCoords[1])) {
-            return true;
-        }
 
         if (button == ReMouseButton.RIGHT.code()) {
             if (debugMode && toggleBreakpointAt(wx, wy)) {
@@ -5037,10 +16449,10 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             return true;
         }
 
-        for (int i = worldWidgets.size() - 1; i >= 0; i--) {
-            FlowNodeWidget widget = (FlowNodeWidget) worldWidgets.get(i);
+        for (FlowNodeWidget widget : graphPointCandidates(wx, wy)) {
 
-            if (widget.handleBottomInputActionClick(wx, wy, button)) {
+            String interactionNodeId = findNodeId(widget);
+            if (isEditableNode(interactionNodeId) && widget.handleBottomInputActionClick(wx, wy, button)) {
                 setFocusedWidget(null);
                 focusedNode = widget;
                 bringToFront(widget);
@@ -5049,8 +16461,16 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
             Widget outputWidget = widget.getOutputWidgetAt(wx, wy);
             if (outputWidget != null) {
+                if (!isEditableNode(interactionNodeId)) {
+                    clearFocusedNodeChild();
+                    setFocusedWidget(null);
+                    return true;
+                }
                 widget.setLastScreenMouse((int) headerCoords[0], (int) headerCoords[1]);
-                Widget.dispatchMouseClicked(outputWidget, event.retarget(outputWidget, wx, wy));
+                if (Widget.dispatchMouseClicked(outputWidget, event.retarget(outputWidget, wx, wy))) {
+                    capturePointerOwner(widget, outputWidget);
+                }
+                clearFocusedNodeChild();
                 setFocusedWidget(null);
                 focusedNode = widget;
                 bringToFront(widget);
@@ -5090,11 +16510,22 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
             Widget inputWidget = widget.getInputWidgetAt(wx, wy);
             if (inputWidget != null) {
+                if (!isEditableNode(interactionNodeId)) {
+                    clearFocusedNodeChild();
+                    setFocusedWidget(null);
+                    return true;
+                }
                 widget.setLastScreenMouse((int) headerCoords[0], (int) headerCoords[1]);
-                Widget.dispatchMouseClicked(inputWidget, event.retarget(inputWidget, wx, wy));
-                if (inputWidget instanceof TextInputWidget || inputWidget instanceof TextAreaWidget) {
+                boolean childHandled = Widget.dispatchMouseClicked(inputWidget, event.retarget(inputWidget, wx, wy));
+                if (childHandled) {
+                    capturePointerOwner(widget, inputWidget);
+                }
+                if (childHandled && (inputWidget instanceof TextInputWidget || inputWidget instanceof TextAreaWidget)) {
                     setFocusedWidget(inputWidget);
+                    focusedNodeChildOwner = widget;
+                    focusedNodeChild = inputWidget;
                 } else {
+                    clearFocusedNodeChild();
                     setFocusedWidget(null);
                 }
                 focusedNode = widget;
@@ -5121,6 +16552,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         }
 
         focusedNode = null;
+        clearFocusedNodeChild();
         setFocusedWidget(null);
         if (button == ReMouseButton.LEFT.code()) {
             if (event.modifiers().shift() || event.modifiers().control()) {
@@ -5130,26 +16562,9 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             clearSelection();
         }
         return super.mouseClicked(event);
-    }
-
-    private boolean handleContextMenuMouseClicked(ReMouseEvent event) {
-        double mouseX = event.x();
-        double mouseY = event.y();
-        List<Widget> widgetSnapshot = new ArrayList<>(widgets);
-        for (int i = widgetSnapshot.size() - 1; i >= 0; i--) {
-            Widget widget = widgetSnapshot.get(i);
-            if (!(widget instanceof ContextMenuWidget menu) || !menu.isVisible()) {
-                continue;
-            }
-            boolean overMenu = menu.isMouseOver(mouseX, mouseY);
-            boolean handled = Widget.dispatchMouseClicked(menu, event.retarget(menu, mouseX, mouseY));
-            hideContextMenu();
-            if (handled || overMenu) {
-                return true;
-            }
-            return event.button() != ReMouseButton.RIGHT;
+        } finally {
+            completeWorkspaceInteraction();
         }
-        return false;
     }
 
     private boolean handleStartupMouseClicked(ReMouseEvent event) {
@@ -5169,8 +16584,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (debug == null) {
             return false;
         }
-        for (int i = worldWidgets.size() - 1; i >= 0; i--) {
-            FlowNodeWidget widget = (FlowNodeWidget) worldWidgets.get(i);
+        for (FlowNodeWidget widget : graphPointCandidates(wx, wy)) {
             if (widget.isMouseOver(wx, wy)) {
                 String nodeId = findNodeId(widget);
                 if (nodeId != null) {
@@ -5199,6 +16613,9 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private void startWireDrag(FlowNodeWidget widget, String pinName, boolean isInput) {
+        if (!canMutateWidgetStructure(widget)) {
+            return;
+        }
         dragState.isDragging = true;
         dragState.sourceNodeId = findNodeId(widget);
         dragState.sourcePin = pinName;
@@ -5216,8 +16633,28 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private void toggleInputPassthrough(FlowNodeWidget widget, String inputPin) {
+        if (isActiveCoreStudioDocument()) {
+            CoreGraphEditorSession session = activeCoreGraphSession();
+            String nodeId = findNodeId(widget);
+            NodeInstanceId identity = coreNodeId(nodeId);
+            PinId pinId = corePinId(inputPin);
+            if (session == null || nodeId == null || identity == null || pinId == null
+                || !canMutateWidgetStructure(widget)) {
+                coreOperationUnavailable("Passthrough");
+                refreshCoreProjection();
+                return;
+            }
+            commitCoreStructuralMutation("Passthrough", current -> {
+                current.togglePassthrough(identity, pinId);
+                return true;
+            }, nodeId);
+            return;
+        }
+        if (deferWorkspaceMutation(() -> toggleInputPassthrough(widget, inputPin))) {
+            return;
+        }
         String nodeId = findNodeId(widget);
-        if (nodeId == null) {
+        if (nodeId == null || !isEditableNode(nodeId)) {
             return;
         }
         captureSnapshot();
@@ -5239,18 +16676,29 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
     @Override
     public boolean mouseReleased(ReMouseEvent event) {
-        double mouseX = event.x();
-        double mouseY = event.y();
-        int button = mouseButtonCode(event);
+        if (!validateNodeChildAuthority()) {
+            return true;
+        }
+        if (routeStudioContextMenuMouseReleased(event)) {
+            return true;
+        }
         if (handleNodeItemSelectorMouseReleased(event)) {
             return true;
         }
         if (handlePopupWidgetMouseReleased(event)) {
             return true;
         }
-        if (dispatchSidePanelMouseReleased(event)) {
+        if (routePointerOwnerMouseReleased(event)) {
+            completeWorkspaceInteraction();
             return true;
         }
+        if (studioMode && handleStudioWorkspaceMouseReleased(event)) {
+            return true;
+        }
+        try {
+        double mouseX = event.x();
+        double mouseY = event.y();
+        int button = mouseButtonCode(event);
         double[] undistortedCoords = unDistortMouse(mouseX, mouseY);
         if (dragState.isDragging) {
             updateConnectionDragMouse(undistortedCoords[0], undistortedCoords[1]);
@@ -5262,9 +16710,10 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             dragState.sourceIsInput = false;
             return true;
         }
-        if (handleStudioWorkspaceMouseReleased(event)) {
+        if (paletteSidePanel != null && paletteSidePanel.mouseReleased(event.retarget(paletteSidePanel, mouseX, mouseY))) {
             return true;
         }
+
         double[] worldMouse = screenToWorld(undistortedCoords[0], undistortedCoords[1]);
         int wx = (int) worldMouse[0];
         int wy = (int) worldMouse[1];
@@ -5277,30 +16726,130 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             return true;
         }
 
-        if (button == ReMouseButton.LEFT.code() && draggedWidget instanceof FlowNodeWidget) {
+        if (button == ReMouseButton.LEFT.code() && draggedWidget instanceof FlowNodeWidget draggedNode
+            && canMoveWidget(draggedNode)) {
+            drainSelectedNodeMove();
             captureSnapshot();
             if (movingSelectedNodes) {
-                syncNodePositions();
+                syncNodePositions(selectedDragStartPositions.keySet());
             } else {
                 syncNodePosition((FlowNodeWidget) draggedWidget);
             }
             movingSelectedNodes = false;
             selectedDragStartPositions.clear();
+            selectedNodeMove.clear();
             draggedWidget = null;
         }
 
-        for (int i = worldWidgets.size() - 1; i >= 0; i--) {
-            FlowNodeWidget widget = (FlowNodeWidget) worldWidgets.get(i);
+        for (FlowNodeWidget widget : graphPointCandidates(wx, wy)) {
             if (Widget.dispatchMouseReleased(widget, event.retarget(widget, wx, wy))) {
                 return true;
             }
         }
 
         return super.mouseReleased(event);
+        } finally {
+            completeWorkspaceInteraction();
+        }
+    }
+
+    private void capturePointerOwner(FlowNodeWidget node, Widget child) {
+        pointerOwnerNode = node;
+        pointerOwnerChild = child;
+    }
+
+    private void clearPointerOwner() {
+        pointerOwnerNode = null;
+        pointerOwnerChild = null;
+    }
+
+    private void revokePointerOwner() {
+        if (focusedNodeChildOwner == pointerOwnerNode && focusedNodeChild == pointerOwnerChild) {
+            setFocusedWidget(null);
+            clearFocusedNodeChild();
+        }
+        clearPointerOwner();
+    }
+
+    private void clearFocusedNodeChild() {
+        focusedNodeChildOwner = null;
+        focusedNodeChild = null;
+    }
+
+    private boolean focusedNodeChildInteractionAllowed() {
+        return validateNodeChildAuthority();
+    }
+
+    private boolean validateNodeChildAuthority() {
+        boolean valid = true;
+        if (focusedNodeChildOwner == null || focusedNodeChild == null) {
+            clearFocusedNodeChild();
+        } else if (getFocusedWidget() != focusedNodeChild) {
+            clearFocusedNodeChild();
+        } else if (!focusedNodeChildOwner.ownsInteractionChild(focusedNodeChild)
+            || !isEditableWidget(focusedNodeChildOwner)) {
+            setFocusedWidget(null);
+            clearFocusedNodeChild();
+            valid = false;
+        }
+        if (pointerOwnerNode != null && pointerOwnerChild != null
+            && (!pointerOwnerNode.ownsInteractionChild(pointerOwnerChild) || !isEditableWidget(pointerOwnerNode))) {
+            revokePointerOwner();
+            valid = false;
+        }
+        return valid;
+    }
+
+    private boolean routePointerOwnerMouseDragged(ReMouseEvent event) {
+        if (pointerOwnerNode == null || pointerOwnerChild == null) {
+            return false;
+        }
+        if (!pointerOwnerNode.ownsInteractionChild(pointerOwnerChild) || !isEditableWidget(pointerOwnerNode)) {
+            revokePointerOwner();
+            return true;
+        }
+        double[] headerCoords = unDistortMouse(event.x(), event.y());
+        double[] worldMouse = screenToWorld(headerCoords[0], headerCoords[1]);
+        Widget.dispatchMouseDragged(pointerOwnerChild, event.retarget(pointerOwnerChild, worldMouse[0], worldMouse[1],
+            event.deltaX(), event.deltaY()));
+        return true;
+    }
+
+    private boolean routePointerOwnerMouseReleased(ReMouseEvent event) {
+        if (pointerOwnerNode == null || pointerOwnerChild == null) {
+            return false;
+        }
+        if (!pointerOwnerNode.ownsInteractionChild(pointerOwnerChild) || !isEditableWidget(pointerOwnerNode)) {
+            revokePointerOwner();
+            return true;
+        }
+        Widget child = pointerOwnerChild;
+        double[] headerCoords = unDistortMouse(event.x(), event.y());
+        double[] worldMouse = screenToWorld(headerCoords[0], headerCoords[1]);
+        clearPointerOwner();
+        Widget.dispatchMouseReleased(child, event.retarget(child, worldMouse[0], worldMouse[1]));
+        return true;
     }
 
     @Override
     public boolean keyPressed(ReKeyEvent event) {
+        boolean childAuthorityValid = validateNodeChildAuthority();
+        if (StudioSaveProvider.isStudioSaveShortcut(event)) {
+            if (blockPendingCoreStudioSave()) {
+                return true;
+            }
+            ReSyncStudioView view = studioMode ? activeStudioView() : null;
+            if (view != null) {
+                view.requestSave();
+            } else {
+                onSave();
+            }
+            return true;
+        }
+        if (!childAuthorityValid) {
+            return true;
+        }
+        try {
         ReKey key = event.key();
         if (nodeItemSelector != null && nodeItemSelector.visible && nodeItemSelector.keyPressed(event.retarget(nodeItemSelector))) {
             return true;
@@ -5308,11 +16857,10 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (handlePopupWidgetKeyPressed(event)) {
             return true;
         }
-        if (handleStudioWorkspaceKeyPressed(event)) {
+        if (!focusedNodeChildInteractionAllowed()) {
             return true;
         }
-        if ((event.modifiers().control() || event.modifiers().superKey()) && key == ReKey.S) {
-            onSave();
+        if (handleStudioWorkspaceKeyPressed(event)) {
             return true;
         }
         if (isKeyboardInputFocused() && super.keyPressed(event)) {
@@ -5324,12 +16872,12 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         }
         if ((key == ReKey.DELETE || key == ReKey.BACKSPACE)
                 && !isKeyboardInputFocused()) {
-            if (!selectedNodeIds.isEmpty()) {
+            if (hasDeletableSelection()) {
                 captureSnapshot();
                 deleteSelectedNodes();
                 return true;
             }
-            if (focusedNode != null) {
+            if (focusedNode != null && canDeleteNode(findNodeId(focusedNode))) {
                 captureSnapshot();
                 deleteNode(findNodeId(focusedNode));
                 return true;
@@ -5340,37 +16888,44 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
         if (hasControl && !isKeyboardInputFocused()) {
             if (key == ReKey.C) {
-                if (!selectedNodeIds.isEmpty()) {
+                if (hasEditableSelection()) {
                     copyNodes();
                     return true;
                 }
             }
             if (key == ReKey.V) {
-                if (!clipboard.nodes.isEmpty()) {
+                if (hasPasteClipboard() && catalogAuthorityAllowsInteraction()) {
                     captureSnapshot();
                     pasteNodes();
                     return true;
                 }
             }
             if (key == ReKey.X) {
-                if (!selectedNodeIds.isEmpty()) {
+                if (hasEditableSelection()) {
                     cutNodes();
                     return true;
                 }
             }
             if (key == ReKey.D) {
-                if (!selectedNodeIds.isEmpty()) {
+                if (hasEditableSelection()) {
                     captureSnapshot();
                     duplicateNodes();
                     return true;
                 }
             }
-            if (handleStudioHistoryShortcut(event)) {
+            if (isActiveCoreStudioDocument()) {
+                if (coreAuthoringNegotiated() && handleStudioHistoryShortcut(event)) {
+                    return true;
+                }
+            } else if (catalogAuthorityAllowsInteraction() && handleStudioHistoryShortcut(event)) {
                 return true;
             }
         }
 
         return super.keyPressed(event);
+        } finally {
+            completeWorkspaceInteraction();
+        }
     }
 
     private int mouseButtonCode(ReMouseEvent event) {
@@ -5392,45 +16947,144 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     @Override
+    protected boolean isStudioKeyboardInputFocused() {
+        return nodeItemSelector != null && nodeItemSelector.visible || super.isStudioKeyboardInputFocused();
+    }
+
+    @Override
     public boolean textInput(ReTextInputEvent event) {
+        if (!validateNodeChildAuthority()) {
+            return true;
+        }
+        try {
         if (nodeItemSelector != null && nodeItemSelector.visible && nodeItemSelector.textInput(event.retarget(nodeItemSelector))) {
             return true;
         }
         if (handlePopupWidgetTextInput(event)) {
             return true;
         }
+        if (!focusedNodeChildInteractionAllowed()) {
+            return true;
+        }
         return handleStudioWorkspaceTextInput(event) || super.textInput(event);
+        } finally {
+            completeWorkspaceInteraction();
+        }
+    }
+
+    private record NodePosition(int x, int y) {
+    }
+
+    private boolean applyCoreNodePositions(CoreGraphEditorSession session, Map<NodeInstanceId, double[]> positions) {
+        List<WorkspacePatch<JsonValue>> patches = new ArrayList<>();
+        positions.forEach((nodeId, position) -> {
+            String path = "/nodes/@" + nodeId.canonicalText() + "/position/";
+            patches.add(new WorkspacePatch<>("set", path + "x", JsonValue.of(position[0])));
+            patches.add(new WorkspacePatch<>("set", path + "y", JsonValue.of(position[1])));
+        });
+        if (patches.isEmpty()) {
+            return false;
+        }
+        session.applyGraphPatches(patches);
+        return true;
     }
 
     protected void syncNodePositions() {
+        syncNodePositions(widgetCache.keySet());
+    }
+
+    private void syncNodePositions(Collection<String> nodeIds) {
+        CoreGraphEditorSession coreSession = coreInteractionSession();
+        if (coreSession != null) {
+            Map<NodeInstanceId, double[]> positions = changedCoreNodePositions(coreGraphDocument(coreSession), nodeIds,
+                nodeId -> {
+                    FlowNodeWidget widget = widgetCache.get(nodeId);
+                    return widget != null ? new double[]{widget.getX(), widget.getY()} : null;
+                });
+            if (positions.isEmpty()) {
+                return;
+            }
+            commitCoreMoveMutation("Node Positions", "positions", current -> applyCoreNodePositions(current, positions),
+                positions.keySet().stream().map(NodeInstanceId::canonicalText).toArray(String[]::new));
+            return;
+        }
+        Map<String, NodePosition> positions = new LinkedHashMap<>();
+        for (String nodeId : new LinkedHashSet<>(nodeIds)) {
+            FlowNode node = graph.getNodes().get(nodeId);
+            FlowNodeWidget widget = widgetCache.get(nodeId);
+            if (node != null && widget != null && isEditableNode(nodeId)
+                && (node.getX() != widget.getX() || node.getY() != widget.getY())) {
+                positions.put(nodeId, new NodePosition(widget.getX(), widget.getY()));
+            }
+        }
+        applyLegacyNodePositions(Map.copyOf(positions));
+    }
+
+    static Map<NodeInstanceId, double[]> changedCoreNodePositions(GraphDocument document, Collection<String> nodeIds,
+                                                                  Function<String, double[]> positionLookup) {
+        if (document == null || nodeIds == null || nodeIds.isEmpty() || positionLookup == null) {
+            return Map.of();
+        }
+        Map<String, GraphNode> nodesById = document.nodes().stream().collect(Collectors.toMap(
+            node -> node.instanceId().canonicalText(), Function.identity(), (first, second) -> first,
+            LinkedHashMap::new));
+        Map<NodeInstanceId, double[]> positions = new LinkedHashMap<>();
+        for (String nodeId : new LinkedHashSet<>(nodeIds)) {
+            GraphNode node = nodesById.get(nodeId);
+            double[] position = positionLookup.apply(nodeId);
+            if (node != null && position != null && position.length >= 2
+                && (Double.compare(node.x(), position[0]) != 0 || Double.compare(node.y(), position[1]) != 0)) {
+                positions.put(node.instanceId(), new double[]{position[0], position[1]});
+            }
+        }
+        return Collections.unmodifiableMap(positions);
+    }
+
+    private void applyLegacyNodePositions(Map<String, NodePosition> positions) {
+        if (positions == null || positions.isEmpty()) {
+            return;
+        }
+        if (deferWorkspaceMutation(() -> applyLegacyNodePositions(positions))) {
+            return;
+        }
         boolean changed = false;
-        for (Map.Entry<String, FlowNodeWidget> entry : widgetCache.entrySet()) {
+        for (Map.Entry<String, NodePosition> entry : positions.entrySet()) {
             FlowNode node = graph.getNodes().get(entry.getKey());
-            FlowNodeWidget widget = entry.getValue();
-            if (node != null && widget != null) {
-                changed |= node.getX() != widget.getX() || node.getY() != widget.getY();
-                node.setX(widget.getX());
-                node.setY(widget.getY());
+            NodePosition position = entry.getValue();
+            if (node != null && position != null && isEditableNode(entry.getKey())) {
+                changed |= node.getX() != position.x() || node.getY() != position.y();
+                node.setX(position.x());
+                node.setY(position.y());
             }
         }
         if (changed) {
-            markWorkspaceMutation();
+            queueWorkspaceMutation();
         }
     }
 
     private void syncNodePosition(FlowNodeWidget widget) {
         String nodeId = findNodeId(widget);
-        if (nodeId == null) {
+        CoreGraphEditorSession coreSession = coreInteractionSession();
+        if (coreSession != null) {
+            NodeInstanceId identity = coreNodeId(nodeId);
+            GraphNode node = coreNode(coreSession, nodeId);
+            if (identity == null || node == null || widget == null || !canMoveNode(nodeId)
+                || node.x() == widget.getX() && node.y() == widget.getY()) {
+                return;
+            }
+            double targetX = widget.getX();
+            double targetY = widget.getY();
+            commitCoreMoveMutation("Node Positions", "position:" + identity.canonicalText(),
+                current -> applyCoreNodePositions(current, Map.of(identity, new double[]{targetX, targetY})),
+                identity.canonicalText());
+            return;
+        }
+        if (nodeId == null || widget == null || !isEditableNode(nodeId)) {
             return;
         }
         FlowNode node = graph.getNodes().get(nodeId);
-        if (node != null) {
-            boolean changed = node.getX() != widget.getX() || node.getY() != widget.getY();
-            node.setX(widget.getX());
-            node.setY(widget.getY());
-            if (changed) {
-                markWorkspaceMutation();
-            }
+        if (node != null && (node.getX() != widget.getX() || node.getY() != widget.getY())) {
+            applyLegacyNodePositions(Map.of(nodeId, new NodePosition(widget.getX(), widget.getY())));
         }
     }
 
@@ -5438,6 +17092,14 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         FlowNodeWidget widget = widgetCache.get(nodeId);
         if (widget != null) {
             widget.refreshInputWidgets();
+            updateGraphRenderNodeTopology(widget, null);
+            if (!isActiveCoreStudioDocument()) {
+                graphRenderMutationPending = true;
+            }
+            invalidateGraphRenderTopology();
+            if (isActiveCoreStudioDocument()) {
+                scheduleGraphRenderIndexBuild();
+            }
         }
     }
 
@@ -5445,19 +17107,46 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (selectedNodeIds.isEmpty()) {
             return;
         }
+        if (deferWorkspaceMutation(this::deleteSelectedNodes)) {
+            return;
+        }
         Set<String> toDelete = new HashSet<>(selectedNodeIds);
-        selectedNodeIds.clear();
+        CoreGraphEditorSession coreSession = activeCoreGraphSession();
+        if (coreSession != null) {
+            List<NodeInstanceId> identities = coreDeletionIdentities(toDelete, this::canDeleteNode, this::coreNodeId);
+            if (identities.isEmpty()) {
+                return;
+            }
+            commitCoreDeleteMutation("Node Delete", current -> removeCoreNodes(current, identities),
+                identities.stream().map(NodeInstanceId::canonicalText).toArray(String[]::new));
+            return;
+        }
         for (String nodeId : toDelete) {
-            deleteNode(nodeId);
+            if (canDeleteNode(nodeId)) {
+                deleteNode(nodeId);
+            }
         }
     }
 
     private void deleteNode(String nodeId) {
-        if (nodeId == null) {
+        if (deferWorkspaceMutation(() -> deleteNode(nodeId))) {
+            return;
+        }
+        CoreGraphEditorSession coreSession = coreInteractionSession();
+        if (coreSession != null) {
+            NodeInstanceId identity = coreNodeId(nodeId);
+            if (identity == null || coreNode(coreSession, nodeId) == null || !canDeleteNode(nodeId)) {
+                return;
+            }
+            commitCoreDeleteMutation("Node Delete", current -> removeCoreNodes(current, List.of(identity)),
+                identity.canonicalText());
+            return;
+        }
+        if (nodeId == null || !isEditableNode(nodeId)) {
             return;
         }
         selectedNodeIds.remove(nodeId);
-        FlowNodeWidget widget = widgetCache.remove(nodeId);
+        FlowNodeWidget widget = removeCachedNodeWidget(nodeId);
         if (widget != null) {
             removeWorldWidget(widget);
         }
@@ -5494,7 +17183,214 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         }
         if (draggedWidget == widget) {
             draggedWidget = null;
+            movingSelectedNodes = false;
+            selectedDragStartPositions.clear();
+            selectedNodeMove.clear();
         }
+    }
+
+    static boolean removeCoreNodes(CoreGraphEditorSession session, Collection<NodeInstanceId> nodeIds) {
+        GraphDocument document = coreGraphDocument(session);
+        Set<NodeInstanceId> identities = nodeIds == null ? Set.of() : nodeIds.stream()
+            .filter(Objects::nonNull)
+            .collect(Collectors.toUnmodifiableSet());
+        if (document == null || identities.isEmpty()) {
+            return false;
+        }
+        List<GraphNode> nodes = document.nodes().stream()
+            .filter(node -> !identities.contains(node.instanceId()))
+            .toList();
+        if (nodes.size() == document.nodes().size()) {
+            return false;
+        }
+        List<GraphConnection> connections = document.connections().stream()
+            .filter(connection -> !identities.contains(connection.source().nodeId())
+                && !identities.contains(connection.target().nodeId()))
+            .toList();
+        List<GraphPassthrough> passthroughs = corePassthroughs(document, nodes, connections);
+        session.replaceGraph(new GraphDocument(document.schemaVersion(), document.resource(), document.revision(),
+            document.catalogBinding(), document.requiredCapabilities(), nodes, connections, passthroughs, document.variables(),
+            document.functions(), document.unknown()));
+        return true;
+    }
+
+    private static List<GraphPassthrough> corePassthroughs(GraphDocument document, List<GraphNode> nodes,
+                                                           List<GraphConnection> connections) {
+        Set<NodeInstanceId> nodeIds = nodes.stream().map(GraphNode::instanceId).collect(Collectors.toUnmodifiableSet());
+        Set<ConnectionId> connectionIds = connections.stream().map(GraphConnection::connectionId)
+            .collect(Collectors.toUnmodifiableSet());
+        return document.passthroughs().stream()
+            .filter(value -> nodeIds.contains(value.nodeId()))
+            .map(value -> new GraphPassthrough(value.nodeId(), value.inputPin(), value.connectionIds().stream()
+                .filter(connectionIds::contains).toList(), value.unknown()))
+            .toList();
+    }
+
+    static boolean removeCoreOptionalInput(CoreGraphEditorSession session, NodeInstanceId nodeId, PinId pinId) {
+        GraphDocument document = coreGraphDocument(session);
+        if (document == null || nodeId == null || pinId == null) {
+            return false;
+        }
+        boolean valuePresent = document.nodes().stream()
+            .filter(node -> node.instanceId().equals(nodeId))
+            .findFirst().map(node -> node.values().containsKey(pinId)).orElse(false);
+        List<GraphConnection> connections = document.connections().stream()
+            .filter(connection -> !connection.target().nodeId().equals(nodeId)
+                || !connection.target().pinId().equals(pinId))
+            .toList();
+        if (!valuePresent && connections.size() == document.connections().size()) {
+            return false;
+        }
+        List<GraphNode> nodes = document.nodes().stream().map(node -> {
+            if (!node.instanceId().equals(nodeId) || !node.values().containsKey(pinId)) {
+                return node;
+            }
+            LinkedHashMap<PinId, PinValue> values = new LinkedHashMap<>(node.values());
+            values.remove(pinId);
+            Map<Object, Object> inspector = new LinkedHashMap<>();
+            inspector.putAll(node.inspector());
+            inspector.putAll(node.inspectorFields());
+            return new GraphNode(node.instanceId(), node.definition(), node.definitionVersion(), node.modeId(), values,
+                inspector, node.branches(), node.repeatables(), node.inspectorState(), node.x(), node.y(), node.unknown());
+        }).toList();
+        List<GraphPassthrough> passthroughs = corePassthroughs(document, nodes, connections).stream()
+            .filter(value -> !value.nodeId().equals(nodeId) || !value.inputPin().equals(pinId))
+            .toList();
+        session.replaceGraph(new GraphDocument(document.schemaVersion(), document.resource(), document.revision(),
+            document.catalogBinding(), document.requiredCapabilities(), nodes, connections, passthroughs, document.variables(),
+            document.functions(), document.unknown()));
+        return true;
+    }
+
+    static CoreClipboardData captureCoreClipboard(CoreGraphEditorSession session, String serverId,
+                                                  Collection<NodeInstanceId> nodeIds,
+                                                  Collection<ContractRef<CapabilityId>> requiredCapabilities) {
+        GraphDocument document = coreGraphDocument(session);
+        if (document == null || nodeIds == null || nodeIds.isEmpty() || nodeIds.stream().anyMatch(Objects::isNull)
+            || serverId == null || session.activeAuthoringChecksum() == null) {
+            return null;
+        }
+        Set<NodeInstanceId> identities = Set.copyOf(nodeIds);
+        List<GraphNode> nodes = document.nodes().stream()
+            .filter(node -> identities.contains(node.instanceId())).toList();
+        if (nodes.size() != identities.size()) {
+            return null;
+        }
+        Set<NodeInstanceId> captured = nodes.stream().map(GraphNode::instanceId).collect(Collectors.toUnmodifiableSet());
+        List<GraphConnection> connections = document.connections().stream()
+            .filter(connection -> captured.contains(connection.source().nodeId())
+                && captured.contains(connection.target().nodeId())).toList();
+        return new CoreClipboardData(serverId, document.catalogBinding(), session.activeAuthoringChecksum(),
+            Set.copyOf(requiredCapabilities == null ? Set.of() : requiredCapabilities), nodes, connections);
+    }
+
+    static List<NodeInstanceId> resolveCoreClipboardSelection(Collection<String> nodeIds, Predicate<String> allowed,
+                                                              Function<String, NodeInstanceId> identity) {
+        if (nodeIds == null || nodeIds.isEmpty() || allowed == null || identity == null) {
+            return List.of();
+        }
+        LinkedHashSet<String> requested = new LinkedHashSet<>();
+        for (String nodeId : nodeIds) {
+            if (nodeId == null || !requested.add(nodeId) || !allowed.test(nodeId)) {
+                return List.of();
+            }
+        }
+        List<NodeInstanceId> identities = requested.stream().map(identity).toList();
+        if (identities.stream().anyMatch(Objects::isNull)
+            || new HashSet<>(identities).size() != requested.size()) {
+            return List.of();
+        }
+        return identities;
+    }
+
+    static CoreClipboardCapture acceptCoreClipboardCapture(CoreClipboardData existing, CoreClipboardData candidate,
+                                                            Predicate<CoreClipboardData> validator) {
+        if (candidate == null || validator == null || !validator.test(candidate)) {
+            return new CoreClipboardCapture(false, existing);
+        }
+        return new CoreClipboardCapture(true, candidate);
+    }
+
+    static CorePasteResult pasteCoreClipboard(GraphDocument document, CoreClipboardData clipboard, double x, double y,
+                                               List<NodeInstanceId> pastedNodeIds) {
+        Objects.requireNonNull(document, "Core graph is required");
+        Objects.requireNonNull(clipboard, "Core clipboard is required");
+        List<NodeInstanceId> identities = List.copyOf(pastedNodeIds == null ? List.of() : pastedNodeIds);
+        if (clipboard.empty() || identities.size() != clipboard.nodes().size() || !Double.isFinite(x)
+            || !Double.isFinite(y)) {
+            throw new IllegalArgumentException("Core paste requires one fresh node identity per copied node");
+        }
+        Set<NodeInstanceId> existingIdentities = document.nodes().stream().map(GraphNode::instanceId)
+            .collect(Collectors.toUnmodifiableSet());
+        if (new HashSet<>(identities).size() != identities.size()
+            || identities.stream().anyMatch(existingIdentities::contains)) {
+            throw new IllegalArgumentException("Pasted Core node identities must be fresh and unique");
+        }
+        double minX = clipboard.nodes().stream().mapToDouble(GraphNode::x).min().orElseThrow();
+        double minY = clipboard.nodes().stream().mapToDouble(GraphNode::y).min().orElseThrow();
+        Map<NodeInstanceId, NodeInstanceId> replacements = new LinkedHashMap<>();
+        List<GraphNode> nodes = new ArrayList<>(document.nodes());
+        for (int index = 0; index < clipboard.nodes().size(); index++) {
+            GraphNode source = clipboard.nodes().get(index);
+            NodeInstanceId identity = Objects.requireNonNull(identities.get(index), "Pasted node identity is required");
+            if (replacements.put(source.instanceId(), identity) != null) {
+                throw new IllegalArgumentException("Core clipboard contains duplicate node identities");
+            }
+            nodes.add(copyCoreNode(source, identity, x + source.x() - minX, y + source.y() - minY));
+        }
+        List<GraphConnection> connections = new ArrayList<>(document.connections());
+        for (GraphConnection source : clipboard.connections()) {
+            NodeInstanceId sourceNode = replacements.get(source.source().nodeId());
+            NodeInstanceId targetNode = replacements.get(source.target().nodeId());
+            if (sourceNode == null || targetNode == null) {
+                throw new IllegalArgumentException("Core clipboard connection endpoints must both be copied");
+            }
+            connections.add(new GraphConnection(ConnectionId.interactive(), copyCoreEndpoint(source.source(), sourceNode),
+                copyCoreEndpoint(source.target(), targetNode), source.unknown()));
+        }
+        GraphDocument pasted = new GraphDocument(document.schemaVersion(), document.resource(), document.revision(),
+            document.catalogBinding(), Stream.concat(document.requiredCapabilities().stream(),
+                clipboard.requiredCapabilities().stream()).collect(Collectors.toUnmodifiableSet()), nodes, connections,
+            List.of(), document.variables(), document.functions(), document.unknown());
+        return new CorePasteResult(pasted, identities);
+    }
+
+    private static GraphNode copyCoreNode(GraphNode source, NodeInstanceId identity, double x, double y) {
+        Map<Object, Object> inspector = new LinkedHashMap<>();
+        inspector.putAll(source.inspector());
+        inspector.putAll(source.inspectorFields());
+        return new GraphNode(identity, source.definition(), source.definitionVersion(), source.modeId(), source.values(),
+            inspector, source.branches(), source.repeatables(), source.inspectorState(), x, y, source.unknown());
+    }
+
+    private static GraphEndpoint copyCoreEndpoint(GraphEndpoint source, NodeInstanceId nodeId) {
+        return new GraphEndpoint(nodeId, source.pinId(), source.elementId(), source.branchId(), source.unknown());
+    }
+
+    static List<NodeInstanceId> coreDeletionIdentities(Collection<String> nodeIds, Predicate<String> canDelete,
+                                                       Function<String, NodeInstanceId> identity) {
+        if (nodeIds == null || nodeIds.isEmpty() || canDelete == null || identity == null) {
+            return List.of();
+        }
+        return nodeIds.stream()
+            .filter(Objects::nonNull)
+            .filter(canDelete)
+            .map(identity)
+            .filter(Objects::nonNull)
+            .distinct()
+            .sorted(Comparator.comparing(NodeInstanceId::canonicalText))
+            .toList();
+    }
+
+    static void clearCommittedCoreDeletionSelection(Collection<String> deletedNodeIds, Set<String> selectedNodeIds,
+                                                     Set<String> selectionBase,
+                                                     Map<String, ?> selectedDragStartPositions) {
+        if (deletedNodeIds == null || deletedNodeIds.isEmpty()) {
+            return;
+        }
+        selectedNodeIds.removeAll(deletedNodeIds);
+        selectionBase.removeAll(deletedNodeIds);
+        selectedDragStartPositions.keySet().removeAll(deletedNodeIds);
     }
 
     private boolean handleRightClick(int wx, int wy, int screenX, int screenY, boolean additiveSelection) {
@@ -5506,14 +17402,21 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
         FlowNodeWidget widget = findNodeAt(wx, wy);
         if (widget != null) {
+            if (isActiveCoreStudioDocument()
+                && showCoreRepeatableContextMenu(widget, wx, wy, screenX, screenY)) {
+                return true;
+            }
+            if (isActiveCoreStudioDocument() && removeOptionalInputPinAt(widget, wx, wy)) {
+                return true;
+            }
             if (disconnectPinAt(widget, wx, wy)) {
                 return true;
             }
-            if (removeOptionalInputPinAt(widget, wx, wy)) {
+            if (!isActiveCoreStudioDocument() && removeOptionalInputPinAt(widget, wx, wy)) {
                 return true;
             }
             selectNode(widget, additiveSelection);
-            if (widget.isFunctionStartOrEnd()) {
+            if (isEditableWidget(widget) && widget.isFunctionStartOrEnd()) {
                 showFunctionNodeContextMenu(screenX, screenY, widget);
             }
             return true;
@@ -5524,15 +17427,20 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private FlowNodeWidget findNodeAt(int wx, int wy) {
-        for (int i = worldWidgets.size() - 1; i >= 0; i--) {
-            Widget widget = worldWidgets.get(i);
-            if (widget instanceof FlowNodeWidget FlowNodeWidget) {
-                if (FlowNodeWidget.isMouseOver(wx, wy)) {
-                    return FlowNodeWidget;
-                }
+        for (FlowNodeWidget widget : graphPointCandidates(wx, wy)) {
+            if (widget.isMouseOver(wx, wy)) {
+                return widget;
             }
         }
         return null;
+    }
+
+    void showFunctionNodeContextMenu(FlowNodeWidget widget) {
+        if (widget == null) {
+            return;
+        }
+        double[] anchor = worldToScreen(widget.getX() + widget.getWidth(), widget.getY());
+        showFunctionNodeContextMenu((int) Math.round(anchor[0]), (int) Math.round(anchor[1]), widget);
     }
 
     private void showFunctionNodeContextMenu(int screenX, int screenY, FlowNodeWidget widget) {
@@ -5540,16 +17448,230 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (params == null) return;
 
         ContextMenuWidget.Builder builder = new ContextMenuWidget.Builder(this);
-        builder.addHeaderButton("add.png", widget::showAddFunctionParameterPopup, "Add Parameter", ThemeManager.getAccent("nice"));
+        boolean core = isActiveCoreStudioDocument();
+        builder.addHeaderButton("add.png", core ? () -> showAddCoreFunctionParameterPopup(widget)
+            : widget::showAddFunctionParameterPopup, "Add Parameter", ThemeManager.getAccent("nice"));
         for (FlowGraph.FunctionParameter p : params) {
-            if (p != null && p.getName() != null) {
-                String name = p.getName();
-                builder.addItem("Remove: " + name, () -> widget.removeFunctionParameter(name), name, ThemeManager.getAccent("danger"));
+            String parameterId = functionParameterIdentity(p);
+            if (!parameterId.isBlank()) {
+                String displayName = functionParameterDisplayName(p);
+                builder.addItem("Remove: " + displayName, core ? () -> removeCoreFunctionParameter(widget, p)
+                    : () -> removeFunctionParameter(widget, p), displayName,
+                    ThemeManager.getAccent("danger"));
             }
         }
         ContextMenuWidget menu = builder.build();
         addDrawableChild(menu);
         menu.show(screenX, screenY);
+    }
+
+    void showAddCoreFunctionParameterPopup(FlowNodeWidget widget) {
+        FlowNode node = widget != null && graph != null ? graph.getNodes().get(widget.getNodeId()) : null;
+        FlowNodeWidget.FunctionBoundaryIntent intent = functionBoundaryCatalog().intent(node);
+        boolean input = intent != null ? intent.role() == FlowNodeWidget.FunctionBoundaryRole.INPUTS
+            : node != null && isFunctionStartType(node.getType());
+        boolean output = intent != null ? intent.role() == FlowNodeWidget.FunctionBoundaryRole.OUTPUTS
+            : node != null && isFunctionEndType(node.getType());
+        if (!input && !output) {
+            coreOperationUnavailable("Function Signature");
+            return;
+        }
+        PopupWidget.Builder builder = new PopupWidget.Builder(input ? "Add Input" : "Add Output").setResizable(false);
+        TextInputWidget nameInput = new TextInputWidget.Builder()
+            .placeholder(input ? "input_name" : "output_name")
+            .size(200, 20)
+            .build();
+        List<String> typeOptions = Stream.concat(FlowDataType.values().stream().map(FlowDataType::getId),
+            Stream.of("list<any>", "list<string>", "set<any>", "map<string,any>", "optional<any>",
+                "result<any,string>"))
+            .filter(type -> !"execution".equals(type)).distinct().toList();
+        FlowTypeRef[] selectedType = new FlowTypeRef[]{FlowTypeRef.simple("any")};
+        AnimatedButton typeButton = new AnimatedButton.Builder().label(selectedType[0].toString()).size(200, 16)
+            .entranceAnimation(false).build();
+        typeButton.setAction(() -> showNodeInputSelectorAtScreen(typeOptions, typeButton.getMessage(), value -> {
+            selectedType[0] = FlowTypeRef.parse(value);
+            typeButton.setMessage(value);
+        }, typeButton.getX(), typeButton.getY() + typeButton.getHeight()));
+        TextInputWidget defaultInput = new TextInputWidget.Builder().placeholder("default").size(200, 20).build();
+        builder.addRow("Name", nameInput);
+        builder.addRow("Type", typeButton);
+        if (input) {
+            builder.addRow("Default", defaultInput);
+        }
+        PopupWidget[] popup = new PopupWidget[1];
+        builder.addTitleAction("Add", () -> {
+            String name = nameInput.getText() != null ? nameInput.getText().trim() : "";
+            if (name.isBlank() || !name.matches("^[a-zA-Z0-9_]+$")) {
+                new Notification("Function", "Invalid Parameter Name", Notification.Type.ERROR);
+                return;
+            }
+            String defaultValue = input && defaultInput.getText() != null ? defaultInput.getText().trim() : "";
+            FunctionParameterContract parameter;
+            try {
+                parameter = CompactBindingSupport.coreParameter(name, selectedType[0], "", "", defaultValue);
+            } catch (RuntimeException failure) {
+                new Notification("Function", failure.getMessage() == null ? "Invalid Parameter" : failure.getMessage(),
+                    Notification.Type.ERROR);
+                return;
+            }
+            if (addCoreFunctionParameter(widget, parameter, input) && popup[0] != null) {
+                popup[0].hide();
+            }
+        }, PopupWidget.TitleActionRole.PRIMARY);
+        popup[0] = builder.build();
+        addDrawableChild(popup[0]);
+        popup[0].show();
+    }
+
+    private boolean addCoreFunctionParameter(FlowNodeWidget widget, FunctionParameterContract parameter,
+                                             boolean input) {
+        if (widget == null || parameter == null || !isEditableWidget(widget)) {
+            return false;
+        }
+        return commitCoreStructuralMutation("Function Signature", current -> {
+            if (!current.isFunction()) {
+                return false;
+            }
+            FunctionSignature signature = current.functionSourceDocument().signature();
+            List<FunctionParameterContract> all = new ArrayList<>();
+            all.addAll(signature.inputs());
+            all.addAll(signature.outputs());
+            String name = String.valueOf(parameter.unknown().getOrDefault("name", ""));
+            if (all.stream().anyMatch(existing -> existing.id().equals(parameter.id())
+                || name.equalsIgnoreCase(String.valueOf(existing.unknown().getOrDefault("name", ""))))) {
+                return false;
+            }
+            List<FunctionParameterContract> parameters = new ArrayList<>(input ? signature.inputs() : signature.outputs());
+            parameters.add(parameter);
+            if (input) {
+                current.setFunctionInputs(parameters);
+            } else {
+                current.setFunctionOutputs(parameters);
+            }
+            return true;
+        }, widget.getNodeId());
+    }
+
+    private void removeCoreFunctionParameter(FlowNodeWidget widget, FlowGraph.FunctionParameter parameter) {
+        if (widget == null || parameter == null || !isEditableWidget(widget)) {
+            return;
+        }
+        String id = functionParameterIdentity(parameter);
+        FlowNode node = graph != null ? graph.getNodes().get(widget.getNodeId()) : null;
+        FlowNodeWidget.FunctionBoundaryIntent intent = functionBoundaryCatalog().intent(node);
+        boolean input = intent != null ? intent.role() == FlowNodeWidget.FunctionBoundaryRole.INPUTS
+            : node != null && isFunctionStartType(node.getType());
+        boolean output = intent != null ? intent.role() == FlowNodeWidget.FunctionBoundaryRole.OUTPUTS
+            : node != null && isFunctionEndType(node.getType());
+        if (id.isBlank() || !input && !output) {
+            return;
+        }
+        NodeInstanceId boundary = coreNodeId(widget.getNodeId());
+        if (boundary == null) {
+            return;
+        }
+        commitCoreStructuralMutation("Function Signature", current -> {
+            return removeCoreFunctionParameter(current, boundary, id, input);
+        }, widget.getNodeId());
+    }
+
+    static boolean removeCoreFunctionParameter(CoreGraphEditorSession current, NodeInstanceId boundary,
+                                               String parameterId, boolean input) {
+        if (current == null || !current.isFunction() || boundary == null || parameterId == null
+            || parameterId.isBlank()) {
+            return false;
+        }
+        FunctionSignature signature = current.functionSourceDocument().signature();
+        List<FunctionParameterContract> parameters = new ArrayList<>(input ? signature.inputs() : signature.outputs());
+        if (!parameters.removeIf(value -> value.id().canonicalText().equals(parameterId))) {
+            return false;
+        }
+        PinId pin = PinId.of(functionParameterPinId(parameterId,
+            input ? NodeDefinition.PinDirection.OUTPUT : NodeDefinition.PinDirection.INPUT));
+        GraphDocument document = current.functionSourceDocument().graph();
+        for (GraphConnection connection : List.copyOf(document.connections())) {
+            GraphEndpoint endpoint = input ? connection.source() : connection.target();
+            if (boundary.equals(endpoint.nodeId()) && pin.equals(endpoint.pinId())) {
+                current.removeConnection(connection.connectionId());
+            }
+        }
+        if (input) {
+            current.setFunctionInputs(parameters);
+        } else {
+            current.setFunctionOutputs(parameters);
+        }
+        return true;
+    }
+
+    void removeCoreFunctionParameter(FlowNodeWidget widget, String identity) {
+        if (widget == null || identity == null || identity.isBlank()) {
+            return;
+        }
+        List<FlowGraph.FunctionParameter> parameters = widget.getFunctionParameterList();
+        if (parameters == null) {
+            return;
+        }
+        FlowGraph.FunctionParameter parameter = parameters.stream()
+            .filter(value -> identity.equals(functionParameterIdentity(value))
+                || identity.equals(functionParameterDisplayName(value)))
+            .findFirst()
+            .orElse(null);
+        if (parameter != null) {
+            removeCoreFunctionParameter(widget, parameter);
+        }
+    }
+
+    private void removeFunctionParameter(FlowNodeWidget widget, FlowGraph.FunctionParameter parameter) {
+        if (isActiveCoreStudioDocument()) {
+            coreOperationUnavailable("Function Signature");
+            return;
+        }
+        if (deferWorkspaceMutation(() -> removeFunctionParameter(widget, parameter))) {
+            return;
+        }
+        if (widget == null || parameter == null || !isEditableWidget(widget) || graph == null) {
+            return;
+        }
+        String parameterId = functionParameterIdentity(parameter);
+        if (parameterId.isBlank()) {
+            return;
+        }
+        FlowNode node = graph.getNodes().get(widget.getNodeId());
+        boolean functionStart = node != null && isFunctionStartType(node.getType());
+        boolean functionEnd = node != null && isFunctionEndType(node.getType());
+        if (!functionStart && !functionEnd) {
+            widget.removeFunctionParameter(parameterId);
+            return;
+        }
+        NodeDefinition.PinDirection direction = functionStart ? NodeDefinition.PinDirection.OUTPUT : NodeDefinition.PinDirection.INPUT;
+        String canonicalPin = functionParameterPinId(parameter, direction);
+        String legacyPin = parameter.getName() != null ? parameter.getName().trim() : "";
+        if (canonicalPin.isBlank() && legacyPin.isBlank()) {
+            return;
+        }
+        boolean typedPath = hasTypedCatalogProjection();
+        String nodeId = widget.getNodeId();
+        Set<String> affectedTargets = new HashSet<>();
+        captureSnapshot();
+        if (graph.getConnections() != null) {
+            graph.getConnections().removeIf(connection -> {
+                boolean source = functionStart && nodeId.equals(connection.getSourceNodeId());
+                boolean target = functionEnd && nodeId.equals(connection.getTargetNodeId());
+                if (!source && !target) {
+                    return false;
+                }
+                String pin = source ? typedPath ? connection.getSourcePinId() : connection.getSourcePin()
+                    : typedPath ? connection.getTargetPinId() : connection.getTargetPin();
+                boolean matches = typedPath ? canonicalPin.equals(pin)
+                    : legacyPin.equals(pin) || canonicalPin.equals(pin);
+                if (matches) {
+                    affectedTargets.add(connection.getTargetNodeId());
+                }
+                return matches;
+            });
+        }
+        widget.removeFunctionParameter(typedPath ? parameterId : !legacyPin.isBlank() ? legacyPin : parameterId);
+        affectedTargets.forEach(this::refreshInputWidgets);
     }
 
 
@@ -5608,8 +17730,8 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         double maxWorldY = Math.max(worldStart[1], worldEnd[1]);
 
         Set<String> selection = new HashSet<>();
-        for (Map.Entry<String, FlowNodeWidget> entry : widgetCache.entrySet()) {
-            FlowNodeWidget widget = entry.getValue();
+        WorldBounds selectionBounds = new WorldBounds(minWorldX, minWorldY, maxWorldX, maxWorldY);
+        for (FlowNodeWidget widget : graphNodeCandidates(selectionBounds, false, List.of())) {
             if (widget == null) {
                 continue;
             }
@@ -5618,7 +17740,10 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             double nodeX2 = nodeX + widget.getWidth();
             double nodeY2 = nodeY + widget.getHeight();
             if (nodeX2 >= minWorldX && nodeX <= maxWorldX && nodeY2 >= minWorldY && nodeY <= maxWorldY) {
-                selection.add(entry.getKey());
+                String nodeId = findNodeId(widget);
+                if (nodeId != null) {
+                    selection.add(nodeId);
+                }
             }
         }
 
@@ -5673,6 +17798,16 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     protected boolean isTypeCompatible(FlowTypeRef sourceTypeRef, FlowTypeRef targetTypeRef, FlowDataType sourceType, FlowDataType targetType) {
+        if (hasTypedCatalogProjection()) {
+            if (sourceTypeRef != null && targetTypeRef != null
+                && targetTypeRef.isAssignableFrom(sourceTypeRef)) {
+                return true;
+            }
+            return sourceType != null && targetType != null && sourceType.canConvertTo(targetType);
+        }
+        if (!legacyCatalogAllowed()) {
+            return false;
+        }
         NodeRegistry registry = NodeRegistry.getInstance();
         if (registry != null && sourceTypeRef != null && targetTypeRef != null) {
             if (useStrictTypeCompatibility()) {
@@ -5690,6 +17825,12 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
     protected boolean isTypeCompatible(FlowDataType sourceType, FlowDataType targetType) {
         if (sourceType == null || targetType == null) {
+            return false;
+        }
+        if (hasTypedCatalogProjection()) {
+            return sourceType.canConvertTo(targetType);
+        }
+        if (!legacyCatalogAllowed()) {
             return false;
         }
         NodeRegistry registry = NodeRegistry.getInstance();
@@ -5719,43 +17860,47 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         int wy = (int) worldMouseY;
 
         boolean connected = false;
+        boolean pinTargeted = false;
 
-        for (int i = worldWidgets.size() - 1; i >= 0; i--) {
-            Widget widget = worldWidgets.get(i);
-            if (widget instanceof FlowNodeWidget targetWidget) {
-                if (targetWidget != dragPinWidget) {
-                    String targetPin = targetWidget.getPinAtPosition(wx, wy);
-                    if (targetPin != null) {
-                        double[] inputBounds = targetWidget.getPinBounds(targetPin, true);
-                        double[] outputBounds = targetWidget.getPinBounds(targetPin, false);
-                        boolean onInput = isInside(wx, wy, inputBounds);
-                        boolean onOutput = isInside(wx, wy, outputBounds);
+        for (FlowNodeWidget targetWidget : graphPointCandidates(wx, wy)) {
+            if (targetWidget != dragPinWidget) {
+                String targetPin = targetWidget.getPinAtPosition(wx, wy);
+                if (targetPin != null) {
+                    double[] inputBounds = targetWidget.getPinBounds(targetPin, true);
+                    double[] outputBounds = targetWidget.getPinBounds(targetPin, false);
+                    boolean onInput = isInside(wx, wy, inputBounds);
+                    boolean onOutput = isInside(wx, wy, outputBounds);
 
-                        if (!dragState.sourceIsInput && onInput && canConnect(dragPinWidget, dragState.sourcePin, targetWidget, targetPin)) {
+                    if (!dragState.sourceIsInput && onInput) {
+                        pinTargeted = true;
+                        if (canConnect(dragPinWidget, dragState.sourcePin, targetWidget, targetPin)) {
                             connected = connectWireTarget(targetWidget, targetPin, true);
-                            break;
                         }
+                        break;
+                    }
 
-                        if (dragState.sourceIsInput && onOutput && canConnect(targetWidget, targetPin, dragPinWidget, dragState.sourcePin)) {
+                    if (dragState.sourceIsInput && onOutput) {
+                        pinTargeted = true;
+                        if (canConnect(targetWidget, targetPin, dragPinWidget, dragState.sourcePin)) {
                             connected = connectWireTarget(targetWidget, targetPin, false);
-                            break;
                         }
+                        break;
                     }
                 }
             }
         }
 
-        if (!connected) {
+        if (!connected && !pinTargeted) {
             FuzzyWireTarget target = findFuzzyWireTarget(wx, wy);
             if (target != null) {
                 connected = connectWireTarget(target.widget(), target.pinName(), target.input());
             }
         }
 
-        if (!connected && dragPinWidget != null) {
+        if (!connected && !pinTargeted && dragPinWidget != null) {
             FlowDataType sourceType = dragPinWidget.getPinType(dragState.sourcePin, dragState.sourceIsInput);
             FlowConnection sourceConnection = !dragState.sourceIsInput ? resolveDragSourceConnection() : null;
-            if (sourceType != null) {
+            if (sourceType != null && (dragState.sourceIsInput || sourceConnection != null)) {
                 pendingSourceNodeId = dragState.sourceIsInput ? dragState.sourceNodeId : sourceConnection.getSourceNodeId();
                 pendingSourcePin = dragState.sourceIsInput ? dragState.sourcePin : sourceConnection.getSourcePin();
                 pendingEditorSourceNodeId = dragState.sourceIsInput ? null : sourceConnection.getEditorSourceNodeId();
@@ -5766,9 +17911,17 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         }
     }
 
+    private record LegacyWireCommand(String sourceNodeId, String sourcePin, String targetNodeId, String targetPin,
+                                     String editorSourceNodeId, String editorSourcePin) {
+    }
+
     private boolean connectWireTarget(FlowNodeWidget targetWidget, String targetPin, boolean targetIsInput) {
         String targetNodeId = findNodeId(targetWidget);
-        if (targetNodeId == null || graph.getConnections() == null) {
+        if (isActiveCoreStudioDocument()) {
+            return connectCoreWireTarget(targetWidget, targetNodeId, targetPin, targetIsInput);
+        }
+        if (targetNodeId == null || !isEditableWidget(targetWidget) || graph.getConnections() == null
+            || dragPinWidget == null || !isEditableWidget(dragPinWidget)) {
             return false;
         }
         if (targetIsInput) {
@@ -5776,36 +17929,184 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             if (sourceConnection == null) {
                 return false;
             }
-            captureSnapshot();
-            FlowConnection newConnection = new FlowConnection(sourceConnection.getSourceNodeId(), sourceConnection.getSourcePin(), targetNodeId, targetPin);
-            copyEditorSource(sourceConnection, newConnection);
-            removeExistingInputConnection(targetNodeId, targetPin);
-            graph.getConnections().add(newConnection);
-            refreshInputWidgets(targetNodeId);
+            return applyLegacyWire(new LegacyWireCommand(sourceConnection.getSourceNodeId(), sourceConnection.getSourcePin(),
+                targetNodeId, targetPin, sourceConnection.getEditorSourceNodeId(), sourceConnection.getEditorSourcePin()));
         } else {
             FlowConnection sourceConnection = resolveConnectionSource(targetNodeId, targetPin);
             if (sourceConnection == null) {
                 return false;
             }
-            captureSnapshot();
-            FlowConnection newConnection = new FlowConnection(sourceConnection.getSourceNodeId(), sourceConnection.getSourcePin(), dragState.sourceNodeId, dragState.sourcePin);
-            copyEditorSource(sourceConnection, newConnection);
-            removeExistingInputConnection(dragState.sourceNodeId, dragState.sourcePin);
-            graph.getConnections().add(newConnection);
-            refreshInputWidgets(dragState.sourceNodeId);
+            return applyLegacyWire(new LegacyWireCommand(sourceConnection.getSourceNodeId(), sourceConnection.getSourcePin(),
+                dragState.sourceNodeId, dragState.sourcePin, sourceConnection.getEditorSourceNodeId(),
+                sourceConnection.getEditorSourcePin()));
         }
+    }
+
+    private boolean applyLegacyWire(LegacyWireCommand command) {
+        if (command == null || command.sourceNodeId() == null || command.sourcePin() == null
+            || command.targetNodeId() == null || command.targetPin() == null) {
+            return false;
+        }
+        if (deferWorkspaceMutation(() -> applyLegacyWire(command))) {
+            return true;
+        }
+        if (graph == null || graph.getConnections() == null || !isEditableNode(command.sourceNodeId())
+            || !isEditableNode(command.targetNodeId())) {
+            return false;
+        }
+        captureSnapshot();
+        FlowConnection connection = new FlowConnection(command.sourceNodeId(), command.sourcePin(),
+            command.targetNodeId(), command.targetPin());
+        connection.setEditorSourceNodeId(command.editorSourceNodeId());
+        connection.setEditorSourcePin(command.editorSourcePin());
+        removeExistingInputConnection(command.targetNodeId(), command.targetPin());
+        graph.getConnections().add(connection);
+        refreshInputWidgets(command.targetNodeId());
         return true;
+    }
+
+    private boolean showCoreRepeatableContextMenu(FlowNodeWidget widget, int wx, int wy,
+                                                  int screenX, int screenY) {
+        String pin = widget.getPinAtPosition(wx, wy);
+        if (pin == null || !widget.isCoreRepeatablePin(pin)) {
+            return false;
+        }
+        ContextMenuWidget.Builder builder = new ContextMenuWidget.Builder(this);
+        boolean available = false;
+        boolean input = pin.equals(widget.getInputPinAtPosition(wx, wy));
+        String nodeId = findNodeId(widget);
+        GraphDocument document = coreGraphDocument(activeCoreGraphSession());
+        boolean connected = nodeId != null && document != null && document.connections().stream().anyMatch(connection ->
+            coreConnectionEndpointMatches(input ? connection.target() : connection.source(), nodeId, pin));
+        if (connected) {
+            builder.addIconItem("Disconnect Pin", "delete.png",
+                () -> {
+                    if (input) {
+                        disconnectInputPin(widget, pin);
+                    } else {
+                        disconnectOutputPin(widget, pin);
+                    }
+                },
+                "Disconnect this item", ThemeManager.getAccent("danger"));
+            available = true;
+        }
+        if (widget.canMoveCoreRepeatablePin(pin, true)) {
+            builder.addIconItem("Move Earlier", "up.png", () -> widget.moveCoreRepeatablePin(pin, true),
+                "Move this item earlier in the group");
+            available = true;
+        }
+        if (widget.canMoveCoreRepeatablePin(pin, false)) {
+            builder.addIconItem("Move Later", "down.png", () -> widget.moveCoreRepeatablePin(pin, false),
+                "Move this item later in the group");
+            available = true;
+        }
+        if (widget.canRemoveCoreRepeatablePin(pin)) {
+            builder.addIconItem("Remove Item", "delete.png", () -> widget.removeCoreRepeatablePin(pin),
+                "Remove this item and its connections", ThemeManager.getAccent("danger"));
+            available = true;
+        }
+        if (!available) {
+            coreOperationUnavailable("Repeatable Pins");
+            return true;
+        }
+        ContextMenuWidget menu = builder.build();
+        addDrawableChild(menu);
+        menu.show(screenX, screenY);
+        return true;
+    }
+
+    private boolean connectCoreWireTarget(FlowNodeWidget targetWidget, String targetNodeId, String targetPin,
+                                          boolean targetIsInput) {
+        CoreGraphEditorSession session = activeCoreGraphSession();
+        if (session == null || targetNodeId == null || targetPin == null || targetPin.isBlank()
+            || !canMutateWidgetStructure(targetWidget) || dragPinWidget == null
+            || !canMutateWidgetStructure(dragPinWidget)) {
+            return false;
+        }
+        FlowConnection sourceConnection;
+        String sourceNodeId;
+        String sourcePin;
+        String destinationNodeId;
+        String destinationPin;
+        if (targetIsInput) {
+            sourceConnection = resolveDragSourceConnection();
+            if (sourceConnection == null) {
+                return false;
+            }
+            sourceNodeId = sourceConnection.getSourceNodeId();
+            sourcePin = sourceConnection.getSourcePin();
+            destinationNodeId = targetNodeId;
+            destinationPin = targetPin;
+        } else {
+            sourceConnection = resolveConnectionSource(targetNodeId, targetPin);
+            if (sourceConnection == null) {
+                return false;
+            }
+            sourceNodeId = sourceConnection.getSourceNodeId();
+            sourcePin = sourceConnection.getSourcePin();
+            destinationNodeId = dragState.sourceNodeId;
+            destinationPin = dragState.sourcePin;
+        }
+        String finalSourceNodeId = sourceNodeId;
+        String finalSourcePin = sourcePin;
+        String finalDestinationNodeId = destinationNodeId;
+        String finalDestinationPin = destinationPin;
+        GraphConnection newConnection = coreGraphConnection(sourceConnection, finalSourceNodeId, finalSourcePin,
+            finalDestinationNodeId, finalDestinationPin);
+        if (newConnection == null) {
+            coreOperationUnavailable("Wire Connection");
+            refreshCoreProjection();
+            return false;
+        }
+        String passthroughSourceNodeId = sourceConnection.getEditorSourceNodeId();
+        String passthroughSourcePin = sourceConnection.getEditorSourcePin();
+        NodeInstanceId passthroughNode = passthroughSourceNodeId != null
+            && NodeWidget.isPassthroughOutputPin(passthroughSourcePin) ? coreNodeId(passthroughSourceNodeId) : null;
+        PinId passthroughPin = passthroughSourcePin != null && NodeWidget.isPassthroughOutputPin(passthroughSourcePin)
+            ? corePinId(NodeWidget.passthroughInputPin(passthroughSourcePin)) : null;
+        return commitCoreStructuralMutation("Connection Add", current -> {
+            GraphDocument document = coreGraphDocument(current);
+            if (document == null) {
+                return false;
+            }
+            List<GraphConnection> connections = new ArrayList<>(document.connections());
+            connections.removeIf(connection -> coreConnectionEndpointMatches(connection.target(), finalDestinationNodeId,
+                finalDestinationPin));
+            connections.add(newConnection);
+            current.setConnections(connections);
+            if (passthroughNode != null && passthroughPin != null) {
+                List<GraphPassthrough> passthroughs = new ArrayList<>(coreGraphDocument(current).passthroughs());
+                boolean matched = false;
+                for (int index = 0; index < passthroughs.size(); index++) {
+                    GraphPassthrough passthrough = passthroughs.get(index);
+                    if (!passthrough.nodeId().equals(passthroughNode) || !passthrough.inputPin().equals(passthroughPin)) {
+                        continue;
+                    }
+                    ArrayList<ConnectionId> connectionIds = new ArrayList<>(passthrough.connectionIds());
+                    connectionIds.add(newConnection.connectionId());
+                    passthroughs.set(index, new GraphPassthrough(passthrough.nodeId(), passthrough.inputPin(),
+                        connectionIds, passthrough.unknown()));
+                    matched = true;
+                    break;
+                }
+                if (!matched) {
+                    passthroughs.add(new GraphPassthrough(passthroughNode, passthroughPin,
+                        List.of(newConnection.connectionId()), OpaqueData.empty()));
+                }
+                current.setPassthroughs(passthroughs);
+            }
+            return true;
+        }, finalSourceNodeId, finalDestinationNodeId);
     }
 
     private FuzzyWireTarget findFuzzyWireTarget(int wx, int wy) {
         FuzzyWireTarget best = null;
-        for (int i = worldWidgets.size() - 1; i >= 0; i--) {
-            Widget widget = worldWidgets.get(i);
-            if (!(widget instanceof FlowNodeWidget targetWidget) || targetWidget == dragPinWidget) {
+        double margin = Math.max(FUZZY_WIRE_NODE_MARGIN, FUZZY_WIRE_PIN_RADIUS) / Math.max(zoomLevel, 0.1f);
+        for (FlowNodeWidget targetWidget : graphNearbyCandidates(wx, wy, margin)) {
+            if (targetWidget == dragPinWidget) {
                 continue;
             }
             boolean targetIsInput = !dragState.sourceIsInput;
-            boolean nearNode = isNearNode(targetWidget, wx, wy);
             List<String> pins = targetIsInput ? targetWidget.getVisibleInputPins() : targetWidget.getVisibleOutputPins();
             for (String pinName : pins) {
                 if (!canFuzzyConnect(targetWidget, pinName, targetIsInput)) {
@@ -5816,7 +18117,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                     continue;
                 }
                 double pinDistance = screenDistanceToPin(wx, wy, bounds);
-                if (!nearNode && pinDistance > FUZZY_WIRE_PIN_RADIUS) {
+                if (pinDistance > FUZZY_WIRE_PIN_RADIUS) {
                     continue;
                 }
                 double score = pinDistance + fuzzyTypePenalty(targetWidget, pinName, targetIsInput) + screenDistanceToNode(wx, wy, targetWidget) * 0.35;
@@ -5838,6 +18139,13 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     private double fuzzyTypePenalty(FlowNodeWidget targetWidget, String targetPin, boolean targetIsInput) {
         FlowDataType connectionSourceType = targetIsInput ? dragPinWidget.getPinType(dragState.sourcePin, false) : targetWidget.getPinType(targetPin, false);
         FlowDataType connectionTargetType = targetIsInput ? targetWidget.getPinType(targetPin, true) : dragPinWidget.getPinType(dragState.sourcePin, true);
+        if (hasTypedCatalogProjection()) {
+            return connectionSourceType == null || connectionTargetType == null
+                || connectionSourceType.equals(connectionTargetType) ? 0.0 : 28.0;
+        }
+        if (!legacyCatalogAllowed()) {
+            return 1000.0;
+        }
         NodeRegistry registry = NodeRegistry.getInstance();
         if (registry != null && connectionSourceType != null && connectionTargetType != null) {
             connectionSourceType = registry.resolveType(nodeRegistryServerId(), connectionSourceType.getId());
@@ -5890,10 +18198,11 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private FlowConnection resolveConnectionSource(String sourceNodeId, String sourcePin) {
-        return resolveConnectionSource(sourceNodeId, sourcePin, new HashSet<>());
+        return resolveConnectionSource(sourceNodeId, sourcePin, new HashSet<>(), null);
     }
 
-    private FlowConnection resolveConnectionSource(String sourceNodeId, String sourcePin, Set<String> visited) {
+    private FlowConnection resolveConnectionSource(String sourceNodeId, String sourcePin, Set<String> visited,
+                                                   Map<InputPinKey, FlowConnection> incomingConnections) {
         FlowConnection resolved = new FlowConnection(sourceNodeId, sourcePin, "", "");
         if (!NodeWidget.isPassthroughOutputPin(sourcePin)) {
             return resolved;
@@ -5902,7 +18211,9 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (!visited.add(routeKey)) {
             return resolved;
         }
-        FlowConnection incoming = findIncomingConnection(sourceNodeId, NodeWidget.passthroughInputPin(sourcePin));
+        String inputPin = NodeWidget.passthroughInputPin(sourcePin);
+        FlowConnection incoming = incomingConnections != null
+            ? incomingConnections.get(new InputPinKey(sourceNodeId, inputPin)) : findIncomingConnection(sourceNodeId, inputPin);
         if (incoming == null) {
             return resolved;
         }
@@ -5912,7 +18223,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         String incomingPin = incoming.getEditorSourcePin() != null && !incoming.getEditorSourcePin().isBlank()
             ? incoming.getEditorSourcePin()
             : incoming.getSourcePin();
-        FlowConnection runtimeSource = resolveConnectionSource(incomingNodeId, incomingPin, visited);
+        FlowConnection runtimeSource = resolveConnectionSource(incomingNodeId, incomingPin, visited, incomingConnections);
         resolved.setSourceNodeId(runtimeSource.getSourceNodeId());
         resolved.setSourcePin(runtimeSource.getSourcePin());
         resolved.setEditorSourceNodeId(sourceNodeId);
@@ -5927,17 +18238,88 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
 
     private void bringToFront(FlowNodeWidget widget) {
-        if (widget == null) {
+        if (!ownsGraphRenderWidget(widget)) {
             return;
         }
-        worldWidgets.remove(widget);
-        worldWidgets.add(widget);
+        if (activeCoreGraphSession() == null) {
+            worldWidgets.remove(widget);
+            worldWidgets.add(widget);
+        }
+        int order = graphRenderFrontOrder++;
+        updateGraphRenderNodeTopology(widget, order);
+        CoreStructuralPreview preview = visibleCorePreview();
+        GraphRenderIndex index = preview != null && preview.overlay() != null && preview.overlay().nodeOrder.containsKey(widget)
+            ? preview.overlay() : graphRenderIndex;
+        if (currentGraphRenderIndex(index)) {
+            index.nodeOrder.put(widget, order);
+        } else {
+            scheduleGraphRenderIndexBuild();
+        }
+    }
+
+    private boolean currentGraphRenderIndex(GraphRenderIndex index) {
+        return index != null && index.graph == graph && index.version == graphRenderMutationVersion
+            && index.projectionGeneration == coreProjectionGeneration
+            && Objects.equals(index.topologyChecksum, coreTopologyChecksum);
+    }
+
+    static <T> void assignGraphRenderOrder(Iterable<T> values, Map<T, Integer> order) {
+        order.clear();
+        int index = 0;
+        for (T value : values) {
+            order.put(value, index++);
+        }
+    }
+
+    static final class SelectedNodeMoveAccumulator {
+        private int moveX;
+        private int moveY;
+        private boolean pending;
+
+        void queue(int moveX, int moveY) {
+            this.moveX = moveX;
+            this.moveY = moveY;
+            pending = true;
+        }
+
+        int drain(Map<String, int[]> startPositions, Map<String, ? extends NodeWidget> widgets,
+                  Consumer<Collection<String>> geometryQueue) {
+            if (!pending) {
+                return 0;
+            }
+            pending = false;
+            Set<String> changedNodeIds = new LinkedHashSet<>();
+            for (Map.Entry<String, int[]> entry : startPositions.entrySet()) {
+                NodeWidget widget = widgets.get(entry.getKey());
+                int[] start = entry.getValue();
+                if (widget == null || start == null || start.length < 2) {
+                    continue;
+                }
+                int targetX = start[0] + moveX;
+                int targetY = start[1] + moveY;
+                if (widget.getX() != targetX || widget.getY() != targetY) {
+                    widget.setPosition(targetX, targetY);
+                    changedNodeIds.add(entry.getKey());
+                }
+            }
+            if (!changedNodeIds.isEmpty()) {
+                geometryQueue.accept(changedNodeIds);
+            }
+            return changedNodeIds.size();
+        }
+
+        void clear() {
+            moveX = 0;
+            moveY = 0;
+            pending = false;
+        }
     }
 
     private void startSelectedNodeMove(FlowNodeWidget widget, int button) {
         movingSelectedNodes = false;
         selectedDragStartPositions.clear();
-        if (button != ReMouseButton.LEFT.code()) {
+        selectedNodeMove.clear();
+        if (button != ReMouseButton.LEFT.code() || !canMoveWidget(widget)) {
             return;
         }
         String nodeId = findNodeId(widget);
@@ -5947,7 +18329,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         movingSelectedNodes = true;
         for (String selectedNodeId : selectedNodeIds) {
             FlowNodeWidget selectedWidget = widgetCache.get(selectedNodeId);
-            if (selectedWidget != null) {
+            if (selectedWidget != null && canMoveNode(selectedNodeId)) {
                 selectedDragStartPositions.put(selectedNodeId, new int[] { selectedWidget.getX(), selectedWidget.getY() });
             }
         }
@@ -6000,12 +18382,45 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private String findNodeId(FlowNodeWidget widget) {
-        for (Map.Entry<String, FlowNodeWidget> entry : widgetCache.entrySet()) {
-            if (entry.getValue() == widget) {
-                return entry.getKey();
-            }
+        return widgetNodeIds.get(widget);
+    }
+
+    private void cacheNodeWidget(String nodeId, FlowNodeWidget widget) {
+        cacheNodeWidget(nodeId, widget, true);
+    }
+
+    private void cacheNodeWidget(String nodeId, FlowNodeWidget widget, boolean completeTopology) {
+        FlowNodeWidget previous = widgetCache.put(nodeId, widget);
+        if (previous != null) {
+            widgetNodeIds.remove(previous);
         }
-        return null;
+        widgetNodeIds.put(widget, nodeId);
+        updateGraphRenderNodeTopology(widget, graphRenderFrontOrder++);
+        invalidateGraphRenderTopology();
+        if (completeTopology && graph != null && graph.getNodes() != null && widgetCache.size() == graph.getNodes().size()) {
+            adoptGraphRenderState();
+        }
+    }
+
+    private FlowNodeWidget removeCachedNodeWidget(String nodeId) {
+        FlowNodeWidget widget = widgetCache.remove(nodeId);
+        if (widget != null) {
+            widgetNodeIds.remove(widget);
+            graphRenderTopologyRevision.incrementAndGet();
+            graphRenderNodeTopology.remove(widget);
+            graphRenderTopologyRevision.incrementAndGet();
+            invalidateGraphRenderTopology();
+        }
+        return widget;
+    }
+
+    private void clearNodeWidgetCache() {
+        widgetCache.clear();
+        widgetNodeIds.clear();
+        graphRenderTopologyRevision.incrementAndGet();
+        graphRenderNodeTopology.clear();
+        graphRenderTopologyRevision.incrementAndGet();
+        invalidateGraphRenderTopology();
     }
 
     private String findNodeIdForNode(FlowNode node) {
@@ -6041,75 +18456,6 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         nodeItemSelector.show(x, y);
     }
 
-    private String findCompatiblePin(NodeDefinition definition, FlowDataType sourceType, boolean sourceIsInput) {
-        List<NodeDefinition.PinDefinition> pins = sourceIsInput ? definition.getOutputs() : definition.getInputs();
-        String bestPin = null;
-        int bestScore = Integer.MAX_VALUE;
-        for (NodeDefinition.PinDefinition pin : pins) {
-            if (pin.getVisibleWhen() != null && !pin.getVisibleWhen().isEmpty() && !canExposeCompatibleFamilyPin(definition, pin)) {
-                continue;
-            }
-            if (sourceType == FlowDataType.EXECUTION) {
-                if (pin.getType() == NodeDefinition.PinType.FLOW && pin.getDataType() == FlowDataType.EXECUTION) {
-                    return pin.getName();
-                }
-                continue;
-            }
-            if (pin.getType() == NodeDefinition.PinType.DATA) {
-                int score = smartDropCompatibilityScore(sourceType, pin.getDataType(), sourceIsInput);
-                if (score < bestScore) {
-                    bestScore = score;
-                    bestPin = pin.getName();
-                    if (score == 0) {
-                        break;
-                    }
-                }
-            }
-        }
-        return bestPin;
-    }
-
-    private int smartDropCompatibilityScore(FlowDataType sourceType, FlowDataType pinType, boolean sourceIsInput) {
-        if (sourceType == null || pinType == null) {
-            return Integer.MAX_VALUE;
-        }
-        if (sourceType.equals(pinType)) {
-            return 0;
-        }
-        FlowDataType connectionSourceType = sourceIsInput ? pinType : sourceType;
-        FlowDataType connectionTargetType = sourceIsInput ? sourceType : pinType;
-        NodeRegistry registry = NodeRegistry.getInstance();
-        if (registry != null) {
-            connectionSourceType = registry.resolveType(nodeRegistryServerId(), connectionSourceType.getId());
-            connectionTargetType = registry.resolveType(nodeRegistryServerId(), connectionTargetType.getId());
-        }
-        if (!isTypeCompatible(connectionSourceType, connectionTargetType)) {
-            return Integer.MAX_VALUE;
-        }
-        if (connectionSourceType == FlowDataType.ANY || connectionTargetType == FlowDataType.ANY) {
-            return 2;
-        }
-        if (connectionTargetType.isAssignableFrom(connectionSourceType)) {
-            return 1;
-        }
-        if (connectionTargetType == FlowDataType.STRING) {
-            return 4;
-        }
-        return 3;
-    }
-
-    private int smartDropCompatibilityScore(NodeDefinition definition, FlowDataType sourceType, boolean sourceIsInput) {
-        String pinName = findCompatiblePin(definition, sourceType, sourceIsInput);
-        if (pinName == null) {
-            return Integer.MAX_VALUE;
-        }
-        if (sourceType == FlowDataType.EXECUTION) {
-            return 0;
-        }
-        NodeDefinition.PinDefinition pin = findPin(definition, pinName);
-        return pin != null ? smartDropCompatibilityScore(sourceType, pin.getDataType(), sourceIsInput) : Integer.MAX_VALUE;
-    }
-
     private String smartDropSectionLabel(int compatibilityScore) {
         return switch (compatibilityScore) {
             case 0 -> "Exact Type";
@@ -6120,31 +18466,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         };
     }
 
-    private boolean canExposeCompatibleFamilyPin(NodeDefinition definition, NodeDefinition.PinDefinition candidate) {
-        if (definition.getKind() != NodeDefinition.NodeKind.FAMILY || candidate.getVisibleWhen() == null || candidate.getVisibleWhen().isEmpty()) {
-            return false;
-        }
-        for (NodeDefinition.PinDefinition input : definition.getInputs()) {
-            if (input.getDirection() == NodeDefinition.PinDirection.INPUT
-                    && input.getType() == NodeDefinition.PinType.DATA
-                    && (input.getName().equalsIgnoreCase("mode") || input.getName().equalsIgnoreCase("action"))) {
-                if (input.getOptions() == null) {
-                    return false;
-                }
-                for (String value : candidate.getVisibleWhen().values()) {
-                    for (String option : value.split(",")) {
-                        if (input.getOptions().contains(option.trim())) {
-                            return true;
-                        }
-                    }
-                }
-                return false;
-            }
-        }
-        return false;
-    }
-
-    private void showAllNodesMenu(int screenX, int screenY) {
+    protected void showAllNodesMenu(int screenX, int screenY) {
         closeNodeItemSelector();
 
         clearSelection();
@@ -6165,70 +18487,49 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private void populateNodeSelector(ItemSelectorWidget.Builder builder, FlowDataType sourceType, boolean sourceIsInput, int worldX, int worldY, boolean atCenter) {
-        if (NodeRegistry.getInstance() != null && NodeRegistry.getInstance().hasDefinitions(nodeRegistryServerId())) {
-            List<NodeDefinition> definitions = new ArrayList<>(NodeRegistry.getInstance().getAllDefinitions(nodeRegistryServerId()).values());
-            definitions.removeIf(NodeDefinition::isHidden);
-            Comparator<NodeDefinition> catalogOrder = Comparator.comparingInt(NodeDefinition::getPriority).thenComparing(NodeDefinition::getDisplayName, String.CASE_INSENSITIVE_ORDER);
-            if (sourceType != null) {
-                definitions.removeIf(definition -> smartDropCompatibilityScore(definition, sourceType, sourceIsInput) == Integer.MAX_VALUE);
-                definitions.sort(Comparator.comparingInt((NodeDefinition definition) -> smartDropCompatibilityScore(definition, sourceType, sourceIsInput)).thenComparing(catalogOrder));
-                int typeColumnWidth = selectorVariantTypeColumnWidth(List.of(definitions), sourceType, sourceIsInput);
-                int displayedCompatibilityScore = Integer.MIN_VALUE;
-                for (NodeDefinition definition : definitions) {
-                    int compatibilityScore = smartDropCompatibilityScore(definition, sourceType, sourceIsInput);
-                    if (compatibilityScore != displayedCompatibilityScore) {
-                        builder.addSectionHeader(smartDropSectionLabel(compatibilityScore));
-                        displayedCompatibilityScore = compatibilityScore;
-                    }
-                    String pinName = findCompatiblePin(definition, sourceType, sourceIsInput);
-                    addSelectorItem(builder, definition, compatibilityScore, () -> {
-                        captureSnapshot();
-                        addNode(worldX, worldY, definition.getId(), pinName);
-                    });
-                    addSelectorVariantItems(builder, definition, worldX, worldY, pinName, typeColumnWidth, compatibilityScore);
-                }
-                return;
-            }
-            definitions.sort(catalogOrder);
+        NodeSelectorProvider provider = createNodeSelectorProvider(sourceType, sourceIsInput, worldX, worldY, atCenter);
+        builder.virtualItems(provider, provider.catalogKey(), this::nodeSelectorCatalogKey);
+    }
 
-            Map<NodeDefinition.NodeCategory, List<NodeDefinition>> categories = new LinkedHashMap<>();
-            List<NodeDefinition.NodeCategory> order = categoryOrder.isEmpty() ? resolveCategoryOrder() : categoryOrder;
-            for (NodeDefinition.NodeCategory category : order) {
-                categories.put(category, new ArrayList<>());
-            }
-            for (NodeDefinition def : definitions) {
-                categories.computeIfAbsent(selectorCategory(def), ignored -> new ArrayList<>()).add(def);
-            }
-
-            int typeColumnWidth = selectorVariantTypeColumnWidth(categories.values(), sourceType, sourceIsInput);
-            String displayedGroup = null;
-            for (Map.Entry<NodeDefinition.NodeCategory, List<NodeDefinition>> entry : categories.entrySet()) {
-                if (entry.getValue().isEmpty()) {
-                    continue;
-                }
-                String group = catalogGroupName(entry.getKey());
-                if (!group.equals(displayedGroup)) {
-                    builder.addSectionHeader(group);
-                    displayedGroup = group;
-                }
-                builder.addSectionHeader(getCategoryLabel(entry.getKey()));
-                for (NodeDefinition def : entry.getValue()) {
-                    if (atCenter) {
-                        addSelectorItem(builder, def, () -> {
-                            captureSnapshot();
-                            addNodeAtCenter(def.getId());
-                        });
-                        addSelectorVariantItemsAtCenter(builder, def, typeColumnWidth);
-                    } else {
-                        addSelectorItem(builder, def, () -> {
-                            captureSnapshot();
-                            addNode(worldX, worldY, def.getId(), null);
-                        });
-                        addSelectorVariantItems(builder, def, worldX, worldY, null, typeColumnWidth);
-                    }
-                }
-            }
+    private NodeSelectorProvider createNodeSelectorProvider(FlowDataType sourceType, boolean sourceIsInput,
+                                                             int worldX, int worldY, boolean atCenter) {
+        boolean typedProjection = hasTypedCatalogProjection();
+        ReSyncTypedInteractionProjection.Palette palette = typedProjection ? typedCatalogPalette().orElse(null) : null;
+        boolean legacyCompatibility = !typedProjection && legacyCatalogAllowed();
+        NodeRegistry.SelectorCatalogSnapshot legacySnapshot = null;
+        if (legacyCompatibility) {
+            NodeRegistry registry = NodeRegistry.getInstance();
+            legacySnapshot = registry != null ? registry.getSelectorCatalogSnapshot(nodeRegistryServerId()) : null;
         }
+        boolean strictTypeCompatibility = useStrictTypeCompatibility();
+        Object catalogKey = typedProjection ? palette != null ? palette.key() : null
+            : legacySnapshot != null ? legacySnapshot.key() : null;
+        return new NodeSelectorProvider(palette, legacySnapshot,
+            sourceType, sourceIsInput, worldX, worldY, atCenter, catalogKey, typedProjection,
+            legacyCompatibility, strictTypeCompatibility, isActiveCoreCommandDocument());
+    }
+
+    private String selectorGroupBadge(String group) {
+        return switch (group) {
+            case "ReSync" -> "Re";
+            case "Minecraft" -> "MC";
+            case "Integrations" -> "App";
+            default -> "Flow";
+        };
+    }
+
+    private Object nodeSelectorCatalogKey() {
+        Optional<ReSyncTypedInteractionProjection> interaction = typedInteractionProjection();
+        if (hasTypedCatalogProjection()) {
+            return interaction.map(ReSyncTypedInteractionProjection::key).orElse(null);
+        }
+        if (!legacyCatalogAllowed()) {
+            return null;
+        }
+        NodeRegistry registry = NodeRegistry.getInstance();
+        NodeRegistry.SelectorCatalogSnapshot snapshot = registry != null
+            ? registry.getSelectorCatalogSnapshot(nodeRegistryServerId()) : null;
+        return snapshot != null ? snapshot.key() : null;
     }
 
     private NodeDefinition.NodeCategory selectorCategory(NodeDefinition definition) {
@@ -6240,79 +18541,19 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         return category != null ? category : NodeDefinition.NodeCategory.UTILITY;
     }
 
+    private String catalogNodeType(NodeDefinition definition) {
+        if (definition == null) {
+            return "";
+        }
+        if (!hasTypedCatalogProjection()) {
+            return definition.getId();
+        }
+        ContractRef<NodeId> identity = FlowNodeWidget.typedNodeIdentity(definition.getOwner(), definition.getId());
+        return FlowNodeWidget.canonicalNodeReference(identity);
+    }
+
     private String selectorLabel(NodeDefinition definition) {
         return definition.getDisplayName();
-    }
-
-    private void addSelectorItem(ItemSelectorWidget.Builder builder, NodeDefinition definition, Runnable action) {
-        addSelectorItem(builder, definition, 0, action);
-    }
-
-    private void addSelectorItem(ItemSelectorWidget.Builder builder, NodeDefinition definition, int rankingPriority, Runnable action) {
-        NodeDefinition.NodeCategory category = selectorCategory(definition);
-        builder.addBadgedItem(selectorLabel(definition), catalogGroupName(category),
-            selectorHint(definition), selectorSearchTerms(definition), rankingPriority, action);
-    }
-
-    private int selectorVariantTypeColumnWidth(Collection<List<NodeDefinition>> groups, FlowDataType sourceType, boolean sourceIsInput) {
-        int width = 0;
-        for (List<NodeDefinition> definitions : groups) {
-            for (NodeDefinition definition : definitions) {
-                String autoWirePin = sourceType != null ? findCompatiblePin(definition, sourceType, sourceIsInput) : null;
-                if (sourceType != null && autoWirePin == null) {
-                    continue;
-                }
-                for (NodeSelectorVariant variant : selectorVariants(definition)) {
-                    if (autoWirePin != null && !variantExposesPin(definition, variant, autoWirePin)) {
-                        continue;
-                    }
-                    width = Math.max(width, FamilyVariantSelectorEntry.variantTypeWidth(selectorVariantDataType(definition, variant, autoWirePin)));
-                }
-            }
-        }
-        return width;
-    }
-
-    private void addSelectorVariantItems(ItemSelectorWidget.Builder builder, NodeDefinition definition, int x, int y, String autoWirePin, int typeColumnWidth) {
-        addSelectorVariantItems(builder, definition, x, y, autoWirePin, typeColumnWidth, 0);
-    }
-
-    private void addSelectorVariantItems(ItemSelectorWidget.Builder builder, NodeDefinition definition, int x, int y, String autoWirePin, int typeColumnWidth, int rankingPriority) {
-        for (NodeSelectorVariant variant : selectorVariants(definition)) {
-            if (autoWirePin != null && !variantExposesPin(definition, variant, autoWirePin)) {
-                continue;
-            }
-            addSelectorVariantItem(builder, definition, variant, autoWirePin, typeColumnWidth, rankingPriority, () -> {
-                captureSnapshot();
-                addNode(x, y, definition.getId(), autoWirePin, Map.of(variant.selectorPin().getName(), variant.option()));
-            });
-        }
-    }
-
-    private void addSelectorVariantItemsAtCenter(ItemSelectorWidget.Builder builder, NodeDefinition definition, int typeColumnWidth) {
-        for (NodeSelectorVariant variant : selectorVariants(definition)) {
-            addSelectorVariantItem(builder, definition, variant, null, typeColumnWidth, 0, () -> {
-                captureSnapshot();
-                addNodeAtCenter(definition.getId(), Map.of(variant.selectorPin().getName(), variant.option()));
-            });
-        }
-    }
-
-    private void addSelectorVariantItem(ItemSelectorWidget.Builder builder, NodeDefinition definition, NodeSelectorVariant variant, String autoWirePin, int typeColumnWidth, int rankingPriority, Runnable action) {
-        FamilyVariantSelectorEntry entry = new FamilyVariantSelectorEntry(
-            definition.getDisplayName(),
-            selectorVariantLabel(definition, variant),
-            selectorVariantDataType(definition, variant, autoWirePin),
-            typeColumnWidth,
-            () -> {
-                closeNodeItemSelector();
-                if (action != null) {
-                    action.run();
-                }
-            }
-        );
-        entry.hint = selectorVariantHint(definition, variant);
-        builder.addCustomEntry(entry, selectorVariantSearchTerms(definition, variant), rankingPriority);
     }
 
     private List<NodeSelectorVariant> selectorVariants(NodeDefinition definition) {
@@ -6557,7 +18798,40 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private String addNode(int x, int y, String type, String autoWirePin, Map<String, Object> inputValues) {
-        NodeDefinition definition = NodeRegistry.getInstance() != null ? NodeRegistry.getInstance().getDefinition(nodeRegistryServerId(), type) : null;
+        if (deferWorkspaceMutation(() -> addNode(x, y, type, autoWirePin, inputValues))) {
+            return null;
+        }
+        if (isActiveCoreStudioDocument()) {
+            return addCoreNode(x, y, type, autoWirePin, inputValues);
+        }
+        if (!catalogAuthorityAllowsInteraction()) {
+            pendingSourceNodeId = null;
+            pendingSourcePin = null;
+            pendingEditorSourceNodeId = null;
+            pendingEditorSourcePin = null;
+            pendingSourceIsInput = false;
+            return null;
+        }
+        if (hasTypedCatalogProjection()) {
+            ContractRef<NodeId> reference = typedNodeReference(type);
+            if (reference == null || !typedCatalogEditable(reference.owner().canonicalText(), reference.id().canonicalText())) {
+                pendingSourceNodeId = null;
+                pendingSourcePin = null;
+                pendingEditorSourceNodeId = null;
+                pendingEditorSourcePin = null;
+                pendingSourceIsInput = false;
+                return null;
+            }
+        }
+        NodeDefinition definition = resolveAuthoritativeNodeDefinition(type);
+        if (definition == null) {
+            pendingSourceNodeId = null;
+            pendingSourcePin = null;
+            pendingEditorSourceNodeId = null;
+            pendingEditorSourcePin = null;
+            pendingSourceIsInput = false;
+            return null;
+        }
         if (definition != null && definition.isDestructive()) {
             new Notification("Destructive Node", formatSelectorOption(definition.getConfirmationPolicy()), Notification.Type.WARN);
         }
@@ -6566,7 +18840,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         graph.getNodes().put(id, node);
 
         FlowNodeWidget widget = createNodeWidget(id, node);
-        widgetCache.put(id, widget);
+        cacheNodeWidget(id, widget);
         addWorldWidget(widget);
 
         if (pendingSourceNodeId != null && pendingSourcePin != null && autoWirePin != null) {
@@ -6592,29 +18866,258 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         return id;
     }
 
+    private String addCoreNode(int x, int y, String type, String autoWirePin, Map<String, Object> inputValues) {
+        CoreGraphEditorSession session = activeCoreGraphSession();
+        ReSyncFlowClient client = typedCatalogClient();
+        ReSyncResourceType resourceType = activeStudioDocument != null
+            ? ReSyncResourceType.byTypeId(activeStudioDocument.type())
+            : session != null && session.resource() != null
+                ? ReSyncResourceType.byTypeId(session.resource().resourceType().value()) : null;
+        ReSyncCatalogPublicationProjection.Snapshot catalog = client != null
+            ? client.catalogPublicationProjection().active().orElse(null) : null;
+        GraphDocument document = session == null ? null
+            : session.isFunction() ? session.functionSourceDocument().graph() : session.graphDocument();
+        String authoringDiagnostic = coreAuthoringDiagnostic();
+        try {
+            if (isActiveCoreCommandDocument() && isAnyCommandStartType(type)) {
+                throw new IllegalArgumentException("Command start nodes are managed by the command resource");
+            }
+            if (session != null && session.isFunction()
+                && functionBoundaryCatalog().intent(new FlowNode(type, x, y, Map.of())) != null) {
+                throw new IllegalArgumentException("Function boundary nodes are managed by the function resource");
+            }
+            if (session == null || client == null || resourceType == null || catalog == null || document == null
+                || !"ready".equals(authoringDiagnostic)) {
+                throw new IllegalStateException("Core graph authoring is unavailable: " + authoringDiagnostic);
+            }
+            CoreGraphAuthoringAdapter.Context context = CoreGraphAuthoringAdapter.Context.strict(resourceType,
+                session.resource(), session.catalogBinding(), document.schemaVersion(), catalog.entries().values(),
+                session.revision());
+            NodeInstanceId identity = NodeInstanceId.interactive();
+            FlowNode candidate = new FlowNode(type, x, y, new HashMap<>(inputValues != null ? inputValues : Map.of()));
+            GraphNode node = new CoreGraphAuthoringAdapter().createNode(identity, candidate, context);
+            CatalogCachePublication.Entry entry = catalog.entries().get(node.definition());
+            if (entry == null || !entry.present() || entry.opaque() || entry.state() != CatalogCacheState.ACTIVE) {
+                throw new IllegalStateException("The node is not active in the current catalog");
+            }
+            String pendingNodeId = pendingSourceNodeId;
+            String pendingPin = pendingSourcePin;
+            boolean pendingInput = pendingSourceIsInput;
+            String autoWireTargetNodeId = pendingInput ? pendingNodeId : identity.canonicalText();
+            String autoWireTargetPin = pendingInput ? pendingPin : autoWirePin;
+            ReSyncGenericWidgetCapabilities.WidgetDefinition createdWidget = genericWidgetDefinition(type);
+            NodeDefinition createdDefinition = createdWidget != null
+                ? createdWidget.definition() : resolveAuthoritativeNodeDefinition(type);
+            CreatedCoreEndpoint createdEndpoint = pendingNodeId == null || pendingPin == null || autoWirePin == null
+                || autoWirePin.isBlank() || createdDefinition == null ? null
+                    : createdCoreEndpoint(node, createdDefinition, autoWirePin);
+            GraphEndpoint existingEndpoint = createdEndpoint == null ? null
+                : coreEndpoint(null, pendingNodeId, pendingPin, !pendingInput);
+            GraphConnection autoWireConnection = createdEndpoint == null || existingEndpoint == null ? null
+                : pendingInput
+                    ? new GraphConnection(ConnectionId.interactive(), createdEndpoint.endpoint(), existingEndpoint)
+                    : new GraphConnection(ConnectionId.interactive(), existingEndpoint, createdEndpoint.endpoint());
+            GraphNode createdNode = autoWireConnection != null ? createdEndpoint.node() : node;
+            boolean added = commitCoreCreateMutation("Node Add", current -> {
+                GraphDocument currentDocument = coreGraphDocument(current);
+                if (currentDocument == null) {
+                    return false;
+                }
+                Set<ContractRef<CapabilityId>> requiredCapabilities = new LinkedHashSet<>(currentDocument.requiredCapabilities());
+                requiredCapabilities.addAll(entry.requiredCapabilities());
+                List<GraphNode> nodes = new ArrayList<>(currentDocument.nodes());
+                nodes.add(createdNode);
+                List<GraphConnection> connections = new ArrayList<>(currentDocument.connections());
+                if (autoWireConnection != null) {
+                    connections.removeIf(connection -> coreConnectionEndpointMatches(connection.target(), autoWireTargetNodeId,
+                        autoWireTargetPin));
+                    connections.add(autoWireConnection);
+                }
+                List<GraphPassthrough> passthroughs = corePassthroughs(currentDocument, nodes, connections);
+                current.replaceGraph(new GraphDocument(currentDocument.schemaVersion(), currentDocument.resource(),
+                    currentDocument.revision(), currentDocument.catalogBinding(), requiredCapabilities, nodes, connections,
+                    passthroughs, currentDocument.variables(), currentDocument.functions(), currentDocument.unknown()));
+                return true;
+            }, identity.canonicalText());
+            if (!added) {
+                return null;
+            }
+            return identity.canonicalText();
+        } catch (RuntimeException exception) {
+            String detail = exception.getMessage() == null || exception.getMessage().isBlank()
+                ? TaskIdentities.failureName(exception) : exception.getMessage();
+            ReLog.logger(LogTypes.FLOW).source(LogSource.server(serverId, serverId)).component(GraphEditorScreen.class)
+                .operation("Core Graph Node Add").error("Core node add rejected: nodeType=" + type + ",resourceType="
+                    + (resourceType != null ? resourceType.typeId() : "missing") + ",owner="
+                    + (activeStudioDocument != null ? "studio_document" : "session") + ",resource="
+                    + (session != null ? session.resource() : "missing") + ",revision="
+                    + (session != null ? session.revision() : -1L) + ",authority="
+                    + (client != null ? client.catalogAuthority() : "missing") + ",catalogKey="
+                    + (catalog != null ? catalog.publication().key() : "missing") + ",authoring=" + authoringDiagnostic
+                    + ",inputPins=" + (inputValues != null ? inputValues.keySet() : Set.of()) + ",reason=" + detail);
+            coreOperationUnavailable("Node Add");
+            refreshCoreProjection();
+            return null;
+        } finally {
+            pendingSourceNodeId = null;
+            pendingSourcePin = null;
+            pendingEditorSourceNodeId = null;
+            pendingEditorSourcePin = null;
+            pendingSourceIsInput = false;
+        }
+    }
+
+    private ContractRef<NodeId> typedNodeReference(String nodeType) {
+        if (nodeType == null || nodeType.isBlank()) {
+            return null;
+        }
+        int separator = nodeType.indexOf(':');
+        if (separator <= 0 || separator == nodeType.length() - 1 || nodeType.indexOf(':', separator + 1) >= 0) {
+            return null;
+        }
+        return FlowNodeWidget.typedNodeIdentity(nodeType.substring(0, separator), nodeType.substring(separator + 1));
+    }
+
+    private boolean typedNodeTypeEditable(String nodeType) {
+        ContractRef<NodeId> reference = typedNodeReference(nodeType);
+        return reference != null && catalogAuthorityAllowsInteraction()
+            && typedCatalogEditable(reference.owner().canonicalText(), reference.id().canonicalText());
+    }
+
+    @Override
+    public boolean requestStudioSave() {
+        onSave();
+        return true;
+    }
+
     protected void onSave() {
-        syncNodePositions();
+        if (blockPendingCoreStudioSave()) {
+            return;
+        }
         saveGraph();
     }
 
+    private GraphSaveAuthorityToken captureGraphSaveAuthority(FlowManager manager, ReSyncResourceType type,
+                                                               String resourceId, CoreGraphEditorSession session) {
+        if (manager == null || type == null || !type.isGraph() && !ownsCoreGraphSession(session)
+            || resourceId == null || resourceId.isBlank()
+            || serverId == null || serverId.isBlank()) {
+            return null;
+        }
+        ReSyncFlowClient client = manager.existingFlowClient(serverId);
+        String authorityIdentity = graphSaveAuthorityIdentity(client);
+        if (session == null) {
+            if (manager.isCoreGraphAuthoritative(serverId, type, resourceId)
+                || manager.coreGraphCreationRequired(serverId, type)
+                || client != null && client.catalogAuthority() != ReSyncFlowClient.CatalogAuthority.LEGACY_COMPATIBILITY) {
+                return null;
+            }
+            return new GraphSaveAuthorityToken(GraphSaveAuthorityMode.LEGACY, serverId, type.typeId(), resourceId,
+                manager, client, authorityIdentity, null, -1L, "");
+        }
+        if (client == null || client.catalogAuthority() != ReSyncFlowClient.CatalogAuthority.TYPED_PUBLICATION
+            || !ownsCoreGraphSession(session) && !manager.isCurrentCoreGraphEditorSession(serverId, type, resourceId, session)
+            || !"ready".equals(coreSessionAuthoringDiagnostic(session, type, resourceId))) {
+            return null;
+        }
+        String snapshot;
+        long revision;
+        try {
+            snapshot = session.canonicalPayloadJson();
+            revision = session.revision();
+        } catch (RuntimeException exception) {
+            return null;
+        }
+        return new GraphSaveAuthorityToken(GraphSaveAuthorityMode.CORE, serverId, type.typeId(), resourceId,
+            manager, client, authorityIdentity, session, revision, snapshot);
+    }
+
+    private boolean workspaceGraphSaveAuthorityCurrent(WorkspaceGraphSaveRequest request) {
+        if (request == null || request.authority() == null) {
+            return false;
+        }
+        GraphSaveAuthorityToken current = captureGraphSaveAuthority(request.manager(), request.type(),
+            request.authority().resourceId(), null);
+        return request.authority().equals(current);
+    }
+
+    private static String graphSaveAuthorityIdentity(ReSyncFlowClient client) {
+        if (client == null) {
+            return "client=none";
+        }
+        String authoring = client.activeCatalogAuthoringChecksum().map(value -> value.canonicalText()).orElse("");
+        return client.catalogAuthorityDebugState() + "|authoringChecksum=" + authoring;
+    }
+
     protected void saveGraph() {
+        if (blockPendingCoreStudioSave()) {
+            return;
+        }
+        CoreGraphEditorSession coreSession = activeCoreGraphSession();
+        if (coreSession != null) {
+            if (!coreAuthoringNegotiated()) {
+                ReLog.logger(LogTypes.FLOW).source(LogSource.server(serverId, serverId)).component(GraphEditorScreen.class)
+                    .operation("Core Graph Save").error("Core canonical save unavailable: " + coreAuthoringDiagnostic());
+                coreOperationUnavailable("Canonical Save");
+                return;
+            }
+            ReSyncResourceType type = activeStudioDocument != null
+                ? ReSyncResourceType.byTypeId(activeStudioDocument.type())
+                : coreSession.resource() != null
+                    ? ReSyncResourceType.byTypeId(coreSession.resource().resourceType().value()) : null;
+            String resourceId = coreSession.resource() != null ? coreSession.resource().id() : "";
+            if (type == null || resourceId.isBlank()) {
+                coreOperationUnavailable("Canonical Save");
+                return;
+            }
+            CoreDeferredSave save = prepareCoreSave(coreSession, type, resourceId);
+            if (save == null) {
+                coreOperationUnavailable("Canonical Save");
+                return;
+            }
+            if (hasPendingCoreMutation(coreSession)) {
+                queueDeferredCoreSave(save);
+                return;
+            }
+            if (!coreSaveProjectionReady(coreSession)) {
+                DesignerSaveNotifications.failExact(save.ticket(), "Editor Projection Unavailable");
+                coreOperationUnavailable("Editor Loading");
+                return;
+            }
+            if (coreEditorReadiness.widgetTopologyAvailable()) {
+                try {
+                    syncNodePositions();
+                } catch (RuntimeException | Error exception) {
+                    DesignerSaveNotifications.failExact(save.ticket(), "Save Preparation Failed");
+                    coreOperationUnavailable("Canonical Save");
+                    return;
+                }
+                if (hasPendingCoreMutation(coreSession)) {
+                    queueDeferredCoreSave(save);
+                    return;
+                }
+            }
+            saveCoreSession(save);
+            return;
+        }
         if (studioMode && activeStudioDocument != null && activeStudioDocument.graph() != null) {
             graph = activeStudioDocument.graph();
         }
-        normalizePassthroughConnections();
         FlowManager flowManager = FlowManager.getInstance();
-        ReSyncFlowClient workspaceClient = flowManager != null && studioMode && flowManager.isFlowClientReady(serverId)
-            ? flowManager.existingFlowClient(serverId) : null;
-        if (workspaceClient != null) {
-            publishWorkspaceDocumentChanges(workspaceClient);
+        if (studioMode && activeStudioDocument != null && activeStudioDocument.graph() != null && flowManager != null) {
+            ReSyncResourceType pendingType = ReSyncResourceType.byTypeId(activeStudioDocument.type());
+            if (pendingType != null && pendingType.isGraph()
+                && (flowManager.isCoreGraphAuthoritative(serverId, pendingType, activeStudioDocument.id())
+                    || flowManager.coreGraphCreationRequired(serverId, pendingType))) {
+                openWorkspaceResource(activeStudioDocument.type(), activeStudioDocument.id());
+                coreOperationUnavailable("Editor Loading");
+                return;
+            }
         }
         if (studioMode && activeStudioDocument != null && ReSyncResourceDragPayload.WORLDGEN.equals(activeStudioDocument.type())) {
-            WorldGenProject project = WorldGenManager.getInstance().getCachedProject(serverId, activeStudioDocument.id());
-            if (project == null) {
-                project = WorldGenManager.getInstance().createProjectTemplate("Continental", activeStudioDocument.id());
+            if (!saveCollaborativeWorkspace()) {
+                new Notification("World Generation", "Save Preparation Unavailable", Notification.Type.ERROR);
             }
-            project.setTerrainGraph(WorldGenManager.getInstance().toWorldGenGraph(graph));
-            WorldGenManager.getInstance().saveWorldGen(serverId, project);
             return;
         }
         if (studioMode && activeStudioDocument != null && ReSyncResourceDragPayload.COMMAND.equals(activeStudioDocument.type())) {
@@ -6635,15 +19138,146 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                 new Notification("Command", "ID Conflicts With Content", Notification.Type.ERROR);
                 return;
             }
-            DesignerSaveNotifications.start(serverId, ReSyncResourceType.COMMAND, commandGraph.getId(), "/" + command.command);
-            flowManager.saveGraph(serverId, ReSyncResourceType.COMMAND, commandGraph);
+            queueWorkspaceMutation();
+            requestWorkspaceGraphSave(flowManager, ReSyncResourceType.COMMAND, commandGraph, "/" + command.command);
             return;
         }
         if (flowManager != null && serverId != null) {
             ReSyncResourceType type = activeGraphResourceType();
-            startGraphSaveNotification(type, graph);
-            flowManager.saveGraph(serverId, type, graph);
+            requestWorkspaceGraphSave(flowManager, type, graph, "");
         }
+    }
+
+    protected final boolean hasPendingCoreMutation(CoreGraphEditorSession session) {
+        return (coreMutationCommitPending != null && coreMutationCommitPending.session() == session)
+            || coreMutationQueue.stream().anyMatch(command -> command.session() == session);
+    }
+
+    private CoreDeferredSave prepareCoreSave(CoreGraphEditorSession session, ReSyncResourceType type,
+                                             String resourceId) {
+        DesignerSaveNotifications.SaveTicket ticket = DesignerSaveNotifications.startResumableExact(serverId,
+            type, resourceId, resourceId, UUID.randomUUID(), UUID.randomUUID());
+        return ticket == null ? null : new CoreDeferredSave(session, type, resourceId, ticket);
+    }
+
+    private void queueDeferredCoreSave(CoreDeferredSave save) {
+        if (coreDeferredSaves.size() >= CORE_MUTATION_QUEUE_LIMIT) {
+            DesignerSaveNotifications.failExact(save.ticket(), "Save Queue Full");
+            coreOperationUnavailable("Canonical Save");
+            return;
+        }
+        coreDeferredSaves.addLast(save);
+    }
+
+    private void dispatchDeferredCoreSaves() {
+        if (coreDeferredSaves.isEmpty()) {
+            return;
+        }
+        int pending = coreDeferredSaves.size();
+        for (int index = 0; index < pending; index++) {
+            CoreDeferredSave save = coreDeferredSaves.removeFirst();
+            if (hasPendingCoreMutation(save.session())) {
+                coreDeferredSaves.addLast(save);
+                continue;
+            }
+            saveCoreSession(save);
+        }
+    }
+
+    private void saveCoreSession(CoreDeferredSave save) {
+        CoreGraphEditorSession session = save.session();
+        ReSyncResourceType type = save.type();
+        String resourceId = save.resourceId();
+        DesignerSaveNotifications.SaveTicket ticket = save.ticket();
+        FlowManager manager = FlowManager.getInstance();
+        try {
+            GraphSaveAuthorityToken authority = captureGraphSaveAuthority(manager, type, resourceId, session);
+            if (authority == null) {
+                DesignerSaveNotifications.failExact(ticket, "Save Authority Unavailable");
+                coreOperationUnavailable("Editor Loading");
+                return;
+            }
+            Optional<Boolean> dispatched = dispatchAuthorityFencedSave(authority,
+                () -> captureGraphSaveAuthority(manager, type, resourceId, session), () -> {
+                    try {
+                        boolean accepted = coreGraphSaveHandler != null
+                            ? Boolean.TRUE.equals(coreGraphSaveHandler.apply(session, ticket))
+                            : manager.saveCoreGraph(serverId, type, session, ticket);
+                        if (!accepted) {
+                            DesignerSaveNotifications.failExact(ticket, "Save Preparation Rejected");
+                        }
+                        return accepted;
+                    } catch (RuntimeException | Error exception) {
+                        DesignerSaveNotifications.failExact(ticket, "Save Preparation Failed");
+                        return false;
+                    }
+                });
+            if (dispatched.isEmpty()) {
+                DesignerSaveNotifications.failExact(ticket, "Save Authority Changed");
+                coreOperationUnavailable("Editor Loading");
+            } else if (!dispatched.orElse(false)) {
+                coreOperationUnavailable("Canonical Save");
+            }
+        } catch (RuntimeException | Error exception) {
+            DesignerSaveNotifications.failExact(ticket, "Save Preparation Failed");
+            coreOperationUnavailable("Canonical Save");
+        }
+    }
+
+    protected boolean saveCollaborativeWorkspace() {
+        GraphEditorScreen editor = activeWorkspaceEditor();
+        return editor != null && editor != this && editor.saveCollaborativeWorkspace();
+    }
+
+    private void requestWorkspaceGraphSave(FlowManager manager, ReSyncResourceType type, FlowGraph target, String notificationName) {
+        if (manager == null || type == null || target == null || target.getId() == null) {
+            return;
+        }
+        SaveTicketIdentity identity = saveTicketIdentity(type, target, notificationName);
+        if (identity == null || identity.type() == null || identity.id() == null || identity.id().isBlank()) {
+            return;
+        }
+        if (!typedGraphCanSave(target)) {
+            coreOperationUnavailable("Editor Loading");
+            return;
+        }
+        GraphSaveAuthorityToken authority = captureGraphSaveAuthority(manager, identity.type(), identity.id(), null);
+        if (authority == null) {
+            coreOperationUnavailable("Editor Loading");
+            return;
+        }
+        clearWorkspaceCaptureFailures();
+        completeWorkspaceMutation();
+        WorkspaceFence fence = workspaceFence(workspacePublicationGeneration, workspaceMutationVersion);
+        workspaceGraphSaveRequest = new WorkspaceGraphSaveRequest(fence, serverId, type,
+            notificationName != null ? notificationName : "", manager, identity, authority, new BrowserSafeState.ReferenceValue<>());
+        captureStableWorkspaceDocument(workspaceMutationVersion);
+    }
+
+    protected SaveTicketIdentity saveTicketIdentity(ReSyncResourceType materializationType, FlowGraph target,
+                                                     String notificationName) {
+        String id = target != null ? target.getId() : "";
+        String name = notificationName != null && !notificationName.isBlank() ? notificationName : id;
+        return new SaveTicketIdentity(materializationType, id, name);
+    }
+
+    private boolean typedGraphCanSave(FlowGraph target) {
+        if (activeCoreGraphSession() != null) {
+            return coreAuthoringNegotiated();
+        }
+        if (!catalogAuthorityAllowsDurableSave()) {
+            return false;
+        }
+        if (!catalogAuthorityRequired() || target == null || target.getNodes() == null) {
+            return true;
+        }
+        for (FlowNode node : target.getNodes().values()) {
+            NodeDefinition definition = node != null ? resolveAuthoritativeNodeDefinition(node.getType()) : null;
+            if (definition == null || !typedCatalogEditable(definition.getOwner(), definition.getId())) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private ReSyncResourceType activeGraphResourceType() {
@@ -6656,18 +19290,6 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             return type;
         }
         return graph != null && graph.isFunction() ? ReSyncResourceType.FUNCTION : ReSyncResourceType.FLOW;
-    }
-
-    private void startGraphSaveNotification(ReSyncResourceType type, FlowGraph savingGraph) {
-        if (savingGraph == null) {
-            return;
-        }
-        CustomContentDefinition content = CustomContentGraphAdapter.toDefinition(savingGraph);
-        if (content != null) {
-            DesignerSaveNotifications.start(serverId, ReSyncResourceType.CUSTOM_CONTENT, content.getId(), content.getDisplayName());
-            return;
-        }
-        DesignerSaveNotifications.start(serverId, type, savingGraph.getId(), savingGraph.getId());
     }
 
     private CommandBindingContext saveCommandDocument(FlowManager manager) {
@@ -6689,30 +19311,59 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (graph == null || graph.getConnections() == null) {
             return;
         }
+        graphRenderTopologyRevision.incrementAndGet();
+        graphRenderConnectionTopology.clear();
+        graphRenderConnectionsByNode.clear();
+        if (isActiveCoreStudioDocument()) {
+            for (FlowConnection connection : graph.getConnections()) {
+                indexGraphRenderConnection(connection);
+            }
+            graphRenderTopologyRevision.incrementAndGet();
+            return;
+        }
+        Map<InputPinKey, FlowConnection> incomingConnections = incomingConnectionIndex();
         for (FlowConnection connection : graph.getConnections()) {
+            if (!isEditableNode(connection.getSourceNodeId()) || !isEditableNode(connection.getTargetNodeId())) {
+                continue;
+            }
             if (!NodeWidget.isPassthroughOutputPin(connection.getSourcePin())) {
                 continue;
             }
-            FlowConnection resolved = resolveConnectionSource(connection.getSourceNodeId(), connection.getSourcePin());
+            FlowConnection resolved = resolveConnectionSource(connection.getSourceNodeId(), connection.getSourcePin(),
+                new HashSet<>(), incomingConnections);
             if (resolved != null && resolved.getEditorSourceNodeId() != null) {
                 connection.setSourceNodeId(resolved.getSourceNodeId());
                 connection.setSourcePin(resolved.getSourcePin());
                 copyEditorSource(resolved, connection);
             }
         }
-        synchronizePassthroughRuntimeSources();
+        synchronizePassthroughRuntimeSources(incomingConnections);
+        graphRenderTopologyRevision.incrementAndGet();
     }
 
-    private void synchronizePassthroughRuntimeSources() {
+    private Map<InputPinKey, FlowConnection> incomingConnectionIndex() {
+        Map<InputPinKey, FlowConnection> incoming = new LinkedHashMap<>();
         for (FlowConnection connection : graph.getConnections()) {
-            String editorNodeId = connection.getEditorSourceNodeId();
-            String editorPin = connection.getEditorSourcePin();
-            if (editorNodeId == null || editorNodeId.isBlank() || !NodeWidget.isPassthroughOutputPin(editorPin)) {
-                continue;
+            incoming.putIfAbsent(new InputPinKey(connection.getTargetNodeId(), connection.getTargetPin()), connection);
+        }
+        return incoming;
+    }
+
+    private void synchronizePassthroughRuntimeSources(Map<InputPinKey, FlowConnection> incomingConnections) {
+        if (isActiveCoreStudioDocument()) {
+            return;
+        }
+        for (FlowConnection connection : graph.getConnections()) {
+            if (isEditableNode(connection.getSourceNodeId()) && isEditableNode(connection.getTargetNodeId())) {
+                String editorNodeId = connection.getEditorSourceNodeId();
+                String editorPin = connection.getEditorSourcePin();
+                if (editorNodeId != null && !editorNodeId.isBlank() && NodeWidget.isPassthroughOutputPin(editorPin)) {
+                    FlowConnection resolved = resolveConnectionSource(editorNodeId, editorPin, new HashSet<>(), incomingConnections);
+                    connection.setSourceNodeId(resolved.getSourceNodeId());
+                    connection.setSourcePin(resolved.getSourcePin());
+                }
             }
-            FlowConnection resolved = resolveConnectionSource(editorNodeId, editorPin);
-            connection.setSourceNodeId(resolved.getSourceNodeId());
-            connection.setSourcePin(resolved.getSourcePin());
+            indexGraphRenderConnection(connection);
         }
     }
 
@@ -6726,6 +19377,15 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private boolean removeOptionalInputPinAt(FlowNodeWidget widget, int wx, int wy) {
+        if (isActiveCoreStudioDocument()) {
+            String repeatablePin = widget.getPinAtPosition(wx, wy);
+            if (repeatablePin != null && widget.isCoreRepeatablePin(repeatablePin)) {
+                if (!widget.removeCoreRepeatablePin(repeatablePin)) {
+                    coreOperationUnavailable("Repeatable Pins");
+                }
+                return true;
+            }
+        }
         String pinName = widget.getInputPinAtPosition(wx, wy);
         if (pinName == null || !widget.isOptionalInputPin(pinName)) {
             return false;
@@ -6734,7 +19394,35 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private boolean removeOptionalInputPin(FlowNodeWidget widget, String pinName) {
-        if (pinName == null || !widget.isOptionalInputPin(pinName)) {
+        if (isActiveCoreStudioDocument()) {
+            CoreGraphEditorSession session = activeCoreGraphSession();
+            String nodeId = findNodeId(widget);
+            NodeInstanceId identity = coreNodeId(nodeId);
+            PinId pinId = corePinId(pinName);
+            if (session == null || nodeId == null || identity == null || pinId == null
+                || !canMutateWidgetStructure(widget) || !widget.isOptionalInputPin(pinName)) {
+                coreOperationUnavailable("Optional Pins");
+                refreshCoreProjection();
+                return false;
+            }
+            GraphDocument document = coreGraphDocument(session);
+            LinkedHashSet<String> affectedNodeIds = new LinkedHashSet<>();
+            affectedNodeIds.add(nodeId);
+            if (document != null) {
+                document.connections().stream()
+                    .filter(connection -> connection.target().nodeId().equals(identity)
+                        && connection.target().pinId().equals(pinId))
+                    .map(connection -> connection.source().nodeId().canonicalText())
+                    .forEach(affectedNodeIds::add);
+            }
+            return commitCoreStructuralMutation("Remove Optional Input",
+                current -> removeCoreOptionalInput(current, identity, pinId),
+                affectedNodeIds.toArray(String[]::new));
+        }
+        if (deferWorkspaceMutation(() -> removeOptionalInputPin(widget, pinName))) {
+            return true;
+        }
+        if (!isEditableWidget(widget) || pinName == null || !widget.isOptionalInputPin(pinName)) {
             return false;
         }
         String nodeId = findNodeId(widget);
@@ -6769,6 +19457,22 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private boolean disconnectInputPin(FlowNodeWidget widget, String pinName) {
+        CoreGraphEditorSession coreSession = activeCoreGraphSession();
+        if (coreSession != null) {
+            String nodeId = findNodeId(widget);
+            if (nodeId == null || !canMutateWidgetStructure(widget) || coreNodeId(nodeId) == null
+                || corePinId(pinName) == null) {
+                return false;
+            }
+            return coreRemoveConnections("Disconnect Input", connection ->
+                coreConnectionEndpointMatches(connection.target(), nodeId, pinName), nodeId);
+        }
+        if (deferWorkspaceMutation(() -> disconnectInputPin(widget, pinName))) {
+            return true;
+        }
+        if (!isEditableWidget(widget)) {
+            return false;
+        }
         String nodeId = findNodeId(widget);
         if (nodeId == null || graph.getConnections() == null) {
             return false;
@@ -6784,6 +19488,22 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private boolean disconnectOutputPin(FlowNodeWidget widget, String pinName) {
+        CoreGraphEditorSession coreSession = activeCoreGraphSession();
+        if (coreSession != null) {
+            String nodeId = findNodeId(widget);
+            if (nodeId == null || !canMutateWidgetStructure(widget) || coreNodeId(nodeId) == null
+                || corePinId(pinName) == null) {
+                return false;
+            }
+            return coreRemoveConnections("Disconnect Output", connection ->
+                coreConnectionEndpointMatches(connection.source(), nodeId, pinName), nodeId);
+        }
+        if (deferWorkspaceMutation(() -> disconnectOutputPin(widget, pinName))) {
+            return true;
+        }
+        if (!isEditableWidget(widget)) {
+            return false;
+        }
         String nodeId = findNodeId(widget);
         if (nodeId == null || graph.getConnections() == null) {
             return false;
@@ -6816,28 +19536,57 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             return null;
         }
         double hitRadius = WIRE_HIT_RADIUS / Math.max(zoomLevel, 0.1f);
-
-        for (FlowConnection conn : graph.getConnections()) {
-            for (WireSegment segment : hitTestSegments(conn)) {
+        GraphRenderIndex index = visibleGraphRenderIndex();
+        if (index != null) {
+            WorldBounds pointBounds = new WorldBounds(worldX - hitRadius, worldY - hitRadius, worldX + hitRadius, worldY + hitRadius);
+            for (WireRenderGroup group : visibleWireGroups(index, pointBounds, List.of())) {
+                if (!group.fanoutArms.isEmpty()) {
+                    int hitIndex = graphRenderFanoutHitIndex(group.fanoutTrunks, group.fanoutHitIndex,
+                        worldX, worldY, hitRadius);
+                    if (hitIndex >= 0) {
+                        FlowConnection connection = group.fanoutConnectionsByArm.get(group.fanoutArms.get(hitIndex));
+                        if (connection != null) {
+                            return connection;
+                        }
+                    } else if (hitIndex == -2 && !group.connections.isEmpty()) {
+                        return group.connections.getFirst();
+                    }
+                    continue;
+                }
+                for (FlowConnection connection : group.connections) {
+                    for (WireSegment segment : group.hitSegments.getOrDefault(connection, List.of())) {
+                        if (isNearWireSegment(worldX, worldY, segment, hitRadius)) {
+                            return connection;
+                        }
+                    }
+                }
+            }
+            return null;
+        }
+        int inspected = 0;
+        List<FlowConnection> connections = graph.getConnections();
+        for (int indexPosition = connections.size() - 1; indexPosition >= 0
+            && inspected++ < GRAPH_RENDER_FALLBACK_CONNECTION_SCAN_LIMIT; indexPosition--) {
+            FlowConnection connection = connections.get(indexPosition);
+            PinPoint source = sourceOutputPoint(connection);
+            PinPoint target = targetInputPoint(connection);
+            if (source == null || target == null) {
+                continue;
+            }
+            List<WireSegment> segments = graphWireSegments(source.x(), source.y(), target.x(), target.y());
+            if (!boundedWireCoordinates(wireBounds(segments))) {
+                continue;
+            }
+            for (WireSegment segment : segments) {
                 if (isNearWireSegment(worldX, worldY, segment, hitRadius)) {
-                    return conn;
+                    return connection;
                 }
             }
         }
         return null;
     }
 
-    private List<WireSegment> hitTestSegments(FlowConnection connection) {
-        PinPoint end = targetInputPoint(connection);
-        List<FlowConnection> fanout = fanoutConnections(connection);
-        if (fanout.size() > 1) {
-            return fanoutSegments(connection, fanout, false);
-        }
-        PinPoint start = sourceOutputPoint(connection);
-        return start != null && end != null ? wireSegments(start.x(), start.y(), end.x(), end.y()) : List.of();
-    }
-
-    private boolean isNearWireSegment(double x, double y, WireSegment segment, double radius) {
+    static boolean isNearWireSegment(double x, double y, WireSegment segment, double radius) {
         double minX = Math.min(segment.x1(), segment.x2()) - radius;
         double maxX = Math.max(segment.x1(), segment.x2()) + radius;
         double minY = Math.min(segment.y1(), segment.y2()) - radius;
@@ -6866,10 +19615,29 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private void removeConnection(FlowConnection conn) {
+        if (deferWorkspaceMutation(() -> removeConnection(conn))) {
+            return;
+        }
+        CoreGraphEditorSession coreSession = activeCoreGraphSession();
+        if (coreSession != null) {
+            ConnectionId connectionId = coreConnectionId(conn);
+            if (connectionId == null || conn == null || !canMutateNodeStructure(conn.getSourceNodeId())
+                || !canMutateNodeStructure(conn.getTargetNodeId())) {
+                return;
+            }
+            commitCoreStructuralMutation("Connection Delete", current -> {
+                current.removeConnection(connectionId);
+                return true;
+            }, conn.getSourceNodeId(), conn.getTargetNodeId());
+            return;
+        }
         if (conn == null || graph.getConnections() == null) {
             return;
         }
         if (!graph.getConnections().contains(conn)) {
+            return;
+        }
+        if (!isEditableNode(conn.getSourceNodeId()) || !isEditableNode(conn.getTargetNodeId())) {
             return;
         }
         captureSnapshot();
@@ -6878,8 +19646,12 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private void copyNodes() {
-        clipboard.nodes.clear();
-        clipboard.connections.clear();
+        if (isActiveCoreStudioDocument()) {
+            copyCoreNodes(this::canMutateNodeStructure);
+            return;
+        }
+        coreClipboard = null;
+        clipboard.clear();
 
         if (selectedNodeIds.isEmpty()) {
             return;
@@ -6890,7 +19662,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
         for (String nodeId : selectedNodeIds) {
             FlowNode node = graph.getNodes().get(nodeId);
-            if (node != null) {
+            if (node != null && isEditableNode(nodeId)) {
                 minX = Math.min(minX, node.getX());
                 minY = Math.min(minY, node.getY());
             }
@@ -6900,7 +19672,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         int index = 0;
         for (String nodeId : selectedNodeIds) {
             FlowNode node = graph.getNodes().get(nodeId);
-            if (node != null) {
+            if (node != null && isEditableNode(nodeId)) {
                 nodeIdToIndex.put(nodeId, index++);
                 clipboard.nodes.add(new CopiedNode(node.getType(), node.getX() - minX, node.getY() - minY, node.getInputValues()));
             }
@@ -6920,7 +19692,11 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private void pasteNodes() {
-        if (clipboard.nodes.isEmpty()) {
+        if (isActiveCoreStudioDocument()) {
+            pasteCoreNodes();
+            return;
+        }
+        if (!catalogAuthorityAllowsInteraction() || clipboard.nodes.isEmpty()) {
             return;
         }
 
@@ -6937,6 +19713,10 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
         for (int i = 0; i < clipboard.nodes.size(); i++) {
             CopiedNode copied = clipboard.nodes.get(i);
+            if (resolveAuthoritativeNodeDefinition(copied.type) == null
+                || (hasTypedCatalogProjection() && !typedNodeTypeEditable(copied.type))) {
+                continue;
+            }
             double x = pasteX + copied.relativeX;
             double y = pasteY + copied.relativeY;
 
@@ -6946,7 +19726,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
             FlowNodeWidget widget = createNodeWidget(newId, newNode);
             addWorldWidget(widget);
-            widgetCache.put(newId, widget);
+            cacheNodeWidget(newId, widget);
 
             indexToNewNodeId.put(i, newId);
             newSelectedIds.add(newId);
@@ -6967,44 +19747,208 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     private void cutNodes() {
+        if (isActiveCoreStudioDocument()) {
+            if (!copyCoreNodes(this::canDeleteNode)) {
+                return;
+            }
+            CoreClipboardData copied = coreClipboard;
+            List<NodeInstanceId> identities = copied.nodes().stream().map(GraphNode::instanceId).toList();
+            commitCoreDeleteMutation("Node Cut", current -> removeCoreNodes(current, identities),
+                identities.stream().map(NodeInstanceId::canonicalText).toArray(String[]::new));
+            return;
+        }
         copyNodes();
         captureSnapshot();
         deleteSelectedNodes();
     }
 
     private void duplicateNodes() {
+        if (isActiveCoreStudioDocument()) {
+            if (!copyCoreNodes(this::canMutateNodeStructure)) {
+                return;
+            }
+            pasteNodes();
+            return;
+        }
         copyNodes();
         pasteNodes();
     }
 
+    private boolean hasPasteClipboard() {
+        return isActiveCoreStudioDocument() ? coreClipboard != null && !coreClipboard.empty()
+            : !clipboard.nodes.isEmpty();
+    }
+
+    private boolean copyCoreNodes(Predicate<String> allowed) {
+        CoreGraphEditorSession session = activeCoreGraphSession();
+        if (session == null || selectedNodeIds.isEmpty()) {
+            return false;
+        }
+        List<NodeInstanceId> identities = resolveCoreClipboardSelection(selectedNodeIds, allowed, this::coreNodeId);
+        if (identities.isEmpty()) {
+            return false;
+        }
+        GraphDocument document = coreGraphDocument(session);
+        Set<NodeInstanceId> selected = Set.copyOf(identities);
+        Set<ContractRef<CapabilityId>> requiredCapabilities = document == null ? Set.of() : document.nodes().stream()
+            .filter(node -> selected.contains(node.instanceId()))
+            .map(GraphNode::definition)
+            .map(definition -> typedDescriptorProjection(typedCatalogClient(), definition.owner().canonicalText(),
+                definition.id().canonicalText()).orElse(null))
+            .filter(Objects::nonNull)
+            .flatMap(descriptor -> descriptor.requiredCapabilities().stream())
+            .collect(Collectors.toUnmodifiableSet());
+        CoreClipboardData candidate = captureCoreClipboard(session, nodeRegistryServerId(), identities,
+            requiredCapabilities);
+        CoreClipboardCapture capture = acceptCoreClipboardCapture(coreClipboard, candidate,
+            copied -> coreClipboardPasteAllowed(session, copied));
+        if (!capture.accepted()) {
+            return false;
+        }
+        clipboard.clear();
+        coreClipboard = capture.clipboard();
+        return true;
+    }
+
+    private void pasteCoreNodes() {
+        CoreGraphEditorSession session = activeCoreGraphSession();
+        CoreClipboardData copied = coreClipboard;
+        if (!coreClipboardPasteAllowed(session, copied)) {
+            coreOperationUnavailable("Paste");
+            return;
+        }
+        double[] mouseWorld = screenToWorld(dragMouseX, dragMouseY);
+        List<NodeInstanceId> identities = copied.nodes().stream().map(ignored -> NodeInstanceId.interactive()).toList();
+        List<String> selection = identities.stream().map(NodeInstanceId::canonicalText).toList();
+        commitCorePasteMutation("Node Paste", current -> {
+            CorePasteResult pasted = pasteCoreClipboard(coreGraphDocument(current), copied, mouseWorld[0], mouseWorld[1],
+                identities);
+            current.replaceGraph(pasted.document());
+            return true;
+        }, selection);
+    }
+
+    private boolean coreClipboardPasteAllowed(CoreGraphEditorSession session, CoreClipboardData copied) {
+        if (session == null || copied == null || copied.empty()
+            || !Objects.equals(nodeRegistryServerId(), copied.serverId())
+            || !Objects.equals(session.catalogBinding(), copied.catalogBinding())
+            || !Objects.equals(session.activeAuthoringChecksum(), copied.authoringChecksum())
+            || !session.authoringCapabilities().containsAll(session.requiredCapabilities())
+            || !session.authoringCapabilities().containsAll(copied.requiredCapabilities())) {
+            return false;
+        }
+        ReSyncFlowClient client = typedCatalogClient();
+        CatalogAuthoringPublication publication = client != null
+            && client.catalogAuthority() == ReSyncFlowClient.CatalogAuthority.TYPED_PUBLICATION
+            ? client.activeCatalogAuthoringPublication().orElse(null) : null;
+        if (publication == null || !publication.binding().equals(copied.catalogBinding())
+            || !CatalogCachePublicationCodec.authoringPublicationChecksum(publication)
+                .equals(copied.authoringChecksum())) {
+            return false;
+        }
+        ReSyncResourceType type = coreSessionResourceType(session);
+        for (GraphNode node : copied.nodes()) {
+            ContractRef<NodeId> definition = node.definition();
+            ReSyncGenericDescriptorProjection.Projection descriptor = typedDescriptorProjection(client,
+                definition.owner().canonicalText(), definition.id().canonicalText()).orElse(null);
+            if (descriptor == null || descriptor.status() != ReSyncGenericDescriptorProjection.Status.ACTIVE
+                || descriptor.readOnly()
+                || !session.authoringCapabilities().containsAll(descriptor.requiredCapabilities())
+                || typedWidgetDefinition(client, definition.owner().canonicalText(), definition.id().canonicalText())
+                    .filter(widget -> !widget.readOnly()).isEmpty()
+                || isProtectedCoreDefinition(session, type, definition)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private void captureSnapshot() {
+        if (isActiveCoreStudioDocument()) {
+            return;
+        }
+        if (deferWorkspaceMutation(this::captureSnapshot)) {
+            return;
+        }
         graphHistory().capture();
-        markWorkspaceMutation();
+        graphRenderMutationPending = true;
+        queueWorkspaceMutation();
     }
 
     private void restoreSnapshot(GraphSnapshot snapshot) {
-        applyGraph(restoredGraph(graph, snapshot), false);
-        selectedNodeIds.clear();
-        snapshot.selectedIds.stream().filter(graph.getNodes()::containsKey).forEach(selectedNodeIds::add);
+        if (!catalogAuthorityAllowsInteraction()) {
+            if (isActiveCoreStudioDocument()) {
+                coreOperationUnavailable("Snapshot History");
+            }
+            return;
+        }
+        if (isActiveCoreStudioDocument()) {
+            coreOperationUnavailable("Snapshot History");
+            return;
+        }
+        requestPreparedHistoryGraphRestore(snapshot, graph);
     }
 
     private void restoreSnapshot(FlowGraph target, GraphSnapshot snapshot) {
-        copyGraphState(target, restoredGraph(target, snapshot));
+        if (!catalogAuthorityAllowsInteraction()) {
+            if (isActiveCoreStudioDocument()) {
+                coreOperationUnavailable("Snapshot History");
+            }
+            return;
+        }
+        if (isActiveCoreStudioDocument()) {
+            coreOperationUnavailable("Snapshot History");
+            return;
+        }
+        requestPreparedHistoryGraphRestore(snapshot, target);
     }
 
-    private FlowGraph restoredGraph(FlowGraph current, GraphSnapshot snapshot) {
-        FlowGraph restored = FlowSerializer.deserialize(JsonTreeParser.write(snapshot.document));
-        if (current == null) {
-            return restored;
+    private void requestPreparedHistoryGraphRestore(GraphSnapshot snapshot, FlowGraph target) {
+        if (snapshot == null || target == null) {
+            return;
         }
-        restored.setId(current.getId());
-        restored.setFunction(current.isFunction());
-        restored.setResourceType(current.getResourceType());
-        restored.setResourceRevision(current.getResourceRevision());
-        restored.setResourceHash(current.getResourceHash());
-        restored.setResourceMutationId(current.getResourceMutationId());
-        restored.setEnabled(current.isEnabled());
-        return restored;
+        if (workspaceHistoryRestoreRequest != null) {
+            workspaceMutationBackpressure = true;
+            return;
+        }
+        if (workspaceSnapshotPending()) {
+            deferWorkspaceMutation(() -> requestPreparedHistoryGraphRestore(snapshot, target));
+            return;
+        }
+        long generation;
+        try {
+            workspaceHistoryGeneration = Math.incrementExact(workspaceHistoryGeneration);
+            generation = workspaceHistoryGeneration;
+        } catch (ArithmeticException exception) {
+            workspaceHistoryGeneration = 1L;
+            generation = workspaceHistoryGeneration;
+        }
+        WorkspaceHistoryRestoreRequest request = new WorkspaceHistoryRestoreRequest(graphHistory(), snapshot, false, false,
+            graphDocumentKey(target), generation, workspaceFence(workspacePublicationGeneration, workspaceMutationVersion),
+            GraphRestoreMetadata.from(target));
+        workspaceHistoryRestoreRequest = request;
+        workspaceHistoryRestoreTarget = target;
+        try {
+            WORKSPACE_HISTORY_RESTORES.execute(() -> prepareGraphHistoryRestore(request));
+        } catch (IllegalStateException exception) {
+            workspaceHistoryRestoreRequest = null;
+            workspaceHistoryRestoreTarget = null;
+            workspaceMutationBackpressure = true;
+        }
+    }
+
+    private void applyPreparedHistoryGraph(WorkspaceHistoryRestoreRequest request, FlowGraph restored, FlowGraph target) {
+        if (request == null || restored == null || target == null) {
+            return;
+        }
+        copyPreparedGraphState(target, restored);
+        if (target != graph) {
+            return;
+        }
+        resetGraphEditorState(false, true);
+        selectedNodeIds.clear();
+        request.snapshot().selectedIds.stream().filter(graph.getNodes()::containsKey).forEach(selectedNodeIds::add);
+        markWorkspaceMutation();
     }
 
     private static List<FlowConnection> copyConnections(List<FlowConnection> connections) {
@@ -7041,7 +19985,14 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             if (parameter == null) {
                 continue;
             }
-            FlowGraph.FunctionParameter copy = new FlowGraph.FunctionParameter(parameter.getName(), parameter.getType(), parameter.getWidget(), parameter.getOptionsSource(), parameter.getDefaultValue());
+            String parameterId = parameter.getParameterId();
+            FlowGraph.FunctionParameter copy = parameterId != null && !parameterId.isBlank()
+                ? new FlowGraph.FunctionParameter(parameterId, parameter.getName(), parameter.getType(), parameter.getWidget(), parameter.getOptionsSource(), parameter.getDefaultValue())
+                : new FlowGraph.FunctionParameter(parameter.getName(), parameter.getType(), parameter.getWidget(), parameter.getOptionsSource(), parameter.getDefaultValue());
+            if (parameter.getDisplayName() != null && !parameter.getDisplayName().isBlank()
+                && !parameter.getDisplayName().equals(parameter.getName())) {
+                copy.setDisplayName(parameter.getDisplayName());
+            }
             copy.setTypeRef(parameter.getTypeRef());
             copied.add(copy);
         }
@@ -7098,7 +20049,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (result.getData() != null) {
             for (String key : List.of("worldName", "world")) {
                 Object raw = result.getData().get(key);
-                String value = FlowJson.text(raw).trim();
+                String value = raw == null ? "" : String.valueOf(raw).trim();
                 if (!value.isBlank()) {
                     return value;
                 }
@@ -7159,7 +20110,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                 if (shown >= 8) {
                     break;
                 }
-                builder.addRow("Player", readOnlyButton(FlowJson.text(player)));
+                builder.addRow("Player", readOnlyButton(String.valueOf(player)));
                 shown++;
             }
         }
@@ -7239,11 +20190,20 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
     private int textWidth(String value) {
         String clean = safeText(value).replaceAll("(?i)[&§][0-9a-fk-or]", "").replaceAll("<[^>]+>", "");
-        return tr == null ? clean.length() * 6 : tr.getWidth(clean);
+        if (RemotelyClient.tr != null) {
+            return RemotelyClient.tr.getWidth(clean);
+        }
+        return clean.length() * 6;
     }
 
     private MinecraftGameAssets getGameAssets() {
-        return ApplicationHostRegistry.gameAssets();
+        if (RemotelyClient.INSTANCE != null && RemotelyClient.INSTANCE.getHost() != null) {
+            MinecraftGameAssets gameAssets = RemotelyClient.INSTANCE.getHost().getGameAssets();
+            if (gameAssets != null) {
+                return gameAssets;
+            }
+        }
+        return MinecraftGameAssets.EMPTY;
     }
 
     private void drawMinecraftTexture(IDrawContext context, MinecraftGameAssets gameAssets, MinecraftAssetReference reference, Identifier fallbackId, int x, int y, int width, int height, int u, int v, int regionWidth, int regionHeight, int textureWidth, int textureHeight) {
@@ -7298,6 +20258,8 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
     @Override
     public boolean mouseScrolled(ReScrollEvent event) {
+        validateNodeChildAuthority();
+        try {
         double mouseX = event.x();
         double mouseY = event.y();
         double horizontalAmount = event.horizontalAmount();
@@ -7323,13 +20285,15 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         double[] worldMouse = screenToWorld(undistortedCoords[0], undistortedCoords[1]);
         int wx = (int) worldMouse[0];
         int wy = (int) worldMouse[1];
-        for (int i = worldWidgets.size() - 1; i >= 0; i--) {
-            FlowNodeWidget widget = (FlowNodeWidget) worldWidgets.get(i);
+        for (FlowNodeWidget widget : graphPointCandidates(wx, wy)) {
             if (Widget.dispatchMouseScrolled(widget, event.retarget(widget, wx, wy))) {
                 return true;
             }
         }
         return super.mouseScrolled(event);
+        } finally {
+            completeWorkspaceInteraction();
+        }
     }
 
     @Override

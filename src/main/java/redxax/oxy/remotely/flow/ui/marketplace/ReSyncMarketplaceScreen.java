@@ -609,7 +609,8 @@ public class ReSyncMarketplaceScreen extends ReScreen {
             notify("Update Failed", "Content Was Not Applied", ReSyncNotificationLevel.ERROR);
             return;
         }
-        manager.installMarketplaceBundle(serverId, update.listing, update.version, payload).thenAccept(applied -> executeOnHost(() -> {
+        boolean applied = manager.installMarketplaceBundle(serverId, update.listing, update.version, payload);
+        executeOnHost(() -> {
             if (!applied) {
                 notify("Update Failed", "Content Was Not Applied", ReSyncNotificationLevel.ERROR);
                 return;
@@ -619,7 +620,7 @@ public class ReSyncMarketplaceScreen extends ReScreen {
             installedBundleUpdateChecked.remove(bundle.key());
             rebuildInstalled();
             notify("Bundle Updated", update.listing.title, ReSyncNotificationLevel.SUCCESS);
-        }));
+        });
     }
 
     private MarketplaceModels.Version latestApprovedVersion(List<MarketplaceModels.Version> versions) {

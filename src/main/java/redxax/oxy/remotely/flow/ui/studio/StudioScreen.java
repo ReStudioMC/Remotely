@@ -1,18 +1,22 @@
 package redxax.oxy.remotely.flow.ui.studio;
 
-import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
+import java.time.Duration;
+import restudio.rescreen.platform.Async;
+import redxax.oxy.remotely.util.BrowserWork;
+import redxax.oxy.remotely.util.BrowserSafeState;
+import redxax.oxy.remotely.util.TaskIdentities;
+import com.google.gson.Gson;
 import com.google.gson.JsonObject;
+import redxax.oxy.remotely.data.flow.AutomationDefinitionDraft;
+import redxax.oxy.remotely.data.flow.CoreGraphEditorSession;
 import redxax.oxy.remotely.data.flow.DesignerSaveNotifications;
 import redxax.oxy.remotely.data.flow.FlowManager;
 import redxax.oxy.remotely.data.flow.ReSyncCollaborationClient;
 import redxax.oxy.remotely.data.flow.ReSyncFlowClient;
 import redxax.oxy.remotely.data.flow.ReSyncResourceType;
 import redxax.oxy.remotely.data.flow.world.WorldOperationResult;
-import redxax.oxy.remotely.RemotelyClient;
 import redxax.oxy.remotely.flow.data.CustomContentDefinition;
 import redxax.oxy.remotely.flow.data.FlowGraph;
-import redxax.oxy.remotely.flow.data.FlowJson;
 import redxax.oxy.remotely.flow.data.FlowNode;
 import redxax.oxy.remotely.flow.data.FlowSerializer;
 import redxax.oxy.remotely.flow.data.GuiDefinition;
@@ -23,26 +27,23 @@ import redxax.oxy.remotely.flow.data.TabDefinition;
 import redxax.oxy.remotely.flow.data.TriggerBinding;
 import redxax.oxy.remotely.flow.ui.AdvancementDesignerScreen;
 import redxax.oxy.remotely.flow.ui.AutomationDefinitionDesignerScreen;
-import redxax.oxy.remotely.flow.ui.ChatDesignerScreen;
 import redxax.oxy.remotely.flow.ui.ContentDesignerScreen;
 import redxax.oxy.remotely.flow.ui.DialogDesignerScreen;
+import redxax.oxy.remotely.flow.ui.GraphEditorScreen;
 import redxax.oxy.remotely.flow.ui.GuiDesignerScreen;
-import redxax.oxy.remotely.flow.ui.LootTableDesignerScreen;
-import redxax.oxy.remotely.flow.ui.MessageRuleDesignerScreen;
-import redxax.oxy.remotely.flow.ui.MotdDesignerScreen;
-import redxax.oxy.remotely.flow.ui.NpcDesignerScreen;
-import redxax.oxy.remotely.flow.ui.RecipeDesignerScreen;
+import redxax.oxy.remotely.flow.ui.ManagedResourceDesignerScreen;
+import redxax.oxy.remotely.flow.ui.ResourceDesigners;
 import redxax.oxy.remotely.flow.ui.ScoreboardDesignerScreen;
 import redxax.oxy.remotely.flow.ui.StudioCloseHandledScreen;
 import redxax.oxy.remotely.flow.ui.TabDesignerScreen;
-import redxax.oxy.remotely.flow.ui.TextTemplateDesignerScreen;
-import redxax.oxy.remotely.flow.ui.TradeDesignerScreen;
 import redxax.oxy.remotely.flow.ui.WorldDesignerScreen;
 import redxax.oxy.remotely.flow.ui.marketplace.ReSyncMarketplaceScreen;
 import redxax.oxy.remotely.ui.collaboration.CollaborationAvatarResolver;
 import redxax.oxy.remotely.ui.collaboration.CollaborationOverlay;
+import redxax.oxy.remotely.ui.integrations.luckperms.LuckPermsDashboardScreen;
 import redxax.oxy.remotely.worldgen.WorldGenManager;
 import redxax.oxy.remotely.worldgen.data.WorldGenProject;
+import redxax.oxy.remotely.worldgen.data.WorldGenSerializer;
 import redxax.oxy.remotely.worldgen.ui.WorldGenEditorScreen;
 import restudio.rescreen.platform.IDrawContext;
 import restudio.rescreen.platform.input.ReKey;
@@ -77,8 +78,12 @@ import restudio.rescreen.ui.widgets.TitledRowWidget;
 import restudio.rescreen.ui.widgets.ToggleWidget;
 import restudio.rescreen.util.Notification;
 import restudio.rescreen.util.Identifier;
+import restudio.resync.flow.command.CommandGraphContract;
+import restudio.resync.flow.command.CommandGraphMetadata;
 
 import java.util.ArrayList;
+import java.util.ArrayDeque;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
@@ -89,14 +94,17 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.Map;
 import java.util.function.BiPredicate;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
+import java.util.stream.Collectors;
 
 import static restudio.rescreen.render.TextRenderer.tr;
 
 public class StudioScreen extends StudioInfiniteScreen {
+    private static final BrowserWork.Executor STUDIO_RESOURCE_OPENS = BrowserWork.executor();
     protected boolean studioMode;
     protected TabsManager studioTabsManager;
     protected ReSyncContentBrowserWidget studioContentBrowser;
@@ -107,6 +115,50 @@ public class StudioScreen extends StudioInfiniteScreen {
         new CollaborationAvatarResolver(), runnable -> ScreenManager.getInstance().execute(runnable));
     private TextInputWidget collaborationChatInput;
     private String collaborationChatDraft = "";
+    private ContextMenuWidget studioContextMenuPointerTarget;
+    private final Set<String> pendingStudioResourceRequests = BrowserSafeState.set();
+    private static final long CORE_STUDIO_REBIND_TIMEOUT_MILLIS = 15_000L;
+    private static final long LUCKPERMS_PREPARE_TIMEOUT_SECONDS = 15L;
+    private String pendingCoreStudioDocumentKey = "";
+    private String pendingCoreStudioPreviousDocumentKey = "";
+    private long pendingCoreStudioDocumentAt;
+    private boolean restoringPendingCoreStudioSelection;
+    private final Map<String, String> terminalCoreStudioRebinds = new HashMap<>();
+    private final Set<String> terminalLegacyCoreDocuments = new HashSet<>();
+    private final Set<String> diagnosedLegacyCoreConflicts = new HashSet<>();
+    private final Map<String, CoreOpenIntent> pendingCoreOpenIntents = new LinkedHashMap<>();
+    private static final long CORE_OPEN_RETRY_MILLIS = 1_000L;
+
+    private enum CoreStudioOwnership {
+        NOT_GRAPH,
+        PENDING_CORE,
+        CORE_REQUIRED,
+        TERMINAL_CORE,
+        TERMINAL_LEGACY
+    }
+
+    private enum CoreOpenPhase {
+        REQUESTING,
+        PREPARING
+    }
+
+    private record CoreOpenIntent(ReSyncResourceType type, String id, String title, String previousDocumentKey,
+                                  StudioDocument retainedDocument, long acceptedAt, long lastRequestAt,
+                                  CoreOpenPhase phase, boolean activated) {
+        private CoreOpenIntent requested(long now) {
+            return new CoreOpenIntent(type, id, title, previousDocumentKey, retainedDocument, acceptedAt, now,
+                phase, activated);
+        }
+
+        private CoreOpenIntent preparing(boolean activated) {
+            return new CoreOpenIntent(type, id, title, previousDocumentKey, retainedDocument, acceptedAt,
+                lastRequestAt, CoreOpenPhase.PREPARING, this.activated || activated);
+        }
+
+        private String key() {
+            return ReSyncProjectMetadata.resourceKey(type.typeId(), id);
+        }
+    }
 
     @Override
     public Map<String, Widget> collaborationContainers() {
@@ -135,24 +187,17 @@ public class StudioScreen extends StudioInfiniteScreen {
     protected final Map<String, ToggleWidget> studioResourcePanelToggles = new HashMap<>();
     protected IconMessage studioEmptyMessage;
     protected final List<StudioDocument> studioDocuments = new ArrayList<>();
-    private boolean restoringPersistedStudioDocuments;
-    private boolean persistedStudioDocumentsRestored;
-    private boolean persistedStudioRestoreDisposed;
-    private long persistedStudioRestoreGeneration;
-    private List<String> persistedStudioRestoreKeys = List.of();
-    private String persistedStudioRestoreSelectedKey = "";
-    private final Map<String, Long> pendingPersistedStudioDocumentRestores = new LinkedHashMap<>();
-    private final Set<String> successfulPersistedStudioDocumentRestores = new HashSet<>();
-    private final Set<String> terminalPersistedStudioDocumentRestores = new HashSet<>();
-    private boolean persistedStudioRestoreRequestAllowed;
     protected final Map<String, Long> pendingStudioTabDiscards = new HashMap<>();
     protected static final long STUDIO_TAB_DISCARD_CONFIRMATION_MILLIS = 3_000L;
     protected static final long STUDIO_TAB_STATE_REFRESH_NANOS = 50_000_000L;
+    private static final String AUTOMATION_DOCUMENT_TYPE = "automation_definition_workspace";
+    private static final String AUTOMATION_DOCUMENT_ID = "all";
     protected long nextStudioTabStateRefreshAt;
     protected StudioDocument activeStudioDocument;
     protected final FlowGraph studioEmptyGraph = new FlowGraph();
     protected boolean syncingStudioTabSelection;
     protected String activeNodeRegistryServerId;
+    protected final Gson gson = new Gson();
     protected TextInputWidget commandLabelInput;
     protected final List<TextInputWidget> commandPathInputs = new ArrayList<>();
     private ReorderableWidget<RowWidget> commandPathList;
@@ -172,8 +217,22 @@ public class StudioScreen extends StudioInfiniteScreen {
     private int studioResourceDragGrabX;
     private int studioResourceDragGrabY;
     private StudioResourceDragDestination studioResourceDragDestination;
+    private final Map<String, Long> studioResourceOpenIntents = new HashMap<>();
+    private final Map<String, Object> studioResourcePanelResources = new HashMap<>();
+    private final Object studioPanelSaveLock = new Object();
+    private final Map<String, ArrayDeque<StudioPanelSaveIntent>> studioPanelSaves = new HashMap<>();
+    private int studioPanelSaveCount;
+    private long studioResourceOpenVersion;
 
     private record StudioResourceDragDestination(int x, int y, int width, int height, boolean close) {
+    }
+
+    private record PreparedStudioResource(String type, String id, String title, Object value, boolean fullEditor,
+                                          boolean replaceExisting) {
+    }
+
+    private record StudioPanelSaveIntent(String serverId, ReSyncResourceType type, String id,
+                                         DesignerSaveNotifications.SaveTicket ticket, Consumer<Object> mutation) {
     }
 
     protected static class CommandBindingContext {
@@ -207,6 +266,9 @@ public class StudioScreen extends StudioInfiniteScreen {
 
     @Override
     public boolean mouseClicked(ReMouseEvent event) {
+        if (routeStudioContextMenuMouseClicked(event)) {
+            return true;
+        }
         TextInputWidget input = collaborationChatInput;
         if (input != null) {
             if (input.isMouseOver(event.x(), event.y())) {
@@ -220,6 +282,9 @@ public class StudioScreen extends StudioInfiniteScreen {
 
     @Override
     public boolean mouseDragged(ReMouseEvent event) {
+        if (routeStudioContextMenuMouseDragged(event)) {
+            return true;
+        }
         TextInputWidget input = collaborationChatInput;
         if (input != null && getFocusedWidget() == input
             && input.mouseDragged(event.retarget(input, event.x(), event.y(), event.deltaX(), event.deltaY()))) {
@@ -228,14 +293,77 @@ public class StudioScreen extends StudioInfiniteScreen {
         return super.mouseDragged(event);
     }
 
+    @Override
+    public boolean mouseReleased(ReMouseEvent event) {
+        if (routeStudioContextMenuMouseReleased(event)) {
+            return true;
+        }
+        return super.mouseReleased(event);
+    }
+
+    protected final boolean routeStudioContextMenuMouseClicked(ReMouseEvent event) {
+        ContextMenuWidget menu = topmostOpenStudioContextMenu();
+        if (menu == null) {
+            studioContextMenuPointerTarget = null;
+            return false;
+        }
+        studioContextMenuPointerTarget = menu;
+        Widget.dispatchMouseClicked(menu, event.retarget(menu, event.x(), event.y()));
+        return true;
+    }
+
+    protected final boolean routeStudioContextMenuMouseDragged(ReMouseEvent event) {
+        ContextMenuWidget menu = studioContextMenuPointerTarget != null
+            ? studioContextMenuPointerTarget
+            : topmostOpenStudioContextMenu();
+        if (menu == null) {
+            return false;
+        }
+        Widget.dispatchMouseDragged(menu, event.retarget(menu, event.x(), event.y(), event.deltaX(), event.deltaY()));
+        return true;
+    }
+
+    protected final boolean routeStudioContextMenuMouseReleased(ReMouseEvent event) {
+        ContextMenuWidget menu = studioContextMenuPointerTarget != null
+            ? studioContextMenuPointerTarget
+            : topmostOpenStudioContextMenu();
+        if (menu == null) {
+            return false;
+        }
+        try {
+            Widget.dispatchMouseReleased(menu, event.retarget(menu, event.x(), event.y()));
+        } finally {
+            studioContextMenuPointerTarget = null;
+        }
+        return true;
+    }
+
+    private ContextMenuWidget topmostOpenStudioContextMenu() {
+        for (int index = hudWidgets.size() - 1; index >= 0; index--) {
+            if (hudWidgets.get(index) instanceof ContextMenuWidget menu && menu.isVisible() && menu.isOpen()) {
+                return menu;
+            }
+        }
+        for (int index = widgets.size() - 1; index >= 0; index--) {
+            if (widgets.get(index) instanceof ContextMenuWidget menu && menu.isVisible() && menu.isOpen()) {
+                return menu;
+            }
+        }
+        return null;
+    }
+
     private boolean openCollaborationChat(ReKeyEvent event) {
         if (collaborationChatInput != null || event.key() != ReKey.T || event.repeat() || event.modifiers().control()
             || event.modifiers().alt() || event.modifiers().superKey() || event.modifiers().shift()
             || !studioMode || isStudioKeyboardInputFocused()) {
             return false;
         }
+        ReSyncStudioView view = activeStudioView();
+        if (view instanceof StudioSelectorView selectorView && selectorView.hasActiveStudioSelector()) {
+            return false;
+        }
         FlowManager manager = FlowManager.getInstance();
-        if (manager == null || !manager.isFlowClientReady(studioServerId())) {
+        if (manager == null || !manager.isFlowClientConnected(studioServerId())) {
             return false;
         }
         ReSyncFlowClient client = manager.ensureFlowClient(studioServerId());
@@ -262,16 +390,486 @@ public class StudioScreen extends StudioInfiniteScreen {
             return;
         }
         String message = collaborationChatInput.getText().trim();
+        boolean sent = false;
         if (!message.isBlank()) {
             FlowManager manager = FlowManager.getInstance();
-            if (manager != null && manager.isFlowClientReady(studioServerId())) {
+            if (manager != null) {
                 ReSyncFlowClient client = manager.ensureFlowClient(studioServerId());
-                if (client != null) {
-                    client.collaboration().publishMessage(message);
+                sent = client != null && manager.isFlowClientConnected(studioServerId())
+                    && manager.withCurrentFlowClientNow(studioServerId(), client,
+                        current -> current.collaboration().publishMessage(message));
+                if (!sent) {
+                    showFlowAdmissionIssue(manager, "Collaboration");
                 }
             }
         }
-        dismissCollaborationChat(false);
+        dismissCollaborationChat(!sent && !message.isBlank());
+    }
+
+    private void requestStudioResource(FlowManager manager, ReSyncResourceType type, String id) {
+        String serverId = studioServerId();
+        if (manager == null || type == null || serverId == null || serverId.isBlank() || id == null || id.isBlank()) {
+            new Notification("ReSync", "Connection Unavailable", Notification.Type.ERROR);
+            return;
+        }
+        ReSyncFlowClient client = manager.ensureFlowClient(serverId);
+        if (client != null && manager.withCurrentFlowClientNow(serverId, client,
+            current -> current.requestResource(type, id, true))) {
+            return;
+        }
+        String requestKey = serverId + ":" + type.typeId() + ":" + id;
+        if (!pendingStudioResourceRequests.add(requestKey)) {
+            return;
+        }
+        boolean loading = showFlowAdmissionIssue(manager, "ReSync");
+        manager.ensureFlowClientAsync(serverId).whenComplete((resolved, error) ->
+            ScreenManager.getInstance().execute(() -> {
+                if (!pendingStudioResourceRequests.remove(requestKey)) {
+                    return;
+                }
+                if (resolved != null && error == null
+                    && manager.withCurrentFlowClientNow(serverId, resolved,
+                        current -> current.requestResource(type, id, true))) {
+                    return;
+                }
+                if (resolved != null && error == null) {
+                    String coreKey = ReSyncProjectMetadata.resourceKey(type.typeId(), id);
+                    if (type.isGraph() && (pendingCoreOpenIntents.containsKey(coreKey)
+                        || terminalCoreStudioRebinds.containsKey(coreKey))) {
+                        return;
+                    }
+                    requestStudioResource(manager, type, id);
+                } else if (loading) {
+                    showFlowUnavailable(manager, "ReSync");
+                }
+            }));
+    }
+
+    protected void requestCoreOpenResource(FlowManager manager, ReSyncResourceType type, String id) {
+        if (manager != null && type != null && type.isGraph() && id != null && !id.isBlank()) {
+            String key = ReSyncProjectMetadata.resourceKey(type.typeId(), id);
+            CoreOpenIntent intent = pendingCoreOpenIntents.get(key);
+            ReSyncFlowClient.traceLifecycle(studioServerId(), "studio_core_hydration_requested", "serverId",
+                studioServerId(), "resourceKey", key, "requestId", "open", "mutationId", null, "generation",
+                -1L, "authorityEpoch", 0L, "revision", -1L, "phase",
+                intent != null ? intent.phase() : "untracked", "activate",
+                Objects.equals(pendingCoreStudioDocumentKey, key), "elapsedMs",
+                intent != null ? Math.max(0L, coreOpenNow() - intent.acceptedAt()) : -1L, "reason",
+                "targeted_core_hydration");
+            manager.requestCoreGraphHydration(studioServerId(), type, id);
+            return;
+        }
+        ReSyncFlowClient.traceLifecycle(studioServerId(), "studio_core_hydration_rejected", "serverId",
+            studioServerId(), "resourceKey", (type != null ? type.typeId() : "unknown") + ":" + id,
+            "requestId", "open", "mutationId", null, "generation", -1L, "authorityEpoch", 0L,
+            "revision", -1L, "reason", manager == null ? "manager_missing"
+                : type == null ? "type_missing" : !type.isGraph() ? "type_not_graph"
+                : id == null || id.isBlank() ? "id_missing" : "invalid_input");
+    }
+
+    protected long coreOpenNow() {
+        return System.currentTimeMillis();
+    }
+
+    protected void notifyCoreGraphOpenFailed(String reason) {
+        String message = switch (reason == null ? "" : reason) {
+            case "resource_read_only" -> "Resource Read Only";
+            case "incompatible_capabilities" -> "Unsupported Capabilities";
+            case "legacy_draft_dirty", "legacy_ownership_unverified" -> "Legacy Draft Preserved";
+            default -> reason == null || reason.isBlank() ? "Resource Unavailable" : reason;
+        };
+        new Notification("Open Resource", message, Notification.Type.ERROR);
+    }
+
+    private CoreOpenIntent acceptCoreOpenIntent(ReSyncResourceType type, String id, String title) {
+        if (type == null || !type.isGraph() || id == null || id.isBlank()) {
+            return null;
+        }
+        String key = ReSyncProjectMetadata.resourceKey(type.typeId(), id);
+        demotePendingCoreActivationExcept(key);
+        String previousDocumentKey = activeStudioDocument != null && !key.equals(activeStudioDocument.key())
+            ? activeStudioDocument.key() : "";
+        StudioDocument retainedDocument = activeStudioDocument != null && key.equals(activeStudioDocument.key())
+            ? activeStudioDocument : null;
+        long acceptedAt = coreOpenNow();
+        CoreOpenIntent previous = pendingCoreOpenIntents.putIfAbsent(key, new CoreOpenIntent(type, id,
+            title == null || title.isBlank() ? id : title, previousDocumentKey, retainedDocument, acceptedAt,
+            acceptedAt, CoreOpenPhase.REQUESTING, false));
+        if (previous != null) {
+            if (previousDocumentKey.isBlank()) {
+                previousDocumentKey = previous.previousDocumentKey();
+            }
+            acceptedAt = previous.acceptedAt();
+        }
+        pendingCoreStudioDocumentKey = key;
+        pendingCoreStudioPreviousDocumentKey = previousDocumentKey;
+        pendingCoreStudioDocumentAt = acceptedAt;
+        if (previous != null) {
+            ReSyncFlowClient.traceLifecycle(studioServerId(), "studio_core_open_intent_retained", "serverId",
+                studioServerId(), "resourceKey", key, "requestId", "open", "mutationId", null,
+                "generation", -1L, "authorityEpoch", 0L, "revision", -1L, "phase", previous.phase(),
+                "activate", Objects.equals(pendingCoreStudioDocumentKey, key), "elapsedMs",
+                Math.max(0L, coreOpenNow() - previous.acceptedAt()), "reason", "intent_already_pending");
+            return previous;
+        }
+        ReSyncFlowClient.traceLifecycle(studioServerId(), "studio_core_open_intent_accepted", "serverId",
+            studioServerId(), "resourceKey", key, "requestId", "open", "mutationId", null, "generation",
+            -1L, "authorityEpoch", 0L, "revision", -1L);
+        return pendingCoreOpenIntents.get(key);
+    }
+
+    private void demotePendingCoreActivationExcept(String retainedKey) {
+        if (pendingCoreStudioDocumentKey != null && !pendingCoreStudioDocumentKey.isBlank()
+            && !Objects.equals(pendingCoreStudioDocumentKey, retainedKey)) {
+            clearPendingCoreStudioDocument();
+        }
+    }
+
+    boolean hasPendingCoreOpenIntent(String type, String id) {
+        return pendingCoreOpenIntents.containsKey(ReSyncProjectMetadata.resourceKey(type, id));
+    }
+
+    String coreOpenTerminalReason(String type, String id) {
+        return terminalCoreStudioRebinds.get(ReSyncProjectMetadata.resourceKey(type, id));
+    }
+
+    private CoreStudioOwnership coreStudioOwnership(FlowManager manager, ReSyncResourceType type, String id) {
+        if (type == null || !type.isGraph()) {
+            return CoreStudioOwnership.NOT_GRAPH;
+        }
+        if (manager == null || id == null || id.isBlank()) {
+            return CoreStudioOwnership.PENDING_CORE;
+        }
+        ReSyncFlowClient.CoreGraphActivationOutcome outcome = manager.peekCoreGraphActivation(
+            studioServerId(), type, id);
+        if (outcome.state() == ReSyncFlowClient.CoreGraphActivationState.LIVE) {
+            return CoreStudioOwnership.CORE_REQUIRED;
+        }
+        if (terminalCoreActivation(outcome)) {
+            return CoreStudioOwnership.TERMINAL_CORE;
+        }
+        ReSyncFlowClient client = manager.existingFlowClient(studioServerId());
+        if (client != null && manager.isFlowClientConnected(studioServerId())
+            && ReSyncFlowClient.catalogAuthorityAllowsLegacyEditing(client.catalogAuthority())) {
+            return CoreStudioOwnership.TERMINAL_LEGACY;
+        }
+        return CoreStudioOwnership.PENDING_CORE;
+    }
+
+    private boolean routeCoreGraphOpen(FlowManager manager, ReSyncResourceType type, String id, String title) {
+        CoreStudioOwnership ownership = coreStudioOwnership(manager, type, id);
+        String key = ReSyncProjectMetadata.resourceKey(type != null ? type.typeId() : "unknown", id);
+        ReSyncFlowClient.CoreGraphActivationOutcome outcome = coreGraphActivation(manager, type, id);
+        CoreOpenIntent pendingIntent = pendingCoreOpenIntents.get(key);
+        ReSyncFlowClient.traceLifecycle(studioServerId(), "studio_core_activation_decision", "serverId",
+            studioServerId(), "resourceKey", key, "requestId", "open", "mutationId", null, "generation",
+            -1L, "authorityEpoch", 0L, "revision", outcome.revision(), "ownership", ownership,
+            "activationState", outcome.state(), "activationReason", outcome.reason(), "managerPresent",
+            manager != null, "reason", ownership == CoreStudioOwnership.NOT_GRAPH ? "route_not_graph"
+                : ownership == CoreStudioOwnership.TERMINAL_LEGACY ? "route_legacy_editor"
+                : terminalCoreActivation(outcome) && !coreActivationStillSettling(outcome)
+                    ? "route_terminal_core" : outcome.state() == ReSyncFlowClient.CoreGraphActivationState.LIVE
+                        ? "route_live_core" : "route_pending_core", "phase",
+            pendingIntent != null ? pendingIntent.phase() : "none", "activate",
+            Objects.equals(pendingCoreStudioDocumentKey, key));
+        if (ownership == CoreStudioOwnership.NOT_GRAPH || ownership == CoreStudioOwnership.TERMINAL_LEGACY) {
+            return false;
+        }
+        if (terminalCoreActivation(outcome) && !coreActivationStillSettling(outcome)) {
+            String terminalReason = coreActivationReason(outcome);
+            terminalCoreStudioRebinds.put(key, terminalReason);
+            notifyCoreGraphOpenFailed(terminalReason);
+            return true;
+        }
+        CoreGraphEditorSession session = outcome.state() == ReSyncFlowClient.CoreGraphActivationState.LIVE
+            ? manager.peekCoreGraphEditorSession(studioServerId(), type, id).orElse(null) : null;
+        if (session != null) {
+            ReSyncFlowClient.traceLifecycle(studioServerId(), "studio_core_activation_session_ready", "serverId",
+                studioServerId(), "resourceKey", key, "requestId", "open", "mutationId", null,
+                "generation", -1L, "authorityEpoch", 0L, "revision", session.revision(), "activate", true,
+                "reason", "current_session_present");
+            acceptCoreOpenIntent(type, id, title);
+            openStudioCoreDocument(type.typeId(), id, title, session);
+            return true;
+        }
+        terminalCoreStudioRebinds.remove(key);
+        CoreOpenIntent intent = acceptCoreOpenIntent(type, id, title);
+        ReSyncFlowClient.traceLifecycle(studioServerId(), "studio_core_open_pending", "serverId",
+            studioServerId(), "resourceKey", key, "requestId", "open", "mutationId", null, "generation",
+            -1L, "authorityEpoch", 0L, "revision", outcome.revision(), "phase",
+            intent != null ? intent.phase() : "missing", "activate", true, "reason", "session_missing");
+        showPendingCoreStudioDocument(intent);
+        requestCoreOpenResource(manager, type, id);
+        return true;
+    }
+
+    private void showPendingCoreStudioDocument(CoreOpenIntent intent) {
+        retainVisibleStudioDocument();
+    }
+
+    private ReSyncFlowClient.CoreGraphActivationOutcome coreGraphActivation(
+        FlowManager manager, ReSyncResourceType type, String id) {
+        if (manager != null) {
+            return manager.peekCoreGraphActivation(studioServerId(), type, id);
+        }
+        return new ReSyncFlowClient.CoreGraphActivationOutcome(ReSyncFlowClient.CoreGraphActivationState.PENDING,
+            "The Core graph connection is unavailable.", 0L);
+    }
+
+    private boolean terminalCoreActivation(ReSyncFlowClient.CoreGraphActivationOutcome outcome) {
+        return outcome != null && (outcome.state() == ReSyncFlowClient.CoreGraphActivationState.READ_ONLY
+            || outcome.state() == ReSyncFlowClient.CoreGraphActivationState.INCOMPATIBLE
+            || outcome.state() == ReSyncFlowClient.CoreGraphActivationState.MISSING);
+    }
+
+    private boolean coreActivationStillSettling(ReSyncFlowClient.CoreGraphActivationOutcome outcome) {
+        if (outcome == null || outcome.state() != ReSyncFlowClient.CoreGraphActivationState.INCOMPATIBLE) {
+            return false;
+        }
+        String reason = outcome.reason() == null ? "" : outcome.reason().toLowerCase(Locale.ROOT);
+        return reason.contains("catalog binding") || reason.contains("authoring publication");
+    }
+
+    private boolean userVisibleCoreOpenFailure(String reason) {
+        String normalized = reason == null ? "" : reason.toLowerCase(Locale.ROOT);
+        return !normalized.contains("catalog binding") && !normalized.equals("session_not_current");
+    }
+
+    private String coreActivationReason(ReSyncFlowClient.CoreGraphActivationOutcome outcome) {
+        if (outcome != null && outcome.reason() != null && !outcome.reason().isBlank()) {
+            return outcome.reason();
+        }
+        if (outcome == null) {
+            return "Resource Unavailable";
+        }
+        return switch (outcome.state()) {
+            case READ_ONLY -> "Resource Read Only";
+            case INCOMPATIBLE -> "Unsupported Capabilities";
+            case MISSING -> "Resource Missing";
+            case LIVE, PENDING -> "Resource Unavailable";
+        };
+    }
+
+    private boolean allowLegacyCoreReplacement(StudioDocument document) {
+        ReSyncResourceType type = document != null ? ReSyncResourceType.byTypeId(document.type()) : null;
+        if (document == null || document.coreSession() != null || type == null || !type.isGraph()) {
+            return true;
+        }
+        if (document.graph() == null && document.view() == null) {
+            return true;
+        }
+        String reason = isStudioDocumentDirty(document) ? "legacy_draft_dirty"
+            : !terminalLegacyCoreDocuments.contains(document.key()) ? "legacy_ownership_unverified" : "";
+        if (reason.isEmpty()) {
+            return true;
+        }
+        diagnoseLegacyCoreConflict(document, reason);
+        return false;
+    }
+
+    private void diagnoseLegacyCoreConflict(StudioDocument document, String reason) {
+        if (document == null || reason == null || reason.isBlank()) {
+            return;
+        }
+        if (diagnosedLegacyCoreConflicts.add(document.key())) {
+            ReSyncFlowClient.traceLifecycle(studioServerId(), "studio_core_legacy_preserved", "serverId",
+                studioServerId(), "resourceKey", document.key(), "requestId", "open", "mutationId", null,
+                "generation", -1L, "authorityEpoch", 0L, "revision",
+                document.graph() != null ? document.graph().getResourceRevision() : -1L,
+                "reason", reason);
+            new Notification("Core Editor", "Legacy Draft Preserved", Notification.Type.ERROR);
+        }
+    }
+
+    void drainCoreOpenIntents() {
+        if (pendingCoreOpenIntents.isEmpty()) {
+            return;
+        }
+        FlowManager manager = FlowManager.getInstance();
+        long now = coreOpenNow();
+        for (CoreOpenIntent intent : List.copyOf(pendingCoreOpenIntents.values())) {
+            if (manager == null) {
+                if (coreOpenExpired(intent, now)) {
+                    failCoreOpenIntent(intent, "The Core graph connection is unavailable.");
+                }
+                continue;
+            }
+            StudioDocument document = findStudioDocument(intent.key());
+            boolean activationOwner = Objects.equals(pendingCoreStudioDocumentKey, intent.key());
+            boolean activeDocument = document != null && activeStudioDocument != null
+                && Objects.equals(activeStudioDocument.key(), intent.key());
+            if (activationOwner && activeDocument && document.coreSession() != null
+                && coreStudioDocumentTerminal(document)) {
+                failCoreOpenIntent(intent, "widget_publication_failed");
+                continue;
+            }
+            if (document != null && document.coreSession() != null && (!activationOwner
+                || activeDocument && coreStudioDocumentReady(document))) {
+                pendingCoreOpenIntents.remove(intent.key());
+                if (activationOwner) {
+                    clearPendingCoreStudioDocument();
+                }
+                GraphEditorScreen graphEditor = this instanceof GraphEditorScreen editor ? editor : null;
+                long generation = graphEditor != null ? graphEditor.coreEditorReadiness().generation() : 0L;
+                String topologyChecksum = graphEditor != null
+                    ? graphEditor.coreEditorReadiness().topologyChecksum() : "bound";
+                ReSyncFlowClient.traceLifecycle(studioServerId(), "studio_core_open_intent_ready", "serverId",
+                    studioServerId(), "resourceKey", intent.key(), "requestId", "open", "mutationId", null,
+                    "generation", generation, "authorityEpoch", 0L, "revision",
+                    document.coreSession().revision(), "topologyChecksum",
+                    topologyChecksum, "phase", intent.phase(), "activate", activationOwner, "documentPresent", true,
+                    "activeDocument", activeDocument, "tabPresent", studioTabPresent(intent.key()), "tabSelected",
+                    studioTabSelected(intent.key()), "currentSession", isCurrentCoreStudioDocument(document),
+                    "editorReady", !(this instanceof GraphEditorScreen editor) || editor.isCoreEditorReady(),
+                    "userVisibleReady", coreStudioDocumentReady(document), "elapsedMs",
+                    Math.max(0L, now - intent.acceptedAt()), "reason", "document_and_topology_visible");
+                continue;
+            }
+            ReSyncFlowClient.CoreGraphActivationOutcome outcome = coreGraphActivation(
+                manager, intent.type(), intent.id());
+            if (terminalCoreActivation(outcome) && !coreActivationStillSettling(outcome)) {
+                failCoreOpenIntent(intent, coreActivationReason(outcome));
+                continue;
+            }
+            if (coreOpenExpired(intent, now)) {
+                failCoreOpenIntent(intent, coreActivationReason(outcome));
+                continue;
+            }
+            CoreGraphEditorSession session = outcome.state() == ReSyncFlowClient.CoreGraphActivationState.LIVE
+                ? manager.peekCoreGraphEditorSession(studioServerId(), intent.type(), intent.id()).orElse(null) : null;
+            if (session != null) {
+                terminalCoreStudioRebinds.remove(intent.key());
+                if (intent.phase() == CoreOpenPhase.REQUESTING) {
+                    ReSyncFlowClient.traceLifecycle(studioServerId(), "studio_core_open_phase", "serverId",
+                        studioServerId(), "resourceKey", intent.key(), "requestId", "open", "mutationId", null,
+                        "generation", -1L, "authorityEpoch", 0L, "revision", session.revision(), "phase",
+                        "requesting_to_preparing", "activate", activationOwner, "documentPresent", document != null,
+                        "activeDocument", activeDocument, "elapsedMs", Math.max(0L, now - intent.acceptedAt()),
+                        "reason", "current_session_observed");
+                    boolean bound;
+                    if (document == null || document.coreSession() != session) {
+                        bound = bindStudioCoreDocument(intent.type().typeId(), intent.id(), intent.title(), session,
+                            activationOwner);
+                    } else if (activationOwner && !activeDocument) {
+                        selectStudioDocument(intent.key());
+                        bound = activeStudioDocument == document;
+                    } else {
+                        bound = true;
+                    }
+                    if (bound) {
+                        if (activationOwner) {
+                            pendingCoreOpenIntents.replace(intent.key(), intent, intent.preparing(true));
+                            ReSyncFlowClient.traceLifecycle(studioServerId(), "studio_core_open_preparing", "serverId",
+                                studioServerId(), "resourceKey", intent.key(), "requestId", "open", "mutationId",
+                                null, "generation", -1L, "authorityEpoch", 0L, "revision", session.revision(),
+                                "phase", CoreOpenPhase.PREPARING, "activate", true, "tabPresent",
+                                studioTabPresent(intent.key()), "tabSelected", studioTabSelected(intent.key()),
+                                "elapsedMs", Math.max(0L, now - intent.acceptedAt()), "reason",
+                                "core_document_bound_waiting_for_widgets");
+                        } else {
+                            pendingCoreOpenIntents.remove(intent.key(), intent);
+                            ReSyncFlowClient.traceLifecycle(studioServerId(), "studio_core_background_bind_complete",
+                                "serverId", studioServerId(), "resourceKey", intent.key(), "requestId", "open",
+                                "mutationId", null, "generation", -1L, "authorityEpoch", 0L, "revision",
+                                session.revision(), "phase", "bound", "activate", false, "elapsedMs",
+                                Math.max(0L, now - intent.acceptedAt()), "reason", "background_document_bound");
+                        }
+                    } else {
+                        ReSyncFlowClient.traceLifecycle(studioServerId(), "studio_core_open_bind_rejected", "serverId",
+                            studioServerId(), "resourceKey", intent.key(), "requestId", "open", "mutationId", null,
+                            "generation", -1L, "authorityEpoch", 0L, "revision", session.revision(), "phase",
+                            intent.phase(), "activate", activationOwner, "elapsedMs",
+                            Math.max(0L, now - intent.acceptedAt()), "reason", "bind_returned_false");
+                    }
+                }
+                continue;
+            }
+            if (intent.phase() == CoreOpenPhase.PREPARING && intent.activated()) {
+                continue;
+            }
+            if (now - intent.lastRequestAt() < CORE_OPEN_RETRY_MILLIS) {
+                continue;
+            }
+            pendingCoreOpenIntents.put(intent.key(), intent.requested(now));
+            requestCoreOpenResource(manager, intent.type(), intent.id());
+        }
+    }
+
+    private boolean coreOpenExpired(CoreOpenIntent intent, long now) {
+        return intent != null && now - intent.acceptedAt() >= CORE_STUDIO_REBIND_TIMEOUT_MILLIS;
+    }
+
+    private boolean failCoreOpenIntent(CoreOpenIntent intent, String reason) {
+        if (intent == null || !pendingCoreOpenIntents.remove(intent.key(), intent)) {
+            return false;
+        }
+        String failureReason = reason == null || reason.isBlank() ? "resource_unavailable" : reason;
+        terminalCoreStudioRebinds.put(intent.key(), failureReason);
+        String previousKey = intent.previousDocumentKey();
+        restoreRetainedCoreStudioDocument(intent);
+        boolean activationOwner = Objects.equals(pendingCoreStudioDocumentKey, intent.key());
+        if (activationOwner) {
+            if (pendingCoreStudioPreviousDocumentKey != null && !pendingCoreStudioPreviousDocumentKey.isBlank()) {
+                previousKey = pendingCoreStudioPreviousDocumentKey;
+            }
+            clearPendingCoreStudioDocument();
+            restorePendingCoreStudioSelection(previousKey);
+        }
+        ReSyncFlowClient.traceLifecycle(studioServerId(), "studio_core_open_intent_failed", "serverId",
+            studioServerId(), "resourceKey", intent.key(), "requestId", "open", "mutationId", null,
+            "generation", -1L, "authorityEpoch", 0L, "revision", -1L, "phase", intent.phase(), "activate",
+            activationOwner, "documentPresent", findStudioDocument(intent.key()) != null, "tabPresent",
+            studioTabPresent(intent.key()), "tabSelected", studioTabSelected(intent.key()), "elapsedMs",
+            Math.max(0L, coreOpenNow() - intent.acceptedAt()), "reason", failureReason);
+        if (userVisibleCoreOpenFailure(failureReason)) {
+            notifyCoreGraphOpenFailed(failureReason);
+        }
+        return true;
+    }
+
+    protected boolean coreStudioDocumentReady(StudioDocument document) {
+        return document != null && document.coreSession() != null && isCurrentCoreStudioDocument(document)
+            && (!(this instanceof GraphEditorScreen editor) || editor.isCoreEditorReady());
+    }
+
+    protected boolean coreStudioDocumentTerminal(StudioDocument document) {
+        return document != null && document.coreSession() != null && this instanceof GraphEditorScreen editor
+            && editor.hasTerminalCoreWidgetPublicationFailure();
+    }
+
+    private void restoreRetainedCoreStudioDocument(CoreOpenIntent intent) {
+        StudioDocument retained = intent != null ? intent.retainedDocument() : null;
+        if (retained == null || !Objects.equals(retained.key(), intent.key())) {
+            return;
+        }
+        for (int index = 0; index < studioDocuments.size(); index++) {
+            StudioDocument current = studioDocuments.get(index);
+            if (!Objects.equals(current.key(), intent.key())) {
+                continue;
+            }
+            studioDocuments.set(index, retained);
+            if (activeStudioDocument == current || activeStudioDocument != null
+                && Objects.equals(activeStudioDocument.key(), intent.key())) {
+                activeStudioDocument = retained;
+            }
+            syncStudioDocumentTabs();
+            return;
+        }
+    }
+
+    private boolean showFlowAdmissionIssue(FlowManager manager, String title) {
+        String issue = manager.getFlowAvailabilityIssue(studioServerId(), null);
+        boolean loading = issue == null || "ReSyncProfileLoading".equals(issue) || "ReSyncProfileChanged".equals(issue);
+        new Notification(title, loading ? "Connection Loading" : manager.normalizeReSyncNotificationMessage(issue),
+            loading ? Notification.Type.INFO : Notification.Type.ERROR);
+        return loading;
+    }
+
+    private void showFlowUnavailable(FlowManager manager, String title) {
+        String issue = manager.getFlowAvailabilityIssue(studioServerId(), null);
+        String message = issue == null || "ReSyncProfileLoading".equals(issue) ? "Connection Unavailable"
+            : manager.normalizeReSyncNotificationMessage(issue);
+        new Notification(title, message, Notification.Type.ERROR);
     }
 
     private void cancelCollaborationChat() {
@@ -295,6 +893,7 @@ public class StudioScreen extends StudioInfiniteScreen {
     public void tick() {
         super.tick();
         updateStudioTabStates();
+        drainCoreOpenIntents();
         ReSyncStudioView activeView = activeStudioView();
         if (activeView != null) {
             activeView.tick();
@@ -311,8 +910,18 @@ public class StudioScreen extends StudioInfiniteScreen {
 
     public void openWorkspaceResource(String type, String id) {
         if (type == null || type.isBlank() || id == null || id.isBlank()) {
+            ReSyncFlowClient.traceLifecycle(studioServerId(), "studio_open_rejected", "serverId", studioServerId(),
+                "resourceKey", type + ":" + id, "requestId", "open", "mutationId", null, "generation", -1L,
+                "authorityEpoch", 0L, "revision", -1L, "reason", "invalid_resource_identity");
             return;
         }
+        if (AutomationDefinitionDraft.supports(type)) {
+            openDefinition(type, id);
+            return;
+        }
+        ReSyncFlowClient.traceLifecycle(studioServerId(), "studio_open_requested", "serverId", studioServerId(),
+            "resourceKey", type + ":" + id, "requestId", "open", "mutationId", null, "generation", -1L,
+            "authorityEpoch", 0L, "revision", -1L);
         FlowManager manager = FlowManager.getInstance();
         if (manager == null) {
             return;
@@ -320,106 +929,68 @@ public class StudioScreen extends StudioInfiniteScreen {
         String key = ReSyncProjectMetadata.resourceKey(type, id);
         boolean alreadyOpen = studioDocuments.stream().anyMatch(document -> document.key().equals(key));
         if (alreadyOpen) {
+            ReSyncResourceType openType = ReSyncResourceType.byTypeId(type);
+            ReSyncProjectMetadata.ResourceEntry openResource = manager.getProjectResource(studioServerId(), type, id);
+            String openTitle = openResource != null ? openResource.getDisplayName() : id;
+            if (openType != null && openType.isGraph() && routeCoreGraphOpen(manager, openType, id, openTitle)) {
+                return;
+            }
             selectStudioDocument(key);
             return;
         }
         ReSyncResourceType freshType = ReSyncResourceType.byTypeId(type);
-        if (freshType == null && (ReSyncResourceDragPayload.FLOW.equals(type) || ReSyncResourceDragPayload.FUNCTION.equals(type)
-            || ReSyncResourceDragPayload.COMMAND.equals(type))) {
-            freshType = ReSyncResourceType.FLOW;
-        }
-        if (freshType != null && (freshType.isGraph() || !restoringPersistedStudioDocuments)) {
-            FlowGraph cachedGraph = manager.getGraph(studioServerId(), freshType, id);
-            if (cachedGraph != null) {
-                ReSyncProjectMetadata.ResourceEntry cachedResource = manager.getProjectMetadata(studioServerId()).findResource(type, id);
-                String title = cachedResource != null ? cachedResource.getDisplayName() : id;
-                openStudioGraphDocument(type, id, title, detachedGraph(cachedGraph));
-            } else {
-                requestWorkspaceResource(manager, freshType, id);
+        ReSyncProjectMetadata.ResourceEntry cachedResource = manager.getProjectResource(studioServerId(), type, id);
+        String title = cachedResource != null ? cachedResource.getDisplayName() : id;
+        if (freshType != null && freshType.isGraph()) {
+            if (routeCoreGraphOpen(manager, freshType, id, title)) {
+                return;
             }
+            if (openStudioResourceSnapshot(type, id, title, false, false)) return;
+            requestStudioResource(manager, freshType, id);
             return;
         }
-        ReSyncProjectMetadata.ResourceEntry resource = manager.getProjectMetadata(studioServerId()).findResource(type, id);
-        if (resource != null && (!restoringPersistedStudioDocuments || freshType == null)) {
+        ReSyncProjectMetadata.ResourceEntry resource = manager.getProjectResource(studioServerId(), type, id);
+        if (resource != null) {
             openProjectResource(resource);
+            return;
+        }
+        if (ReSyncResourceDragPayload.WORLDGEN.equals(type)) {
+            if (!openStudioResourceSnapshot(type, id, id, false, false)) {
+                WorldGenManager.getInstance().requestProject(studioServerId(), id);
+            }
             return;
         }
         ReSyncResourceType jsonType = ReSyncResourceType.byTypeId(type);
         if (jsonType != null) {
             if (jsonType == ReSyncResourceType.CUSTOM_CONTENT) {
-                CustomContentDefinition content = manager.getCustomContentForServer(studioServerId()).get(id);
-                if (content == null) {
-                    requestWorkspaceResource(manager, jsonType, id);
-                    return;
-                }
-                String graphId = content.getFlowId() != null && !content.getFlowId().isBlank() ? content.getFlowId() : id;
-                FlowGraph contentGraph = content.getGraph() != null ? content.getGraph() : manager.getGraph(studioServerId(), ReSyncResourceType.FLOW, graphId);
-                if (contentGraph == null) {
-                    requestWorkspaceResource(manager, jsonType, id);
-                    return;
-                }
-                openStudioViewDocument(type, id, content.getDisplayName(), contentGraph,
-                    new ScreenBackedStudioView(this, new ContentDesignerScreen(studioServerId(), contentGraph, this)));
+                if (openStudioResourceSnapshot(type, id, resource != null ? resource.getDisplayName() : id, false, false)) return;
+                requestStudioResource(manager, jsonType, id);
                 return;
             }
             if (jsonType == ReSyncResourceType.GUI) {
-                if (manager.getGuisForServer(studioServerId()).containsKey(id)) {
-                    openStudioDesigner(type, id);
-                } else {
-                    requestWorkspaceResource(manager, jsonType, id);
-                }
+                if (!openStudioResourceSnapshot(type, id, manager.getGuiName(studioServerId(), id), false, false))
+                    requestStudioResource(manager, jsonType, id);
                 return;
             }
             if (jsonType == ReSyncResourceType.SCOREBOARD) {
-                if (manager.getScoreboardsForServer(studioServerId()).containsKey(id)) {
-                    openStudioDesigner(type, id);
-                } else {
-                    requestWorkspaceResource(manager, jsonType, id);
-                }
+                if (!openStudioResourceSnapshot(type, id, manager.getScoreboardName(studioServerId(), id), false, false))
+                    requestStudioResource(manager, jsonType, id);
                 return;
             }
             if (jsonType == ReSyncResourceType.TAB) {
-                if (manager.getTabsForServer(studioServerId()).containsKey(id)) {
-                    openStudioDesigner(type, id);
-                } else {
-                    requestWorkspaceResource(manager, jsonType, id);
-                }
+                if (!openStudioResourceSnapshot(type, id, manager.getTabName(studioServerId(), id), false, false))
+                    requestStudioResource(manager, jsonType, id);
                 return;
             }
-            JsonObject json = manager.getJsonResourcesForServer(studioServerId(), jsonType).get(id);
-            if (json == null) {
-                requestWorkspaceResource(manager, jsonType, id);
-                return;
-            }
-            if (ReSyncResourceDragPayload.ADVANCEMENT_TREE.equals(type) || ReSyncResourceDragPayload.DIALOG.equals(type)) {
-                openStudioDesigner(type, id);
-                return;
-            }
-            openFocusedResourceDocument(type, id, id, json);
+            if (!openStudioResourceSnapshot(type, id, resource != null ? resource.getDisplayName() : id, false, false))
+                requestStudioResource(manager, jsonType, id);
             return;
         }
         if (ReSyncResourceDragPayload.WORLD.equals(type)) {
             openStudioWorldDocument(id, id);
             return;
         }
-        new Notification("Open Resource", "No Designer For " + type, Notification.Type.ERROR);
-    }
-
-    private void requestWorkspaceResource(FlowManager manager, ReSyncResourceType type, String id) {
-        if (manager == null || type == null || id == null || id.isBlank()
-            || restoringPersistedStudioDocuments && !persistedStudioRestoreRequestAllowed) {
-            return;
-        }
-        ReSyncFlowClient client = manager.ensureFlowClient(studioServerId());
-        if (client == null) {
-            if (restoringPersistedStudioDocuments) {
-                String key = ReSyncProjectMetadata.resourceKey(type.typeId(), id);
-                pendingPersistedStudioDocumentRestores.remove(key);
-                terminalPersistedStudioDocumentRestores.remove(key);
-            }
-            return;
-        }
-        client.requestResource(type, id, !restoringPersistedStudioDocuments);
+        openOpaqueManagedResourceDocument(type, id, id);
     }
 
     public void openWorkspaceFlowEditor(String flowId, String branchPin) {
@@ -429,9 +1000,29 @@ public class StudioScreen extends StudioInfiniteScreen {
         openWorkspaceFlowEditor(flowId, null);
     }
 
+    public void openWorkspaceCoreEditor(CoreGraphEditorSession session, String title, String branchPin) {
+        if (session == null || session.resource() == null) {
+            return;
+        }
+        String type = session.resource().resourceType().value();
+        String id = session.resource().id();
+        bindStudioCoreDocument(type, id, title, session, true);
+    }
+
+    public void bindWorkspaceCoreEditor(CoreGraphEditorSession session, String title) {
+        if (session == null || session.resource() == null) {
+            return;
+        }
+        String type = session.resource().resourceType().value();
+        String id = session.resource().id();
+        bindStudioCoreDocument(type, id, title, session, false);
+    }
+
     public void openWorkspaceGraphEditor(FlowGraph graph) {
         if (graph != null) {
-            openWorkspaceFlowEditor(graph.getId());
+            String type = graph.getResourceType();
+            openWorkspaceResource(type == null || type.isBlank() ? ReSyncResourceDragPayload.FLOW : type,
+                graph.getId());
         }
     }
 
@@ -473,7 +1064,6 @@ public class StudioScreen extends StudioInfiniteScreen {
             refreshStudioContentBrowser();
         }
         refreshStudioResourcePanel();
-        restorePersistedOpenStudioDocuments();
     }
 
     public void refreshStudioContentBrowserOnly() {
@@ -515,26 +1105,7 @@ public class StudioScreen extends StudioInfiniteScreen {
             .onTabClosed(tab -> {
                 Object data = tab.getData();
                 if (data instanceof String key) {
-                    pendingStudioTabDiscards.remove(key);
-                    studioDocuments.removeIf(document -> {
-                        boolean match = document.key().equals(key);
-                        if (match) {
-                            studioDocumentClosed(document);
-                            removePersistedOpenStudioDocument(document.type(), document.id());
-                            if (document.view() != null) {
-                                document.view().closed();
-                            }
-                        }
-                        return match;
-                    });
-                    if (studioDocuments.isEmpty()) {
-                        clearActiveStudioDocument();
-                    } else if (activeStudioDocument != null && activeStudioDocument.key().equals(key)) {
-                        selectStudioDocument(studioDocuments.getFirst().key());
-                    } else {
-                        refreshActiveViewHeaderButtons();
-                        refreshStudioResourcePanel();
-                    }
+                    removeStudioDocuments(Set.of(key));
                 }
             })
             .onTabSelected(tab -> {
@@ -552,7 +1123,6 @@ public class StudioScreen extends StudioInfiniteScreen {
         }
         syncStudioDocumentTabs();
         clearActiveStudioDocument();
-        restorePersistedOpenStudioDocuments();
     }
 
     private void showStudioTabMenu(TabsManager.Tab tab) {
@@ -571,7 +1141,20 @@ public class StudioScreen extends StudioInfiniteScreen {
             return true;
         }
         StudioDocument document = findStudioDocument(key);
-        if (document == null || !isStudioDocumentDirty(document)) {
+        if (document == null) {
+            clearStudioDiscardPrompt(key);
+            return true;
+        }
+        if (isAutomationDocument(document)) {
+            AutomationDefinitionDesignerScreen designer = automationDesigner(document);
+            if (designer != null && !designer.canCloseStudioDocument()) {
+                return false;
+            }
+            clearStudioDiscardPrompt(key);
+            discardStudioDocumentForClose(document);
+            return true;
+        }
+        if (!isStudioDocumentDirty(document)) {
             clearStudioDiscardPrompt(key);
             return true;
         }
@@ -579,8 +1162,7 @@ public class StudioScreen extends StudioInfiniteScreen {
         Long deadline = pendingStudioTabDiscards.get(key);
         if (deadline != null && deadline >= now) {
             clearStudioDiscardPrompt(key);
-            discardStudioDocument(document);
-            return true;
+            return discardStudioDocumentForClose(document);
         }
         pendingStudioTabDiscards.put(key, now + STUDIO_TAB_DISCARD_CONFIRMATION_MILLIS);
         tab.setName("Discard Changes?");
@@ -590,13 +1172,257 @@ public class StudioScreen extends StudioInfiniteScreen {
         return false;
     }
 
+    protected boolean discardStudioDocumentForClose(StudioDocument document) {
+        if (document == null) {
+            return false;
+        }
+        if (isAutomationDocument(document)) {
+            if (document.view() != null) {
+                document.view().discardUnsavedChanges();
+            }
+            return true;
+        }
+        FlowManager manager = FlowManager.getInstance();
+        ReSyncResourceType type = ReSyncResourceType.byTypeId(document.type());
+        if (document.coreSession() != null) {
+            if (manager == null || type == null || !manager.ownsCoreGraphEditorSession(
+                studioServerId(), type, document.id(), document.coreSession())) {
+                new Notification("Core Editor", "Discard Unavailable", Notification.Type.ERROR);
+                return false;
+            }
+            if (!manager.discardCoreGraphSession(studioServerId(), type, document.id())) {
+                new Notification("Core Editor", "Discard Unavailable", Notification.Type.ERROR);
+                return false;
+            }
+            return true;
+        }
+        if (manager != null && type != null) {
+            manager.discardResourceDraft(studioServerId(), type, document.id());
+        }
+        if (document.view() == null && document == activeStudioDocument) {
+            discardUnsavedChanges();
+        }
+        return true;
+    }
+
+    private boolean isCurrentCoreStudioDocument(StudioDocument document) {
+        if (document == null || document.coreSession() == null) {
+            return true;
+        }
+        FlowManager manager = FlowManager.getInstance();
+        ReSyncResourceType type = ReSyncResourceType.byTypeId(document.type());
+        return manager != null && type != null && manager.peekCoreGraphEditorSession(
+            studioServerId(), type, document.id()).orElse(null) == document.coreSession();
+    }
+
+    protected StudioDocument rebindCoreStudioDocument(StudioDocument document) {
+        if (document == null) {
+            return null;
+        }
+        FlowManager manager = FlowManager.getInstance();
+        ReSyncResourceType type = ReSyncResourceType.byTypeId(document.type());
+        CoreStudioOwnership ownership = coreStudioOwnership(manager, type, document.id());
+        boolean legacyUpgrade = document.coreSession() == null
+            && ownership != CoreStudioOwnership.NOT_GRAPH && ownership != CoreStudioOwnership.TERMINAL_LEGACY;
+        if (document.coreSession() == null && !legacyUpgrade) {
+            return document;
+        }
+        ReSyncFlowClient.CoreGraphActivationOutcome outcome = coreGraphActivation(manager, type, document.id());
+        CoreGraphEditorSession session = outcome.state() == ReSyncFlowClient.CoreGraphActivationState.LIVE
+            ? manager.peekCoreGraphEditorSession(studioServerId(), type, document.id()).orElse(null) : null;
+        if (session == null) {
+            if (legacyUpgrade && document.graph() != null && isStudioDocumentDirty(document)) {
+                diagnoseLegacyCoreConflict(document, "legacy_draft_dirty");
+            }
+            return null;
+        }
+        if (session == document.coreSession()) {
+            return document;
+        }
+        if (legacyUpgrade && !allowLegacyCoreReplacement(document)) {
+            return null;
+        }
+        StudioDocument rebound = new StudioDocument(document.type(), document.id(), document.title(), null, session, null,
+            document.viewport());
+        if (legacyUpgrade) {
+            if (document.view() != null) {
+                document.view().closed();
+            }
+            studioDocumentClosed(document);
+            terminalLegacyCoreDocuments.remove(document.key());
+            diagnosedLegacyCoreConflicts.remove(document.key());
+        }
+        for (int index = 0; index < studioDocuments.size(); index++) {
+            if (studioDocuments.get(index) == document) {
+                studioDocuments.set(index, rebound);
+                if (activeStudioDocument == document) {
+                    activeStudioDocument = rebound;
+                }
+                break;
+            }
+        }
+        return rebound;
+    }
+
+    private void retryPendingCoreStudioDocument() {
+        String key = pendingCoreStudioDocumentKey;
+        if (key == null || key.isBlank()) {
+            return;
+        }
+        if (pendingCoreOpenIntents.containsKey(key)) {
+            return;
+        }
+        StudioDocument document = findStudioDocument(key);
+        if (document == null) {
+            String previousKey = pendingCoreStudioPreviousDocumentKey;
+            clearPendingCoreStudioDocument();
+            restorePendingCoreStudioSelection(previousKey);
+            return;
+        }
+        long now = coreOpenNow();
+        if (now - pendingCoreStudioDocumentAt >= CORE_STUDIO_REBIND_TIMEOUT_MILLIS) {
+            CoreOpenIntent intent = pendingCoreOpenIntents.get(key);
+            if (intent == null || !failCoreOpenIntent(intent, "resource_unavailable")) {
+                String previousKey = pendingCoreStudioPreviousDocumentKey;
+                terminalCoreStudioRebinds.put(key, "resource_unavailable");
+                clearPendingCoreStudioDocument();
+                restorePendingCoreStudioSelection(previousKey);
+            }
+            return;
+        }
+        if (document.coreSession() == null) {
+            FlowManager manager = FlowManager.getInstance();
+            ReSyncResourceType type = ReSyncResourceType.byTypeId(document.type());
+            CoreStudioOwnership ownership = coreStudioOwnership(manager, type, document.id());
+            if (ownership == CoreStudioOwnership.PENDING_CORE || ownership == CoreStudioOwnership.CORE_REQUIRED) {
+                acceptCoreOpenIntent(type, document.id(), document.title());
+                return;
+            }
+            String previousKey = pendingCoreStudioPreviousDocumentKey;
+            clearPendingCoreStudioDocument();
+            restorePendingCoreStudioSelection(previousKey);
+            return;
+        }
+        if (rebindCoreStudioDocument(document) != null) {
+            clearPendingCoreStudioDocument();
+            selectStudioDocument(key);
+            return;
+        }
+    }
+
+    private void clearPendingCoreStudioDocument() {
+        pendingCoreStudioDocumentKey = "";
+        pendingCoreStudioPreviousDocumentKey = "";
+        pendingCoreStudioDocumentAt = 0L;
+    }
+
+    protected final boolean blockPendingCoreStudioSave() {
+        if (pendingCoreStudioDocumentKey == null || pendingCoreStudioDocumentKey.isBlank()) {
+            return false;
+        }
+        drainCoreOpenIntents();
+        if (pendingCoreStudioDocumentKey == null || pendingCoreStudioDocumentKey.isBlank()) {
+            return false;
+        }
+        new Notification("Core Editor", "Editor Loading", Notification.Type.ERROR);
+        return true;
+    }
+
+    private void restorePendingCoreStudioSelection(String previousKey) {
+        StudioDocument previous = previousKey == null || previousKey.isBlank() ? null : findStudioDocument(previousKey);
+        if (previous == null) {
+            previous = activeStudioDocument;
+        }
+        if (previous != null && Objects.equals(previous.key(), pendingCoreStudioDocumentKey)) {
+            setStudioTabsManagerActiveTab(findStudioTab(previous.key(),
+                studioTabsManager != null ? studioTabsManager.getTabs() : List.of()));
+            return;
+        }
+        if (previous == null) {
+            return;
+        }
+        if (activeStudioDocument == null || !activeStudioDocument.key().equals(previous.key())) {
+            String pendingKey = pendingCoreStudioDocumentKey;
+            String retainedPreviousKey = pendingCoreStudioPreviousDocumentKey;
+            long pendingAt = pendingCoreStudioDocumentAt;
+            restoringPendingCoreStudioSelection = true;
+            try {
+                selectStudioDocument(previous.key());
+            } finally {
+                restoringPendingCoreStudioSelection = false;
+            }
+            pendingCoreStudioDocumentKey = pendingKey;
+            pendingCoreStudioPreviousDocumentKey = retainedPreviousKey;
+            pendingCoreStudioDocumentAt = pendingAt;
+            return;
+        }
+        setStudioTabsManagerActiveTab(findStudioTab(previous.key(),
+            studioTabsManager != null ? studioTabsManager.getTabs() : List.of()));
+    }
+
     protected StudioDocument findStudioDocument(String key) {
         return studioDocuments.stream().filter(document -> document.key().equals(key)).findFirst().orElse(null);
     }
 
+    final void removeStudioDocuments(Set<String> keys) {
+        if (keys == null || keys.isEmpty()) {
+            return;
+        }
+        Set<String> removedKeys = keys.stream().filter(Objects::nonNull).filter(key -> !key.isBlank())
+            .collect(Collectors.toUnmodifiableSet());
+        if (removedKeys.isEmpty()) {
+            return;
+        }
+        int fallbackIndex = studioDocuments.size();
+        boolean activeRemoved = activeStudioDocument != null && removedKeys.contains(activeStudioDocument.key());
+        for (int index = 0; index < studioDocuments.size(); index++) {
+            if (removedKeys.contains(studioDocuments.get(index).key())) {
+                fallbackIndex = Math.min(fallbackIndex, index);
+            }
+        }
+        if (activeRemoved) {
+            clearActiveStudioDocument();
+        }
+        List<StudioDocument> removed = studioDocuments.stream()
+            .filter(document -> removedKeys.contains(document.key())).toList();
+        for (StudioDocument document : removed) {
+            if (Objects.equals(pendingCoreStudioDocumentKey, document.key())) {
+                clearPendingCoreStudioDocument();
+            }
+            terminalCoreStudioRebinds.remove(document.key());
+            terminalLegacyCoreDocuments.remove(document.key());
+            diagnosedLegacyCoreConflicts.remove(document.key());
+            pendingCoreOpenIntents.remove(document.key());
+            pendingStudioTabDiscards.remove(document.key());
+            studioResourcePanelResources.remove(document.key());
+            studioResourceOpenIntents.remove(document.key());
+            studioDocumentClosed(document);
+            removePersistedOpenStudioDocument(document.type(), document.id());
+            if (document.view() != null) {
+                document.view().closed();
+            }
+        }
+        studioDocuments.removeAll(removed);
+        syncStudioDocumentTabs();
+        if (activeRemoved && !studioDocuments.isEmpty()) {
+            selectStudioDocument(studioDocuments.get(Math.min(fallbackIndex, studioDocuments.size() - 1)).key());
+        } else if (!activeRemoved) {
+            refreshActiveViewHeaderButtons();
+            refreshStudioResourcePanel();
+        }
+    }
+
     protected boolean isStudioDocumentDirty(StudioDocument document) {
-        if (document.view() != null && document.view().hasUnsavedChanges()) {
-            return true;
+        if (document == null) {
+            return false;
+        }
+        if (document.coreSession() != null) {
+            FlowManager manager = FlowManager.getInstance();
+            return manager != null && manager.isCoreGraphEditorSessionDirty(studioServerId(),
+                ReSyncResourceType.byTypeId(document.type()), document.id(), document.coreSession());
+        }
+        if (document.view() != null) {
+            return document.view().hasUnsavedChanges();
         }
         return document == activeStudioDocument && hasUnsavedChanges();
     }
@@ -607,13 +1433,17 @@ public class StudioScreen extends StudioInfiniteScreen {
         }
         FlowManager manager = FlowManager.getInstance();
         ReSyncResourceType type = ReSyncResourceType.byTypeId(document.type());
-        if (manager != null && type != null) {
+        if (document.coreSession() != null) {
+            if (manager != null && type != null) {
+                manager.discardCoreGraphSession(studioServerId(), type, document.id());
+            }
+        } else if (manager != null && type != null) {
             manager.discardResourceDraft(studioServerId(), type, document.id());
         }
-        if (document.view() != null) {
+        if (document.coreSession() == null && document.view() != null) {
             document.view().discardUnsavedChanges();
         }
-        if (document == activeStudioDocument) {
+        if (document.coreSession() == null && document.view() == null && document == activeStudioDocument) {
             discardUnsavedChanges();
         }
     }
@@ -628,12 +1458,23 @@ public class StudioScreen extends StudioInfiniteScreen {
         if (document == null) {
             return;
         }
-        if (document.view() != null) {
+        if (document.coreSession() == null && document.view() != null) {
+            ReSyncFlowClient.traceLifecycle(studioServerId(), "studio_save_owner", "resourceKey", key,
+                "operation", "saving", "owner", "view", "sequence", sequence);
             document.view().markChangesSaving(sequence);
         }
-        if (document == activeStudioDocument) {
+        if (document.coreSession() == null && document.view() == null && document == activeStudioDocument) {
             markChangesSaving(sequence);
         }
+    }
+
+    public void markStudioDocumentSaveFailed(String type, String id) {
+        String key = ReSyncProjectMetadata.resourceKey(type, id);
+        if (findStudioDocument(key) == null) {
+            return;
+        }
+        syncStudioDocumentTabs();
+        updateStudioTabStates();
     }
 
     public void markStudioDocumentSaved(String type, String id, long sequence) {
@@ -642,10 +1483,12 @@ public class StudioScreen extends StudioInfiniteScreen {
         if (document == null) {
             return;
         }
-        if (document.view() != null) {
+        if (document.coreSession() == null && document.view() != null) {
+            ReSyncFlowClient.traceLifecycle(studioServerId(), "studio_save_owner", "resourceKey", key,
+                "operation", "saved", "owner", "view", "sequence", sequence);
             document.view().markChangesSaved(sequence);
         }
-        if (document == activeStudioDocument) {
+        if (document.coreSession() == null && document.view() == null && document == activeStudioDocument) {
             markChangesSaved(sequence);
         }
         clearStudioDiscardPrompt(key);
@@ -692,7 +1535,6 @@ public class StudioScreen extends StudioInfiniteScreen {
         }
         if (studioResourceStudioPanel == null) {
             studioResourceStudioPanel = rightStudioPanel("studioResourcePanel")
-                .collapsible("Resource Inspector")
                 .show();
             studioResourcePanel = studioResourceStudioPanel.sidePanel();
             studioResourceStudioPanel.padding(studioPanelState.padding());
@@ -794,10 +1636,10 @@ public class StudioScreen extends StudioInfiniteScreen {
     }
 
     public int studioContentBrowserPanelWidth() {
-        if (studioContentBrowser == null || studioContentBrowser.sidePanel() == null) {
+        if (studioContentBrowser == null || studioContentBrowser.sidePanel() == null || !studioContentBrowser.sidePanel().isVisible()) {
             return 0;
         }
-        return studioContentBrowser.sidePanel().layoutWidth(0);
+        return studioContentBrowser.sidePanel().getDesiredWidth();
     }
 
     public void setStudioContentBrowserTemporarilyHidden(boolean hidden) {
@@ -835,10 +1677,24 @@ public class StudioScreen extends StudioInfiniteScreen {
         }
         ReSyncFlowClient client = manager.ensureFlowClient(serverId);
         if (client == null) {
-            new Notification("Permissions", "ReSync Is Not Connected", Notification.Type.ERROR);
+            showFlowAdmissionIssue(manager, "Permissions");
             return;
         }
-        manager.getApplicationHost().openPermissionManager(this, client.luckPerms());
+        LuckPermsDashboardScreen.prepare(this, client.luckPerms())
+            
+            .whenComplete((screen, error) -> ScreenManager.getInstance().execute(() -> {
+                if (error != null || screen == null) {
+                    new Notification("Permissions", "Permissions Unavailable", Notification.Type.ERROR);
+                    return;
+                }
+                if (ScreenManager.getInstance().getCurrentScreen() != this) {
+                    return;
+                }
+                if (!manager.withCurrentFlowClientNow(serverId, client,
+                    current -> ScreenManager.getInstance().setScreen(screen))) {
+                    new Notification("Permissions", "Connection Changed", Notification.Type.ERROR);
+                }
+            }));
     }
 
     public boolean hasReSyncUpdateAvailable() {
@@ -856,6 +1712,186 @@ public class StudioScreen extends StudioInfiniteScreen {
         openStudioResource(resource);
     }
 
+    private boolean openStudioResourceSnapshot(String type, String id, String title, boolean fullEditor, boolean replaceExisting) {
+        FlowManager manager = FlowManager.getInstance();
+        if (manager == null || type == null || type.isBlank() || id == null || id.isBlank()) return false;
+        ReSyncResourceType resourceType = ReSyncResourceType.byTypeId(type);
+        if (resourceType != null && resourceType.isGraph() && routeCoreGraphOpen(manager, resourceType, id, title)) {
+            return true;
+        }
+        String requestedServerId = studioServerId();
+        FlowManager.ResourceReadLease lease = manager.snapshotResource(requestedServerId, type, id);
+        if (lease == null) {
+            ReSyncFlowClient.traceLifecycle(requestedServerId, "studio_snapshot_rejected", "serverId",
+                requestedServerId, "resourceKey", type + ":" + id, "requestId", "open", "mutationId", null,
+                "generation", -1L, "authorityEpoch", 0L, "revision", -1L, "reason", "snapshot_missing");
+            return false;
+        }
+        String key = ReSyncProjectMetadata.resourceKey(type, id);
+        long intent = ++studioResourceOpenVersion;
+        long startedAt = ReSyncFlowClient.TEMP_LIFECYCLE_DEBUG ? System.nanoTime() : 0L;
+        studioResourceOpenIntents.clear();
+        studioResourceOpenIntents.put(key, intent);
+        ReSyncFlowClient.traceLifecycle(requestedServerId, "studio_snapshot_admitted", "serverId", requestedServerId,
+            "resourceKey", type + ":" + id, "requestId", intent, "mutationId", null, "generation", -1L,
+            "authorityEpoch", 0L, "revision", -1L);
+        try {
+            STUDIO_RESOURCE_OPENS.execute(() -> {
+                try {
+                    Object value = deserializeStudioResource(type, lease.materialize());
+                    if (ReSyncResourceDragPayload.WORLDGEN.equals(type)
+                        && (!(value instanceof WorldGenProject project) || !id.equals(project.getId()))) {
+                        throw new IllegalStateException("World Generation project snapshot is invalid");
+                    }
+                    PreparedStudioResource prepared = new PreparedStudioResource(type, id, title, value,
+                        fullEditor, replaceExisting);
+                    ScreenManager.getInstance().execute(() -> {
+                        boolean expectedKeyPresent = Objects.equals(studioResourceOpenIntents.get(key), intent);
+                        boolean currentServer = Objects.equals(requestedServerId, studioServerId());
+                        boolean leaseCurrent = lease.isCurrent();
+                        ReSyncFlowClient.traceLifecycle(requestedServerId, "studio_open_callback", "serverId",
+                            requestedServerId, "resourceKey", key, "requestId", intent, "mutationId", null,
+                            "generation", -1L, "authorityEpoch", 0L, "revision", -1L,
+                            "expectedKeyPresent", expectedKeyPresent, "currentServer", currentServer,
+                            "leaseCurrent", leaseCurrent, "resourcePresent", prepared.value() != null,
+                            "elapsedMs", startedAt == 0L ? -1L : ((
+                                System.nanoTime() - startedAt) / 1_000_000L), "reason", !expectedKeyPresent ? "stale_intent"
+                                : !currentServer ? "server_changed" : !leaseCurrent ? "lease_stale" : "accepted");
+                        if (!expectedKeyPresent) return;
+                        if (!currentServer) {
+                            studioResourceOpenIntents.remove(key, intent);
+                            return;
+                        }
+                        if (!leaseCurrent) {
+                            if (!openStudioResourceSnapshot(type, id, title, fullEditor, replaceExisting)
+                                && studioResourceOpenIntents.remove(key, intent)) {
+                                if (studioResourcePanelResources.get(key) == prepared.value()) {
+                                    studioResourcePanelResources.remove(key);
+                                }
+                                new Notification("Open Resource", "Resource Is Unavailable", Notification.Type.ERROR);
+                            }
+                            return;
+                        }
+                        try {
+                            mountStudioResource(prepared);
+                            studioResourceOpenIntents.remove(key, intent);
+                            ReSyncFlowClient.traceLifecycle(requestedServerId, "studio_resource_opened", "serverId",
+                                requestedServerId, "resourceKey", type + ":" + id, "requestId", intent,
+                                "mutationId", null, "generation", -1L, "authorityEpoch", 0L, "revision", -1L,
+                                "expectedKeyPresent", true, "resourcePresent", prepared.value() != null,
+                                "documentPresent", findStudioDocument(key) != null, "tabPresent",
+                                studioTabPresent(key), "tabSelected", studioTabSelected(key),
+                                "elapsedMs", startedAt == 0L ? -1L : ((
+                                    System.nanoTime() - startedAt) / 1_000_000L));
+                        } catch (RuntimeException | Error exception) {
+                            if (studioResourcePanelResources.get(key) == prepared.value()) {
+                                studioResourcePanelResources.remove(key);
+                            }
+                            if (studioResourceOpenIntents.remove(key, intent)) {
+                                ReSyncFlowClient.traceLifecycle(requestedServerId, "studio_open_failed", "serverId",
+                                    requestedServerId, "resourceKey", type + ":" + id, "requestId", intent,
+                                    "mutationId", null, "generation", -1L, "authorityEpoch", 0L, "revision", -1L,
+                                    "elapsedMs", startedAt == 0L ? -1L : ((
+                                        System.nanoTime() - startedAt) / 1_000_000L), "reason", "mount_failed");
+                                new Notification("Open Resource", "Resource Could Not Be Opened", Notification.Type.ERROR);
+                            }
+                        }
+                    });
+                } catch (RuntimeException | Error exception) {
+                    ScreenManager.getInstance().execute(() -> {
+                        if (studioResourceOpenIntents.remove(key, intent)) {
+                            ReSyncFlowClient.traceLifecycle(requestedServerId, "studio_open_failed", "serverId",
+                                requestedServerId, "resourceKey", type + ":" + id, "requestId", intent,
+                                "mutationId", null, "generation", -1L, "authorityEpoch", 0L, "revision", -1L,
+                                "elapsedMs", startedAt == 0L ? -1L : ((
+                                    System.nanoTime() - startedAt) / 1_000_000L), "reason", "materialize_failed");
+                            new Notification("Open Resource", "Resource Is Unavailable", Notification.Type.ERROR);
+                        }
+                    });
+                }
+            });
+            return true;
+        } catch (IllegalStateException exception) {
+            BrowserWork.schedule(Duration.ofMillis(50L), () ->
+                ScreenManager.getInstance().execute(() -> {
+                    if (Objects.equals(studioResourceOpenIntents.get(key), intent)
+                        && Objects.equals(requestedServerId, studioServerId())) {
+                        openStudioResourceSnapshot(type, id, title, fullEditor, replaceExisting);
+                    }
+                }));
+            return true;
+        }
+    }
+
+    private Object deserializeStudioResource(String type, String payload) {
+        return switch (type) {
+            case ReSyncResourceDragPayload.FLOW, ReSyncResourceDragPayload.FUNCTION, ReSyncResourceDragPayload.COMMAND ->
+                FlowSerializer.deserialize(payload);
+            case ReSyncResourceDragPayload.CUSTOM_CONTENT -> FlowSerializer.deserializeCustomContent(payload);
+            case ReSyncResourceDragPayload.GUI -> FlowSerializer.deserializeGui(payload);
+            case ReSyncResourceDragPayload.SCOREBOARD -> FlowSerializer.deserializeScoreboard(payload);
+            case ReSyncResourceDragPayload.TAB -> FlowSerializer.deserializeTab(payload);
+            case ReSyncResourceDragPayload.WORLDGEN -> WorldGenSerializer.deserializeProject(payload);
+            default -> gson.fromJson(payload, JsonObject.class);
+        };
+    }
+
+    private void mountStudioResource(PreparedStudioResource prepared) {
+        String type = prepared.type();
+        String id = prepared.id();
+        String title = prepared.title();
+        String key = ReSyncProjectMetadata.resourceKey(type, id);
+        FlowManager manager = FlowManager.getInstance();
+        ReSyncResourceType resourceType = ReSyncResourceType.byTypeId(type);
+        if (prepared.value() instanceof FlowGraph && resourceType != null && resourceType.isGraph()
+            && routeCoreGraphOpen(manager, resourceType, id, title)) {
+            return;
+        }
+        if (prepared.value() instanceof FlowGraph graph) {
+            openStudioGraphDocumentOwned(type, id, title, graph);
+            StudioDocument document = findStudioDocument(key);
+            if (document != null && document.graph() != null
+                && coreStudioOwnership(manager, resourceType, id) == CoreStudioOwnership.TERMINAL_LEGACY) {
+                studioResourcePanelResources.put(key, prepared.value());
+            }
+            return;
+        }
+        studioResourcePanelResources.put(key, prepared.value());
+        if (prepared.value() instanceof WorldGenProject project) {
+            openStudioWorldGenDocument(id, title, project);
+        } else if (prepared.value() instanceof CustomContentDefinition content && content.getGraph() != null) {
+            FlowGraph graph = content.getGraph();
+            openStudioViewDocumentOwned(type, id, title, graph,
+                new ScreenBackedStudioView(this, new ContentDesignerScreen(studioServerId(), graph, this)), prepared.replaceExisting(), true);
+        } else if (prepared.value() instanceof CustomContentDefinition) {
+            requestStudioResource(FlowManager.getInstance(), ReSyncResourceType.CUSTOM_CONTENT, id);
+        } else if (prepared.value() instanceof GuiDefinition gui) {
+            openStudioViewDocumentOwned(type, id, title, null,
+                screenBackedStudioView(new GuiDesignerScreen(gui, studioServerId(), this, prepared.fullEditor(), prepared.fullEditor()), prepared.fullEditor()),
+                prepared.replaceExisting(), true);
+        } else if (prepared.value() instanceof ScoreboardDefinition scoreboard) {
+            openStudioViewDocumentOwned(type, id, title, null,
+                screenBackedStudioView(new ScoreboardDesignerScreen(scoreboard, studioServerId(), this, prepared.fullEditor(), prepared.fullEditor()), prepared.fullEditor()),
+                prepared.replaceExisting(), true);
+        } else if (prepared.value() instanceof TabDefinition tab) {
+            openStudioViewDocumentOwned(type, id, title, null,
+                screenBackedStudioView(new TabDesignerScreen(tab, studioServerId(), this, prepared.fullEditor(), prepared.fullEditor()), prepared.fullEditor()),
+                prepared.replaceExisting(), true);
+        } else if (prepared.value() instanceof JsonObject json) {
+            if (ReSyncResourceDragPayload.ADVANCEMENT_TREE.equals(type)) {
+                openStudioViewDocumentOwned(type, id, title, null,
+                    screenBackedStudioView(new AdvancementDesignerScreen(json, studioServerId(), this, prepared.fullEditor(), prepared.fullEditor()), prepared.fullEditor()),
+                    prepared.replaceExisting(), true);
+            } else if (ReSyncResourceDragPayload.DIALOG.equals(type)) {
+                openStudioViewDocumentOwned(type, id, title, null,
+                    screenBackedStudioView(new DialogDesignerScreen(json, studioServerId(), this, prepared.fullEditor(), prepared.fullEditor()), prepared.fullEditor()),
+                    prepared.replaceExisting(), true);
+            } else {
+                openFocusedResourceDocumentOwned(type, id, title, json);
+            }
+        }
+    }
+
     protected void openStudioResource(ReSyncProjectMetadata.ResourceEntry resource) {
         FlowManager manager = FlowManager.getInstance();
         if (manager == null || resource == null) {
@@ -863,50 +1899,30 @@ public class StudioScreen extends StudioInfiniteScreen {
         }
         if (ReSyncResourceDragPayload.FLOW.equals(resource.getType()) || ReSyncResourceDragPayload.FUNCTION.equals(resource.getType()) || ReSyncResourceDragPayload.COMMAND.equals(resource.getType())) {
             ReSyncResourceType resourceType = ReSyncResourceType.byTypeId(resource.getType());
-            FlowGraph targetGraph = ReSyncResourceDragPayload.COMMAND.equals(resource.getType())
-                ? manager.resolveCommandFlowGraph(studioServerId(), resource.getId())
-                : manager.getGraph(studioServerId(), resourceType, resource.getId());
-            if (targetGraph != null && (resourceType == null || !resource.getType().equals(targetGraph.getResourceType()))) {
-                targetGraph = null;
+            if (resourceType != null && routeCoreGraphOpen(manager, resourceType, resource.getId(), resource.getDisplayName())) {
+                return;
             }
-            if (targetGraph != null) {
-                openStudioGraphDocument(resource.getType(), resource.getId(), resource.getDisplayName(), detachedGraph(targetGraph));
-            } else if (resourceType != null) {
+            if (resourceType != null && openStudioResourceSnapshot(resource.getType(), resource.getId(), resource.getDisplayName(), false, false)) {
+                return;
+            }
+            if (resourceType != null) {
                 if (ReSyncResourceDragPayload.COMMAND.equals(resource.getType()) && manager.isCommandFlowIdentityBlocked(studioServerId(), resource.getId())) {
                     new Notification("Command", "ID Conflicts With Content", Notification.Type.ERROR);
                     return;
                 }
-                ReSyncFlowClient client = manager.ensureFlowClient(studioServerId());
-                if (client != null) {
-                    client.requestResource(resourceType, resource.getId(), true);
-                }
+                requestStudioResource(manager, resourceType, resource.getId());
             }
             return;
         }
         if (ReSyncResourceDragPayload.CUSTOM_CONTENT.equals(resource.getType())) {
-            String graphId = resource.getId();
-            CustomContentDefinition content = manager.getCustomContentForServer(studioServerId()).get(resource.getId());
-            if (content != null && content.getFlowId() != null && !content.getFlowId().isBlank()) {
-                graphId = content.getFlowId();
-            }
-            FlowGraph contentGraph = content != null ? content.getGraph() : null;
-            if (contentGraph == null) {
-                contentGraph = manager.getGraph(studioServerId(), ReSyncResourceType.FLOW, graphId);
-            }
-            if (contentGraph == null) {
-                ReSyncFlowClient client = manager.ensureFlowClient(studioServerId());
-                if (client != null) {
-                    client.requestResource(ReSyncResourceType.CUSTOM_CONTENT, resource.getId(), true);
-                }
-                return;
-            }
-            openStudioViewDocument(resource.getType(), resource.getId(), resource.getDisplayName(), contentGraph, new ScreenBackedStudioView(this, new ContentDesignerScreen(studioServerId(), contentGraph, this)));
+            if (!openStudioResourceSnapshot(resource.getType(), resource.getId(), resource.getDisplayName(), false, false))
+                requestStudioResource(manager, ReSyncResourceType.CUSTOM_CONTENT, resource.getId());
             return;
         }
         if (ReSyncResourceDragPayload.WORLDGEN.equals(resource.getType())) {
-            WorldGenManager worldGenManager = WorldGenManager.getInstance();
-            WorldGenProject project = worldGenManager.getCachedProject(studioServerId(), resource.getId());
-            openStudioWorldGenDocument(resource.getId(), resource.getDisplayName(), project);
+            if (!openStudioResourceSnapshot(resource.getType(), resource.getId(), resource.getDisplayName(), false, false)) {
+                WorldGenManager.getInstance().requestProject(studioServerId(), resource.getId());
+            }
             return;
         }
         if (ReSyncResourceDragPayload.GUI.equals(resource.getType())
@@ -917,33 +1933,178 @@ public class StudioScreen extends StudioInfiniteScreen {
         }
         ReSyncResourceType jsonType = ReSyncResourceType.byTypeId(resource.getType());
         if (jsonType != null) {
-            JsonObject json = manager.getJsonResourcesForServer(studioServerId(), jsonType).get(resource.getId());
-            if (json == null) {
-                ReSyncFlowClient client = manager.ensureFlowClient(studioServerId());
-                if (client != null) {
-                    client.requestResource(jsonType, resource.getId(), true);
-                }
-                return;
-            }
-            if (ReSyncResourceDragPayload.ADVANCEMENT_TREE.equals(resource.getType()) || ReSyncResourceDragPayload.DIALOG.equals(resource.getType())) {
-                openStudioDesigner(resource.getType(), resource.getId());
-            } else {
-                openFocusedResourceDocument(resource.getType(), resource.getId(), resource.getDisplayName(), detachedJson(json));
+            if (!openStudioResourceSnapshot(resource.getType(), resource.getId(), resource.getDisplayName(), false, false)) {
+                requestStudioResource(manager, jsonType, resource.getId());
             }
             return;
         }
         if (ReSyncResourceDragPayload.WORLD.equals(resource.getType())) {
             openStudioWorldDocument(resource.getId(), resource.getDisplayName());
+            return;
         }
+        openOpaqueManagedResourceDocument(resource.getType(), resource.getId(), resource.getDisplayName());
     }
 
     protected void openStudioGraphDocument(String type, String id, String title, FlowGraph targetGraph) {
+        openStudioGraphDocument(type, id, title, targetGraph, false);
+    }
+
+    protected final void openStudioGraphDocumentOwned(String type, String id, String title, FlowGraph targetGraph) {
+        openStudioGraphDocument(type, id, title, targetGraph, true);
+    }
+
+    private void openStudioGraphDocument(String type, String id, String title, FlowGraph targetGraph, boolean owned) {
+        FlowManager manager = FlowManager.getInstance();
+        ReSyncResourceType resourceType = ReSyncResourceType.byTypeId(type);
+        if (resourceType != null && resourceType.isGraph() && routeCoreGraphOpen(manager, resourceType, id, title)) {
+            return;
+        }
         if (targetGraph == null) {
             return;
         }
-        addStudioDocument(type, id, title == null || title.isBlank() ? id : title, targetGraph, null);
+        String key = ReSyncProjectMetadata.resourceKey(type, id);
+        addStudioDocument(type, id, title == null || title.isBlank() ? id : title, targetGraph, null, false, true, owned);
         syncStudioDocumentTabs();
-        selectStudioDocument(ReSyncProjectMetadata.resourceKey(type, id));
+        selectStudioDocument(key);
+    }
+
+    protected void openStudioCoreDocument(String type, String id, String title, CoreGraphEditorSession session) {
+        String key = ReSyncProjectMetadata.resourceKey(type, id);
+        ReSyncResourceType resourceType = ReSyncResourceType.byTypeId(type);
+        CoreOpenIntent intent = pendingCoreOpenIntents.get(key);
+        if (intent == null && resourceType != null && resourceType.isGraph()) {
+            intent = acceptCoreOpenIntent(resourceType, id, title);
+        }
+        if (bindStudioCoreDocument(type, id, title, session, true) && intent != null) {
+            pendingCoreOpenIntents.replace(key, intent, intent.preparing(true));
+        }
+    }
+
+    protected boolean bindStudioCoreDocument(String type, String id, String title, CoreGraphEditorSession session,
+                                             boolean activate) {
+        if (type == null || type.isBlank() || id == null || id.isBlank() || session == null
+            || session.resource() == null || !type.equals(session.resource().resourceType().value())
+            || !id.equals(session.resource().id())) {
+            return false;
+        }
+        FlowManager manager = FlowManager.getInstance();
+        ReSyncResourceType resourceType = ReSyncResourceType.byTypeId(type);
+        if (manager == null || resourceType == null || !resourceType.isGraph()) {
+            return false;
+        }
+        CoreGraphEditorSession currentSession = manager.peekCoreGraphEditorSession(
+            studioServerId(), resourceType, id).orElse(null);
+        if (currentSession != session) {
+            ReSyncFlowClient.traceLifecycle(studioServerId(), "studio_core_session_rejected", "serverId",
+                studioServerId(), "resourceKey", type + ":" + id, "requestId", "open", "mutationId", null,
+                "generation", -1L, "authorityEpoch", 0L, "revision", session.revision(), "reason",
+                "session_not_current");
+            if (activate) {
+                acceptCoreOpenIntent(resourceType, id, title);
+                requestCoreOpenResource(manager, resourceType, id);
+            }
+            retainVisibleStudioDocument();
+            return false;
+        }
+        String key = ReSyncProjectMetadata.resourceKey(type, id);
+        terminalCoreStudioRebinds.remove(key);
+        installCoreGraphSaveHandler();
+        String documentTitle = title == null || title.isBlank() ? id : title;
+        for (int i = 0; i < studioDocuments.size(); i++) {
+            StudioDocument document = studioDocuments.get(i);
+            if (!document.key().equals(key)) {
+                continue;
+            }
+            if (document.coreSession() != session || document.graph() != null || document.view() != null) {
+                if (document.coreSession() == null && !allowLegacyCoreReplacement(document)) {
+                    String reason = isStudioDocumentDirty(document)
+                        ? "legacy_draft_dirty" : "legacy_ownership_unverified";
+                    CoreOpenIntent intent = pendingCoreOpenIntents.get(key);
+                    if (!activate || intent == null || !failCoreOpenIntent(intent, reason)) {
+                        terminalCoreStudioRebinds.put(key, reason);
+                    }
+                    return false;
+                }
+                if (document.view() != null) {
+                    document.view().closed();
+                }
+                StudioDocument updated = new StudioDocument(type, id, documentTitle, null, session, null,
+                    document.viewport());
+                if (document.coreSession() == null) {
+                    studioDocumentClosed(document);
+                }
+                replaceStudioCoreDocument(i, document, updated);
+                terminalLegacyCoreDocuments.remove(key);
+                diagnosedLegacyCoreConflicts.remove(key);
+            } else if (!documentTitle.equals(document.title())) {
+                StudioDocument updated = new StudioDocument(type, id, documentTitle, null, session, null,
+                    document.viewport());
+                replaceStudioCoreDocument(i, document, updated);
+            }
+            persistOpenStudioDocument(type, id, documentTitle, activate);
+            syncStudioDocumentTabs();
+            if (activate) {
+                selectStudioDocument(key);
+            }
+            ReSyncFlowClient.traceLifecycle(studioServerId(), "studio_core_session_bound", "serverId",
+                studioServerId(), "resourceKey", type + ":" + id, "requestId", "open", "mutationId", null,
+                "generation", -1L, "authorityEpoch", 0L, "revision", session.revision(), "documentState",
+                "reused", "activate", activate, "phase", pendingCoreOpenIntents.containsKey(key)
+                    ? pendingCoreOpenIntents.get(key).phase() : "none", "tabPresent", studioTabPresent(key),
+                "tabSelected", studioTabSelected(key));
+            return true;
+        }
+        terminalLegacyCoreDocuments.remove(key);
+        diagnosedLegacyCoreConflicts.remove(key);
+        studioDocuments.add(new StudioDocument(type, id, documentTitle, null, session, null,
+            new StudioViewportState()));
+        persistOpenStudioDocument(type, id, documentTitle, activate);
+        syncStudioDocumentTabs();
+        if (activate) {
+            selectStudioDocument(key);
+        }
+        ReSyncFlowClient.traceLifecycle(studioServerId(), "studio_core_session_bound", "serverId", studioServerId(),
+            "resourceKey", type + ":" + id, "requestId", "open", "mutationId", null, "generation", -1L,
+            "authorityEpoch", 0L, "revision", session.revision(), "documentState", "created", "activate", activate,
+            "phase", pendingCoreOpenIntents.containsKey(key) ? pendingCoreOpenIntents.get(key).phase() : "none",
+            "tabPresent", studioTabPresent(key), "tabSelected", studioTabSelected(key));
+        return true;
+    }
+
+    private void replaceStudioCoreDocument(int index, StudioDocument previous, StudioDocument replacement) {
+        boolean active = activeStudioDocument == previous || activeStudioDocument != null
+            && Objects.equals(activeStudioDocument.key(), previous.key());
+        studioDocuments.set(index, replacement);
+        if (active) {
+            activeStudioDocument = replacement;
+            afterStudioDocumentSelected(replacement);
+        }
+    }
+
+    private void installCoreGraphSaveHandler() {
+        if (!(this instanceof GraphEditorScreen graphEditor)) {
+            return;
+        }
+        graphEditor.setCoreGraphSaveHandler((current, ticket) -> {
+            FlowManager manager = FlowManager.getInstance();
+            if (manager == null || current == null || activeStudioDocument == null
+                || activeStudioDocument.view() != null || activeStudioDocument.coreSession() != current
+                || current.resource() == null || !Objects.equals(studioServerId(), current.resource().serverId().canonicalText())) {
+                return false;
+            }
+            ReSyncResourceType type = ReSyncResourceType.byTypeId(current.resource().resourceType().value());
+            if (type == null || !type.isGraph()) {
+                return false;
+            }
+            boolean admitted = manager.saveCoreGraph(studioServerId(), type, current, ticket);
+            ReSyncFlowClient.traceLifecycle(studioServerId(), admitted ? "studio_save_admitted"
+                : "studio_save_rejected", "serverId", studioServerId(), "resourceKey",
+                type.typeId() + ":" + current.resource().id(), "requestId",
+                ticket != null ? ticket.requestId() : "save", "mutationId",
+                ticket != null ? ticket.mutationId() : null, "generation", -1L, "authorityEpoch", 0L,
+                "revision", current.revision());
+            return admitted;
+        });
     }
 
     protected void openStudioDesigner(String type, String id) {
@@ -955,69 +2116,50 @@ public class StudioScreen extends StudioInfiniteScreen {
         if (manager == null || id == null) {
             return;
         }
-        recordRecentRestudioItem(type, id, id);
         if (fullEditor) {
             collapseStudioContentBrowser();
         }
         if (ReSyncResourceDragPayload.GUI.equals(type)) {
-            GuiDefinition gui = manager.getGuisForServer(studioServerId()).get(id);
-            if (gui != null) {
-                openStudioViewDocument(type, id, manager.getGuiName(studioServerId(), id), screenBackedStudioView(new GuiDesignerScreen(detachedGui(gui), studioServerId(), this, fullEditor, fullEditor), fullEditor), fullEditor);
-            } else {
+            if (!openStudioResourceSnapshot(type, id, manager.getGuiName(studioServerId(), id), fullEditor, fullEditor)) {
                 manager.openGuiDesigner(studioServerId(), null, id, this, fullEditor);
             }
             return;
         }
         if (ReSyncResourceDragPayload.SCOREBOARD.equals(type)) {
-            ScoreboardDefinition scoreboard = manager.getScoreboardsForServer(studioServerId()).get(id);
-            if (scoreboard != null) {
-                openStudioViewDocument(type, id, manager.getScoreboardName(studioServerId(), id), screenBackedStudioView(new ScoreboardDesignerScreen(detachedScoreboard(scoreboard), studioServerId(), this, fullEditor, fullEditor), fullEditor), fullEditor);
-            } else {
+            if (!openStudioResourceSnapshot(type, id, manager.getScoreboardName(studioServerId(), id), fullEditor, fullEditor)) {
                 manager.openScoreboardDesigner(studioServerId(), null, id, this, fullEditor);
             }
             return;
         }
         if (ReSyncResourceDragPayload.TAB.equals(type)) {
-            TabDefinition tab = manager.getTabsForServer(studioServerId()).get(id);
-            if (tab != null) {
-                openStudioViewDocument(type, id, manager.getTabName(studioServerId(), id), screenBackedStudioView(new TabDesignerScreen(detachedTab(tab), studioServerId(), this, fullEditor, fullEditor), fullEditor), fullEditor);
-            } else {
+            if (!openStudioResourceSnapshot(type, id, manager.getTabName(studioServerId(), id), fullEditor, fullEditor)) {
                 manager.openTabDesigner(studioServerId(), null, id, this, fullEditor);
             }
             return;
         }
         if (ReSyncResourceDragPayload.ADVANCEMENT_TREE.equals(type)) {
-            JsonObject tree = manager.getJsonResourcesForServer(studioServerId(), ReSyncResourceType.ADVANCEMENT_TREE).get(id);
-            if (tree != null) {
-                openStudioViewDocument(type, id, ReSyncResourceType.ADVANCEMENT_TREE.extractName(tree), screenBackedStudioView(new AdvancementDesignerScreen(detachedJson(tree), studioServerId(), this, fullEditor, fullEditor), fullEditor), fullEditor);
-            }
+            if (!openStudioResourceSnapshot(type, id, id, fullEditor, fullEditor))
+                requestStudioResource(manager, ReSyncResourceType.ADVANCEMENT_TREE, id);
             return;
         }
         if (ReSyncResourceDragPayload.DIALOG.equals(type)) {
-            JsonObject dialog = manager.getJsonResourcesForServer(studioServerId(), ReSyncResourceType.DIALOG).get(id);
-            if (dialog != null) {
-                openStudioViewDocument(type, id, ReSyncResourceType.DIALOG.extractName(dialog), screenBackedStudioView(new DialogDesignerScreen(detachedJson(dialog), studioServerId(), this, fullEditor, fullEditor), fullEditor), fullEditor);
-            } else {
+            if (!openStudioResourceSnapshot(type, id, id, fullEditor, fullEditor)) {
                 manager.openDialogDesigner(studioServerId(), id, this, fullEditor);
             }
             return;
         }
         ReSyncResourceType resourceType = ReSyncResourceType.byTypeId(type);
-        if (resourceType == null || !Set.of(ReSyncResourceType.CHAT, ReSyncResourceType.MOTD_PROFILE, ReSyncResourceType.MESSAGE_RULE,
-            ReSyncResourceType.RECIPE_DEFINITION, ReSyncResourceType.TEXT_TEMPLATE, ReSyncResourceType.TRADE_PROFILE,
-            ReSyncResourceType.NPC_DEFINITION, ReSyncResourceType.LOOT_TABLE, ReSyncResourceType.VARIABLE_DEFINITION,
-            ReSyncResourceType.TIMER_DEFINITION, ReSyncResourceType.SCHEDULE_DEFINITION).contains(resourceType)) {
+        if (resourceType == null) {
+            openOpaqueManagedResourceDocument(type, id, id);
             return;
         }
-        JsonObject resource = manager.getJsonResourcesForServer(studioServerId(), resourceType).get(id);
-        if (resource == null) {
-            ReSyncFlowClient client = manager.ensureFlowClient(studioServerId());
-            if (client != null) {
-                client.requestResource(resourceType, id, true);
-            }
+        if (resourceType.isGraph() || resourceType == ReSyncResourceType.PROJECT_METADATA
+            || resourceType == ReSyncResourceType.CUSTOM_CONTENT) {
             return;
         }
-        openFocusedResourceDocument(type, id, resourceType.extractName(resource), detachedJson(resource));
+        if (!openStudioResourceSnapshot(type, id, id, fullEditor, fullEditor)) {
+            requestStudioResource(manager, resourceType, id);
+        }
     }
 
     protected ScreenBackedStudioView screenBackedStudioView(Screen screen, boolean fullEditor) {
@@ -1028,7 +2170,14 @@ public class StudioScreen extends StudioInfiniteScreen {
     }
 
     protected void requestCloseFullEditorStudioScreen() {
+        if (fullEditorHeaderCloseRequested) {
+            return;
+        }
         fullEditorHeaderCloseRequested = true;
+        ReSyncStudioView view = activeStudioView();
+        if (view instanceof ScreenBackedStudioView screenView && screenView.fullEditor()) {
+            screenView.requestCloseAnimation();
+        }
         startTopHeaderClosingAnimation();
         if (studioContentBrowser != null) {
             studioContentBrowser.slideOut();
@@ -1051,9 +2200,8 @@ public class StudioScreen extends StudioInfiniteScreen {
     }
 
     protected void openStudioWorldGenDocument(String id, String title, WorldGenProject project) {
-        WorldGenManager.getInstance().ensureLocalDefinitions(studioServerId());
-        WorldGenProject initialProject = project != null ? project : WorldGenManager.getInstance().createProjectTemplate("Continental", id);
-        openStudioViewDocument(ReSyncResourceDragPayload.WORLDGEN, id, title, new ScreenBackedStudioView(this, new WorldGenEditorScreen(studioServerId(), null, this, initialProject)));
+        openStudioViewDocument(ReSyncResourceDragPayload.WORLDGEN, id, title, new ScreenBackedStudioView(this,
+            new WorldGenEditorScreen(studioServerId(), null, this, project, id)));
         if (project == null) {
             WorldGenManager.getInstance().requestProject(studioServerId(), id);
         }
@@ -1063,13 +2211,151 @@ public class StudioScreen extends StudioInfiniteScreen {
         openStudioViewDocument(ReSyncResourceDragPayload.WORLD, id, title == null || title.isBlank() ? id : title, screenBackedStudioView(new WorldDesignerScreen(id, studioServerId(), this), false));
     }
 
+    private List<ReSyncResourceType> studioTypedResourceTypes() {
+        return Arrays.stream(ReSyncResourceType.values())
+            .filter(type -> type != ReSyncResourceType.PROJECT_METADATA)
+            .toList();
+    }
+
+    private Map<?, ?> studioTypedResources(FlowManager manager, ReSyncResourceType type) {
+        return switch (type) {
+            case FLOW, FUNCTION, COMMAND -> manager.getGraphsForServer(studioServerId(), type);
+            case GUI -> manager.getGuisForServer(studioServerId());
+            case SCOREBOARD -> manager.getScoreboardsForServer(studioServerId());
+            case TAB -> manager.getTabsForServer(studioServerId());
+            case CUSTOM_CONTENT -> manager.getCustomContentForServer(studioServerId());
+            case PROJECT_METADATA -> Map.of();
+            default -> manager.getJsonResourcesForServer(studioServerId(), type);
+        };
+    }
+
+    private String studioTypedResourceId(ReSyncResourceType type, Object key, Object value) {
+        String id = key instanceof String text ? text : "";
+        if (id.isBlank() && value != null) {
+            try {
+                id = type.extractId(value);
+            } catch (RuntimeException ignored) {
+                id = "";
+            }
+        }
+        return id == null ? "" : id.trim();
+    }
+
+    private String studioTypedResourceName(ReSyncResourceType type, Object value, String id) {
+        if (value != null) {
+            try {
+                String name = type.extractName(value);
+                if (name != null && !name.isBlank()) {
+                    return name;
+                }
+            } catch (RuntimeException ignored) {
+            }
+        }
+        return id;
+    }
+
+    private ReSyncProjectMetadata studioPresentationMetadata(FlowManager manager) {
+        FlowManager.ResourceReadLease lease = manager.snapshotProjectMetadata(studioServerId());
+        if (lease == null) {
+            return null;
+        }
+        try {
+            if (!lease.isCurrent()) {
+                return null;
+            }
+            ReSyncProjectMetadata metadata = gson.fromJson(lease.materialize(), ReSyncProjectMetadata.class);
+            return lease.isCurrent() ? metadata : null;
+        } catch (RuntimeException ignored) {
+            return null;
+        }
+    }
+
+    private void hydrateStudioTypedResources(FlowManager manager, ReSyncResourceType type,
+                                             Map<String, ReSyncProjectMetadata.ResourceEntry> resources) {
+        Map<?, ?> typed = studioTypedResources(manager, type);
+        for (Map.Entry<?, ?> item : typed.entrySet()) {
+            String id = studioTypedResourceId(type, item.getKey(), item.getValue());
+            if (id.isBlank() || item.getValue() == null) {
+                continue;
+            }
+            String key = ReSyncProjectMetadata.resourceKey(type.typeId(), id);
+            ReSyncProjectMetadata.ResourceEntry existing = resources.get(key);
+            if (existing == null) {
+                continue;
+            }
+            if (existing.getDisplayName() == null || existing.getDisplayName().isBlank()) {
+                existing.setDisplayName(studioTypedResourceName(type, item.getValue(), id));
+            }
+            if (existing.getPath() == null || existing.getPath().isBlank()) {
+                existing.setPath(type.defaultFolder());
+            }
+        }
+    }
+
+    private List<ReSyncProjectMetadata.ResourceEntry> studioResourceProjection(FlowManager manager) {
+        Map<String, ReSyncProjectMetadata.ResourceEntry> resources = new LinkedHashMap<>();
+        for (ReSyncProjectMetadata.ResourceEntry resource : manager.getProjectResources(studioServerId())) {
+            if (resource != null) {
+                resources.put(resource.key(), resource);
+            }
+        }
+        for (ReSyncResourceType type : studioTypedResourceTypes()) {
+            hydrateStudioTypedResources(manager, type, resources);
+        }
+        return List.copyOf(resources.values());
+    }
+
+    private List<ReSyncProjectMetadata.FolderEntry> studioFolderProjection(FlowManager manager) {
+        Map<String, ReSyncProjectMetadata.FolderEntry> folders = new LinkedHashMap<>();
+        ReSyncProjectMetadata metadata = studioPresentationMetadata(manager);
+        if (metadata != null) {
+            for (ReSyncProjectMetadata.FolderEntry folder : metadata.getFolders()) {
+                if (folder != null) {
+                    folders.put(ReSyncProjectMetadata.normalizePath(folder.getPath()), folder);
+                }
+            }
+        }
+        for (ReSyncProjectMetadata.ResourceEntry resource : studioResourceProjection(manager)) {
+            List<String> hierarchy = studioResourceFolderHierarchy(resource.getPath(), resource.getId());
+            String parent = "";
+            for (String current : hierarchy) {
+                if (!folders.containsKey(current)) {
+                    ReSyncProjectMetadata.FolderEntry folder = new ReSyncProjectMetadata.FolderEntry();
+                    folder.setPath(current);
+                    folder.setParentPath(parent);
+                    int separator = current.lastIndexOf('/');
+                    folder.setName(separator >= 0 ? current.substring(separator + 1) : current);
+                    folder.setSortOrder(Integer.MAX_VALUE);
+                    folders.put(current, folder);
+                }
+                parent = current;
+            }
+        }
+        return List.copyOf(folders.values());
+    }
+
+    static List<String> studioResourceFolderHierarchy(String path, String id) {
+        String folder = ReSyncContentBrowserWidget.resourceFolderPath(path, id);
+        if (folder.isBlank()) {
+            return List.of();
+        }
+        List<String> hierarchy = new ArrayList<>();
+        String current = "";
+        for (String segment : folder.split("/")) {
+            if (!segment.isBlank()) {
+                current = current.isBlank() ? segment : current + "/" + segment;
+                hierarchy.add(current);
+            }
+        }
+        return List.copyOf(hierarchy);
+    }
+
     protected List<ReSyncProjectMetadata.FolderEntry> studioFolders(String parentPath) {
         FlowManager manager = FlowManager.getInstance();
         if (manager == null) {
             return List.of();
         }
-        ReSyncProjectMetadata metadata = manager.getProjectMetadata(studioServerId());
-        return metadata.getFolders().stream()
+        return studioFolderProjection(manager).stream()
             .filter(this::isVisibleStudioFolder)
             .filter(folder -> parentPath.equals(folder.getParentPath()))
             .sorted(Comparator.comparingInt(ReSyncProjectMetadata.FolderEntry::getSortOrder).thenComparing(ReSyncProjectMetadata.FolderEntry::getName))
@@ -1081,8 +2367,7 @@ public class StudioScreen extends StudioInfiniteScreen {
         if (manager == null) {
             return List.of();
         }
-        ReSyncProjectMetadata metadata = manager.getProjectMetadata(studioServerId());
-        return metadata.getFolders().stream()
+        return studioFolderProjection(manager).stream()
             .filter(this::isVisibleStudioFolder)
             .toList();
     }
@@ -1092,12 +2377,16 @@ public class StudioScreen extends StudioInfiniteScreen {
         if (manager == null) {
             return List.of();
         }
-        ReSyncProjectMetadata metadata = manager.getProjectMetadata(studioServerId());
-        return metadata.getResources().stream()
+        return studioResourceProjection(manager).stream()
             .filter(this::isVisibleStudioResource)
-            .filter(resource -> folderPath.equals(resource.getPath()))
+            .filter(resource -> studioResourceInFolder(resource, folderPath))
             .sorted(Comparator.comparing(ReSyncProjectMetadata.ResourceEntry::getDisplayName))
             .toList();
+    }
+
+    static boolean studioResourceInFolder(ReSyncProjectMetadata.ResourceEntry resource, String folderPath) {
+        return resource != null && ReSyncProjectMetadata.normalizePath(folderPath)
+            .equals(ReSyncContentBrowserWidget.resourceFolderPath(resource.getPath(), resource.getId()));
     }
 
     protected List<ReSyncProjectMetadata.ResourceEntry> studioAllResources() {
@@ -1105,8 +2394,7 @@ public class StudioScreen extends StudioInfiniteScreen {
         if (manager == null) {
             return List.of();
         }
-        ReSyncProjectMetadata metadata = manager.getProjectMetadata(studioServerId());
-        return metadata.getResources().stream()
+        return studioResourceProjection(manager).stream()
             .filter(this::isVisibleStudioResource)
             .toList();
     }
@@ -1123,21 +2411,79 @@ public class StudioScreen extends StudioInfiniteScreen {
         openStudioViewDocument(type, id, title == null || title.isBlank() ? id : title, focusedResourceView(type, id, detachedJson(resource)));
     }
 
+    protected void openFocusedResourceDocumentOwned(String type, String id, String title, JsonObject resource) {
+        openStudioViewDocumentOwned(type, id, title == null || title.isBlank() ? id : title, null,
+            focusedResourceView(type, id, resource), false, true);
+    }
+
+    public void openDefinitions(String type) {
+        if (!AutomationDefinitionDraft.supports(type)) {
+            return;
+        }
+        openAutomationDocument(type, null, "", null, false);
+    }
+
+    public void openDefinition(String type, String id) {
+        if (AutomationDefinitionDraft.supports(type) && id != null && !id.isBlank()) {
+            openAutomationDocument(type, id, "", null, false);
+        }
+    }
+
+    public void openDefinitionCreate(String type, String folder, Consumer<ReSyncResourceCreator.Result> completion) {
+        if (AutomationDefinitionDraft.supports(type)) {
+            openAutomationDocument(type, null, folder, completion, true);
+        }
+    }
+
+    private void openAutomationDocument(String type, String id, String folder,
+                                        Consumer<ReSyncResourceCreator.Result> completion, boolean create) {
+        String key = ReSyncProjectMetadata.resourceKey(AUTOMATION_DOCUMENT_TYPE, AUTOMATION_DOCUMENT_ID);
+        StudioDocument document = findStudioDocument(key);
+        AutomationDefinitionDesignerScreen designer = automationDesigner(document);
+        if (designer == null) {
+            ReSyncStudioView view = AutomationDefinitionDesignerScreen.typeScreen(this, studioServerId(), type);
+            openStudioViewDocument(AUTOMATION_DOCUMENT_TYPE, AUTOMATION_DOCUMENT_ID, "Automation", null, view,
+                false, false);
+            document = findStudioDocument(key);
+            designer = automationDesigner(document);
+        } else {
+            selectStudioDocument(key);
+        }
+        if (designer == null) {
+            return;
+        }
+        if (create) {
+            designer.showCreate(type, folder, completion);
+        } else if (id != null && !id.isBlank()) {
+            designer.showDefinition(type, id);
+        } else {
+            designer.showType(type);
+        }
+    }
+
+    private AutomationDefinitionDesignerScreen automationDesigner(StudioDocument document) {
+        if (document == null || !(document.view() instanceof ScreenBackedStudioView view)
+            || !(view.screen() instanceof AutomationDefinitionDesignerScreen designer)) {
+            return null;
+        }
+        return designer;
+    }
+
+    private boolean isAutomationDocument(StudioDocument document) {
+        return document != null && AUTOMATION_DOCUMENT_TYPE.equals(document.type())
+            && AUTOMATION_DOCUMENT_ID.equals(document.id());
+    }
+
+    protected void openOpaqueManagedResourceDocument(String type, String id, String title) {
+        openStudioViewDocumentOwned(type, id, title == null || title.isBlank() ? id : title, null,
+            new ManagedResourceDesignerScreen(this, type, id, null, studioServerId(), this, false), false, true);
+    }
+
     protected ReSyncStudioView focusedResourceView(String type, String id, JsonObject resource) {
-        return switch (type) {
-            case ReSyncResourceDragPayload.RECIPE_DEFINITION -> new RecipeDesignerScreen(this, id, resource, studioServerId(), this);
-            case ReSyncResourceDragPayload.MOTD_PROFILE -> new MotdDesignerScreen(this, id, resource, studioServerId(), this);
-            case ReSyncResourceDragPayload.MESSAGE_RULE -> new MessageRuleDesignerScreen(this, id, resource, studioServerId(), this);
-            case ReSyncResourceDragPayload.TEXT_TEMPLATE -> new TextTemplateDesignerScreen(this, id, resource, studioServerId(), this);
-            case ReSyncResourceDragPayload.CHAT -> new ChatDesignerScreen(this, id, resource, studioServerId(), this);
-            case ReSyncResourceDragPayload.TRADE_PROFILE -> new TradeDesignerScreen(this, id, resource, studioServerId(), this);
-            case ReSyncResourceDragPayload.NPC_DEFINITION -> new NpcDesignerScreen(this, id, resource, studioServerId(), this);
-            case ReSyncResourceDragPayload.LOOT_TABLE -> new LootTableDesignerScreen(this, id, resource, studioServerId(), this);
-            case ReSyncResourceDragPayload.VARIABLE_DEFINITION, ReSyncResourceDragPayload.TIMER_DEFINITION,
-                 ReSyncResourceDragPayload.SCHEDULE_DEFINITION ->
-                new AutomationDefinitionDesignerScreen(this, type, id, resource, studioServerId(), this);
-            default -> new TextTemplateDesignerScreen(this, id, resource, studioServerId(), this);
-        };
+        if (AutomationDefinitionDraft.supports(type)) {
+            return AutomationDefinitionDesignerScreen.designer(this, studioServerId(), type, id, resource);
+        }
+        return ResourceDesigners.create(this, type, id, resource, studioServerId(), this);
     }
 
     protected void openStudioViewDocument(String type, String id, String title, ReSyncStudioView view) {
@@ -1162,6 +2508,13 @@ public class StudioScreen extends StudioInfiniteScreen {
         selectStudioDocument(ReSyncProjectMetadata.resourceKey(type, id));
     }
 
+    private void openStudioViewDocumentOwned(String type, String id, String title, FlowGraph targetGraph, ReSyncStudioView view,
+                                             boolean replaceExisting, boolean persistDocument) {
+        addStudioDocument(type, id, title == null || title.isBlank() ? id : title, targetGraph, view, replaceExisting, persistDocument, true);
+        syncStudioDocumentTabs();
+        selectStudioDocument(ReSyncProjectMetadata.resourceKey(type, id));
+    }
+
     protected void addStudioDocument(String type, String id, String title, FlowGraph targetGraph, ReSyncStudioView view) {
         addStudioDocument(type, id, title, targetGraph, view, false);
     }
@@ -1171,24 +2524,58 @@ public class StudioScreen extends StudioInfiniteScreen {
     }
 
     protected void addStudioDocument(String type, String id, String title, FlowGraph targetGraph, ReSyncStudioView view, boolean replaceExisting, boolean persistDocument) {
+        addStudioDocument(type, id, title, targetGraph, view, replaceExisting, persistDocument, false);
+    }
+
+    private void addStudioDocument(String type, String id, String title, FlowGraph targetGraph, ReSyncStudioView view,
+                                   boolean replaceExisting, boolean persistDocument, boolean ownedGraph) {
         String key = ReSyncProjectMetadata.resourceKey(type, id);
-        recordRecentRestudioItem(type, id, title);
+        ReSyncResourceType resourceType = ReSyncResourceType.byTypeId(type);
+        if (targetGraph != null && resourceType != null && resourceType.isGraph()) {
+            FlowManager manager = FlowManager.getInstance();
+            if (coreStudioOwnership(manager, resourceType, id) != CoreStudioOwnership.TERMINAL_LEGACY) {
+                routeCoreGraphOpen(manager, resourceType, id, title);
+                return;
+            }
+            terminalLegacyCoreDocuments.add(key);
+            diagnosedLegacyCoreConflicts.remove(key);
+        }
         String documentTitle = persistDocument ? studioDocumentTitle(id, title) : title == null || title.isBlank() ? id : title;
         for (int i = 0; i < studioDocuments.size(); i++) {
             StudioDocument document = studioDocuments.get(i);
             if (document.key().equals(key)) {
+                if (document.coreSession() != null) {
+                    if (!documentTitle.equals(document.title())) {
+                        StudioDocument updatedDocument = new StudioDocument(document.type(), document.id(), documentTitle,
+                            document.graph(), document.coreSession(), document.view(), document.viewport());
+                        studioDocuments.set(i, updatedDocument);
+                        if (activeStudioDocument != null && activeStudioDocument.key().equals(key)) {
+                            activeStudioDocument = updatedDocument;
+                        }
+                    }
+                    if (persistDocument) {
+                        persistOpenStudioDocument(type, id, documentTitle);
+                    }
+                    ReSyncFlowClient.traceLifecycle(studioServerId(), "studio_document_retained", "serverId", studioServerId(),
+                        "resourceKey", key, "requestId", "studio", "mutationId", null, "authorityEpoch", 0L,
+                        "revision", document.coreSession().revision(), "replaceRequested", replaceExisting);
+                    return;
+                }
                 if (replaceExisting) {
                     if (document.view() != null) {
                         document.view().closed();
                     }
-                    FlowGraph detachedGraph = detachedGraph(targetGraph);
-                    StudioDocument updatedDocument = new StudioDocument(type, id, documentTitle, detachedGraph, view != null ? view : createStudioDocumentView(type, id, detachedGraph), document.viewport());
+                    FlowGraph detachedGraph = ownedGraph ? targetGraph : detachedGraph(targetGraph);
+                    StudioDocument updatedDocument = new StudioDocument(type, id, documentTitle, detachedGraph, null,
+                        view != null ? view : createStudioDocumentView(type, id, detachedGraph), document.viewport());
                     studioDocuments.set(i, updatedDocument);
-                    if (activeStudioDocument != null && activeStudioDocument.key().equals(key)) {
-                        activeStudioDocument = updatedDocument;
-                    }
+                    ReSyncFlowClient.traceLifecycle(studioServerId(), "studio_document_replaced", "serverId", studioServerId(),
+                        "resourceKey", key, "requestId", "studio", "mutationId", null, "authorityEpoch", 0L,
+                        "revision", detachedGraph != null ? detachedGraph.getResourceRevision() : -1L,
+                        "nodeCount", detachedGraph != null && detachedGraph.getNodes() != null ? detachedGraph.getNodes().size() : 0);
                 } else if (!documentTitle.equals(document.title())) {
-                    StudioDocument updatedDocument = new StudioDocument(document.type(), document.id(), documentTitle, document.graph(), document.view(), document.viewport());
+                    StudioDocument updatedDocument = new StudioDocument(document.type(), document.id(), documentTitle,
+                        document.graph(), null, document.view(), document.viewport());
                     studioDocuments.set(i, updatedDocument);
                     if (activeStudioDocument != null && activeStudioDocument.key().equals(key)) {
                         activeStudioDocument = updatedDocument;
@@ -1200,20 +2587,16 @@ public class StudioScreen extends StudioInfiniteScreen {
                 return;
             }
         }
-        FlowGraph detachedGraph = detachedGraph(targetGraph);
-        StudioDocument document = new StudioDocument(type, id, documentTitle, detachedGraph, view != null ? view : createStudioDocumentView(type, id, detachedGraph), new StudioViewportState());
+        FlowGraph detachedGraph = ownedGraph ? targetGraph : detachedGraph(targetGraph);
+        StudioDocument document = new StudioDocument(type, id, documentTitle, detachedGraph, null,
+            view != null ? view : createStudioDocumentView(type, id, detachedGraph), new StudioViewportState());
         studioDocuments.add(document);
+        ReSyncFlowClient.traceLifecycle(studioServerId(), "studio_document_added", "serverId", studioServerId(),
+            "resourceKey", key, "requestId", "studio", "mutationId", null, "authorityEpoch", 0L, "revision",
+            detachedGraph != null ? detachedGraph.getResourceRevision() : -1L,
+            "nodeCount", detachedGraph != null && detachedGraph.getNodes() != null ? detachedGraph.getNodes().size() : 0);
         if (persistDocument) {
             persistOpenStudioDocument(type, id, documentTitle);
-        }
-    }
-
-    private void recordRecentRestudioItem(String type, String id, String title) {
-        String serverId = studioServerId();
-        RemotelyClient client = RemotelyClient.INSTANCE;
-        if (client != null && serverId != null && !serverId.isBlank() && type != null && !type.isBlank() && id != null && !id.isBlank()) {
-            client.getHost().serverScreenHost(client).recordRecentRestudioItem(serverId,
-                    ReSyncProjectMetadata.resourceKey(type, id), title == null || title.isBlank() ? id : title);
         }
     }
 
@@ -1249,93 +2632,18 @@ public class StudioScreen extends StudioInfiniteScreen {
     }
 
     protected void persistOpenStudioDocument(String type, String id, String title) {
-        if (restoringPersistedStudioDocuments) {
-            return;
-        }
-        FlowManager manager = FlowManager.getInstance();
-        if (manager == null) {
-            return;
-        }
-        ReSyncProjectMetadata metadata = manager.getProjectMetadata(studioServerId());
-        metadata.addOpenDocument(type, id, title);
-        manager.saveProjectMetadata(studioServerId(), metadata, false);
+        persistOpenStudioDocument(type, id, title, true);
     }
 
-    protected void restorePersistedOpenStudioDocuments() {
-        if (!studioMode || persistedStudioRestoreDisposed || restoringPersistedStudioDocuments) {
-            return;
-        }
+    protected void persistOpenStudioDocument(String type, String id, String title, boolean activate) {
         FlowManager manager = FlowManager.getInstance();
-        String serverId = studioServerId();
-        if (manager == null || serverId == null || serverId.isBlank()) {
+        if (manager == null) {
+            ReSyncFlowClient.traceLifecycle(studioServerId(), "studio_open_rejected", "serverId", studioServerId(),
+                "resourceKey", type + ":" + id, "requestId", "open", "mutationId", null, "generation", -1L,
+                "authorityEpoch", 0L, "revision", -1L, "reason", "manager_missing");
             return;
         }
-        ReSyncProjectMetadata metadata = manager.getProjectMetadata(serverId);
-        List<ReSyncProjectMetadata.OpenDocumentEntry> entries = new ArrayList<>();
-        Set<String> entryKeys = new HashSet<>();
-        for (ReSyncProjectMetadata.OpenDocumentEntry entry : List.copyOf(metadata.getOpenDocuments())) {
-            if (entry != null && !entry.getType().isBlank() && !entry.getId().isBlank() && entryKeys.add(entry.key())) {
-                entries.add(entry);
-            }
-        }
-        List<String> snapshotKeys = entries.stream().map(ReSyncProjectMetadata.OpenDocumentEntry::key).toList();
-        String selectedKey = metadata.getSelectedResourceKey() == null ? "" : metadata.getSelectedResourceKey();
-        if (!persistedStudioRestoreKeys.equals(snapshotKeys)
-            || !Objects.equals(persistedStudioRestoreSelectedKey, selectedKey)) {
-            ++persistedStudioRestoreGeneration;
-            persistedStudioRestoreKeys = snapshotKeys;
-            persistedStudioRestoreSelectedKey = selectedKey;
-            pendingPersistedStudioDocumentRestores.clear();
-            successfulPersistedStudioDocumentRestores.clear();
-            terminalPersistedStudioDocumentRestores.clear();
-            persistedStudioDocumentsRestored = snapshotKeys.isEmpty();
-        }
-        if (persistedStudioDocumentsRestored) {
-            return;
-        }
-        long generation = persistedStudioRestoreGeneration;
-        for (ReSyncProjectMetadata.OpenDocumentEntry entry : entries) {
-            String key = entry.key();
-            if (successfulPersistedStudioDocumentRestores.contains(key) || terminalPersistedStudioDocumentRestores.contains(key)) {
-                continue;
-            }
-            if (findStudioDocument(key) != null) {
-                successfulPersistedStudioDocumentRestores.add(key);
-                pendingPersistedStudioDocumentRestores.remove(key);
-                continue;
-            }
-            ReSyncResourceType resourceType = ReSyncResourceType.byTypeId(entry.getType());
-            boolean requestWhenMissing = !Objects.equals(pendingPersistedStudioDocumentRestores.get(key), generation);
-            boolean failed = false;
-            restoringPersistedStudioDocuments = true;
-            persistedStudioRestoreRequestAllowed = requestWhenMissing;
-            try {
-                openWorkspaceResource(entry.getType(), entry.getId());
-            } catch (Throwable failure) {
-                failed = true;
-            } finally {
-                persistedStudioRestoreRequestAllowed = false;
-                restoringPersistedStudioDocuments = false;
-            }
-            if (findStudioDocument(key) != null) {
-                successfulPersistedStudioDocumentRestores.add(key);
-                pendingPersistedStudioDocumentRestores.remove(key);
-            } else if (!failed && resourceType != null && resourceType != ReSyncResourceType.PROJECT_METADATA
-                && manager.existingFlowClient(serverId) != null) {
-                pendingPersistedStudioDocumentRestores.put(key, generation);
-            } else {
-                pendingPersistedStudioDocumentRestores.remove(key);
-                if (failed || resourceType == null || resourceType == ReSyncResourceType.PROJECT_METADATA) {
-                    terminalPersistedStudioDocumentRestores.add(key);
-                }
-            }
-        }
-        persistedStudioDocumentsRestored = entries.stream().allMatch(entry ->
-            successfulPersistedStudioDocumentRestores.contains(entry.key()) || terminalPersistedStudioDocumentRestores.contains(entry.key()));
-        if (persistedStudioDocumentsRestored && !persistedStudioRestoreSelectedKey.isBlank()
-            && findStudioDocument(persistedStudioRestoreSelectedKey) != null) {
-            selectStudioDocument(persistedStudioRestoreSelectedKey);
-        }
+        manager.persistOpenProjectDocument(studioServerId(), type, id, title, activate);
     }
 
     protected void removePersistedOpenStudioDocument(String type, String id) {
@@ -1343,16 +2651,7 @@ public class StudioScreen extends StudioInfiniteScreen {
         if (manager == null) {
             return;
         }
-        String key = ReSyncProjectMetadata.resourceKey(type, id);
-        ReSyncProjectMetadata metadata = manager.getProjectMetadata(studioServerId());
-        boolean removed = metadata.getOpenDocuments().removeIf(entry -> key.equals(entry.key()));
-        if (!removed) {
-            return;
-        }
-        if (key.equals(metadata.getSelectedResourceKey())) {
-            metadata.setSelectedResourceKey("");
-        }
-        manager.saveProjectMetadata(studioServerId(), metadata, false);
+        manager.removeOpenProjectDocument(studioServerId(), type, id);
     }
 
     protected void renameStudioDocument(String type, String oldId, String newId) {
@@ -1374,13 +2673,26 @@ public class StudioScreen extends StudioInfiniteScreen {
         }
         if (documentIndex >= 0) {
             StudioDocument document = studioDocuments.get(documentIndex);
+            if (document.coreSession() != null) {
+                new Notification("Core Editor", "Rename Unavailable", Notification.Type.WARN);
+                return;
+            }
+            if (document.view() instanceof StudioResourceRenameAware view
+                && view.deferResourceRename(type, oldId, newId, () -> renameStudioDocument(type, oldId, newId))) {
+                return;
+            }
+            if (document.view() == null && this instanceof StudioResourceRenameAware view
+                && view.deferResourceRename(type, oldId, newId, () -> renameStudioDocument(type, oldId, newId))) {
+                return;
+            }
             if (document.graph() != null) {
                 document.graph().setId(newId);
             }
             if (document.view() != null) {
                 document.view().resourceRenamed(type, oldId, newId);
             }
-            StudioDocument renamed = new StudioDocument(type, newId, newId, document.graph(), document.view(), document.viewport());
+            StudioDocument renamed = new StudioDocument(type, newId, newId, document.graph(), null,
+                document.view(), document.viewport());
             studioDocumentRenamed(document, renamed);
             for (int i = studioDocuments.size() - 1; i >= 0; i--) {
                 StudioDocument duplicate = studioDocuments.get(i);
@@ -1401,26 +2713,19 @@ public class StudioScreen extends StudioInfiniteScreen {
                 activeStudioDocument = renamed;
             }
         }
+        Object panelResource = studioResourcePanelResources.remove(oldKey);
+        if (panelResource != null) {
+            studioResourcePanelResources.put(newKey, panelResource);
+        }
+        if (terminalLegacyCoreDocuments.remove(oldKey)) {
+            terminalLegacyCoreDocuments.add(newKey);
+        }
+        if (diagnosedLegacyCoreConflicts.remove(oldKey)) {
+            diagnosedLegacyCoreConflicts.add(newKey);
+        }
         FlowManager manager = FlowManager.getInstance();
         if (manager != null) {
-            ReSyncProjectMetadata metadata = manager.getProjectMetadata(studioServerId());
-            ReSyncProjectMetadata.OpenDocumentEntry renamedEntry = null;
-            for (ReSyncProjectMetadata.OpenDocumentEntry entry : metadata.getOpenDocuments()) {
-                if (entry.key().equals(oldKey)) {
-                    renamedEntry = entry;
-                    break;
-                }
-            }
-            ReSyncProjectMetadata.OpenDocumentEntry keep = renamedEntry;
-            metadata.getOpenDocuments().removeIf(entry -> entry != keep && entry.key().equals(newKey));
-            if (renamedEntry != null) {
-                renamedEntry.setId(newId);
-                renamedEntry.setDisplayName(newId);
-            }
-            if (metadata.getSelectedResourceKey().equals(oldKey)) {
-                metadata.setSelectedResourceKey(newKey);
-            }
-            manager.saveProjectMetadata(studioServerId(), metadata, false);
+            manager.renameOpenProjectDocument(studioServerId(), type, oldId, newId);
         }
         syncStudioDocumentTabs();
         if (activeRenamed) {
@@ -1446,7 +2751,8 @@ public class StudioScreen extends StudioInfiniteScreen {
     }
 
     protected boolean activeStudioDocumentUsesFlowGraphCanvas() {
-        return activeStudioDocument != null && activeStudioDocument.view() == null && activeStudioDocument.graph() != null;
+        return activeStudioDocument != null && activeStudioDocument.coreSession() == null
+            && activeStudioDocument.view() == null && activeStudioDocument.graph() != null;
     }
 
     protected void refreshActiveViewHeaderButtons() {
@@ -1477,18 +2783,7 @@ public class StudioScreen extends StudioInfiniteScreen {
     }
 
     protected boolean shouldAnimateActiveStudioHeader(ReSyncStudioView view) {
-        if (!(view instanceof ScreenBackedStudioView screenView)) {
-            return false;
-        }
-        if (!screenView.fullEditor()) {
-            return false;
-        }
-        Screen screen = screenView.screen();
-        return screen instanceof GuiDesignerScreen
-            || screen instanceof ScoreboardDesignerScreen
-            || screen instanceof TabDesignerScreen
-            || screen instanceof AdvancementDesignerScreen
-            || screen instanceof DialogDesignerScreen;
+        return view instanceof ScreenBackedStudioView screenView && screenView.fullEditor();
     }
 
     protected void refreshStudioResourcePanel() {
@@ -1554,9 +2849,96 @@ public class StudioScreen extends StudioInfiniteScreen {
         return false;
     }
 
-    protected void buildGuiResourcePanel() {
+    private Object activeStudioPanelResource() {
+        if (activeStudioDocument == null) {
+            return null;
+        }
+        return studioResourcePanelResources.get(activeStudioDocument.key());
+    }
+
+    private void submitStudioPanelSave(ReSyncResourceType type, String id, String name,
+                                       Consumer<Object> mutation) {
         FlowManager manager = FlowManager.getInstance();
-        GuiDefinition gui = manager != null ? manager.getGuisForServer(studioServerId()).get(activeStudioDocument.id()) : null;
+        String serverId = studioServerId();
+        DesignerSaveNotifications.SaveTicket ticket = DesignerSaveNotifications.startExact(serverId, type, id, name);
+        if (manager == null || ticket == null || mutation == null) {
+            DesignerSaveNotifications.failExact(ticket, "Save Snapshot Rejected");
+            return;
+        }
+        String key = serverId + "\u0000" + type.typeId() + "\u0000" + id;
+        StudioPanelSaveIntent intent = new StudioPanelSaveIntent(serverId, type, id, ticket, mutation);
+        boolean dispatch;
+        synchronized (studioPanelSaveLock) {
+            if (studioPanelSaveCount >= 32) {
+                DesignerSaveNotifications.failExact(ticket, "Studio Is Busy");
+                return;
+            }
+            ArrayDeque<StudioPanelSaveIntent> saves = studioPanelSaves.get(key);
+            dispatch = saves == null;
+            if (saves == null) {
+                saves = new ArrayDeque<>();
+                studioPanelSaves.put(key, saves);
+            }
+            saves.addLast(intent);
+            studioPanelSaveCount++;
+        }
+        if (!dispatch) return;
+        try {
+            STUDIO_RESOURCE_OPENS.execute(() -> drainStudioPanelSaves(key, manager));
+        } catch (IllegalStateException exception) {
+            failStudioPanelSaves(key, "Studio Is Busy");
+        }
+    }
+
+    private void drainStudioPanelSaves(String key, FlowManager manager) {
+        while (true) {
+            StudioPanelSaveIntent intent;
+            synchronized (studioPanelSaveLock) {
+                ArrayDeque<StudioPanelSaveIntent> saves = studioPanelSaves.get(key);
+                intent = saves != null ? saves.pollFirst() : null;
+                if (intent == null) {
+                    studioPanelSaves.remove(key);
+                    return;
+                }
+                studioPanelSaveCount--;
+            }
+            saveStudioPanelIntent(manager, intent);
+        }
+    }
+
+    private void saveStudioPanelIntent(FlowManager manager, StudioPanelSaveIntent intent) {
+        try {
+            for (int attempt = 0; attempt < 8 && DesignerSaveNotifications.isPending(intent.ticket()); attempt++) {
+                FlowManager.ResourceReadLease lease = manager.snapshotResource(intent.serverId(), intent.type().typeId(), intent.id());
+                if (lease == null) {
+                    DesignerSaveNotifications.failExact(intent.ticket(), "Save Snapshot Rejected");
+                    return;
+                }
+                Object resource = deserializeStudioResource(intent.type().typeId(), lease.materialize());
+                intent.mutation().accept(resource);
+                if (manager.saveStudioPanelResource(intent.serverId(), intent.type(), lease, resource, intent.ticket())) return;
+            }
+            if (DesignerSaveNotifications.isPending(intent.ticket())) {
+                DesignerSaveNotifications.failExact(intent.ticket(), "Resource Changed Repeatedly");
+            }
+        } catch (RuntimeException | Error exception) {
+            DesignerSaveNotifications.failExact(intent.ticket(), "Save Snapshot Failed");
+        }
+    }
+
+    private void failStudioPanelSaves(String key, String message) {
+        List<StudioPanelSaveIntent> failed;
+        synchronized (studioPanelSaveLock) {
+            ArrayDeque<StudioPanelSaveIntent> saves = studioPanelSaves.remove(key);
+            if (saves == null) return;
+            failed = List.copyOf(saves);
+            studioPanelSaveCount -= saves.size();
+        }
+        failed.forEach(intent -> DesignerSaveNotifications.failExact(intent.ticket(), message));
+    }
+
+    protected void buildGuiResourcePanel() {
+        GuiDefinition gui = activeStudioPanelResource() instanceof GuiDefinition value ? value : null;
         if (gui == null) {
             return;
         }
@@ -1583,15 +2965,27 @@ public class StudioScreen extends StudioInfiniteScreen {
         setStudioResourcePanelWidgets(studioPanelState.row("Title", title, rowWidth, studioResourceDescription("Gui Title")),
             studioPanelState.row("Rows", rows, rowWidth, studioResourceDescription("Gui Rows")),
             studioPanelState.row("Inventory", playerInventory, rowWidth, studioResourceDescription("Gui Inventory")), panelSaveButton(() -> {
-            gui.setTitle(title.getText());
-            gui.setRows(parseStudioInt(rows.getText(), gui.getRows(), 1, 6));
-            gui.setExtendToPlayerInventory(playerInventory.getValue());
-            DesignerSaveNotifications.start(studioServerId(), ReSyncResourceType.GUI, gui.getId(), gui.getTitle());
-            manager.saveGui(studioServerId(), gui);
+            String updatedTitle = title.getText();
+            int updatedRows = parseStudioInt(rows.getText(), gui.getRows(), 1, 6);
+            boolean updatedInventory = playerInventory.getValue();
+            submitStudioPanelSave(ReSyncResourceType.GUI, gui.getId(), updatedTitle, resource -> {
+                GuiDefinition updated = (GuiDefinition) resource;
+                updated.setTitle(updatedTitle);
+                updated.setRows(updatedRows);
+                updated.setExtendToPlayerInventory(updatedInventory);
+            });
         }));
     }
 
     protected void buildCommandResourcePanel() {
+        if (activeStudioDocument == null) {
+            return;
+        }
+        CoreGraphEditorSession coreSession = activeStudioDocument.coreSession();
+        if (coreSession != null) {
+            buildCommandResourcePanel(commandContext(coreSession.commandMetadata()));
+            return;
+        }
         FlowManager manager = FlowManager.getInstance();
         if (manager == null) {
             return;
@@ -1607,8 +3001,7 @@ public class StudioScreen extends StudioInfiniteScreen {
     }
 
     protected void buildScoreboardResourcePanel() {
-        FlowManager manager = FlowManager.getInstance();
-        ScoreboardDefinition scoreboard = manager != null ? manager.getScoreboardsForServer(studioServerId()).get(activeStudioDocument.id()) : null;
+        ScoreboardDefinition scoreboard = activeStudioPanelResource() instanceof ScoreboardDefinition value ? value : null;
         if (scoreboard == null) {
             return;
         }
@@ -1630,17 +3023,20 @@ public class StudioScreen extends StudioInfiniteScreen {
         setStudioResourcePanelWidgets(studioPanelState.row("Title", title, rowWidth, studioResourceDescription("Scoreboard Title")),
             studioPanelState.row("Objective", objective, rowWidth, studioResourceDescription("Objective")),
             studioPanelState.row("Lines", lines, rowWidth, studioResourceDescription("Scoreboard Lines")), panelSaveButton(() -> {
-            scoreboard.setTitle(title.getText());
-            scoreboard.setObjectiveId(objective.getText());
-            scoreboard.setLines(parseStudioLines(lines.getText()));
-            DesignerSaveNotifications.start(studioServerId(), ReSyncResourceType.SCOREBOARD, scoreboard.getId(), scoreboard.getTitle());
-            manager.saveScoreboard(studioServerId(), scoreboard);
+            String updatedTitle = title.getText();
+            String updatedObjective = objective.getText();
+            List<String> updatedLines = parseStudioLines(lines.getText());
+            submitStudioPanelSave(ReSyncResourceType.SCOREBOARD, scoreboard.getId(), updatedTitle, resource -> {
+                ScoreboardDefinition updated = (ScoreboardDefinition) resource;
+                updated.setTitle(updatedTitle);
+                updated.setObjectiveId(updatedObjective);
+                updated.setLines(updatedLines);
+            });
         }));
     }
 
     protected void buildTabResourcePanel() {
-        FlowManager manager = FlowManager.getInstance();
-        TabDefinition tab = manager != null ? manager.getTabsForServer(studioServerId()).get(activeStudioDocument.id()) : null;
+        TabDefinition tab = activeStudioPanelResource() instanceof TabDefinition value ? value : null;
         if (tab == null) {
             return;
         }
@@ -1662,17 +3058,21 @@ public class StudioScreen extends StudioInfiniteScreen {
         setStudioResourcePanelWidgets(studioPanelState.row("Header", header, rowWidth, studioResourceDescription("Tab Header")),
             studioPanelState.row("Entry", entry, rowWidth, studioResourceDescription("Tab Entry")),
             studioPanelState.row("Footer", footer, rowWidth, studioResourceDescription("Tab Footer")), panelSaveButton(() -> {
-            tab.setHeader(header.getText());
-            tab.setEntryFormat(entry.getText());
-            tab.setFooter(footer.getText());
-            DesignerSaveNotifications.start(studioServerId(), ReSyncResourceType.TAB, tab.getId(), tab.getId());
-            manager.saveTab(studioServerId(), tab);
+            String updatedHeader = header.getText();
+            String updatedEntry = entry.getText();
+            String updatedFooter = footer.getText();
+            submitStudioPanelSave(ReSyncResourceType.TAB, tab.getId(), tab.getId(), resource -> {
+                TabDefinition updated = (TabDefinition) resource;
+                updated.setHeader(updatedHeader);
+                updated.setEntryFormat(updatedEntry);
+                updated.setFooter(updatedFooter);
+            });
         }));
     }
 
     protected void buildDialogResourcePanel() {
         FlowManager manager = FlowManager.getInstance();
-        JsonObject dialog = manager != null ? manager.getJsonResourcesForServer(studioServerId(), ReSyncResourceType.DIALOG).get(activeStudioDocument.id()) : null;
+        JsonObject dialog = manager != null ? manager.getJsonResource(studioServerId(), ReSyncResourceType.DIALOG, activeStudioDocument.id()) : null;
         if (dialog == null) {
             return;
         }
@@ -1694,13 +3094,18 @@ public class StudioScreen extends StudioInfiniteScreen {
         setStudioResourcePanelWidgets(studioPanelState.row("Name", name, rowWidth, studioResourceDescription("Dialog Name")),
             studioPanelState.row("Title", title, rowWidth, studioResourceDescription("Dialog Title")),
             studioPanelState.row("Type", type, rowWidth, studioResourceDescription("Dialog Type")), panelSaveButton(() -> {
-            dialog.addProperty("displayName", name.getText());
-            dialog.addProperty("title", title.getText());
-            dialog.addProperty("type", type.getText());
-            dialog.remove("pause");
-            dialog.remove("external_title");
-            DesignerSaveNotifications.start(studioServerId(), ReSyncResourceType.DIALOG, ReSyncResourceType.DIALOG.extractId(dialog), ReSyncResourceType.DIALOG.extractName(dialog));
-            manager.saveJsonResource(studioServerId(), ReSyncResourceType.DIALOG, dialog);
+            String updatedName = name.getText();
+            String updatedTitle = title.getText();
+            String updatedType = type.getText();
+            String dialogId = ReSyncResourceType.DIALOG.extractId(dialog);
+            submitStudioPanelSave(ReSyncResourceType.DIALOG, dialogId, updatedName, resource -> {
+                JsonObject updated = (JsonObject) resource;
+                updated.addProperty("displayName", updatedName);
+                updated.addProperty("title", updatedTitle);
+                updated.addProperty("type", updatedType);
+                updated.remove("pause");
+                updated.remove("external_title");
+            });
         }));
     }
 
@@ -1711,8 +3116,11 @@ public class StudioScreen extends StudioInfiniteScreen {
         }
         setStudioResourcePanelKey(panelKey);
         setStudioResourcePanelWidgets(panelSaveButton(() -> {
-            WorldGenProject project = WorldGenManager.getInstance().createProjectTemplate("Continental", activeStudioDocument.id());
-            WorldGenManager.getInstance().saveWorldGen(studioServerId(), project);
+            String projectId = activeStudioDocument == null ? "" : activeStudioDocument.id();
+            Screen screen = activeStudioViewScreen();
+            if (!(screen instanceof WorldGenEditorScreen editor) || !editor.requestProjectSave(projectId)) {
+                new Notification("World Generation Failed", "Save Not Submitted", Notification.Type.ERROR);
+            }
         }));
     }
 
@@ -2000,13 +3408,22 @@ public class StudioScreen extends StudioInfiniteScreen {
     }
 
     private void applyCommandInteraction(CommandBindingContext draft, boolean rebuild) {
-        if (activeStudioDocument == null || activeStudioDocument.graph() == null || draft == null) {
+        if (activeStudioDocument == null || draft == null) {
             return;
         }
-        applyStudioCollaborationInteraction(() -> applyCommandContext(activeStudioDocument.graph(), draft));
+        if (activeStudioDocument.coreSession() != null) {
+            applyCoreCommandInteraction(draft);
+        } else if (activeStudioDocument.graph() != null) {
+            applyStudioCollaborationInteraction(() -> applyCommandContext(activeStudioDocument.graph(), draft));
+        } else {
+            return;
+        }
         if (rebuild) {
             rebuildCommandResourcePanel(draft);
         }
+    }
+
+    protected void applyCoreCommandInteraction(CommandBindingContext context) {
     }
 
     protected void applyStudioCollaborationInteraction(Runnable mutation) {
@@ -2024,8 +3441,16 @@ public class StudioScreen extends StudioInfiniteScreen {
     }
 
     protected List<String> collectCommandPaths() {
+        return collectCommandPaths(collectCommandPathDraft());
+    }
+
+    protected List<String> collectCommandPaths(List<String> values) {
         List<String> paths = new ArrayList<>();
-        for (String path : collectCommandPathDraft()) {
+        if (values == null) {
+            return paths;
+        }
+        for (String value : values) {
+            String path = value != null ? value.trim() : "";
             if (!path.isBlank()) {
                 paths.add(path);
             }
@@ -2050,7 +3475,7 @@ public class StudioScreen extends StudioInfiniteScreen {
                 continue;
             }
             Object commandValue = node.getInputValues().get("command");
-            String command = commandValue != null ? normalizeCommandLabel(FlowJson.text(commandValue)) : "";
+            String command = commandValue != null ? normalizeCommandLabel(String.valueOf(commandValue)) : "";
             if (command.isBlank()) {
                 continue;
             }
@@ -2058,13 +3483,26 @@ public class StudioScreen extends StudioInfiniteScreen {
             context.command = command;
             Object pathsValue = node.getInputValues().get("subcommands");
             context.subcommands = pathsValue instanceof List<?> paths
-                ? paths.stream().map(FlowJson::text).toList()
+                ? paths.stream().map(path -> path != null ? String.valueOf(path) : "").toList()
                 : new ArrayList<>();
             Object structuredValue = node.getInputValues().get("structured");
-            context.structured = structuredValue instanceof Boolean value ? value : Boolean.parseBoolean(FlowJson.text(structuredValue));
+            context.structured = structuredValue instanceof Boolean value ? value : Boolean.parseBoolean(String.valueOf(structuredValue));
             return context;
         }
         return null;
+    }
+
+    protected CommandBindingContext commandContext(CommandGraphMetadata metadata) {
+        CommandBindingContext context = new CommandBindingContext();
+        context.command = metadata.commandLabel();
+        context.subcommands = new ArrayList<>(metadata.commandPaths());
+        context.structured = metadata.structured();
+        return context;
+    }
+
+    protected CommandGraphMetadata commandMetadata(CommandBindingContext context) {
+        return new CommandGraphMetadata(normalizeCommandLabel(context.command), context.structured != null && context.structured,
+            collectCommandPaths(context.subcommands));
     }
 
     private boolean isEditingCommandPanel() {
@@ -2097,11 +3535,7 @@ public class StudioScreen extends StudioInfiniteScreen {
     }
 
     protected boolean isCommandStartNode(String type) {
-        if (type == null) {
-            return false;
-        }
-        String normalized = type.trim().toLowerCase(Locale.ROOT);
-        return "event.resync.command".equals(normalized) || "event:resync_command".equals(normalized);
+        return CommandGraphContract.isAnyStart(type);
     }
 
     protected CommandBindingContext parseCommandContext(String context) {
@@ -2114,12 +3548,13 @@ public class StudioScreen extends StudioInfiniteScreen {
         String trimmed = context.trim();
         if (trimmed.startsWith("{")) {
             try {
-                JsonObject decoded = FlowJson.parse(trimmed).getAsJsonObject();
-                parsed.command = normalizeCommandLabel(commandJsonText(decoded, "command"));
-                parsed.subcommands = commandJsonStrings(decoded, "subcommands");
-                JsonElement structured = decoded.get("structured");
-                parsed.structured = structured != null && !structured.isJsonNull() && structured.getAsBoolean();
-                return parsed;
+                CommandBindingContext decoded = gson.fromJson(trimmed, CommandBindingContext.class);
+                if (decoded != null) {
+                    parsed.command = normalizeCommandLabel(decoded.command);
+                    parsed.subcommands = decoded.subcommands != null ? decoded.subcommands : new ArrayList<>();
+                    parsed.structured = decoded.structured != null && decoded.structured;
+                    return parsed;
+                }
             } catch (Exception ignored) {
             }
         }
@@ -2134,29 +3569,7 @@ public class StudioScreen extends StudioInfiniteScreen {
         command.command = normalizeCommandLabel(command.command);
         command.subcommands = command.subcommands != null ? command.subcommands : new ArrayList<>();
         command.structured = command.structured != null && command.structured;
-        if (command.subcommands.isEmpty() && !command.structured) return command.command;
-        JsonObject encoded = new JsonObject();
-        encoded.addProperty("command", command.command);
-        JsonArray subcommands = new JsonArray();
-        command.subcommands.forEach(subcommands::add);
-        encoded.add("subcommands", subcommands);
-        encoded.addProperty("structured", command.structured);
-        return FlowJson.write(encoded);
-    }
-
-    private static String commandJsonText(JsonObject value, String name) {
-        JsonElement element = value.get(name);
-        return element == null || element.isJsonNull() ? "" : element.getAsString();
-    }
-
-    private static List<String> commandJsonStrings(JsonObject value, String name) {
-        JsonElement element = value.get(name);
-        if (element == null || !element.isJsonArray()) return new ArrayList<>();
-        List<String> result = new ArrayList<>();
-        element.getAsJsonArray().forEach(item -> {
-            if (item.isJsonPrimitive()) result.add(item.getAsString());
-        });
-        return result;
+        return command.subcommands.isEmpty() && !command.structured ? command.command : gson.toJson(command);
     }
 
     protected String normalizeCommandLabel(String label) {
@@ -2257,6 +3670,7 @@ public class StudioScreen extends StudioInfiniteScreen {
         if (layoutChanged) {
             studioTabsManager.updateLayout();
         }
+        retryPendingCoreStudioDocument();
     }
 
     private void clearStudioDiscardPrompts() {
@@ -2325,36 +3739,125 @@ public class StudioScreen extends StudioInfiniteScreen {
     }
 
     protected void selectStudioDocument(String key) {
+        StudioDocument document = findStudioDocument(key);
+        if (document == null) {
+            clearActiveStudioDocument();
+            return;
+        }
+        if (!restoringPendingCoreStudioSelection) {
+            demotePendingCoreActivationExcept(key);
+        }
+        if (isUnchangedActiveStudioDocument(document)) {
+            return;
+        }
         clearStudioDiscardPrompts();
-        for (StudioDocument document : studioDocuments) {
-            if (document.key().equals(key)) {
-                if (activeStudioDocument != null && !activeStudioDocument.key().equals(key) && activeStudioDocument.view() != null) {
-                    activeStudioDocument.view().deselected();
+        StudioDocument selected = rebindCoreStudioDocument(document);
+        if (selected == null) {
+            ReSyncResourceType type = ReSyncResourceType.byTypeId(document.type());
+            boolean corePending = isCoreStudioDocumentPending(document);
+            if (corePending) {
+                FlowManager manager = FlowManager.getInstance();
+                ReSyncFlowClient.CoreGraphActivationOutcome outcome = coreGraphActivation(
+                    manager, type, document.id());
+                if (terminalCoreActivation(outcome) && !coreActivationStillSettling(outcome)) {
+                    String terminalReason = coreActivationReason(outcome);
+                    terminalCoreStudioRebinds.put(key, terminalReason);
+                    notifyCoreGraphOpenFailed(terminalReason);
+                    return;
                 }
-                beforeStudioDocumentSelection();
-                prepareStudioDocumentSelection();
-                activeStudioDocument = document;
-                setStudioTabsManagerActiveTab(findStudioTab(document.key(), studioTabsManager != null ? studioTabsManager.getTabs() : List.of()));
-                if (document.view() != null) {
-                    document.view().selected();
+                terminalCoreStudioRebinds.remove(key);
+                boolean newIntent = !pendingCoreOpenIntents.containsKey(key);
+                CoreOpenIntent intent = acceptCoreOpenIntent(type, document.id(), document.title());
+                if (newIntent && intent != null) {
+                    requestCoreOpenResource(manager, type, document.id());
                 }
-                refreshActiveViewHeaderButtons();
-                afterStudioDocumentSelected(document);
-                if (studioResourcePanel != null) {
-                    if (document.view() != null && !document.view().hasPanel()) {
-                        studioResourcePanel.hide();
-                    } else {
-                        studioResourcePanel.show();
-                    }
+                if (intent != null && !Objects.equals(pendingCoreStudioDocumentKey, key)) {
+                    pendingCoreStudioDocumentKey = key;
+                    pendingCoreStudioPreviousDocumentKey = intent.previousDocumentKey();
+                    pendingCoreStudioDocumentAt = intent.acceptedAt();
                 }
-                if (document.view() == null || document.view().hasPanel()) {
-                    refreshStudioResourcePanel();
-                }
-                updatePositions();
+                retainVisibleStudioDocument();
                 return;
             }
+            return;
         }
-        clearActiveStudioDocument();
+        if (!pendingCoreOpenIntents.containsKey(key)) {
+            clearPendingCoreStudioDocument();
+        }
+        terminalCoreStudioRebinds.remove(key);
+        activateStudioDocument(selected);
+    }
+
+    private void retainVisibleStudioDocument() {
+        if (activeStudioDocument == null || studioTabsManager == null) {
+            return;
+        }
+        TabsManager.Tab activeTab = findStudioTab(activeStudioDocument.key(), studioTabsManager.getTabs());
+        if (activeTab != null && studioTabsManager.getActiveTab() != activeTab) {
+            setStudioTabsManagerActiveTab(activeTab);
+        }
+    }
+
+    private void activateStudioDocument(StudioDocument selected) {
+        if (activeStudioDocument != null && !activeStudioDocument.key().equals(selected.key())
+            && activeStudioDocument.view() != null) {
+            activeStudioDocument.view().deselected();
+        }
+        beforeStudioDocumentSelection();
+        prepareStudioDocumentSelection();
+        activeStudioDocument = selected;
+        TabsManager.Tab selectedTab = findStudioTab(selected.key(), studioTabsManager != null
+            ? studioTabsManager.getTabs() : List.of());
+        setStudioTabsManagerActiveTab(selectedTab);
+        CoreOpenIntent pendingIntent = pendingCoreOpenIntents.get(selected.key());
+        ReSyncFlowClient.traceLifecycle(studioServerId(), "studio_document_selected", "serverId", studioServerId(),
+            "resourceKey", selected.key(), "requestId", "studio", "mutationId", null, "authorityEpoch", 0L,
+            "revision", selected.coreSession() != null
+                ? selected.coreSession().revision() : selected.graph() != null ? selected.graph().getResourceRevision() : -1L,
+            "nodeCount", selected.graph() != null && selected.graph().getNodes() != null
+                ? selected.graph().getNodes().size() : 0, "documentPresent", true, "tabPresent",
+            selectedTab != null, "tabSelected", studioTabSelected(selected.key()), "phase",
+            pendingIntent != null ? pendingIntent.phase() : "none", "activate", true);
+        if (selected.view() != null) {
+            selected.view().init();
+            selected.view().selected();
+        }
+        refreshActiveViewHeaderButtons();
+        afterStudioDocumentSelected(selected);
+        if (studioResourcePanel != null) {
+            if (selected.view() != null && !selected.view().hasPanel()) {
+                studioResourcePanel.hide();
+            } else {
+                studioResourcePanel.show();
+            }
+        }
+        if (selected.view() == null || selected.view().hasPanel()) {
+            refreshStudioResourcePanel();
+        }
+        updatePositions();
+    }
+
+    private boolean isUnchangedActiveStudioDocument(StudioDocument document) {
+        if (document == null || activeStudioDocument == null
+            || document != activeStudioDocument || !document.key().equals(activeStudioDocument.key())) {
+            return false;
+        }
+        if (document.coreSession() != null) {
+            return isCurrentCoreStudioDocument(document);
+        }
+        if (terminalCoreStudioRebinds.containsKey(document.key())) {
+            return true;
+        }
+        return !isCoreStudioDocumentPending(document);
+    }
+
+    protected boolean isCoreStudioDocumentPending(StudioDocument document) {
+        FlowManager manager = FlowManager.getInstance();
+        ReSyncResourceType type = document != null ? ReSyncResourceType.byTypeId(document.type()) : null;
+        CoreStudioOwnership ownership = document != null
+            ? coreStudioOwnership(manager, type, document.id()) : CoreStudioOwnership.NOT_GRAPH;
+        return document != null && (document.coreSession() != null || ownership == CoreStudioOwnership.PENDING_CORE
+            || ownership == CoreStudioOwnership.CORE_REQUIRED || ownership == CoreStudioOwnership.TERMINAL_CORE);
     }
 
     protected void prepareStudioDocumentSelection() {
@@ -2413,6 +3916,18 @@ public class StudioScreen extends StudioInfiniteScreen {
             }
         }
         return null;
+    }
+
+    protected boolean studioTabPresent(String key) {
+        return studioTabsManager != null && findStudioTab(key, studioTabsManager.getTabs()) != null;
+    }
+
+    protected boolean studioTabSelected(String key) {
+        if (studioTabsManager == null) {
+            return false;
+        }
+        TabsManager.Tab tab = findStudioTab(key, studioTabsManager.getTabs());
+        return tab != null && studioTabsManager.getActiveTab() == tab;
     }
 
     protected void setStudioTabsManagerActiveTab(TabsManager.Tab tab) {
@@ -2476,9 +3991,11 @@ public class StudioScreen extends StudioInfiniteScreen {
             return true;
         }
         ReSyncStudioView priorityView = activeStudioView();
-        if (priorityView instanceof StudioPriorityInputView && priorityView.mouseClicked(event)) {
+        if (priorityView instanceof StudioPriorityInputView) {
             setFocusedWidget(null);
-            return true;
+            if (priorityView.mouseClicked(event)) {
+                return true;
+            }
         }
         if (handleStudioHudMouseClicked(event)) {
             ReSyncStudioView view = activeStudioView();
@@ -3170,7 +4687,7 @@ public class StudioScreen extends StudioInfiniteScreen {
             return;
         }
         client.collaboration().publishPresence(type, id,
-            view == null ? "" : type.isBlank() ? "studio" : type,
+            view != null ? TaskIdentities.typeName(view) : "",
             width > 0 ? (double) mouseX / width : 0.0, height > 0 ? (double) mouseY / height : 0.0,
             activeStudioDocument != null, typing);
     }
@@ -3316,7 +4833,7 @@ public class StudioScreen extends StudioInfiniteScreen {
             return;
         }
         ReSyncCollaborationClient.ResourceChange change = collaboration.resourceChange(activeStudioDocument.type(), activeStudioDocument.id());
-        if (change == null || collaboration.isOwnChange(change) || System.currentTimeMillis() - change.changedAt() > 8000L) {
+        if (!shouldRenderRemoteResourceChange(collaboration, change, System.currentTimeMillis())) {
             return;
         }
         String author = change.author() != null ? safeStudioText(change.author().displayName()) : "Collaborator";
@@ -3337,6 +4854,13 @@ public class StudioScreen extends StudioInfiniteScreen {
         collaborationChangeBadge.accentType = change.deleted() ? ThemeManager.getAccent("danger") : ThemeManager.getAccent("nice");
         collaborationChangeBadge.setPosition(Math.max(8, (width - collaborationChangeBadge.getWidth()) / 2), 29);
         collaborationChangeBadge.render(context, 0, 0, 0);
+    }
+
+    static boolean shouldRenderRemoteResourceChange(ReSyncCollaborationClient collaboration,
+                                                     ReSyncCollaborationClient.ResourceChange change, long now) {
+        return collaboration != null && change != null && change.authorSessionId() != null
+            && !change.authorSessionId().isBlank() && !collaboration.isOwnChange(change)
+            && now - change.changedAt() <= 8000L;
     }
 
     protected Identifier collaborationAvatar(ReSyncCollaborationClient.Presence presence) {
@@ -3362,20 +4886,14 @@ public class StudioScreen extends StudioInfiniteScreen {
 
     @Override
     public void removed() {
-        persistedStudioRestoreDisposed = true;
-        ++persistedStudioRestoreGeneration;
-        persistedStudioRestoreRequestAllowed = false;
-        restoringPersistedStudioDocuments = false;
-        if (studioContentBrowser != null) {
-            studioContentBrowser.cancelCatalogPreload();
-        }
-        pendingPersistedStudioDocumentRestores.clear();
-        successfulPersistedStudioDocumentRestores.clear();
-        terminalPersistedStudioDocumentRestores.clear();
+        studioResourceOpenVersion++;
+        studioResourceOpenIntents.clear();
+        studioResourcePanelResources.clear();
+        if (studioContentBrowser != null) studioContentBrowser.dispose();
         collaborationOverlay.close();
         dismissCollaborationChat(false);
         FlowManager manager = FlowManager.getInstance();
-        if (studioMode && manager != null && manager.isFlowClientReady(studioServerId())) {
+        if (studioMode && manager != null && manager.isFlowClientConnected(studioServerId())) {
             ReSyncFlowClient client = manager.existingFlowClient(studioServerId());
             if (client != null) {
                 client.collaboration().publishPresence("", "", "", 0.0, 0.0, false, false);
@@ -3420,7 +4938,10 @@ public class StudioScreen extends StudioInfiniteScreen {
 
     protected void updateFullEditorHeaderClose() {
         boolean contentBrowserClosed = studioContentBrowser == null || studioContentBrowser.isSlideOutFinished();
-        if (fullEditorHeaderCloseRequested && isTopHeaderAnimationFinished() && contentBrowserClosed) {
+        ReSyncStudioView view = activeStudioView();
+        boolean editorClosed = !(view instanceof ScreenBackedStudioView screenView)
+            || screenView.closeAnimationFinished();
+        if (fullEditorHeaderCloseRequested && isTopHeaderAnimationFinished() && contentBrowserClosed && editorClosed) {
             fullEditorHeaderCloseRequested = false;
             closeFullEditorStudioScreen();
         }
@@ -3455,16 +4976,22 @@ public class StudioScreen extends StudioInfiniteScreen {
         }
         int top = 42;
         int bottom = studioContentBrowserAffectsLayout() ? studioContentBrowser.getY() - 8 : height - 8;
-        int left = 12;
-        int right = width - 12 - (studioResourcePanel != null ? studioResourcePanel.layoutWidth(0) : 0);
+        int left = studioContentBrowserWidth() + 12;
+        int right = width - (studioResourcePanel != null && studioResourcePanel.isVisible() ? studioResourcePanel.getDesiredWidth() + 12 : 12);
         int areaWidth = Math.max(20, right - left);
         int areaHeight = Math.max(20, bottom - top);
         ReSyncStudioView view = activeStudioView();
-        if (view != null) {
-            view.renderPreview(context, left, top, areaWidth, areaHeight);
-        } else if (ReSyncResourceDragPayload.WORLD.equals(activeStudioDocument.type())) {
-            int text = ThemeManager.getColor(ThemeColor.text);
-            context.drawText(activeStudioDocument.title(), left + 12, top + 12, text, false);
+        context.pushScissorState();
+        try {
+            context.enableScissor(left, top, left + areaWidth, top + areaHeight);
+            if (view != null) {
+                view.renderPreview(context, left, top, areaWidth, areaHeight);
+            } else if (ReSyncResourceDragPayload.WORLD.equals(activeStudioDocument.type())) {
+                int text = ThemeManager.getColor(ThemeColor.text);
+                context.drawText(activeStudioDocument.title(), left + 12, top + 12, text, false);
+            }
+        } finally {
+            context.popScissorState();
         }
     }
 
@@ -3530,8 +5057,8 @@ public class StudioScreen extends StudioInfiniteScreen {
 
     protected String customContentIconPath(String id) {
         FlowManager manager = FlowManager.getInstance();
-        CustomContentDefinition content = manager != null ? manager.getCustomContentForServer(studioServerId()).get(id) : null;
-        return switch (content != null ? safeStudioText(content.getType()).toLowerCase(Locale.ROOT) : "") {
+        String contentType = manager != null ? manager.getCustomContentType(studioServerId(), id) : "";
+        return switch (safeStudioText(contentType).toLowerCase(Locale.ROOT)) {
             case "armor" -> "armor.png";
             case "block" -> "block.png";
             case "item" -> "item.png";
@@ -3548,14 +5075,11 @@ public class StudioScreen extends StudioInfiniteScreen {
         private final Supplier<T> snapshotSupplier;
         private final Consumer<T> restoreConsumer;
         private final int limit;
-        private final List<T> undoStack = new ArrayList<>();
-        private final List<T> redoStack = new ArrayList<>();
-        private boolean restoring;
-        private T savedSnapshot;
-        private boolean savedSnapshotInitialized;
-        private int cursor;
-        private int savedCursor;
-        private final Map<Long, SavePoint<T>> savePoints = new HashMap<>();
+        private final Object stateLock = new Object();
+        private HistoryState<T> state = new HistoryState<>(HistoryStack.empty(), HistoryStack.empty(), null, false, 0, 0,
+            Map.of());
+        private long generation = 1L;
+        private volatile boolean restoring;
 
         public History(Supplier<T> snapshotSupplier, Consumer<T> restoreConsumer, int limit) {
             this.snapshotSupplier = snapshotSupplier;
@@ -3564,140 +5088,187 @@ public class StudioScreen extends StudioInfiniteScreen {
         }
 
         public void capture() {
-            if (restoring) {
-                return;
+            synchronized (stateLock) {
+                if (restoring) {
+                    return;
+                }
+                HistoryState<T> current = state;
+                T snapshot = snapshotSupplier.get();
+                T savedSnapshot = current.savedSnapshot();
+                boolean savedSnapshotInitialized = current.savedSnapshotInitialized();
+                if (!savedSnapshotInitialized) {
+                    savedSnapshot = snapshot;
+                    savedSnapshotInitialized = true;
+                }
+                HistoryStack<T> undoStack = current.undoStack().push(snapshot);
+                if (undoStack.size() > limit) {
+                    undoStack = undoStack.dropOldest();
+                }
+                int savedCursor = current.savedCursor();
+                if (!current.redoStack().isEmpty() && savedCursor > current.cursor()) {
+                    savedCursor = Integer.MIN_VALUE;
+                }
+                setState(new HistoryState<>(undoStack, HistoryStack.empty(), savedSnapshot, savedSnapshotInitialized,
+                    current.cursor() + 1, savedCursor, current.savePoints()));
             }
-            T snapshot = snapshotSupplier.get();
-            if (!savedSnapshotInitialized) {
-                savedSnapshot = snapshot;
-                savedSnapshotInitialized = true;
-            }
-            undoStack.add(snapshot);
-            if (undoStack.size() > limit) {
-                undoStack.removeFirst();
-            }
-            if (!redoStack.isEmpty() && savedCursor > cursor) {
-                savedCursor = Integer.MIN_VALUE;
-            }
-            redoStack.clear();
-            cursor++;
         }
 
         public void clear() {
-            undoStack.clear();
-            redoStack.clear();
-            cursor = 0;
-            savedCursor = 0;
-            savedSnapshot = snapshotSupplier.get();
-            savedSnapshotInitialized = true;
-            savePoints.clear();
+            synchronized (stateLock) {
+                setState(new HistoryState<>(HistoryStack.empty(), HistoryStack.empty(), snapshotSupplier.get(), true, 0, 0,
+                    Map.of()));
+            }
+        }
+
+        public void invalidate() {
+            synchronized (stateLock) {
+                setState(new HistoryState<>(HistoryStack.empty(), HistoryStack.empty(), null, false, 0, 0, Map.of()));
+            }
+        }
+
+        public void clearWithoutSnapshot() {
+            invalidate();
+        }
+
+        public void resetSaved(T preparedSnapshot) {
+            if (preparedSnapshot == null) {
+                return;
+            }
+            synchronized (stateLock) {
+                setState(new HistoryState<>(HistoryStack.empty(), HistoryStack.empty(), preparedSnapshot, true, 0, 0,
+                    Map.of()));
+            }
         }
 
         public boolean isDirty() {
-            return cursor != savedCursor;
+            synchronized (stateLock) {
+                return state.cursor() != state.savedCursor();
+            }
         }
 
         public boolean isDirty(BiPredicate<T, T> equality) {
-            if (equality == null || !savedSnapshotInitialized) {
-                return isDirty();
+            synchronized (stateLock) {
+                if (equality == null || !state.savedSnapshotInitialized()) {
+                    return state.cursor() != state.savedCursor();
+                }
+                return !equality.test(snapshotSupplier.get(), state.savedSnapshot());
             }
-            return !equality.test(snapshotSupplier.get(), savedSnapshot);
         }
 
         public void markSaved() {
-            savedSnapshot = snapshotSupplier.get();
-            savedSnapshotInitialized = true;
-            savedCursor = cursor;
-            savePoints.clear();
+            synchronized (stateLock) {
+                HistoryState<T> current = state;
+                setState(new HistoryState<>(current.undoStack(), current.redoStack(), snapshotSupplier.get(), true,
+                    current.cursor(), current.cursor(), Map.of()));
+            }
         }
 
         public void markSaving(long sequence) {
-            if (sequence > 0L) {
-                savePoints.put(sequence, new SavePoint<>(snapshotSupplier.get(), cursor));
+            if (sequence <= 0L) {
+                return;
+            }
+            synchronized (stateLock) {
+                HistoryState<T> current = state;
+                Map<Long, SavePoint<T>> savePoints = new HashMap<>(current.savePoints());
+                savePoints.put(sequence, new SavePoint<>(snapshotSupplier.get(), current.cursor()));
                 if (savePoints.size() > 32) {
                     savePoints.remove(savePoints.keySet().stream().min(Long::compareTo).orElse(sequence));
                 }
+                setState(new HistoryState<>(current.undoStack(), current.redoStack(), current.savedSnapshot(),
+                    current.savedSnapshotInitialized(), current.cursor(), current.savedCursor(), Map.copyOf(savePoints)));
             }
         }
 
         public void markSaved(long sequence) {
-            SavePoint<T> point = sequence > 0L ? savePoints.remove(sequence) : null;
-            if (point == null) {
-                if (sequence <= 0L) {
-                    markSaved();
-                }
+            if (sequence <= 0L) {
+                markSaved();
                 return;
             }
-            savedSnapshot = point.snapshot();
-            savedSnapshotInitialized = true;
-            savedCursor = point.cursor();
-            savePoints.keySet().removeIf(value -> value <= sequence);
+            synchronized (stateLock) {
+                HistoryState<T> current = state;
+                SavePoint<T> point = current.savePoints().get(sequence);
+                if (point == null) {
+                    return;
+                }
+                Map<Long, SavePoint<T>> savePoints = new HashMap<>(current.savePoints());
+                savePoints.remove(sequence);
+                savePoints.keySet().removeIf(value -> value <= sequence);
+                setState(new HistoryState<>(current.undoStack(), current.redoStack(), point.snapshot(), true,
+                    current.cursor(), point.cursor(), Map.copyOf(savePoints)));
+            }
         }
 
         public void discardChanges() {
-            if (!savedSnapshotInitialized) {
-                clear();
-                return;
-            }
-            restoring = true;
-            try {
-                restoreConsumer.accept(savedSnapshot);
-                undoStack.clear();
-                redoStack.clear();
-                cursor = 0;
-                savedCursor = 0;
-                savedSnapshot = snapshotSupplier.get();
-                savePoints.clear();
-            } finally {
-                restoring = false;
+            synchronized (stateLock) {
+                if (!state.savedSnapshotInitialized()) {
+                    setState(new HistoryState<>(HistoryStack.empty(), HistoryStack.empty(), null, false, 0, 0, Map.of()));
+                    return;
+                }
+                restoring = true;
+                try {
+                    T savedSnapshot = state.savedSnapshot();
+                    restoreConsumer.accept(savedSnapshot);
+                    setState(new HistoryState<>(HistoryStack.empty(), HistoryStack.empty(), savedSnapshot, true, 0, 0, Map.of()));
+                } finally {
+                    restoring = false;
+                }
             }
         }
 
         public void rebase(UnaryOperator<T> rebaser) {
-            if (rebaser == null || restoring) {
+            if (rebaser == null) {
                 return;
             }
-            undoStack.replaceAll(rebaser);
-            redoStack.replaceAll(rebaser);
-            if (savedSnapshotInitialized) {
-                savedSnapshot = rebaser.apply(savedSnapshot);
+            RebaseState<T> captured = captureRebaseState();
+            PreparedRebase<T> prepared = prepareRebase(captured, rebaser);
+            if (prepared != null) {
+                commitRebase(captured, prepared);
             }
-            savePoints.replaceAll((sequence, point) -> new SavePoint<>(rebaser.apply(point.snapshot()), point.cursor()));
         }
 
         public boolean undo() {
-            if (undoStack.isEmpty()) {
-                return false;
-            }
-            restoring = true;
-            try {
-                redoStack.add(snapshotSupplier.get());
-                if (redoStack.size() > limit) {
-                    redoStack.removeFirst();
+            synchronized (stateLock) {
+                if (state.undoStack().isEmpty() || restoring) {
+                    return false;
                 }
-                restoreConsumer.accept(undoStack.removeLast());
-                cursor--;
-                return true;
-            } finally {
-                restoring = false;
+                restoring = true;
+                try {
+                    HistoryState<T> current = state;
+                    HistoryStack.Pop<T> popped = current.undoStack().pop();
+                    HistoryStack<T> redoStack = current.redoStack().push(snapshotSupplier.get());
+                    if (redoStack.size() > limit) {
+                        redoStack = redoStack.dropOldest();
+                    }
+                    setState(new HistoryState<>(popped.rest(), redoStack, current.savedSnapshot(),
+                        current.savedSnapshotInitialized(), current.cursor() - 1, current.savedCursor(), current.savePoints()));
+                    restoreConsumer.accept(popped.value());
+                    return true;
+                } finally {
+                    restoring = false;
+                }
             }
         }
 
         public boolean redo() {
-            if (redoStack.isEmpty()) {
-                return false;
-            }
-            restoring = true;
-            try {
-                undoStack.add(snapshotSupplier.get());
-                if (undoStack.size() > limit) {
-                    undoStack.removeFirst();
+            synchronized (stateLock) {
+                if (state.redoStack().isEmpty() || restoring) {
+                    return false;
                 }
-                restoreConsumer.accept(redoStack.removeLast());
-                cursor++;
-                return true;
-            } finally {
-                restoring = false;
+                restoring = true;
+                try {
+                    HistoryState<T> current = state;
+                    HistoryStack.Pop<T> popped = current.redoStack().pop();
+                    HistoryStack<T> undoStack = current.undoStack().push(snapshotSupplier.get());
+                    if (undoStack.size() > limit) {
+                        undoStack = undoStack.dropOldest();
+                    }
+                    setState(new HistoryState<>(undoStack, popped.rest(), current.savedSnapshot(),
+                        current.savedSnapshotInitialized(), current.cursor() + 1, current.savedCursor(), current.savePoints()));
+                    restoreConsumer.accept(popped.value());
+                    return true;
+                } finally {
+                    restoring = false;
+                }
             }
         }
 
@@ -3705,15 +5276,267 @@ public class StudioScreen extends StudioInfiniteScreen {
             return restoring;
         }
 
+        public T peekUndo() {
+            synchronized (stateLock) {
+                return state.undoStack().peek();
+            }
+        }
+
+        public T peekRedo() {
+            synchronized (stateLock) {
+                return state.redoStack().peek();
+            }
+        }
+
+        public boolean undoPrepared(T expected, Consumer<T> preparedRestore) {
+            synchronized (stateLock) {
+                if (restoring || expected == null || preparedRestore == null || state.undoStack().isEmpty()
+                    || state.undoStack().peek() != expected) {
+                    return false;
+                }
+                restoring = true;
+                try {
+                    HistoryState<T> current = state;
+                    HistoryStack.Pop<T> popped = current.undoStack().pop();
+                    HistoryStack<T> redoStack = current.redoStack().push(snapshotSupplier.get());
+                    if (redoStack.size() > limit) {
+                        redoStack = redoStack.dropOldest();
+                    }
+                    preparedRestore.accept(popped.value());
+                    setState(new HistoryState<>(popped.rest(), redoStack, current.savedSnapshot(),
+                        current.savedSnapshotInitialized(), current.cursor() - 1, current.savedCursor(), current.savePoints()));
+                    return true;
+                } finally {
+                    restoring = false;
+                }
+            }
+        }
+
+        public boolean redoPrepared(T expected, Consumer<T> preparedRestore) {
+            synchronized (stateLock) {
+                if (restoring || expected == null || preparedRestore == null || state.redoStack().isEmpty()
+                    || state.redoStack().peek() != expected) {
+                    return false;
+                }
+                restoring = true;
+                try {
+                    HistoryState<T> current = state;
+                    HistoryStack.Pop<T> popped = current.redoStack().pop();
+                    HistoryStack<T> undoStack = current.undoStack().push(snapshotSupplier.get());
+                    if (undoStack.size() > limit) {
+                        undoStack = undoStack.dropOldest();
+                    }
+                    preparedRestore.accept(popped.value());
+                    setState(new HistoryState<>(undoStack, popped.rest(), current.savedSnapshot(),
+                        current.savedSnapshotInitialized(), current.cursor() + 1, current.savedCursor(), current.savePoints()));
+                    return true;
+                } finally {
+                    restoring = false;
+                }
+            }
+        }
+
         public boolean canUndo() {
-            return !undoStack.isEmpty();
+            synchronized (stateLock) {
+                return !state.undoStack().isEmpty();
+            }
         }
 
         public boolean canRedo() {
-            return !redoStack.isEmpty();
+            synchronized (stateLock) {
+                return !state.redoStack().isEmpty();
+            }
+        }
+
+        public RebaseState<T> captureRebaseState() {
+            synchronized (stateLock) {
+                return new RebaseState<>(this, state, generation);
+            }
+        }
+
+        public PreparedRebase<T> prepareRebase(UnaryOperator<T> rebaser) {
+            return prepareRebase(captureRebaseState(), rebaser);
+        }
+
+        public PreparedRebase<T> prepareRebase(RebaseState<T> captured, UnaryOperator<T> rebaser) {
+            if (captured == null || rebaser == null || captured.owner() != this) {
+                return null;
+            }
+            HistoryState<T> current = captured.state();
+            HistoryStack<T> undoStack = current.undoStack().map(rebaser);
+            HistoryStack<T> redoStack = current.redoStack().map(rebaser);
+            T savedSnapshot = current.savedSnapshotInitialized() ? rebaser.apply(current.savedSnapshot()) : null;
+            Map<Long, SavePoint<T>> savePoints;
+            if (current.savePoints().isEmpty()) {
+                savePoints = Map.of();
+            } else {
+                Map<Long, SavePoint<T>> transformed = new HashMap<>(current.savePoints().size());
+                current.savePoints().forEach((sequence, point) ->
+                    transformed.put(sequence, new SavePoint<>(rebaser.apply(point.snapshot()), point.cursor())));
+                savePoints = Map.copyOf(transformed);
+            }
+            HistoryState<T> preparedState = new HistoryState<>(undoStack, redoStack, savedSnapshot,
+                current.savedSnapshotInitialized(), current.cursor(), current.savedCursor(), savePoints);
+            return new PreparedRebase<>(this, captured, preparedState);
+        }
+
+        public boolean commitRebase(PreparedRebase<T> prepared) {
+            return prepared != null && commitRebase(prepared.captured(), prepared);
+        }
+
+        public boolean commitRebase(RebaseState<T> captured, PreparedRebase<T> prepared) {
+            if (captured == null || prepared == null || captured.owner() != this || prepared.owner() != this
+                || prepared.captured() != captured) {
+                return false;
+            }
+            synchronized (stateLock) {
+                if (restoring || generation != captured.generation() || state != captured.state()) {
+                    return false;
+                }
+                setState(prepared.state());
+                return true;
+            }
+        }
+
+        public long generation() {
+            synchronized (stateLock) {
+                return generation;
+            }
+        }
+
+        private void setState(HistoryState<T> next) {
+            state = next;
+            generation = generation == Long.MAX_VALUE ? 1L : generation + 1L;
+        }
+
+        public static final class RebaseState<T> {
+            private final History<T> owner;
+            private final HistoryState<T> state;
+            private final long generation;
+
+            private RebaseState(History<T> owner, HistoryState<T> state, long generation) {
+                this.owner = owner;
+                this.state = state;
+                this.generation = generation;
+            }
+
+            public long generation() {
+                return generation;
+            }
+
+            private History<T> owner() {
+                return owner;
+            }
+
+            private HistoryState<T> state() {
+                return state;
+            }
+        }
+
+        public static final class PreparedRebase<T> {
+            private final History<T> owner;
+            private final RebaseState<T> captured;
+            private final HistoryState<T> state;
+
+            private PreparedRebase(History<T> owner, RebaseState<T> captured, HistoryState<T> state) {
+                this.owner = owner;
+                this.captured = captured;
+                this.state = state;
+            }
+
+            private History<T> owner() {
+                return owner;
+            }
+
+            private RebaseState<T> captured() {
+                return captured;
+            }
+
+            private HistoryState<T> state() {
+                return state;
+            }
+        }
+
+        private record HistoryState<T>(HistoryStack<T> undoStack, HistoryStack<T> redoStack, T savedSnapshot,
+                                       boolean savedSnapshotInitialized, int cursor, int savedCursor,
+                                       Map<Long, SavePoint<T>> savePoints) {
+        }
+
+        private static final class HistoryStack<T> {
+            private final StackNode<T> head;
+            private final int size;
+
+            private HistoryStack(StackNode<T> head, int size) {
+                this.head = head;
+                this.size = size;
+            }
+
+            private static <T> HistoryStack<T> empty() {
+                return new HistoryStack<>(null, 0);
+            }
+
+            private HistoryStack<T> push(T value) {
+                return new HistoryStack<>(new StackNode<>(value, head), size + 1);
+            }
+
+            private Pop<T> pop() {
+                return new Pop<>(head.value(), new HistoryStack<>(head.next(), size - 1));
+            }
+
+            private T peek() {
+                return head == null ? null : head.value();
+            }
+
+            private boolean isEmpty() {
+                return size == 0;
+            }
+
+            private int size() {
+                return size;
+            }
+
+            private HistoryStack<T> dropOldest() {
+                if (size <= 1) {
+                    return empty();
+                }
+                List<T> values = new ArrayList<>(size - 1);
+                for (StackNode<T> node = head; node.next() != null; node = node.next()) {
+                    values.add(node.value());
+                }
+                return fromHeadOrder(values);
+            }
+
+            private HistoryStack<T> map(UnaryOperator<T> mapper) {
+                if (isEmpty()) {
+                    return this;
+                }
+                List<T> values = new ArrayList<>(size);
+                for (StackNode<T> node = head; node != null; node = node.next()) {
+                    values.add(mapper.apply(node.value()));
+                }
+                return fromHeadOrder(values);
+            }
+
+            private static <T> HistoryStack<T> fromHeadOrder(List<T> values) {
+                StackNode<T> head = null;
+                for (int index = values.size() - 1; index >= 0; index--) {
+                    head = new StackNode<>(values.get(index), head);
+                }
+                return new HistoryStack<>(head, values.size());
+            }
+
+            private record StackNode<T>(T value, StackNode<T> next) {
+            }
+
+            private record Pop<T>(T value, HistoryStack<T> rest) {
+            }
         }
 
         private record SavePoint<T>(T snapshot, int cursor) {
         }
+    }
+
+    boolean coreStudioLoadingVisible() {
+        return false;
     }
 }

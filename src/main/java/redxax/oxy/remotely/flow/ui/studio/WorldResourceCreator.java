@@ -73,10 +73,11 @@ public final class WorldResourceCreator {
                 manager.createWorld(serverId, worldName, seedInput.getText(), environmentSelect.getSelectedItem(),
                     generatorOption == null ? "" : generatorOption.generator(), generatorConfig.getText());
                 String targetFolder = ReSyncProjectMetadata.normalizePath(folder);
-                ReSyncProjectMetadata metadata = manager.getProjectMetadata(serverId);
-                ReSyncProjectMetadata.ResourceEntry entry = metadata.ensureResource(ReSyncResourceDragPayload.WORLD, worldName, worldName, targetFolder);
-                entry.setPath(targetFolder);
-                manager.saveProjectMetadata(serverId, metadata);
+                FlowManager.ProjectMetadataEdit metadata = manager.editProjectMetadata(serverId);
+                FlowManager.ProjectResource existing = metadata.resource(ReSyncResourceDragPayload.WORLD, worldName);
+                metadata.putResource(ReSyncResourceDragPayload.WORLD, worldName, worldName, targetFolder,
+                    existing != null ? existing.sortOrder() : metadata.nextResourceSortOrder());
+                manager.saveProjectMetadata(metadata, true);
                 if (onCreated != null) {
                     onCreated.accept(worldName);
                 }
@@ -122,9 +123,9 @@ public final class WorldResourceCreator {
                     return;
                 }
                 manager.deleteWorld(serverId, worldName, deleteFiles.getValue(), fallbackWorld);
-                ReSyncProjectMetadata metadata = manager.getProjectMetadata(serverId);
-                metadata.getResources().removeIf(resource -> resource != null && resource.key().equals(ReSyncProjectMetadata.resourceKey(ReSyncResourceDragPayload.WORLD, worldName)));
-                manager.saveProjectMetadata(serverId, metadata);
+                FlowManager.ProjectMetadataEdit metadata = manager.editProjectMetadata(serverId);
+                metadata.removeResource(ReSyncProjectMetadata.resourceKey(ReSyncResourceDragPayload.WORLD, worldName));
+                manager.saveProjectMetadata(metadata, true);
                 if (onDeleted != null) {
                     onDeleted.run();
                 }
@@ -142,7 +143,7 @@ public final class WorldResourceCreator {
         if (manager == null || serverId == null || worldName == null || worldName.isBlank()) {
             return false;
         }
-        if (manager.getProjectMetadata(serverId).findResource(ReSyncResourceDragPayload.WORLD, worldName) != null) {
+        if (manager.getProjectResource(serverId, ReSyncResourceDragPayload.WORLD, worldName) != null) {
             return true;
         }
         return manager.getWorldsForServer(serverId).containsKey(worldName);
@@ -174,8 +175,7 @@ public final class WorldResourceCreator {
             addGeneratorOption(options, new GeneratorOption(label, descriptor.getId(), descriptor.getDefaultConfig(), descriptor.isConfigurable()));
         }
         Set<String> projectIds = new LinkedHashSet<>(WorldGenManager.getInstance().getProjectIds(serverId));
-        ReSyncProjectMetadata metadata = manager.getProjectMetadata(serverId);
-        for (ReSyncProjectMetadata.ResourceEntry resource : metadata.getResources()) {
+        for (ReSyncProjectMetadata.ResourceEntry resource : manager.getProjectResources(serverId)) {
             if (resource != null && ReSyncResourceDragPayload.WORLDGEN.equals(resource.getType()) && !safeText(resource.getId()).isBlank()) {
                 projectIds.add(resource.getId());
             }

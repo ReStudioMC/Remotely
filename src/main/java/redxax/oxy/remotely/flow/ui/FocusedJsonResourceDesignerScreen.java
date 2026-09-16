@@ -1,22 +1,18 @@
 package redxax.oxy.remotely.flow.ui;
 
 import redxax.oxy.remotely.util.BrowserSafeState;
-
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
-import redxax.oxy.remotely.host.ApplicationHostRegistry;
+import redxax.oxy.remotely.RemotelyClient;
 import redxax.oxy.remotely.data.flow.DesignerSaveNotifications;
 import redxax.oxy.remotely.data.flow.FlowManager;
-import redxax.oxy.remotely.data.flow.OptionCatalogCache;
-import redxax.oxy.remotely.data.flow.OptionCatalogItem;
 import redxax.oxy.remotely.data.flow.OptionCatalogLoader;
 import redxax.oxy.remotely.data.flow.ReSyncResourceType;
 import redxax.oxy.remotely.flow.data.CustomContentDefinition;
 import redxax.oxy.remotely.flow.data.FlowDataType;
 import redxax.oxy.remotely.flow.data.FlowGraph;
-import redxax.oxy.remotely.flow.data.FlowJson;
 import redxax.oxy.remotely.flow.data.FlowWorkspaceDocument;
 import redxax.oxy.remotely.flow.data.ReSyncProjectMetadata;
 import redxax.oxy.remotely.flow.data.ReSyncResourceDragPayload;
@@ -33,12 +29,12 @@ import redxax.oxy.remotely.flow.ui.studio.StudioOverlayView;
 import redxax.oxy.remotely.flow.ui.studio.StudioPanel;
 import redxax.oxy.remotely.flow.ui.studio.StudioPriorityInputView;
 import redxax.oxy.remotely.flow.ui.studio.StudioScreen;
+import redxax.oxy.remotely.flow.ui.studio.StudioSaveProvider;
 import redxax.oxy.remotely.flow.ui.studio.StudioSelectorView;
 import restudio.rescreen.game.MinecraftAssetReference;
 import restudio.rescreen.game.MinecraftGameAssets;
 import restudio.rescreen.game.MinecraftGameEntities;
 import restudio.rescreen.platform.IDrawContext;
-import restudio.rescreen.platform.ITextRenderer;
 import restudio.rescreen.platform.input.ReKeyEvent;
 import restudio.rescreen.platform.input.ReMouseEvent;
 import restudio.rescreen.platform.input.ReScrollEvent;
@@ -66,13 +62,26 @@ import restudio.rescreen.ui.widgets.TextInputWidget;
 import restudio.rescreen.ui.widgets.ToggleWidget;
 import restudio.rescreen.ui.widgets.TitledRowWidget;
 import restudio.rescreen.ui.widgets.CompactBindingWidget;
+import restudio.rescreen.util.FileUtils;
 import restudio.rescreen.util.Identifier;
 import restudio.resync.flow.workspace.WorkspacePatch;
 import restudio.resync.flow.contract.EditorDiagnostic;
 import restudio.resync.flow.contract.EditorError;
 import restudio.rescreen.util.Notification;
+import restudio.rescreen.util.ResourceManager;
+
+import javax.imageio.ImageIO;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
@@ -86,11 +95,12 @@ import java.util.function.Consumer;
 import static redxax.oxy.remotely.flow.ui.GuiEditOverlayState.snapshot;
 import static restudio.rescreen.config.Config.desktopMode;
 
-public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen implements DesktopWindowBehaviorProvider, ReSyncStudioView, ReSyncCollaborativeView, ReSyncEditorDiagnosticView, StudioSelectorView, StudioOverlayView, StudioCatalogRefreshView, StudioPriorityInputView, StudioHeaderProvider {
+public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen implements DesktopWindowBehaviorProvider, ReSyncStudioView, ReSyncCollaborativeView, ReSyncEditorDiagnosticView, StudioSelectorView, StudioOverlayView, StudioCatalogRefreshView, StudioPriorityInputView, StudioHeaderProvider, StudioSaveProvider {
     private static final Set<FocusedJsonResourceDesignerScreen> OPEN_SCREENS = BrowserSafeState.set();
     protected final String type;
     protected String id;
-    protected final JsonObject resource;
+    protected JsonObject resource;
+    protected final VersionedEditorDraft<JsonObject> resourceDraft;
     protected final String serverId;
     protected final Object parent;
     protected final StudioScreen host;
@@ -112,7 +122,11 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     private int y;
     private int width;
     private int height;
+    private boolean resourceRebindPending;
+    private volatile long resourceLifecycle = 1L;
+    private boolean resourceDisposed;
     protected final StudioScreen.History<String> resourceEditHistory = history(this::resourceSnapshot, this::restoreResourceSnapshot);
+    private final HistoryRebaseCoordinator<String> resourceHistoryRebase;
 
     protected record ResourcePanelSection(String title, List<String> fields) {
     }
@@ -124,6 +138,12 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
         this.serverId = serverId;
         this.parent = parent;
         this.host = owner != null ? owner : parent instanceof StudioScreen screen ? screen : null;
+        this.resourceDraft = new VersionedEditorDraft<>(this.resource, JsonObject::toString,
+            payload -> gson.fromJson(payload, JsonObject.class), this::rebindResource, this::failSnapshot,
+            () -> new Notification("Editor Busy", "Try Again", Notification.Type.WARN));
+        this.resourceHistoryRebase = new HistoryRebaseCoordinator<>(resourceEditHistory,
+            () -> type + ":" + serverId + ":" + id, this::resourceLifecycle,
+            () -> new Notification("Editor Busy", "Try Again", Notification.Type.WARN));
         OPEN_SCREENS.add(this);
         resourceHeaderActions.add(headerButton("save.png", "Save", this::save));
     }
@@ -138,10 +158,75 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     }
 
     @Override
+    public long collaborationLifecycle() {
+        return resourceLifecycle;
+    }
+
+    @Override
+    public long collaborationEditVersion() {
+        return resourceDraft.editVersion();
+    }
+
+    @Override
+    public boolean requestCollaborationDocument(Consumer<CollaborationDocumentSnapshot> completion) {
+        if (completion == null) {
+            return false;
+        }
+        long lifecycle = resourceLifecycle;
+        return resourceDraft.requestProjection(type, id, this::collaborationDocument,
+            projection -> completion.accept(collaborationSnapshot(lifecycle, projection)));
+    }
+
+    private CollaborationDocumentSnapshot collaborationSnapshot(long lifecycle,
+                                                                 VersionedEditorDraft.ProjectionSnapshot projection) {
+        RuntimeException failure = projection.failure();
+        JsonObject document = null;
+        if (failure == null) {
+            try {
+                document = gson.fromJson(projection.payload(), JsonObject.class);
+                if (document == null) {
+                    failure = new IllegalStateException("Collaboration Snapshot Is Empty");
+                }
+            } catch (RuntimeException | Error exception) {
+                failure = exception instanceof RuntimeException runtime ? runtime : new IllegalStateException(exception);
+            }
+        }
+        if (failure == null && !isResourceLifecycle(lifecycle)) {
+            document = null;
+            failure = new IllegalStateException("Collaboration Snapshot Expired");
+        }
+        return new CollaborationDocumentSnapshot(this, lifecycle, projection.editVersion(), document, failure);
+    }
+
+    @Override
+    public boolean applyCollaborationDocument(JsonObject document, List<WorkspacePatch<JsonElement>> patches,
+                                              Consumer<CollaborationDocumentApplyResult> completion) {
+        if (completion == null) {
+            return false;
+        }
+        long lifecycle = resourceLifecycle;
+        return resourceDraft.runMutation(() -> {
+            if (document == null) {
+                throw new IllegalArgumentException("Collaboration Document Is Required");
+            }
+            if (resource == null) {
+                throw new IllegalStateException("Resource Is Unavailable");
+            }
+            applyCollaborationDocument(document, patches);
+        }, result ->
+            completion.accept(new CollaborationDocumentApplyResult(this, lifecycle, result.beforeEditVersion(),
+                result.afterEditVersion(), result.successful(), result.failure())));
+    }
+
+    @Override
     public void applyCollaborationDocument(JsonObject document, List<WorkspacePatch<JsonElement>> patches) {
         if (document == null) {
             return;
         }
+        if (resourceDraft.defer(() -> applyCollaborationDocument(document, patches))) {
+            return;
+        }
+        resourceDraft.markMutation();
         boolean previousBatch = resourceEditHistoryBatch;
         resourceEditHistoryBatch = true;
         try {
@@ -164,14 +249,13 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
         if (!hasResourceHistory() || patches == null || patches.isEmpty()) {
             return;
         }
-        resourceEditHistory.rebase(snapshot -> {
-            JsonElement parsed = FlowJson.parse(snapshot);
-            JsonObject historic = parsed.isJsonObject() ? parsed.getAsJsonObject() : null;
+        resourceHistoryRebase.request(patches, copiedPatches -> snapshot -> {
+            JsonObject historic = gson.fromJson(gson.toJson(snapshot), JsonObject.class);
             if (historic == null) {
                 historic = new JsonObject();
             }
-            FlowWorkspaceDocument.apply(historic, patches);
-            return FlowJson.write(historic);
+            FlowWorkspaceDocument.apply(historic, copiedPatches);
+            return gson.toJson(gson.fromJson(gson.toJson(historic), JsonObject.class));
         });
     }
 
@@ -223,19 +307,39 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
 
     @Override
     public void close() {
-        OPEN_SCREENS.remove(this);
-        clearFocusedResourcePanelState();
+        disposeResourceDesigner();
         super.close();
     }
 
     @Override
     public void closed() {
+        disposeResourceDesigner();
+    }
+
+    @Override
+    public void removed() {
+        disposeResourceDesigner();
+        super.removed();
+    }
+
+    private void disposeResourceDesigner() {
+        if (resourceDisposed) {
+            return;
+        }
+        resourceDisposed = true;
+        resourceLifecycle++;
         OPEN_SCREENS.remove(this);
         clearFocusedResourcePanelState();
+        resourceHistoryRebase.close();
+        resourceDraft.close();
     }
 
     @Override
     public void resourceRenamed(String type, String oldId, String newId) {
+        if (resourceDraft.defer(() -> resourceRenamed(type, oldId, newId))) {
+            return;
+        }
+        resourceDraft.markMutation();
         if (!this.type.equals(type) || !this.id.equals(oldId)) {
             return;
         }
@@ -258,7 +362,7 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     }
 
     private String resourceSnapshot() {
-        return FlowJson.write(resource);
+        return gson.toJson(resource);
     }
 
     protected void captureResourceSnapshot() {
@@ -267,9 +371,34 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
         }
     }
 
+    protected void applyResourceMutation(Runnable mutation) {
+        if (mutation == null || deferResourceMutation(() -> applyResourceMutation(mutation))) {
+            return;
+        }
+        mutation.run();
+    }
+
+    protected long resourceLifecycle() {
+        return resourceLifecycle;
+    }
+
+    protected boolean isResourceLifecycle(long lifecycle) {
+        return lifecycle == resourceLifecycle;
+    }
+
+    protected boolean deferResourceMutation(Runnable mutation) {
+        if (resourceDraft.defer(mutation)) {
+            return true;
+        }
+        resourceDraft.markMutation();
+        return false;
+    }
+
     private void restoreResourceSnapshot(String snapshot) {
-        JsonElement parsed = FlowJson.parse(snapshot);
-        JsonObject restored = parsed.isJsonObject() ? parsed.getAsJsonObject() : null;
+        if (deferResourceMutation(() -> restoreResourceSnapshot(snapshot))) {
+            return;
+        }
+        JsonObject restored = gson.fromJson(snapshot, JsonObject.class);
         List<String> keys = resource.entrySet().stream().map(Map.Entry::getKey).toList();
         for (String key : keys) {
             resource.remove(key);
@@ -348,6 +477,16 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
 
     @Override
     public void render(IDrawContext context, int mouseX, int mouseY, float delta) {
+        resourceHistoryRebase.drain();
+        resourceDraft.drain();
+        if (resourceRebindPending && resourceDraft.isSettled()) {
+            resourceRebindPending = false;
+            onResourceSnapshotRestored();
+            reloadFields();
+            if (!remountPanelOnFieldReload()) {
+                refreshBindingWidgets();
+            }
+        }
         int text = ThemeManager.getColor(ThemeColor.text);
         int muted = ThemeManager.getColor(ThemeColor.textDark);
         renderPreviewCanvas(context, mouseX, mouseY, text, muted);
@@ -356,7 +495,7 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     private void renderPreviewCanvas(IDrawContext context, int mouseX, int mouseY, int text, int muted) {
         int previewX = x + 12;
         int previewY = y + 12;
-        int rightReserve = studioResourcePanel != null && !studioResourcePanel.isLeftAnchored() ? studioResourcePanel.layoutWidth(10) : 0;
+        int rightReserve = studioResourcePanel != null && studioResourcePanel.isVisible() && !studioResourcePanel.isLeftAnchored() ? studioResourcePanel.getDesiredWidth() + 10 : 0;
         int previewRightReserve = centeredTextPreview() ? 0 : rightReserve;
         int previewWidth = Math.max(160, x + width - previewRightReserve - previewX - 14);
         int previewHeight = Math.max(80, height - 24);
@@ -372,7 +511,13 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     }
 
     protected MinecraftGameAssets getGameAssets() {
-        return ApplicationHostRegistry.gameAssets();
+        if (RemotelyClient.INSTANCE != null && RemotelyClient.INSTANCE.getHost() != null) {
+            MinecraftGameAssets gameAssets = RemotelyClient.INSTANCE.getHost().getGameAssets();
+            if (gameAssets != null) {
+                return gameAssets;
+            }
+        }
+        return MinecraftGameAssets.EMPTY;
     }
 
     protected void drawMinecraftTexture(IDrawContext context, MinecraftGameAssets gameAssets, MinecraftAssetReference reference, Identifier fallbackId, int x, int y, int width, int height, int u, int v, int regionWidth, int regionHeight, int textureWidth, int textureHeight) {
@@ -402,13 +547,71 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
         if (resourceType != null) {
             sanitizeLegacyResourceFields();
             String resourceId = resourceType.extractId(resource);
-            DesignerSaveNotifications.start(serverId, resourceType, resourceId, resourceDisplayName());
+            DesignerSaveNotifications.SaveTicket ticket = DesignerSaveNotifications.startExact(serverId, resourceType,
+                resourceId, resourceDisplayName());
+            observeSave(ticket);
             if (manager == null || serverId == null) {
-                DesignerSaveNotifications.failResource(serverId, resourceType, resourceId, "ReSync Offline");
+                DesignerSaveNotifications.failExact(ticket, "ReSync Offline");
                 return;
             }
-            manager.saveJsonResource(serverId, resourceType, resource);
+            if (!resourceDraft.capture(resourceType.typeId(), resourceId, ticket,
+                snapshot -> manager.saveJsonResource(serverId, resourceType,
+                    snapshot.serialize(payload -> gson.fromJson(payload, JsonObject.class)), ticket))) {
+                DesignerSaveNotifications.failExact(ticket, "Save Snapshot Rejected");
+            }
         }
+    }
+
+    @Override
+    public boolean requestStudioSave() {
+        save();
+        return true;
+    }
+
+    private void rebindResource(JsonObject previous, JsonObject replacement) {
+        JsonObject currentResource = resource;
+        boolean currentResourceRebindPending = resourceRebindPending;
+        if (previous == replacement) {
+            resource = previous;
+            return;
+        }
+        try {
+            resource = replacement;
+            resourceRebindPending = true;
+        } catch (RuntimeException | Error exception) {
+            resource = currentResource;
+            resourceRebindPending = currentResourceRebindPending;
+            throw exception;
+        }
+    }
+
+    private void failSnapshot(VersionedEditorDraft.Failure failure) {
+        if (failure.stage() == VersionedEditorDraft.Stage.REBASE) {
+            new Notification("Save Refresh Failed", "Save Paused", Notification.Type.ERROR);
+            return;
+        }
+        ReSyncResourceType resourceType = ReSyncResourceType.byTypeId(failure.key().type());
+        if (resourceType != null && failure.request() instanceof DesignerSaveNotifications.SaveTicket ticket) {
+            DesignerSaveNotifications.failExact(ticket, "Save Snapshot Failed");
+        }
+    }
+
+    private void observeSave(DesignerSaveNotifications.SaveTicket ticket) {
+        if (ticket == null) {
+            return;
+        }
+        ticket.whenFinished((saved, current) -> ScreenManager.getInstance().execute(() -> {
+            if (!saved || !current) {
+                resourceDraft.discard(ticket);
+                return;
+            }
+            FlowManager manager = FlowManager.getInstance();
+            FlowManager.ResourceReadLease lease = manager != null
+                ? manager.snapshotResource(serverId, type, ticket.id()) : null;
+            if (lease == null || !resourceDraft.acknowledge(ticket, lease::materialize)) {
+                resourceDraft.discard(ticket);
+            }
+        }));
     }
 
     protected void sanitizeLegacyResourceFields() {
@@ -724,7 +927,7 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
             .label("")
             .toggled(value)
             .size(46, ReSyncStudioPanelState.FIELD_HEIGHT)
-            .onChange(val -> putJsonText(field, Boolean.toString(val)))
+            .onChange(val -> putJsonText(field, String.valueOf(val)))
             .build();
         ReSyncStudioPanelState.disableEntrance(toggle);
         resourceToggleFieldInputs.put(field, toggle);
@@ -977,7 +1180,7 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     protected void openFunctionBinding(String functionBase) {
         String id = jsonPathTextRaw(functionBase + ".functionId");
         if (!id.isBlank() && host != null) {
-            host.openWorkspaceFlowEditor(id);
+            host.openWorkspaceResource(ReSyncResourceDragPayload.FUNCTION, id);
         }
     }
 
@@ -1020,7 +1223,7 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
             }
             if (host != null) {
                 host.refreshStudioWorkspace(true);
-                host.openWorkspaceFlowEditor(result.id());
+                host.openWorkspaceResource(result.type(), result.id());
             }
         });
     }
@@ -1073,18 +1276,19 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     }
 
     protected void normalizeBindingFunction(String functionId, CompactBindingSupport.FunctionShape shape) {
-        FlowManager manager = FlowManager.getInstance();
-        FlowGraph function = manager != null ? manager.getGraph(serverId, ReSyncResourceType.FUNCTION, functionId) : null;
-        CompactBindingSupport.normalizeFunction(serverId, function, shape);
+        CompactBindingSupport.initializeFunction(serverId, functionId, shape);
     }
 
     protected String bindingCreateFolder() {
         FlowManager manager = FlowManager.getInstance();
-        ReSyncProjectMetadata.ResourceEntry entry = manager != null ? manager.getProjectMetadata(serverId).findResource(type, id) : null;
+        ReSyncProjectMetadata.ResourceEntry entry = manager != null ? manager.getProjectResource(serverId, type, id) : null;
         return entry != null ? entry.getPath() : "";
     }
 
     protected void ensureJsonPathText(String field, String value) {
+        if (deferResourceMutation(() -> ensureJsonPathText(field, value))) {
+            return;
+        }
         if (field == null || field.isBlank()) {
             return;
         }
@@ -1096,6 +1300,9 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     }
 
     protected void ensureFunctionCall(String basePath) {
+        if (deferResourceMutation(() -> ensureFunctionCall(basePath))) {
+            return;
+        }
         JsonObject call = ensureJsonPathObject(basePath);
         call.addProperty("type", "functionRef");
         if (!call.has("functionId")) {
@@ -1572,26 +1779,7 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     }
 
     protected String recipeItemSelectorLabel(String value) {
-        if (value == null || value.isBlank()) {
-            return "none";
-        }
-        for (OptionCatalogItem item : OptionCatalogCache.getInstance().getItems(serverId, RECIPE_ITEM_OPTIONS_SOURCE)) {
-            if (value.equals(item.getValue())) {
-                return item.getLabel();
-            }
-        }
-        for (OptionCatalogItem item : OptionCatalogCache.getInstance().getItems(serverId, MATERIAL_OPTIONS_SOURCE)) {
-            if (value.equals(item.getValue())) {
-                return item.getLabel();
-            }
-        }
-        if (value.startsWith("provider:")) {
-            int split = value.lastIndexOf(':');
-            if (split > 0 && split < value.length() - 1) {
-                return value.substring(split + 1);
-            }
-        }
-        return formatOptionLabel(value);
+        return ItemIconPreview.project(serverId, value).label();
     }
 
     protected String encodeRecipeItemValue(JsonObject object) {
@@ -1671,6 +1859,9 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     }
 
     protected void putRecipeItemPathText(String field, String value) {
+        if (deferResourceMutation(() -> putRecipeItemPathText(field, value))) {
+            return;
+        }
         String[] parts = field.split("\\.", 2);
         JsonObject parent = jsonObject(parts[0]);
         if (!resource.has(parts[0]) || !resource.get(parts[0]).isJsonObject()) {
@@ -1823,9 +2014,6 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
         if (handleActiveStudioSelectorMouseClicked(event)) {
             return true;
         }
-        if (dispatchSidePanelMouseClicked(event)) {
-            return true;
-        }
         return handleResourceMouseClicked(event);
     }
 
@@ -1839,9 +2027,6 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
         if (handleActiveStudioSelectorMouseReleased(event)) {
             return true;
         }
-        if (dispatchSidePanelMouseReleased(event)) {
-            return true;
-        }
         return handleResourceMouseReleased(event);
     }
 
@@ -1853,9 +2038,6 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     @Override
     public boolean mouseDragged(ReMouseEvent event) {
         if (handleActiveStudioSelectorMouseDragged(event)) {
-            return true;
-        }
-        if (dispatchSidePanelMouseDragged(event)) {
             return true;
         }
         return handleResourceMouseDragged(event);
@@ -1881,6 +2063,9 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
 
     @Override
     public boolean keyPressed(ReKeyEvent event) {
+        if (handleStudioSaveShortcut(event)) {
+            return true;
+        }
         if (handleActiveStudioSelectorKeyPressed(event)) {
             return true;
         }
@@ -2100,6 +2285,9 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     }
 
     protected void putJsonText(String field, String value) {
+        if (deferResourceMutation(() -> putJsonText(field, value))) {
+            return;
+        }
         if ("id".equals(field)) {
             return;
         }
@@ -2265,6 +2453,10 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     }
 
     protected void putWorldConditionValues(List<String> values) {
+        List<String> snapshot = values != null ? new ArrayList<>(values) : List.of();
+        if (deferResourceMutation(() -> putWorldConditionValues(snapshot))) {
+            return;
+        }
         JsonObject conditions = jsonObject("conditions");
         conditions.remove("world");
         JsonArray array = new JsonArray();
@@ -2297,6 +2489,9 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     }
 
     protected void putMotdText(String value) {
+        if (deferResourceMutation(() -> putMotdText(value))) {
+            return;
+        }
         String[] lines = (value == null ? "" : value).split("\\R", -1);
         String line1 = lines.length > 0 ? lines[0] : "";
         String line2 = lines.length > 1 ? lines[1] : "";
@@ -2332,6 +2527,9 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     }
 
     protected void putTemplateText(String value) {
+        if (deferResourceMutation(() -> putTemplateText(value))) {
+            return;
+        }
         if (value == null || value.isBlank()) {
             resource.remove("text");
         } else {
@@ -2352,6 +2550,9 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     }
 
     protected void putJsonArrayLines(String key, String value) {
+        if (deferResourceMutation(() -> putJsonArrayLines(key, value))) {
+            return;
+        }
         JsonArray array = new JsonArray();
         if (value != null) {
             for (String line : value.split("\\R", -1)) {
@@ -2386,6 +2587,9 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     }
 
     protected void putPlayerText(String field, String value) {
+        if (deferResourceMutation(() -> putPlayerText(field, value))) {
+            return;
+        }
         int index = playerIndex(field);
         if (index < 0) {
             return;
@@ -2463,6 +2667,9 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     }
 
     protected void putRecipeSlotText(int index, String value) {
+        if (deferResourceMutation(() -> putRecipeSlotText(index, value))) {
+            return;
+        }
         if (index < 0) {
             return;
         }
@@ -2489,6 +2696,9 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     }
 
     protected void removeRecipeIngredientIndex(int index) {
+        if (deferResourceMutation(() -> removeRecipeIngredientIndex(index))) {
+            return;
+        }
         JsonArray ingredients = resource.has("ingredients") && resource.get("ingredients").isJsonArray() ? resource.getAsJsonArray("ingredients") : null;
         if (ingredients == null || index < 0 || index >= ingredients.size()) {
             return;
@@ -2538,6 +2748,9 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     }
 
     protected void putRecipeIngredientText(int index, String value) {
+        if (deferResourceMutation(() -> putRecipeIngredientText(index, value))) {
+            return;
+        }
         if (index < 0) {
             return;
         }
@@ -2562,6 +2775,9 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     }
 
     protected void putJsonPathText(String field, String value) {
+        if (deferResourceMutation(() -> putJsonPathText(field, value))) {
+            return;
+        }
         JsonPathParent parent = jsonPathParent(field, true);
         if (parent == null) {
             return;
@@ -2583,6 +2799,9 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     }
 
     protected void putJsonPathElement(String field, JsonElement value) {
+        if (deferResourceMutation(() -> putJsonPathElement(field, value))) {
+            return;
+        }
         JsonPathParent parent = jsonPathParent(field, true);
         if (parent != null) {
             jsonPathSet(parent, value);
@@ -2590,6 +2809,9 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     }
 
     protected void removeJsonPath(String field) {
+        if (deferResourceMutation(() -> removeJsonPath(field))) {
+            return;
+        }
         JsonPathParent parent = jsonPathParent(field, false);
         if (parent == null) {
             return;
@@ -2606,6 +2828,9 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     }
 
     protected void putFunctionIdPathText(String field, String value) {
+        if (deferResourceMutation(() -> putFunctionIdPathText(field, value))) {
+            return;
+        }
         String basePath = field.substring(0, field.length() - ".functionId".length());
         if (value == null || value.isBlank() || "none".equalsIgnoreCase(value) || "No Function".equals(value)) {
             putJsonPathText(field, "");
@@ -2754,10 +2979,6 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     }
 
     protected record JsonPathParent(JsonObject object, JsonArray array, String key) {
-        @Override
-        public String toString() {
-            return "JsonPathParent[object=" + FlowJson.write(object) + ", array=" + FlowJson.write(array) + ", key=" + key + "]";
-        }
     }
 
     protected JsonObject jsonPathObject(String field) {
@@ -2842,7 +3063,7 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
             String contentId = encoded.substring("content:".length());
             FlowManager manager = FlowManager.getInstance();
             if (manager != null && serverId != null) {
-                CustomContentDefinition content = manager.getCustomContentForServer(serverId).get(contentId);
+                CustomContentDefinition content = manager.getCustomContent(serverId, contentId);
                 if (content != null && content.getMaterial() != null && !content.getMaterial().isBlank()) {
                     return content.getMaterial();
                 }
@@ -2861,7 +3082,7 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
             return;
         }
         int iconSize = Math.max(16, 16 * scale);
-        MinecraftRenderItem item = ItemIconPreview.resolve(serverId, previewMaterial).toRenderItem(recipeItemSelectorLabel(previewMaterial));
+        MinecraftRenderItem item = ItemIconPreview.project(serverId, previewMaterial).toRenderItem();
         if (item == null) {
             return;
         }
@@ -2915,8 +3136,10 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
 
     protected int textWidth(String value) {
         String clean = safeText(value).replaceAll("(?i)[&�][0-9a-fk-or]", "").replaceAll("<[^>]+>", "");
-        ITextRenderer textRenderer = ScreenManager.getInstance().runtime().textRenderer();
-        return textRenderer == null ? clean.length() * 6 : textRenderer.getWidth(clean);
+        if (RemotelyClient.tr != null) {
+            return RemotelyClient.tr.getWidth(clean);
+        }
+        return clean.length() * 6;
     }
 
     @Override

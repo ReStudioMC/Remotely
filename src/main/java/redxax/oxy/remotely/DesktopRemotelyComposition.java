@@ -2,6 +2,8 @@ package redxax.oxy.remotely;
 
 import redxax.oxy.remotely.config.RemotelyConfigManager;
 import redxax.oxy.remotely.config.RemotelyConfigStore;
+import redxax.oxy.remotely.data.flow.DesktopReSyncDirectSockets;
+import redxax.oxy.remotely.data.flow.DesktopReSyncLocalInstances;
 import redxax.oxy.remotely.data.flow.DesktopReSyncFlowClientFactory;
 import redxax.oxy.remotely.data.flow.DesktopReSyncClock;
 import redxax.oxy.remotely.data.flow.DesktopReSyncStorage;
@@ -30,6 +32,7 @@ import restudio.rebase.ui.screens.editor.completion.CodeCompletionRegistry;
 import restudio.rescreen.config.Config;
 import redxax.oxy.remotely.session.TerminalSessionManager;
 import redxax.oxy.remotely.settings.server.DesktopServerSettingsRegistry;
+import redxax.oxy.remotely.util.DesktopTaskIdentities;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -39,9 +42,12 @@ public final class DesktopRemotelyComposition {
     }
 
     public static RemotelyComposition.Builder create(ApplicationHost host) {
+        DesktopTaskIdentities.install();
         CodeCompletionRegistry.installDefaults();
         ReSyncFlowClientFactory flowClientFactory = DesktopReSyncFlowClientFactory.create();
         ReSyncFlowClientFactory.installDesktop(flowClientFactory);
+        DesktopReSyncDirectSockets.install();
+        DesktopReSyncLocalInstances.install();
         ReSyncStorage.installDesktop(DesktopReSyncStorage::fromKey);
         Path applicationDirectory = DesktopRemotelyPaths.appDir();
         Path flowDirectory = applicationDirectory.resolve("data").resolve("flow");

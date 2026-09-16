@@ -1,84 +1,248 @@
 package redxax.oxy.remotely.data.flow;
 
+import restudio.rescreen.platform.TaskScheduler;
+import java.time.Duration;
+import restudio.rescreen.platform.Async;
+import redxax.oxy.remotely.util.BrowserWork;
 import redxax.oxy.remotely.util.BrowserSafeState;
-import redxax.oxy.remotely.util.TaskSchedulers;
-
+import redxax.oxy.remotely.util.TaskIdentities;
+import redxax.oxy.remotely.RemotelyClient;
 import redxax.oxy.remotely.RemotelyServerApi;
 import redxax.oxy.remotely.flow.registry.NodeRegistry;
-import restudio.rescreen.platform.Async;
-import restudio.rescreen.platform.TaskScheduler;
 import restudio.rebase.restudio.api.models.ServerModels.ClientServerView;
+import restudio.rescreen.ui.core.ScreenManager;
+import restudio.rescreen.util.Notification;
+import restudio.resync.flow.identity.ServerId;
 
-import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.Predicate;
 
 public class ReSyncConnectionManager {
-    private static final Duration CONNECTION_WAIT_TIMEOUT = Duration.ofSeconds(5);
-    private static final int MAX_PENDING_PROFILE_ATTEMPTS = 100;
-    private final Object client;
+    private static final int PROFILE_WORKERS = 2;
+    private static final int PROFILE_QUEUE_CAPACITY = 32;
+    private static final int PROFILE_CACHE_CAPACITY = 128;
+    private static final long PROFILE_CACHE_MILLIS = 5_000L;
+    private static final long PROFILE_RESOLUTION_TIMEOUT_SECONDS = 16L;
+    private static final long FLOW_CLIENT_ADMISSION_RETRY_MILLIS = 50L;
+    private static final int CONNECTION_LIFECYCLE_WORKERS = 2;
+    private static final int CONNECTION_LIFECYCLE_QUEUE_CAPACITY = 32;
+    private static final int SHUTDOWN_DRAIN_ATTEMPTS = 2;
+    private static final long CONNECTION_LIFECYCLE_SHUTDOWN_TIMEOUT_MILLIS = 1_000L;
+    private static final long CONNECTION_RETIREMENT_SHUTDOWN_TIMEOUT_MILLIS = 1_000L;
+    private static final BrowserSafeState.IntegerValue PROFILE_THREAD_SEQUENCE = new BrowserSafeState.IntegerValue();
+    private static final BrowserSafeState.IntegerValue CONNECTION_LIFECYCLE_THREAD_SEQUENCE = new BrowserSafeState.IntegerValue();
+    private static final BrowserSafeState.IntegerValue SHUTDOWN_THREAD_SEQUENCE = new BrowserSafeState.IntegerValue();
+    private final RemotelyClient client;
     private final RemotelyServerApi apiClient;
-    private final ReSyncFlowClientFactory flowClientFactory;
-    private final ReSyncConnectionProfileProvider profileProvider;
-    private final ReSyncConnectionNotificationSink notificationSink;
-    private final NodeRegistry nodeRegistry;
-    private final ReSyncFlowClientContext flowClientContext;
-    private final Map<String, ReSyncServerIdentity> identities = BrowserSafeState.map();
-    private final Map<String, ReSyncFlowClient> flowClients = BrowserSafeState.map();
+    private final Function<String, ReSyncCatalogPublicationCache> catalogPublicationCacheFactory;
+    private final Map<String, OwnershipLock> connectionOwnershipLocks = BrowserSafeState.map();
+    private final Map<String, OwnedFlowClient> flowClients = BrowserSafeState.map();
     private final Map<String, ReSyncConnectionProfile> flowProfiles = BrowserSafeState.map();
-    private Consumer<String> connectionListener = serverId -> {};
-    private Consumer<String> disconnectListener = serverId -> {};
+    private final Map<String, String> profileConnectionKeys = BrowserSafeState.map();
+    private final Set<String> staleProfileAliases = BrowserSafeState.set();
+    private final Set<String> profileOwnerRefreshRequired = BrowserSafeState.set();
+    private final Map<String, RetirementProgress> pendingRetirements = BrowserSafeState.map();
+    private final Object profileResolutionLock = new Object();
+    private final Map<String, CachedProfileResolution> profileResolutionCache = BrowserSafeState.map();
+    private final Map<String, ProfileFlight> profileFlights = BrowserSafeState.map();
+    private final Map<String, Long> profileResolutionGenerations = BrowserSafeState.map();
+    private final Map<String, Async<ProfileResolution>> pendingProfileEnsures = BrowserSafeState.map();
+    private final Map<String, Async<ReSyncFlowClient>> pendingFlowClientAdmissions = BrowserSafeState.map();
+    private final BrowserSafeState.LongValue nextProfileResolutionGeneration = new BrowserSafeState.LongValue();
+    private final BrowserWork.Executor profileResolutionExecutor;
+    private final BrowserWork.Executor profileTimeoutExecutor;
+    private final Map<String, ProfileReplacement> pendingProfileReplacements = BrowserSafeState.map();
+    private final Set<ProfileReplacement> dispatchedProfileReplacements = BrowserSafeState.set();
+    private final Map<ProfileReplacement, Long> profileReplacementRetryAt = BrowserSafeState.map();
+    private final BrowserSafeState.LongValue nextProfileReplacementGeneration = new BrowserSafeState.LongValue();
+    private final BrowserWork.Executor connectionLifecycleExecutor;
+    private final Object profileObject;
+    private final Runnable profileInstanceChangeListener = this::invalidateProfileSources;
+    private final Object connectionLifecycleAdmission = new Object();
+    private volatile Consumer<String> connectionListener = serverId -> {};
+    private volatile Consumer<String> disconnectListener = serverId -> {};
+    private volatile boolean profileResolutionClosed;
+    private volatile boolean connectionLifecycleClosed;
+    private volatile boolean connectionLifecycleAbort;
+    private volatile boolean shutdownTerminal;
+    private final BrowserSafeState.LongValue nextConnectionGeneration = new BrowserSafeState.LongValue();
+    private final ThreadLocal<Integer> ownerLeaseDepth = ThreadLocal.withInitial(() -> 0);
 
-    public record ReSyncConnectionProfile(String wsUrl, String apiKey, boolean apiManaged) {
-        public ReSyncConnectionProfile(String wsUrl, String apiKey) {
-            this(wsUrl, apiKey, false);
+    private enum ErrorMode {
+        NOTIFY,
+        LIVE_SESSION,
+        SILENT
+    }
+
+    private static final class OwnershipLock {
+        private final BrowserSafeState.Lock lock = new BrowserSafeState.Lock();
+        private int references;
+        private boolean retiring;
+    }
+
+    private static final class OwnedFlowClient {
+        private final ReSyncFlowClient client;
+        private final long generation;
+        private final ReSyncFrameTransport callbackTransport;
+        private final Object leaseMonitor = new Object();
+        private int activeLeases;
+        private boolean connectClaimed;
+        private boolean connectInvoking;
+        private volatile boolean callbacksSuppressed;
+        private Async<Void> connectDispatch = Async.completed(null);
+        private ErrorMode errorMode;
+
+        private OwnedFlowClient(ReSyncFlowClient client, long generation, ErrorMode errorMode,
+                                ReSyncFrameTransport callbackTransport) {
+            this.client = client;
+            this.generation = generation;
+            this.errorMode = errorMode;
+            this.callbackTransport = callbackTransport;
+        }
+    }
+
+    private static final class ShutdownContext {
+        private final long deadlineNanos;
+        private boolean interrupted;
+        private boolean forced;
+        private boolean timedOut;
+
+        private ShutdownContext(long deadlineNanos) {
+            this.deadlineNanos = deadlineNanos;
+        }
+    }
+
+    private enum RetirementKind {
+        CURRENT,
+        SERVER
+    }
+
+    private static final class RetirementProgress {
+        private final OwnedFlowClient owner;
+        private final RetirementKind kind;
+        private final ReSyncConnectionProfile profile;
+        private final boolean profilePresent;
+        private final Consumer<ReSyncFlowClient> onRetired;
+        private final Runnable onCacheClear;
+        private boolean shutdownComplete;
+        private boolean retiredCallbackComplete;
+        private boolean nodeRegistryComplete;
+        private boolean cacheClearComplete;
+        private boolean profileCleanupComplete;
+        private boolean stepRunning;
+
+        private RetirementProgress(OwnedFlowClient owner, RetirementKind kind,
+                                   ReSyncConnectionProfile profile, boolean profilePresent,
+                                   Consumer<ReSyncFlowClient> onRetired, Runnable onCacheClear) {
+            this.owner = owner;
+            this.kind = kind;
+            this.profile = profile;
+            this.profilePresent = profilePresent;
+            this.onRetired = onRetired;
+            this.onCacheClear = onCacheClear;
+            this.retiredCallbackComplete = onRetired == null;
+            this.nodeRegistryComplete = kind == RetirementKind.CURRENT;
+            this.cacheClearComplete = kind == RetirementKind.CURRENT || onCacheClear == null;
+            this.profileCleanupComplete = kind == RetirementKind.CURRENT;
         }
 
-        public ReSyncConnectionProfile {
-            wsUrl = wsUrl == null ? "" : wsUrl.trim();
-            apiKey = apiKey == null ? "" : apiKey.trim();
+        private boolean complete() {
+            return shutdownComplete && retiredCallbackComplete && nodeRegistryComplete
+                && cacheClearComplete && profileCleanupComplete;
+        }
+    }
+
+    private record ConnectClaim(boolean dispatch, Async<Void> completion) {
+    }
+
+    public record ReSyncConnectionProfile(String serverId, String wsUrl, String apiKey) {
+        public ReSyncConnectionProfile(String wsUrl, String apiKey) {
+            this("", wsUrl, apiKey);
         }
 
         public static ReSyncConnectionProfile apiManagedProfile() {
-            return new ReSyncConnectionProfile("", "", true);
+            return new ReSyncConnectionProfile("", "", "");
         }
     }
 
-    public ReSyncConnectionManager(Object client, RemotelyServerApi apiClient) {
-        this(client, apiClient, ReSyncFlowClientFactory.unavailable(), ReSyncConnectionProfileProvider.unavailable(),
-            ReSyncConnectionNotificationSink.noop(), null);
+    public record ProfileResolution(String serverId, String instanceId, long generation,
+                                    ReSyncConnectionProfile profile, String issue) {
+        public boolean available() {
+            return issue == null;
+        }
     }
 
-    public ReSyncConnectionManager(Object client, RemotelyServerApi apiClient, ReSyncFlowClientFactory flowClientFactory) {
-        this(client, apiClient, flowClientFactory, ReSyncConnectionProfileProvider.unavailable(), ReSyncConnectionNotificationSink.noop(), null);
+    private record ProfileTarget(String serverId, List<String> aliases, Object instance, String instanceId,
+                                 String path, Object backendConfig, String backendType, String backendHost,
+                                 Map<String, String> backendCredentials, boolean apiManaged, boolean resolved) {
     }
 
-    public ReSyncConnectionManager(Object client, RemotelyServerApi apiClient, ReSyncFlowClientFactory flowClientFactory,
-                                   ReSyncConnectionProfileProvider profileProvider,
-                                   ReSyncConnectionNotificationSink notificationSink) {
-        this(client, apiClient, flowClientFactory, profileProvider, notificationSink, null);
+    private record ProfileRead(ReSyncConnectionProfile profile, String issue, boolean found) {
     }
 
-    public ReSyncConnectionManager(Object client, RemotelyServerApi apiClient, ReSyncFlowClientFactory flowClientFactory,
-                                   ReSyncConnectionProfileProvider profileProvider,
-                                   ReSyncConnectionNotificationSink notificationSink, NodeRegistry nodeRegistry) {
-        this(client, apiClient, flowClientFactory, profileProvider, notificationSink, nodeRegistry, null);
+    private record CachedProfileResolution(ProfileTarget target, ProfileResolution resolution, long expiresAt) {
     }
 
-    public ReSyncConnectionManager(Object client, RemotelyServerApi apiClient, ReSyncFlowClientFactory flowClientFactory,
-                                   ReSyncConnectionProfileProvider profileProvider,
-                                   ReSyncConnectionNotificationSink notificationSink, NodeRegistry nodeRegistry,
-                                   ReSyncFlowClientContext flowClientContext) {
+    private static final class ProfileFlight {
+        private volatile ProfileTarget target;
+        private volatile List<String> lookupAliases;
+        private final CachedProfileResolution candidate;
+        private final String expectedOwnerKey;
+        private final OwnedFlowClient expectedOwner;
+        private final long generation;
+        private final Async<ProfileResolution> completion = Async.pending();
+        private final BrowserSafeState.BooleanValue finished = new BrowserSafeState.BooleanValue();
+        private volatile Async<Void> task;
+        private volatile TaskScheduler.ScheduledTask timeout;
+        private volatile Object taskThread;
+
+        private ProfileFlight(ProfileTarget target, List<String> lookupAliases, CachedProfileResolution candidate,
+                              String expectedOwnerKey, OwnedFlowClient expectedOwner, long generation) {
+            this.target = target;
+            this.lookupAliases = lookupAliases;
+            this.candidate = candidate;
+            this.expectedOwnerKey = expectedOwnerKey;
+            this.expectedOwner = expectedOwner;
+            this.generation = generation;
+        }
+    }
+
+    private record ProfileReplacement(String serverId, OwnedFlowClient expectedOwner,
+                                      ReSyncConnectionProfile profile, ReSyncLiveServerSession liveSession,
+                                      ErrorMode errorMode, boolean connectIfNeeded, String resolutionFenceKey,
+                                      long resolutionGeneration, long generation) {
+    }
+
+    public ReSyncConnectionManager(RemotelyClient client, RemotelyServerApi apiClient) {
+        this(client, apiClient, ignored -> ReSyncCatalogPublicationCache.deferred());
+    }
+
+    public ReSyncConnectionManager(RemotelyClient client, RemotelyServerApi apiClient,
+                                   Function<String, ReSyncCatalogPublicationCache> catalogPublicationCacheFactory) {
         this.client = client;
         this.apiClient = apiClient;
-        this.flowClientFactory = flowClientFactory == null ? ReSyncFlowClientFactory.unavailable() : flowClientFactory;
-        this.profileProvider = profileProvider == null ? ReSyncConnectionProfileProvider.unavailable() : profileProvider;
-        this.notificationSink = notificationSink == null ? ReSyncConnectionNotificationSink.noop() : notificationSink;
-        this.nodeRegistry = nodeRegistry;
-        this.flowClientContext = flowClientContext;
+        this.catalogPublicationCacheFactory = catalogPublicationCacheFactory != null
+            ? catalogPublicationCacheFactory : ignored -> ReSyncCatalogPublicationCache.deferred();
+        this.profileResolutionExecutor = BrowserWork.executor();
+        this.profileTimeoutExecutor = BrowserWork.executor();
+        this.profileTimeoutExecutor.setRemoveOnCancelPolicy(true);
+        this.connectionLifecycleExecutor = BrowserWork.executor();
+        Object instanceManager = null;
+        try {
+            instanceManager = ReSyncLocalInstances.access.manager();
+            ReSyncLocalInstances.access.addListener(profileInstanceChangeListener);
+        } catch (RuntimeException ignored) {
+        }
+        this.profileObject = instanceManager;
     }
 
     public RemotelyServerApi getApiClient() {
@@ -86,397 +250,1629 @@ public class ReSyncConnectionManager {
     }
 
     public ReSyncFlowClient getFlowClient(String serverId) {
-        return getFlowClient(ReSyncServerIdentity.of(serverId));
+        if (serverId != null && staleProfileAliases.contains(serverId)) {
+            traceOwnerLifecycle(serverId, "connection_owner_lookup_rejected", null, "stale_profile_alias");
+            return null;
+        }
+        serverId = connectionKey(serverId);
+        if (serverId == null || serverId.isBlank()) {
+            traceOwnerLifecycle(serverId, "connection_owner_lookup_rejected", null, "server_id_unavailable");
+            return null;
+        }
+        if (pendingProfileReplacements.containsKey(serverId)) {
+            traceOwnerLifecycle(serverId, "connection_owner_lookup_rejected", flowClients.get(serverId),
+                "replacement_pending");
+            return null;
+        }
+        OwnedFlowClient owner = flowClients.get(serverId);
+        return owner == null ? null : owner.client;
     }
 
-    public ReSyncFlowClient getFlowClient(ReSyncServerIdentity identity) {
-        ReSyncServerIdentity canonical = rememberIdentity(identity);
-        return canonical == null || !canonical.present() ? null : flowClients.get(canonical.serverId());
+    boolean hasFlowClients() {
+        return !flowClients.isEmpty();
+    }
+
+    public boolean withCurrentFlowClient(String serverId, ReSyncFlowClient expected, Consumer<ReSyncFlowClient> action) {
+        if (connectionLifecycleClosed || (serverId != null && pendingProfileReplacements.containsKey(serverId))) {
+            return false;
+        }
+        return withCurrentFlowClient(serverId, expected, ignored -> true, action);
+    }
+
+    public boolean withCurrentFlowClientNow(String serverId, ReSyncFlowClient expected, Consumer<ReSyncFlowClient> action) {
+        if (connectionLifecycleClosed) {
+            traceOwnerLifecycle(serverId, "connection_owner_callback_dropped", null, "lifecycle_closed");
+            return false;
+        }
+        if (serverId != null && staleProfileAliases.contains(serverId)) {
+            traceOwnerLifecycle(serverId, "connection_owner_callback_dropped", null, "stale_profile_alias");
+            return false;
+        }
+        serverId = connectionKey(serverId);
+        if (serverId == null || serverId.isBlank()) {
+            traceOwnerLifecycle(serverId, "connection_owner_callback_dropped", null, "server_id_unavailable");
+            return false;
+        }
+        if (expected == null) {
+            traceOwnerLifecycle(serverId, "connection_owner_callback_dropped", flowClients.get(serverId),
+                "expected_owner_unavailable");
+            return false;
+        }
+        if (action == null) {
+            traceOwnerLifecycle(serverId, "connection_owner_callback_dropped", flowClients.get(serverId),
+                "callback_unavailable");
+            return false;
+        }
+        if (pendingProfileReplacements.containsKey(serverId)) {
+            traceOwnerLifecycle(serverId, "connection_owner_callback_dropped", flowClients.get(serverId),
+                "replacement_pending");
+            return false;
+        }
+        OwnershipLock ownership = tryAcquireOwnership(serverId);
+        if (ownership == null) {
+            traceOwnerLifecycle(serverId, "connection_owner_callback_dropped", flowClients.get(serverId),
+                "ownership_lock_busy");
+            return false;
+        }
+        OwnedFlowClient owner;
+        try {
+            owner = flowClients.get(serverId);
+            String rejection = connectionLifecycleClosed ? "lifecycle_closed"
+                : staleProfileAliases.contains(serverId) ? "stale_profile_alias"
+                : ownership.retiring ? "owner_retiring"
+                : owner == null ? "owner_unavailable"
+                : owner.client != expected ? "expected_owner_mismatch"
+                : !isOwner(serverId, owner) ? "owner_generation_stale" : null;
+            if (rejection != null) {
+                traceOwnerLifecycle(serverId, "connection_owner_callback_dropped", owner, rejection);
+                releaseOwnership(serverId, ownership);
+                return false;
+            }
+            acquireLease(owner);
+            ownership.lock.unlock();
+        } catch (RuntimeException | Error error) {
+            if (ownership.lock.isHeldByCurrentThread()) {
+                releaseOwnership(serverId, ownership);
+            }
+            throw error;
+        }
+        try {
+            action.accept(expected);
+            return true;
+        } finally {
+            ownership.lock.lock();
+            releaseLease(owner);
+            ownership.lock.signalAll();
+            releaseOwnership(serverId, ownership);
+        }
+    }
+
+    boolean withCurrentFlowClient(String serverId, ReSyncFlowClient expected,
+                                  Predicate<ReSyncFlowClient> admission, Consumer<ReSyncFlowClient> action) {
+        if (connectionLifecycleClosed || (serverId != null && staleProfileAliases.contains(serverId))) {
+            return false;
+        }
+        serverId = connectionKey(serverId);
+        if (serverId == null || serverId.isBlank() || expected == null || admission == null || action == null) {
+            return false;
+        }
+        if (pendingProfileReplacements.containsKey(serverId)) {
+            return false;
+        }
+        OwnershipLock ownership = acquireOwnership(serverId);
+        OwnedFlowClient owner;
+        try {
+            if (ownership.retiring) {
+                releaseOwnership(serverId, ownership);
+                return false;
+            }
+            owner = flowClients.get(serverId);
+            if (connectionLifecycleClosed || owner == null || owner.client != expected || !isOwner(serverId, owner)) {
+                releaseOwnership(serverId, ownership);
+                return false;
+            }
+            if (!admission.test(owner.client)) {
+                releaseOwnership(serverId, ownership);
+                return false;
+            }
+            acquireLease(owner);
+            ownership.lock.unlock();
+        } catch (RuntimeException | Error error) {
+            if (ownership.lock.isHeldByCurrentThread()) {
+                releaseOwnership(serverId, ownership);
+            }
+            throw error;
+        }
+        try {
+            action.accept(expected);
+            return true;
+        } finally {
+            ownership.lock.lock();
+            releaseLease(owner);
+            ownership.lock.signalAll();
+            releaseOwnership(serverId, ownership);
+        }
     }
 
     public ReSyncConnectionProfile getProfile(String serverId) {
-        return getProfile(ReSyncServerIdentity.of(serverId));
+        if (serverId != null && staleProfileAliases.contains(serverId)) {
+            return null;
+        }
+        return flowProfiles.get(serverId);
     }
 
-    public ReSyncConnectionProfile getProfile(ReSyncServerIdentity identity) {
-        ReSyncServerIdentity canonical = rememberIdentity(identity);
-        return canonical == null || !canonical.present() ? null : flowProfiles.get(canonical.serverId());
+    public void disconnectServerConnection(String serverId) {
+        closeServerConnectionAtomically(serverId, null, null);
+    }
+
+    private String connectionKey(String serverId) {
+        return serverId == null ? null : profileConnectionKeys.getOrDefault(serverId, serverId);
     }
 
     public boolean isFlowClientConnected(String serverId) {
-        return isFlowClientReady(serverId);
-    }
-
-    public boolean isFlowClientReady(String serverId) {
-        ReSyncFlowClient flowClient = getFlowClient(serverId);
-        return flowClient != null && flowClient.isReady();
-    }
-
-    public ReSyncFlowClient.ReadinessState getFlowClientReadiness(String serverId) {
-        ReSyncFlowClient flowClient = getFlowClient(serverId);
-        return flowClient == null ? ReSyncFlowClient.ReadinessState.DISCONNECTED : flowClient.readinessState();
+        if (serverId != null && staleProfileAliases.contains(serverId)) {
+            return false;
+        }
+        serverId = connectionKey(serverId);
+        if (serverId == null || serverId.isBlank()) {
+            return false;
+        }
+        if (pendingProfileReplacements.containsKey(serverId)) {
+            return false;
+        }
+        OwnedFlowClient owner = flowClients.get(serverId);
+        return owner != null && owner.client.isConnectedState();
     }
 
     public ReSyncFlowClient.ConnectionState getFlowClientConnectionState(String serverId) {
-        ReSyncFlowClient flowClient = getFlowClient(serverId);
-        return flowClient == null ? ReSyncFlowClient.ConnectionState.DISCONNECTED : flowClient.connectionState();
+        if (serverId != null && staleProfileAliases.contains(serverId)) {
+            return ReSyncFlowClient.ConnectionState.DISCONNECTED;
+        }
+        serverId = connectionKey(serverId);
+        if (serverId == null || serverId.isBlank()) {
+            return ReSyncFlowClient.ConnectionState.DISCONNECTED;
+        }
+        if (pendingProfileReplacements.containsKey(serverId)) {
+            return ReSyncFlowClient.ConnectionState.DISCONNECTED;
+        }
+        OwnedFlowClient owner = flowClients.get(serverId);
+        return owner == null ? ReSyncFlowClient.ConnectionState.DISCONNECTED : owner.client.connectionState();
     }
 
     public ReSyncFlowClient ensureFlowClient(String serverId, boolean showNotifications) {
-        return ensureFlowClient(ReSyncServerIdentity.of(serverId), showNotifications);
-    }
-
-    public ReSyncFlowClient ensureFlowClient(ReSyncServerIdentity identity, boolean showNotifications) {
-        ReSyncServerIdentity canonical = rememberIdentity(identity);
-        if (canonical == null || !canonical.present()) {
+        if (serverId == null || serverId.isBlank() || connectionLifecycleClosed) {
             return null;
         }
-        return ensureFlowClient(canonical, profileForLocalInstance(canonical), showNotifications, true);
+        boolean staleProfile = staleProfileAliases.contains(serverId);
+        String ownerKey = connectionKey(serverId);
+        OwnedFlowClient owner = flowClients.get(ownerKey);
+        if (!staleProfile && owner != null
+            && owner.client.connectionState() != ReSyncFlowClient.ConnectionState.DISCONNECTED) {
+            return owner.client;
+        }
+        if (!staleProfile && owner != null && !owner.client.usesDirectWebSocketTransport()) {
+            return ensureFlowClient(ownerKey, null, showNotifications, true);
+        }
+        ReSyncConnectionProfile storedProfile = flowProfiles.get(ownerKey);
+        if (!staleProfile && storedProfile != null) {
+            return ensureFlowClient(ownerKey, storedProfile, showNotifications, true);
+        }
+        Async<ProfileResolution> resolutionFuture = resolveAndStoreProfile(serverId, null);
+        ProfileResolution resolution = resolutionFuture.getNow(null);
+        if (resolution == null) {
+            BrowserSafeState.BooleanValue attachEnsure = new BrowserSafeState.BooleanValue();
+            pendingProfileEnsures.compute(serverId, (ignored, current) -> {
+                if (current == resolutionFuture) {
+                    return current;
+                }
+                attachEnsure.set(true);
+                return resolutionFuture;
+            });
+            if (attachEnsure.get()) {
+                resolutionFuture.thenAccept(resolved -> {
+                    pendingProfileEnsures.remove(serverId, resolutionFuture);
+                    if (resolved.available() && !connectionLifecycleClosed) {
+                        ensureFlowClient(resolved.serverId(), resolved.profile(), showNotifications, true);
+                    }
+                });
+            }
+            return null;
+        }
+        if (!resolution.available()) {
+            return null;
+        }
+        return ensureFlowClient(resolution.serverId(), resolution.profile(), showNotifications, true);
     }
 
     public ReSyncFlowClient ensureFlowClient(String serverId, ReSyncConnectionProfile profile) {
-        return ensureFlowClient(ReSyncServerIdentity.of(serverId), profile);
-    }
-
-    public ReSyncFlowClient ensureFlowClient(ReSyncServerIdentity identity, ReSyncConnectionProfile profile) {
-        ReSyncServerIdentity canonical = rememberIdentity(identity);
-        if (canonical == null || !canonical.present()) {
+        if (serverId != null && staleProfileAliases.contains(serverId)) {
+            resolveAndStoreProfile(serverId, null);
             return null;
         }
-        return ensureFlowClient(canonical, profile, true, true);
+        return ensureFlowClient(connectionKey(serverId), profile, true, true);
     }
 
     public ReSyncFlowClient ensureFlowClient(String serverId) {
         return ensureFlowClient(serverId, true);
     }
 
-    public boolean canUseFlowClient(ReSyncServerIdentity identity) {
-        return getFlowAvailabilityIssue(rememberIdentity(identity)) == null;
-    }
-
-    public boolean canSurfaceFlowClient(ReSyncServerIdentity identity) {
-        ReSyncServerIdentity canonical = rememberIdentity(identity);
-        return canUseFlowClient(canonical) || profileProvider.connectionPending(canonical);
-    }
-
-    public boolean canUseFlowClient(String serverId, ClientServerView server) {
-        return canUseFlowClient(ReSyncServerIdentity.from(serverId, server));
-    }
-
-    public boolean canActivateLiveSession(ReSyncLiveServerSession session) {
-        return flowClientFactory.available() && session != null && session.serverId() != null
-            && !session.serverId().isBlank() && session.transport() != null;
-    }
-
-    public Async<ReSyncFlowClient.ReadinessState> awaitFlowClientConnected(String serverId) {
-        return awaitFlowClientConnected(serverId, true);
-    }
-
-    public Async<ReSyncFlowClient.ReadinessState> awaitFlowClientConnected(String serverId, boolean showNotifications) {
-        ReSyncServerIdentity identity = ReSyncServerIdentity.of(serverId);
-        if (!identity.present()) {
-            return Async.completed(ReSyncFlowClient.ReadinessState.DISCONNECTED);
+    public Async<ReSyncFlowClient> ensureFlowClientAsync(String serverId, boolean showNotifications) {
+        ReSyncFlowClient immediate = ensureFlowClient(serverId, showNotifications);
+        if (immediate != null) {
+            return Async.completed(immediate);
         }
-        ReSyncFlowClient flowClient = ensureFlowClient(identity, profileForLocalInstance(identity), showNotifications, false);
-        if (flowClient == null) {
-            return profileProvider.connectionPending(identity)
-                ? awaitPendingFlowClient(identity, showNotifications)
-                : Async.completed(ReSyncFlowClient.ReadinessState.DISCONNECTED);
+        if (serverId == null || serverId.isBlank() || connectionLifecycleClosed) {
+            return Async.completed(null);
         }
-        if (flowClient.isReady()) {
-            return Async.completed(ReSyncFlowClient.ReadinessState.READY);
+        Async<ReSyncFlowClient> admission = Async.pending();
+        Async<ReSyncFlowClient> current = pendingFlowClientAdmissions.putIfAbsent(serverId, admission);
+        if (current != null) {
+            return current;
         }
-        boolean initiate = flowClient.readinessState() == ReSyncFlowClient.ReadinessState.DISCONNECTED;
-        Async<ReSyncFlowClient.ReadinessState> result = flowClient.awaitReady(CONNECTION_WAIT_TIMEOUT, false);
-        if (initiate) {
-            flowClient.connectAsync();
-        }
-        return result;
+        admission.whenComplete((ignored, error) -> pendingFlowClientAdmissions.remove(serverId, admission));
+        continueFlowClientAdmission(serverId, showNotifications, admission,
+            System.nanoTime() + ((PROFILE_RESOLUTION_TIMEOUT_SECONDS) * 1_000_000_000L));
+        return admission;
     }
 
-    private Async<ReSyncFlowClient.ReadinessState> awaitPendingFlowClient(ReSyncServerIdentity identity,
-                                                                            boolean showNotifications) {
-        Async<ReSyncFlowClient.ReadinessState> result = Async.pending();
-        BrowserSafeState.ReferenceValue<TaskScheduler.ScheduledTask> scheduled = new BrowserSafeState.ReferenceValue<>();
-        result.onCancel(() -> {
-            TaskScheduler.ScheduledTask task = scheduled.get();
-            if (task != null) {
-                task.cancel();
-            }
-        });
-        pollPendingFlowClient(identity, showNotifications, result, scheduled, 0);
-        return result;
-    }
-
-    private void pollPendingFlowClient(ReSyncServerIdentity identity, boolean showNotifications,
-                                       Async<ReSyncFlowClient.ReadinessState> result,
-                                       BrowserSafeState.ReferenceValue<TaskScheduler.ScheduledTask> scheduled,
-                                       int attempt) {
-        if (result.isDone()) {
+    private void continueFlowClientAdmission(String serverId, boolean showNotifications,
+                                             Async<ReSyncFlowClient> admission, long deadline) {
+        if (admission.isDone() || pendingFlowClientAdmissions.get(serverId) != admission) {
             return;
         }
-        ReSyncFlowClient flowClient = ensureFlowClient(identity, profileForLocalInstance(identity), showNotifications, false);
-        if (flowClient != null) {
-            if (flowClient.isReady()) {
-                result.complete(ReSyncFlowClient.ReadinessState.READY);
+        if (connectionLifecycleClosed) {
+            admission.complete(null);
+            return;
+        }
+        ReSyncFlowClient immediate = ensureFlowClient(serverId, showNotifications);
+        if (immediate != null) {
+            admission.complete(immediate);
+            return;
+        }
+        getFlowAvailabilityIssueAsync(serverId, null).whenComplete((issue, error) -> {
+            if (admission.isDone() || pendingFlowClientAdmissions.get(serverId) != admission) {
                 return;
             }
-            boolean initiate = flowClient.readinessState() == ReSyncFlowClient.ReadinessState.DISCONNECTED;
-            Async<ReSyncFlowClient.ReadinessState> readiness = flowClient.awaitReady(CONNECTION_WAIT_TIMEOUT, false);
-            readiness.whenComplete((state, failure) -> {
-                if (failure != null) {
-                    result.complete(ReSyncFlowClient.ReadinessState.DISCONNECTED);
-                } else {
-                    result.complete(state == null ? ReSyncFlowClient.ReadinessState.DISCONNECTED : state);
-                }
-            });
-            if (initiate) {
-                flowClient.connectAsync();
+            if (error != null || issue != null || connectionLifecycleClosed) {
+                admission.complete(null);
+                return;
             }
-            return;
-        }
-        if (!profileProvider.connectionPending(identity) || attempt >= MAX_PENDING_PROFILE_ATTEMPTS) {
-            result.complete(ReSyncFlowClient.ReadinessState.DISCONNECTED);
-            return;
-        }
-        try {
-            TaskScheduler.ScheduledTask task = TaskSchedulers.current().schedule(
-                () -> pollPendingFlowClient(identity, showNotifications, result, scheduled, attempt + 1),
-                Duration.ofMillis(50));
-            scheduled.set(task);
-        } catch (RuntimeException error) {
-            result.complete(ReSyncFlowClient.ReadinessState.DISCONNECTED);
-        }
-    }
-
-    public ReSyncFlowClient retryFlowClient(String serverId, boolean showNotifications) {
-        ReSyncServerIdentity identity = ReSyncServerIdentity.of(serverId);
-        if (!identity.present()) {
-            return null;
-        }
-        ReSyncFlowClient flowClient = ensureFlowClient(identity, profileForLocalInstance(identity), showNotifications, false);
-        if (flowClient != null) {
-            flowClient.connect();
-        }
-        return flowClient;
+            ReSyncFlowClient resolved = ensureFlowClient(serverId, showNotifications);
+            if (resolved != null) {
+                admission.complete(resolved);
+                return;
+            }
+            if (System.nanoTime() >= deadline) {
+                admission.complete(null);
+                return;
+            }
+            try {
+                profileTimeoutExecutor.schedule(
+                    () -> continueFlowClientAdmission(serverId, showNotifications, admission, deadline), Duration.ofMillis(FLOW_CLIENT_ADMISSION_RETRY_MILLIS));
+            } catch (IllegalStateException rejected) {
+                admission.complete(null);
+            }
+        });
     }
 
     public ReSyncFlowClient activateLiveSession(ReSyncLiveServerSession session) {
-        if (!canActivateLiveSession(session)) {
+        if (session == null || session.serverId() == null || session.serverId().isBlank() || session.transport() == null
+            || connectionLifecycleClosed) {
             return null;
         }
-        ReSyncServerIdentity identity = rememberIdentity(ReSyncServerIdentity.of(session.serverId()));
-        String serverId = identity.serverId();
-        ReSyncFlowClient existing = flowClients.get(serverId);
-        if (existing != null && existing.usesFrameTransport(session.transport())) {
-            existing.connect();
-            return existing;
-        }
-        existing = flowClients.remove(serverId);
-        if (existing != null) {
-            existing.shutdown();
-        }
-        flowProfiles.remove(serverId);
-        Object clientState = flowClientContext == null ? client : flowClientContext;
-        ReSyncFlowClient flowClient = flowClientFactory.createLive(serverId, session.transport(), clientState);
-        if (flowClient == null) {
+        String serverId = session.serverId();
+        ServerId peerServerId = session.peerServerId().orElse(null);
+        if (peerServerId != null && !peerServerId.canonicalText().equals(serverId)) {
             return null;
         }
-        flowClient.setReadyListener(() -> connectionListener.accept(serverId));
-        flowClient.setDisconnectListener(() -> disconnectListener.accept(serverId));
-        flowClient.setErrorListener((nodeId, message) -> {
-            String normalized = normalizeReSyncNotificationMessage(message);
-            if (!"ReSync Connection Timed Out".equals(normalized)) {
-                notificationSink.show("ReSync", normalized, ReSyncNotificationLevel.ERROR);
-            }
-        });
-        flowClients.put(serverId, flowClient);
-        flowClient.connectAsync();
-        return flowClient;
-    }
-
-    private ReSyncFlowClient ensureFlowClient(ReSyncServerIdentity identity, ReSyncConnectionProfile profile,
-                                               boolean showNotifications, boolean connectIfNeeded) {
-        if (identity == null || !identity.present() || !flowClientFactory.available()) {
+        ProfileReplacement pendingReplacement = pendingProfileReplacements.get(serverId);
+        if (pendingReplacement != null) {
+            dispatchProfileReplacement(pendingReplacement);
             return null;
         }
-        String serverId = identity.serverId();
-        if (profile == null || !profileProvider.connectionAllowed(identity, profile)
-                || !profile.apiManaged() && !hasDirectProfile(profile)
-                || profile.apiManaged() && apiClient == null) {
-            ReSyncFlowClient blocked = flowClients.remove(serverId);
-            if (blocked != null) {
-                blocked.shutdown();
-            }
-            flowProfiles.remove(serverId);
-            return null;
-        }
-        ReSyncFlowClient flowClient = flowClients.get(serverId);
-        if (flowClient != null && profile != null && !profile.apiManaged() && !flowClient.isReady()
-                && !flowClient.matchesDirectProfile(profile.wsUrl(), profile.apiKey())) {
-            flowClient.shutdown();
-            flowClients.remove(serverId);
-            flowClient = null;
-        }
-        if (flowClient == null) {
-            if (!profile.apiManaged()) {
-                Object clientState = flowClientContext == null ? client : flowClientContext;
-                flowClient = flowClientFactory.create(serverId, apiClient, profile.wsUrl(), profile.apiKey(), null, clientState);
-            } else {
-                Object clientState = flowClientContext == null ? client : flowClientContext;
-                flowClient = flowClientFactory.create(serverId, apiClient, null, null, null, clientState);
-            }
-            if (flowClient == null) {
+        OwnedFlowClient owner = null;
+        OwnedFlowClient displaced = null;
+        ConnectClaim connectClaim = null;
+        RuntimeException shutdownFailure = null;
+        ReSyncFlowClient unpublished = null;
+        Throwable transitionFailure = null;
+        OwnershipLock ownership = acquireOwnership(serverId);
+        try {
+            requireAvailable(ownership);
+            if (connectionLifecycleClosed) {
                 return null;
             }
-            flowClients.put(serverId, flowClient);
+            owner = flowClients.get(serverId);
+            if (owner == null || !owner.client.usesFrameTransport(session.transport())) {
+                requireNoCurrentThreadLease();
+                displaced = owner;
+                ReSyncConnectionProfile displacedProfile = flowProfiles.get(serverId);
+                if (displaced != null) {
+                    scheduleLiveReplacement(serverId, displaced, session);
+                    return null;
+                }
+                ReSyncCatalogPublicationCache publicationCache = catalogPublicationCacheFactory.apply(serverId);
+                ReSyncFlowClient flowClient = publicationCache == null
+                    ? new ReSyncFlowClient(serverId, session.transport(), client)
+                    : new ReSyncFlowClient(serverId, session.transport(), client, publicationCache);
+                unpublished = flowClient;
+                OwnedFlowClient replacement = prepareOwner(serverId, flowClient, ErrorMode.LIVE_SESSION,
+                    session.transport());
+                shutdownFailure = retireDisplaced(ownership, displaced);
+                if (shutdownFailure != null) {
+                    throw shutdownFailure;
+                }
+                if (displaced != null && !flowClients.remove(serverId, displaced)) {
+                    throw new IllegalStateException("ReSync connection ownership changed during replacement.");
+                }
+                synchronized (connectionLifecycleAdmission) {
+                    if (!connectionLifecycleClosed) {
+                        flowClients.put(serverId, replacement);
+                        owner = replacement;
+                        unpublished = null;
+                        removeProfileIfSame(serverId, displacedProfile);
+                        traceOwnerLifecycle(serverId, "connection_owner_published", owner, "live_session_owner_current");
+                    }
+                }
+                if (unpublished != null) {
+                    owner = null;
+                    connectClaim = null;
+                }
+            } else {
+                owner.errorMode = ErrorMode.LIVE_SESSION;
+                shutdownFailure = null;
+            }
+            if (unpublished == null) {
+                connectClaim = owner.client.isFrameTransportRetired() && !session.transport().reusableAfterDisconnect()
+                    ? null : claimConnect(owner);
+            }
+        } catch (RuntimeException | Error error) {
+            transitionFailure = error;
+        } finally {
+            releaseOwnership(serverId, ownership);
         }
-        flowClient.setReadyListener(() -> connectionListener.accept(serverId));
-        flowClient.setDisconnectListener(() -> disconnectListener.accept(serverId));
-        if (showNotifications) {
-            flowClient.setErrorListener((nodeId, message) -> {
-                String normalized = normalizeReSyncNotificationMessage(message);
-                ReSyncNotificationLevel type = "ReSync Connection Timed Out".equals(normalized) ? ReSyncNotificationLevel.WARN : ReSyncNotificationLevel.ERROR;
-                notificationSink.show("ReSync", normalized, type);
-            });
-        } else {
-            flowClient.setErrorListener((nodeId, message) -> {
-            });
+        if (unpublished != null) {
+            try {
+                unpublished.shutdown();
+            } catch (RuntimeException | Error error) {
+                if (transitionFailure == null) {
+                    transitionFailure = error;
+                } else {
+                    transitionFailure.addSuppressed(error);
+                }
+            }
         }
-        if (connectIfNeeded) {
-            flowClient.connectAsync();
+        if (transitionFailure != null) {
+            if (transitionFailure instanceof Error error) {
+                throw error;
+            }
+            throw (RuntimeException) transitionFailure;
         }
-        return flowClient;
+        if (unpublished != null) {
+            return null;
+        }
+        finishOwnershipTransition(serverId, owner, connectClaim, shutdownFailure);
+        return owner.client;
     }
 
-    private boolean hasDirectProfile(ReSyncConnectionProfile profile) {
-        return profile.wsUrl() != null && !profile.wsUrl().isBlank()
-            && (profile.wsUrl().startsWith("ws://") || profile.wsUrl().startsWith("wss://"))
-            && profile.apiKey() != null && !profile.apiKey().isBlank();
+    private ReSyncFlowClient ensureFlowClient(String serverId, ReSyncConnectionProfile profile, boolean showNotifications, boolean connectIfNeeded) {
+        serverId = connectionKey(serverId);
+        if (serverId == null || serverId.isBlank() || connectionLifecycleClosed) {
+            return null;
+        }
+        ProfileReplacement pendingReplacement = pendingProfileReplacements.get(serverId);
+        if (pendingReplacement != null) {
+            dispatchProfileReplacement(pendingReplacement);
+            return null;
+        }
+        OwnedFlowClient owner;
+        ConnectClaim connectClaim;
+        ReSyncFlowClient unpublished = null;
+        OwnershipLock ownership = acquireOwnership(serverId);
+        try {
+            requireAvailable(ownership);
+            if (connectionLifecycleClosed) {
+                return null;
+            }
+            owner = flowClients.get(serverId);
+            ErrorMode errorMode = showNotifications ? ErrorMode.NOTIFY : ErrorMode.SILENT;
+            if (profile != null) {
+                flowProfiles.put(serverId, profile);
+            }
+            if (owner != null && profile != null && (profileOwnerRefreshRequired.contains(serverId)
+                || !owner.client.matchesDirectProfile(profile.wsUrl(), profile.apiKey()))) {
+                requireNoCurrentThreadLease();
+                scheduleProfileReplacement(serverId, owner, profile, errorMode, connectIfNeeded);
+                return null;
+            }
+            if (owner == null) {
+                ReSyncFlowClient flowClient;
+                if (profile != null && profile.wsUrl() != null && !profile.wsUrl().isBlank()) {
+                    flowClient = new ReSyncFlowClient(serverId, apiClient, profile.wsUrl(), profile.apiKey(), client);
+                } else {
+                    flowClient = new ReSyncFlowClient(serverId, apiClient, client);
+                }
+                owner = publishOwner(serverId, flowClient, errorMode);
+                if (owner == null) {
+                    unpublished = flowClient;
+                    connectClaim = null;
+                } else {
+                    profileOwnerRefreshRequired.remove(serverId);
+                    connectClaim = connectIfNeeded ? claimConnect(owner) : null;
+                }
+            } else {
+                owner.errorMode = errorMode;
+                connectClaim = connectIfNeeded ? claimConnect(owner) : null;
+            }
+        } finally {
+            releaseOwnership(serverId, ownership);
+        }
+        if (unpublished != null) {
+            try {
+                unpublished.shutdown();
+            } catch (RuntimeException ignored) {
+            }
+            return null;
+        }
+        finishOwnershipTransition(serverId, owner, connectClaim, null);
+        return owner.client;
+    }
+
+    private OwnedFlowClient publishOwner(String serverId, ReSyncFlowClient flowClient, ErrorMode errorMode) {
+        OwnedFlowClient owner = prepareOwner(serverId, flowClient, errorMode, null);
+        synchronized (connectionLifecycleAdmission) {
+            if (connectionLifecycleClosed) {
+                traceOwnerLifecycle(serverId, "connection_owner_publication_rejected", owner, "lifecycle_closed");
+                return null;
+            }
+            flowClients.put(serverId, owner);
+            traceOwnerLifecycle(serverId, "connection_owner_published", owner, "owner_current");
+            return owner;
+        }
+    }
+
+    private OwnedFlowClient prepareOwner(String serverId, ReSyncFlowClient flowClient, ErrorMode errorMode,
+                                         ReSyncFrameTransport callbackTransport) {
+        OwnedFlowClient owner = new OwnedFlowClient(flowClient, nextConnectionGeneration.incrementAndGet(), errorMode,
+            callbackTransport);
+        flowClient.setConnectionListener(() -> notifyConnected(serverId, owner));
+        flowClient.setDisconnectListener(() -> notifyDisconnected(serverId, owner));
+        flowClient.setErrorListener((nodeId, message) -> notifyError(serverId, owner, message));
+        traceOwnerLifecycle(serverId, "connection_owner_listeners_bound", owner,
+            callbackTransport == null ? "direct_callback" : "transport_callback");
+        return owner;
+    }
+
+    private void scheduleProfileReplacement(String serverId, OwnedFlowClient owner,
+                                            ReSyncConnectionProfile profile, ErrorMode errorMode,
+                                            boolean connectIfNeeded) {
+        if (connectionLifecycleClosed) {
+            return;
+        }
+        ProfileReplacement replacement = new ProfileReplacement(serverId, owner, profile, null, errorMode,
+            connectIfNeeded, null, 0L, nextProfileReplacementGeneration.incrementAndGet());
+        scheduleReplacement(replacement);
+    }
+
+    private void scheduleLiveReplacement(String serverId, OwnedFlowClient owner, ReSyncLiveServerSession session) {
+        if (connectionLifecycleClosed) {
+            return;
+        }
+        ProfileReplacement replacement = new ProfileReplacement(serverId, owner, null, session,
+            ErrorMode.LIVE_SESSION, true, null, 0L, nextProfileReplacementGeneration.incrementAndGet());
+        scheduleReplacement(replacement);
+    }
+
+    private void scheduleProfileRetirement(String serverId, String resolutionFenceKey, OwnedFlowClient owner,
+                                           long resolutionGeneration) {
+        if (connectionLifecycleClosed || owner == null || !owner.client.usesDirectWebSocketTransport()) {
+            return;
+        }
+        ProfileReplacement replacement = new ProfileReplacement(serverId, owner, null, null, ErrorMode.SILENT,
+            false, resolutionFenceKey, resolutionGeneration, nextProfileReplacementGeneration.incrementAndGet());
+        scheduleReplacement(replacement);
+    }
+
+    private void scheduleReplacement(ProfileReplacement replacement) {
+        synchronized (connectionLifecycleAdmission) {
+            if (connectionLifecycleClosed
+                || pendingProfileReplacements.putIfAbsent(replacement.serverId(), replacement) != null) {
+                return;
+            }
+            replacement.expectedOwner().callbacksSuppressed = true;
+        }
+        dispatchProfileReplacement(replacement);
+    }
+
+    private void dispatchProfileReplacement(ProfileReplacement replacement) {
+        if (connectionLifecycleClosed) {
+            return;
+        }
+        long now = System.nanoTime();
+        Long retryAt = profileReplacementRetryAt.get(replacement);
+        if (retryAt != null && retryAt > now) {
+            return;
+        }
+        profileReplacementRetryAt.remove(replacement);
+        if (!isCurrentProfileReplacement(replacement) || !dispatchedProfileReplacements.add(replacement)) {
+            return;
+        }
+        try {
+            connectionLifecycleExecutor.execute(() -> replaceConnection(replacement));
+        } catch (IllegalStateException error) {
+            dispatchedProfileReplacements.remove(replacement);
+            if (profileReplacementRetryAt.putIfAbsent(replacement,
+                now + ((1L) * 1_000_000_000L)) == null) {
+                notifyProfileReplacementFailure(replacement);
+                try {
+                    profileTimeoutExecutor.schedule(() -> {
+                        profileReplacementRetryAt.remove(replacement);
+                        dispatchProfileReplacement(replacement);
+                    }, java.time.Duration.ofSeconds(1L));
+                } catch (IllegalStateException retryError) {
+                    pendingProfileReplacements.remove(replacement.serverId(), replacement);
+                    profileReplacementRetryAt.remove(replacement);
+                    replacement.expectedOwner().callbacksSuppressed = false;
+                }
+            }
+        }
+    }
+
+    private void replaceConnection(ProfileReplacement replacement) {
+        OwnedFlowClient published = null;
+        ReSyncFlowClient unpublished = null;
+        ConnectClaim connectClaim = null;
+        Throwable failure = null;
+        boolean retired = false;
+        boolean retryPending = false;
+        OwnershipLock ownership = acquireOwnership(replacement.serverId());
+        try {
+            requireAvailable(ownership);
+            if (!isCurrentProfileReplacement(replacement)
+                || !isOwner(replacement.serverId(), replacement.expectedOwner())
+                || !isReplacementSourceCurrent(replacement)) {
+                replacement.expectedOwner().callbacksSuppressed = false;
+                return;
+            }
+            RuntimeException shutdownFailure = retireDisplaced(ownership, replacement.expectedOwner());
+            if (shutdownFailure != null) {
+                throw shutdownFailure;
+            }
+            retired = true;
+            if (!flowClients.remove(replacement.serverId(), replacement.expectedOwner())) {
+                throw new IllegalStateException("ReSync connection ownership changed during profile replacement.");
+            }
+            boolean profileRetirement = replacement.profile() == null && replacement.liveSession() == null;
+            if (!isCurrentProfileReplacement(replacement) || connectionLifecycleClosed
+                || !isReplacementSourceCurrent(replacement)) {
+                return;
+            }
+            if (profileRetirement) {
+                return;
+            }
+            ReSyncFlowClient flowClient;
+            ReSyncFrameTransport callbackTransport;
+            if (replacement.liveSession() != null) {
+                ReSyncCatalogPublicationCache publicationCache = catalogPublicationCacheFactory.apply(replacement.serverId());
+                flowClient = publicationCache == null
+                    ? new ReSyncFlowClient(replacement.serverId(), replacement.liveSession().transport(), client)
+                    : new ReSyncFlowClient(replacement.serverId(), replacement.liveSession().transport(), client,
+                        publicationCache);
+                callbackTransport = replacement.liveSession().transport();
+                flowProfiles.remove(replacement.serverId());
+            } else {
+                flowClient = replacement.profile().wsUrl() != null && !replacement.profile().wsUrl().isBlank()
+                    ? new ReSyncFlowClient(replacement.serverId(), apiClient, replacement.profile().wsUrl(),
+                        replacement.profile().apiKey(), client)
+                    : new ReSyncFlowClient(replacement.serverId(), apiClient, client);
+                callbackTransport = null;
+            }
+            published = prepareOwner(replacement.serverId(), flowClient, replacement.errorMode(), callbackTransport);
+            synchronized (connectionLifecycleAdmission) {
+                if (connectionLifecycleClosed) {
+                    unpublished = flowClient;
+                    published = null;
+                } else {
+                    flowClients.put(replacement.serverId(), published);
+                    profileOwnerRefreshRequired.remove(replacement.serverId());
+                    traceOwnerLifecycle(replacement.serverId(), "connection_owner_published", published,
+                        replacement.liveSession() == null ? "profile_replacement_current" : "live_replacement_current");
+                }
+            }
+            if (published != null) {
+                connectClaim = replacement.connectIfNeeded()
+                    && (replacement.liveSession() == null || !published.client.isFrameTransportRetired()
+                        || replacement.liveSession().transport().reusableAfterDisconnect())
+                    ? claimConnect(published) : null;
+            }
+        } catch (Throwable error) {
+            failure = error;
+            if (retired) {
+                flowClients.remove(replacement.serverId(), replacement.expectedOwner());
+            } else if (isOwner(replacement.serverId(), replacement.expectedOwner())) {
+                replacement.expectedOwner().callbacksSuppressed = true;
+                retryPending = true;
+            }
+        } finally {
+            dispatchedProfileReplacements.remove(replacement);
+            if (retryPending && isCurrentProfileReplacement(replacement)) {
+                profileReplacementRetryAt.put(replacement, System.nanoTime() + ((1L) * 1_000_000_000L));
+            } else {
+                pendingProfileReplacements.remove(replacement.serverId(), replacement);
+                profileReplacementRetryAt.remove(replacement);
+            }
+            releaseOwnership(replacement.serverId(), ownership);
+        }
+        if (unpublished != null) {
+            try {
+                unpublished.shutdown();
+            } catch (Throwable error) {
+                failure = failure == null ? error : mergeFailure(asFailure(failure), error);
+            }
+        }
+        if (published != null) {
+            try {
+                finishOwnershipTransition(replacement.serverId(), published, connectClaim, null);
+            } catch (Throwable error) {
+                failure = failure == null ? error : mergeFailure(asFailure(failure), error);
+            }
+        }
+        if (failure != null) {
+            notifyProfileReplacementFailure(replacement);
+        }
+    }
+
+    private void notifyProfileReplacementFailure(ProfileReplacement replacement) {
+        if (replacement.errorMode() != ErrorMode.NOTIFY) {
+            return;
+        }
+        ScreenManager.getInstance().execute(() -> {
+            if (!connectionLifecycleClosed && isCurrentProfileReplacement(replacement)
+                && replacement.expectedOwner().callbacksSuppressed
+                && isOwner(replacement.serverId(), replacement.expectedOwner())) {
+                new Notification("ReSync", "ReSync Connection Couldn't Be Refreshed. Try Again",
+                    Notification.Type.ERROR);
+            }
+        });
+    }
+
+    private boolean isCurrentProfileReplacement(ProfileReplacement replacement) {
+        ProfileReplacement current = pendingProfileReplacements.get(replacement.serverId());
+        return !connectionLifecycleClosed && current == replacement && current.generation() == replacement.generation();
+    }
+
+    private boolean isReplacementSourceCurrent(ProfileReplacement replacement) {
+        if (replacement.profile() != null) {
+            return flowProfiles.get(replacement.serverId()) == replacement.profile();
+        }
+        if (replacement.liveSession() != null) {
+            return true;
+        }
+        CachedProfileResolution current = profileResolutionCache.get(replacement.resolutionFenceKey());
+        return current != null && current.resolution().generation() == replacement.resolutionGeneration();
+    }
+
+    private void shutdownConnectionLifecycle() {
+        synchronized (connectionLifecycleAdmission) {
+            if (!connectionLifecycleClosed) {
+                connectionLifecycleClosed = true;
+            }
+            pendingProfileReplacements.clear();
+            dispatchedProfileReplacements.clear();
+            profileReplacementRetryAt.clear();
+            pendingFlowClientAdmissions.values().forEach(admission -> admission.complete(null));
+            pendingFlowClientAdmissions.clear();
+        }
+        connectionLifecycleExecutor.shutdown();
+    }
+
+    private void awaitConnectionLifecycleTermination(ShutdownContext context) {
+        if (connectionLifecycleExecutor.isTerminated()) {
+            return;
+        }
+        if (TaskIdentities.access.name().startsWith("ReSync-Connection-Lifecycle-")) {
+            context.forced = true;
+            connectionLifecycleAbort = true;
+            connectionLifecycleExecutor.shutdownNow();
+            return;
+        }
+        while (!connectionLifecycleExecutor.isTerminated()) {
+            long remaining = context.deadlineNanos - System.nanoTime();
+            if (remaining <= 0L) {
+                context.forced = true;
+                context.timedOut = true;
+                connectionLifecycleAbort = true;
+                connectionLifecycleExecutor.shutdownNow();
+                return;
+            }
+            connectionLifecycleExecutor.awaitTermination(Math.min(remaining, ((100L) * 1_000_000L)),
+                1L);
+        }
+    }
+
+    private ConnectClaim claimConnect(OwnedFlowClient owner) {
+        if (owner.connectInvoking || (owner.connectClaimed && (!owner.connectDispatch.isDone()
+            || owner.client.connectionState() != ReSyncFlowClient.ConnectionState.DISCONNECTED))) {
+            traceOwnerLifecycle(null, "connection_owner_connect_claim_reused", owner, "connect_already_claimed");
+            return new ConnectClaim(false, owner.connectDispatch);
+        }
+        owner.connectClaimed = true;
+        owner.connectDispatch = Async.pending();
+        traceOwnerLifecycle(null, "connection_owner_connect_claimed", owner, "connect_dispatch_required");
+        return new ConnectClaim(true, owner.connectDispatch);
+    }
+
+    private void connectOwned(String serverId, OwnedFlowClient owner, ConnectClaim claim) {
+        if (claim == null) {
+            traceOwnerLifecycle(serverId, "connection_owner_connect_dropped", owner, "claim_unavailable");
+            return;
+        }
+        if (connectionLifecycleClosed) {
+            traceOwnerLifecycle(serverId, "connection_owner_connect_dropped", owner, "lifecycle_closed");
+            return;
+        }
+        if (!claim.dispatch()) {
+            traceOwnerLifecycle(serverId, "connection_owner_connect_deduplicated", owner, "existing_dispatch");
+            return;
+        }
+        OwnershipLock ownership = acquireOwnership(serverId);
+        try {
+            if (!isOwner(serverId, owner) || !owner.connectClaimed) {
+                traceOwnerLifecycle(serverId, "connection_owner_connect_dropped", owner,
+                    !isOwner(serverId, owner) ? "owner_generation_stale" : "claim_released");
+                claim.completion().complete(null);
+                return;
+            }
+            owner.connectInvoking = true;
+            claim.completion().complete(null);
+            acquireLease(owner);
+            traceOwnerLifecycle(serverId, "connection_owner_connect_executing", owner, "connect_started");
+        } finally {
+            releaseOwnership(serverId, ownership);
+        }
+        RuntimeException failure = null;
+        try {
+            owner.client.connect();
+        } catch (RuntimeException error) {
+            failure = error;
+            traceOwnerLifecycle(serverId, "connection_owner_connect_failed", owner, TaskIdentities.failureName(error));
+            throw error;
+        } finally {
+            OwnershipLock completionOwnership = acquireOwnership(serverId);
+            try {
+                if (isOwner(serverId, owner)) {
+                    owner.connectInvoking = false;
+                    if (failure != null) {
+                        owner.connectClaimed = false;
+                    }
+                }
+                releaseLease(owner);
+                completionOwnership.lock.signalAll();
+            } finally {
+                releaseOwnership(serverId, completionOwnership);
+            }
+        }
+    }
+
+    private RuntimeException shutdownDisplaced(OwnedFlowClient displaced) {
+        if (displaced == null) {
+            return null;
+        }
+        try {
+            displaced.client.shutdown();
+            return null;
+        } catch (RuntimeException error) {
+            return error;
+        }
+    }
+
+    private RuntimeException retireDisplaced(OwnershipLock ownership, OwnedFlowClient displaced) {
+        if (displaced == null) {
+            return null;
+        }
+        displaced.callbacksSuppressed = true;
+        ownership.retiring = true;
+        try {
+            awaitLeases(ownership, displaced);
+            ownership.lock.unlock();
+            try {
+                RuntimeException failure = shutdownDisplaced(displaced);
+                if (failure != null) {
+                    displaced.callbacksSuppressed = false;
+                }
+                return failure;
+            } catch (RuntimeException | Error error) {
+                displaced.callbacksSuppressed = false;
+                throw error;
+            } finally {
+                ownership.lock.lock();
+            }
+        } finally {
+            ownership.retiring = false;
+            ownership.lock.signalAll();
+        }
+    }
+
+    private void finishOwnershipTransition(String serverId, OwnedFlowClient owner, ConnectClaim connectClaim,
+                                           RuntimeException shutdownFailure) {
+        try {
+            connectOwned(serverId, owner, connectClaim);
+        } catch (RuntimeException error) {
+            if (shutdownFailure != null) {
+                error.addSuppressed(shutdownFailure);
+            }
+            throw error;
+        }
+        if (shutdownFailure != null) {
+            throw shutdownFailure;
+        }
+    }
+
+    private void notifyConnected(String serverId, OwnedFlowClient owner) {
+        OwnershipLock ownership = acquireOwnership(serverId);
+        try {
+            String rejection = connectionLifecycleClosed ? "lifecycle_closed"
+                : ownership.retiring ? "owner_retiring"
+                : owner.callbacksSuppressed ? "callbacks_suppressed"
+                : pendingProfileReplacements.containsKey(serverId) ? "replacement_pending"
+                : !isOwner(serverId, owner) ? "owner_generation_stale"
+                : owner.client.connectionState() != ReSyncFlowClient.ConnectionState.CONNECTED
+                ? "connection_state_not_connected" : null;
+            if (rejection != null) {
+                traceOwnerLifecycle(serverId, "connection_owner_connected_callback_dropped", owner, rejection);
+                return;
+            }
+            owner.connectClaimed = true;
+            traceOwnerLifecycle(serverId, "connection_owner_connected_callback_admitted", owner, "owner_current");
+        } finally {
+            releaseOwnership(serverId, ownership);
+        }
+        publishCallback(serverId, owner, () -> withCurrentFlowClient(serverId, owner.client,
+            current -> !owner.callbacksSuppressed && !pendingProfileReplacements.containsKey(serverId)
+                && current.connectionState() == ReSyncFlowClient.ConnectionState.CONNECTED,
+            ignored -> connectionListener.accept(serverId)));
+    }
+
+    private void notifyDisconnected(String serverId, OwnedFlowClient owner) {
+        OwnershipLock ownership = acquireOwnership(serverId);
+        try {
+            String rejection = connectionLifecycleClosed ? "lifecycle_closed"
+                : ownership.retiring ? "owner_retiring"
+                : owner.callbacksSuppressed ? "callbacks_suppressed"
+                : pendingProfileReplacements.containsKey(serverId) ? "replacement_pending"
+                : !isOwner(serverId, owner) ? "owner_generation_stale" : null;
+            if (rejection != null) {
+                traceOwnerLifecycle(serverId, "connection_owner_disconnected_callback_dropped", owner, rejection);
+                return;
+            }
+            if (owner.client.connectionState() != ReSyncFlowClient.ConnectionState.DISCONNECTED) {
+                traceOwnerLifecycle(serverId, "connection_owner_disconnected_callback_dropped", owner,
+                    "connection_state_not_disconnected");
+                return;
+            }
+            owner.connectClaimed = false;
+            traceOwnerLifecycle(serverId, "connection_owner_disconnected_callback_admitted", owner, "owner_current");
+        } finally {
+            releaseOwnership(serverId, ownership);
+        }
+        publishCallback(serverId, owner, () -> withCurrentFlowClient(serverId, owner.client,
+            current -> !owner.callbacksSuppressed && !pendingProfileReplacements.containsKey(serverId)
+                && current.connectionState() == ReSyncFlowClient.ConnectionState.DISCONNECTED,
+            ignored -> disconnectListener.accept(serverId)));
+    }
+
+    private void notifyError(String serverId, OwnedFlowClient owner, String message) {
+        ErrorMode errorMode;
+        if (!isOwner(serverId, owner)) {
+            traceOwnerLifecycle(serverId, "connection_owner_error_callback_dropped", owner, "owner_generation_stale");
+            return;
+        }
+        OwnershipLock ownership = acquireOwnership(serverId);
+        try {
+            String rejection = ownership.retiring ? "owner_retiring"
+                : owner.callbacksSuppressed ? "callbacks_suppressed"
+                : !isOwner(serverId, owner) ? "owner_generation_stale" : null;
+            if (rejection != null) {
+                traceOwnerLifecycle(serverId, "connection_owner_error_callback_dropped", owner, rejection);
+                return;
+            }
+            if (owner.client.connectionState() == ReSyncFlowClient.ConnectionState.DISCONNECTED) {
+                owner.connectClaimed = false;
+            }
+            errorMode = owner.errorMode;
+        } finally {
+            releaseOwnership(serverId, ownership);
+        }
+        String normalized = normalizeReSyncNotificationMessage(message);
+        boolean transientLiveFailure = errorMode == ErrorMode.LIVE_SESSION
+            && ("ReSync Connection Timed Out".equals(normalized) || "ReSync Connection Failed".equals(normalized));
+        if (errorMode == ErrorMode.SILENT || transientLiveFailure) {
+            traceOwnerLifecycle(serverId, "connection_owner_error_callback_dropped", owner,
+                errorMode == ErrorMode.SILENT ? "silent_error_mode" : "live_session_transient_failure_suppressed");
+            return;
+        }
+        Notification.Type type = errorMode == ErrorMode.NOTIFY && "ReSync Connection Timed Out".equals(normalized)
+            ? Notification.Type.WARN : Notification.Type.ERROR;
+        traceOwnerLifecycle(serverId, "connection_owner_error_callback_admitted", owner, "notification_queued");
+        publishCallback(serverId, owner, () -> ScreenManager.getInstance().execute(() -> {
+            if (!isOwner(serverId, owner)) {
+                traceOwnerLifecycle(serverId, "connection_owner_error_callback_dropped", owner,
+                    "owner_changed_before_notification");
+                return;
+            }
+            OwnershipLock notificationOwnership = acquireOwnership(serverId);
+            try {
+                if (!notificationOwnership.retiring && !owner.callbacksSuppressed
+                    && !pendingProfileReplacements.containsKey(serverId) && isOwner(serverId, owner)) {
+                    traceOwnerLifecycle(serverId, "connection_owner_error_callback_executing", owner,
+                        "notification_visible");
+                    new Notification("ReSync", normalized, type);
+                } else {
+                    traceOwnerLifecycle(serverId, "connection_owner_error_callback_dropped", owner,
+                        "notification_fence_changed");
+                }
+            } finally {
+                releaseOwnership(serverId, notificationOwnership);
+            }
+        }));
+    }
+
+    private ReSyncFrameTransport.CallbackPublication publishCallback(String serverId, OwnedFlowClient owner,
+                                                                     Runnable callback) {
+        Runnable traced = () -> {
+            try {
+                callback.run();
+            } catch (RuntimeException | Error error) {
+                traceOwnerLifecycle(serverId, "connection_owner_callback_failed", owner,
+                    TaskIdentities.failureName(error));
+                throw error;
+            }
+        };
+        if (owner.callbackTransport == null) {
+            traced.run();
+            return ReSyncFrameTransport.CallbackPublication.EXECUTED;
+        }
+        ReSyncFrameTransport.CallbackPublication publication = owner.callbackTransport.publishCallback(traced);
+        if (publication == ReSyncFrameTransport.CallbackPublication.STALE) {
+            traceOwnerLifecycle(serverId, "connection_owner_callback_dropped", owner, "stale");
+        }
+        return publication;
+    }
+
+    private boolean isOwner(String serverId, OwnedFlowClient owner) {
+        OwnedFlowClient current = flowClients.get(serverId);
+        return current != null && current.generation == owner.generation && current.client == owner.client;
+    }
+
+    private OwnershipLock acquireOwnership(String serverId) {
+        OwnershipLock ownership = connectionOwnershipLocks.compute(serverId, (ignored, current) -> {
+            OwnershipLock resolved = current != null ? current : new OwnershipLock();
+            resolved.references++;
+            return resolved;
+        });
+        ownership.lock.lock();
+        return ownership;
+    }
+
+    private OwnershipLock tryAcquireOwnership(String serverId) {
+        OwnershipLock ownership = connectionOwnershipLocks.compute(serverId, (ignored, current) -> {
+            OwnershipLock resolved = current != null ? current : new OwnershipLock();
+            resolved.references++;
+            return resolved;
+        });
+        if (ownership.lock.tryLock()) {
+            return ownership;
+        }
+        connectionOwnershipLocks.computeIfPresent(serverId, (ignored, current) -> {
+            if (current != ownership) {
+                return current;
+            }
+            current.references--;
+            return current.references == 0 && !flowClients.containsKey(serverId)
+                && !pendingRetirements.containsKey(serverId) ? null : current;
+        });
+        return null;
+    }
+
+    private void requireAvailable(OwnershipLock ownership) {
+        if (ownership.retiring) {
+            throw new IllegalStateException("Cannot Enter ReSync Ownership During Retirement");
+        }
+    }
+
+    private void awaitLeases(OwnershipLock ownership, OwnedFlowClient owner) {
+        awaitLeases(ownership, owner, Long.MAX_VALUE, false);
+    }
+
+    private boolean awaitLeases(OwnershipLock ownership, OwnedFlowClient owner, long deadlineNanos,
+                                boolean stopOnInterrupt) {
+        if (owner == null) {
+            return true;
+        }
+        boolean interrupted = false;
+        boolean complete = false;
+        ownership.lock.unlock();
+        try {
+            synchronized (owner.leaseMonitor) {
+                while (owner.activeLeases > 0) {
+                    long remaining = deadlineNanos - System.nanoTime();
+                    if (remaining <= 0L) {
+                        break;
+                    }
+                    try {
+                        if (deadlineNanos == Long.MAX_VALUE) {
+                            owner.leaseMonitor.wait();
+                        } else {
+                            long waitNanos = Math.min(remaining, ((100L) * 1_000_000L));
+                            long waitMillis = ((waitNanos) / 1_000_000L);
+                            int waitNanosPart = (int) (waitNanos - ((waitMillis) * 1_000_000L));
+                            if (waitMillis == 0L && waitNanosPart == 0) {
+                                waitNanosPart = 1;
+                            }
+                            owner.leaseMonitor.wait(waitMillis, waitNanosPart);
+                        }
+                    } catch (InterruptedException error) {
+                        interrupted = true;
+                        if (stopOnInterrupt) {
+                            break;
+                        }
+                    }
+                }
+                complete = owner.activeLeases == 0;
+            }
+        } finally {
+            ownership.lock.lock();
+        }
+        if (interrupted && !stopOnInterrupt) {
+            TaskIdentities.access.interrupt();
+        }
+        return complete;
+    }
+
+    private void acquireLease(OwnedFlowClient owner) {
+        synchronized (owner.leaseMonitor) {
+            owner.activeLeases++;
+        }
+        ownerLeaseDepth.set(ownerLeaseDepth.get() + 1);
+    }
+
+    private void releaseLease(OwnedFlowClient owner) {
+        int depth = ownerLeaseDepth.get() - 1;
+        if (depth == 0) {
+            ownerLeaseDepth.remove();
+        } else {
+            ownerLeaseDepth.set(depth);
+        }
+        synchronized (owner.leaseMonitor) {
+            owner.activeLeases--;
+            owner.leaseMonitor.notifyAll();
+        }
+    }
+
+    private void requireNoCurrentThreadLease() {
+        if (ownerLeaseDepth.get() > 0) {
+            throw new IllegalStateException("Cannot Retire ReSync Client During An Active Owner Action");
+        }
+    }
+
+    private void releaseOwnership(String serverId, OwnershipLock ownership) {
+        ownership.lock.unlock();
+        connectionOwnershipLocks.computeIfPresent(serverId, (ignored, current) -> {
+            if (current != ownership) {
+                return current;
+            }
+            current.references--;
+            return current.references == 0 && !flowClients.containsKey(serverId)
+                && !pendingRetirements.containsKey(serverId) ? null : current;
+        });
+    }
+
+    public boolean closeCurrentFlowClient(String serverId, Consumer<ReSyncFlowClient> onRemoved) {
+        return closeRetirement(connectionKey(serverId), RetirementKind.CURRENT, onRemoved, null);
     }
 
     public void closeServerConnection(String serverId, Runnable onCacheClear) {
-        ReSyncServerIdentity identity = rememberIdentity(ReSyncServerIdentity.of(serverId));
-        String canonicalServerId = identity == null ? "" : identity.serverId();
-        ReSyncFlowClient flowClient = flowClients.remove(canonicalServerId);
-        if (flowClient != null) {
-            flowClient.shutdown();
+        closeServerConnection(serverId, null, onCacheClear);
+    }
+
+    public void closeServerConnection(String serverId, Consumer<ReSyncFlowClient> onRemoved, Runnable onCacheClear) {
+        closeServerConnectionAtomically(serverId, source -> {
+            if (source != null && onRemoved != null) {
+                onRemoved.accept(source);
+            }
+        }, onCacheClear);
+    }
+
+    public boolean closeServerConnectionAtomically(String serverId, Consumer<ReSyncFlowClient> onRetired,
+                                                   Runnable onCacheClear) {
+        return closeRetirement(connectionKey(serverId), RetirementKind.SERVER, onRetired, onCacheClear);
+    }
+
+    private boolean closeRetirement(String serverId, RetirementKind kind,
+                                    Consumer<ReSyncFlowClient> onRetired, Runnable onCacheClear) {
+        return closeRetirement(serverId, kind, onRetired, onCacheClear, Long.MAX_VALUE, false);
+    }
+
+    private boolean closeRetirement(String serverId, RetirementKind kind,
+                                    Consumer<ReSyncFlowClient> onRetired, Runnable onCacheClear,
+                                    long deadlineNanos, boolean boundedShutdown) {
+        if (serverId == null || serverId.isBlank()) {
+            return false;
         }
-        flowProfiles.remove(canonicalServerId);
-        identities.remove(canonicalServerId);
-        if (nodeRegistry != null) {
-            nodeRegistry.clearServer(canonicalServerId);
+        if (shouldStopRetirement(boundedShutdown) || connectionLifecycleClosed && !boundedShutdown) {
+            return false;
         }
-        if (onCacheClear != null) {
-            onCacheClear.run();
+        if (kind == RetirementKind.SERVER) {
+            invalidateProfileResolution(serverId, false);
+        }
+        OwnershipLock ownership = acquireOwnership(serverId);
+        boolean retirementStarted = false;
+        boolean keepRetiring = false;
+        try {
+            RetirementProgress progress = pendingRetirements.get(serverId);
+            OwnedFlowClient owner = flowClients.get(serverId);
+            if (progress != null) {
+                if (progress.kind != kind) {
+                    throw new IllegalStateException("ReSync connection has a different pending retirement operation.");
+                }
+                if (progress.owner != owner || progress.stepRunning) {
+                    throw new IllegalStateException("ReSync connection retirement is already in progress.");
+                }
+            } else {
+                requireAvailable(ownership);
+                if (kind == RetirementKind.CURRENT && owner == null) {
+                    return false;
+                }
+            }
+            requireNoCurrentThreadLease();
+            ownership.retiring = true;
+            retirementStarted = true;
+            if (progress == null) {
+                progress = new RetirementProgress(owner, kind, flowProfiles.get(serverId),
+                    flowProfiles.containsKey(serverId), onRetired, onCacheClear);
+                pendingRetirements.put(serverId, progress);
+                if (owner == null) {
+                    progress.shutdownComplete = true;
+                }
+            }
+            boolean leasesComplete;
+            if (boundedShutdown) {
+                leasesComplete = awaitLeases(ownership, owner, deadlineNanos, true);
+            } else {
+                awaitLeases(ownership, owner);
+                leasesComplete = true;
+            }
+            if (!leasesComplete) {
+                connectionLifecycleAbort = true;
+                pendingRetirements.remove(serverId, progress);
+                return false;
+            }
+            if (shouldStopRetirement(boundedShutdown)) {
+                pendingRetirements.remove(serverId, progress);
+                return false;
+            }
+            if (!progress.shutdownComplete) {
+                progress.stepRunning = true;
+                ownership.lock.unlock();
+                Throwable shutdownError = null;
+                try {
+                    owner.client.shutdown();
+                } catch (Throwable error) {
+                    shutdownError = error;
+                } finally {
+                    ownership.lock.lock();
+                    progress.stepRunning = false;
+                }
+                if (shutdownError != null) {
+                    pendingRetirements.remove(serverId, progress);
+                    throw asFailure(shutdownError);
+                }
+                if (shouldStopRetirement(boundedShutdown)) {
+                    pendingRetirements.remove(serverId, progress);
+                    return false;
+                }
+                progress.shutdownComplete = true;
+            }
+            if (shouldStopRetirement(boundedShutdown)) {
+                pendingRetirements.remove(serverId, progress);
+                return false;
+            }
+            RuntimeException failure;
+            try {
+                failure = finishRetirement(serverId, ownership, progress, boundedShutdown);
+            } catch (Throwable error) {
+                keepRetiring = true;
+                throw asFailure(error);
+            }
+            if (failure != null || !progress.complete()) {
+                keepRetiring = true;
+                throw failure != null ? failure : new IllegalStateException("ReSync connection retirement is incomplete.");
+            }
+            if (owner != null && !flowClients.remove(serverId, owner)) {
+                keepRetiring = true;
+                throw new IllegalStateException("ReSync connection ownership changed during close.");
+            }
+            pendingRetirements.remove(serverId, progress);
+            return owner != null;
+        } finally {
+            if (retirementStarted) {
+                if (!keepRetiring) {
+                    ownership.retiring = false;
+                }
+                ownership.lock.signalAll();
+            }
+            releaseOwnership(serverId, ownership);
         }
     }
 
-    public void disconnectServerConnection(String serverId) {
-        ReSyncServerIdentity identity = rememberIdentity(ReSyncServerIdentity.of(serverId));
-        String canonicalServerId = identity == null ? "" : identity.serverId();
-        if (canonicalServerId.isBlank()) {
-            return;
+    private RuntimeException finishRetirement(String serverId, OwnershipLock ownership,
+                                              RetirementProgress progress, boolean boundedShutdown) {
+        if (shouldStopRetirement(boundedShutdown)) {
+            return new IllegalStateException("ReSync connection shutdown was forced.");
         }
-        ReSyncFlowClient flowClient = flowClients.remove(canonicalServerId);
-        if (flowClient != null) {
-            flowClient.setDisconnectListener(() -> {});
-            flowClient.shutdown();
+        RuntimeException failure = null;
+        if (!progress.retiredCallbackComplete) {
+            failure = mergeFailure(failure, invokeRetiredCallback(ownership, progress));
         }
-        flowProfiles.remove(canonicalServerId);
+        if (shouldStopRetirement(boundedShutdown)) {
+            return mergeFailure(failure, new IllegalStateException("ReSync connection shutdown was forced."));
+        }
+        if (progress.kind == RetirementKind.SERVER) {
+            if (!progress.nodeRegistryComplete) {
+                failure = mergeFailure(failure, clearNodeRegistry(serverId, ownership, progress));
+            }
+            if (shouldStopRetirement(boundedShutdown)) {
+                return mergeFailure(failure, new IllegalStateException("ReSync connection shutdown was forced."));
+            }
+            if (!progress.cacheClearComplete) {
+                failure = mergeFailure(failure, clearCache(ownership, progress));
+            }
+            if (shouldStopRetirement(boundedShutdown)) {
+                return mergeFailure(failure, new IllegalStateException("ReSync connection shutdown was forced."));
+            }
+            if (!progress.profileCleanupComplete && failure == null) {
+                failure = mergeFailure(failure, removeRetiredProfile(serverId, progress));
+            }
+        }
+        return failure;
+    }
+
+    private boolean shouldStopRetirement(boolean boundedShutdown) {
+        return shutdownTerminal || connectionLifecycleAbort && !boundedShutdown;
+    }
+
+    private RuntimeException invokeRetiredCallback(OwnershipLock ownership, RetirementProgress progress) {
+        progress.stepRunning = true;
+        Throwable error = null;
+        ownership.lock.unlock();
+        try {
+            progress.onRetired.accept(progress.owner == null ? null : progress.owner.client);
+        } catch (Throwable failure) {
+            error = failure;
+        } finally {
+            ownership.lock.lock();
+            progress.stepRunning = false;
+        }
+        if (error == null) {
+            progress.retiredCallbackComplete = true;
+            return null;
+        }
+        return asFailure(error);
+    }
+
+    private RuntimeException clearNodeRegistry(String serverId, OwnershipLock ownership,
+                                               RetirementProgress progress) {
+        progress.stepRunning = true;
+        Throwable error = null;
+        ownership.lock.unlock();
+        try {
+            NodeRegistry registry = NodeRegistry.getInstance();
+            if (registry != null) {
+                registry.clearServer(serverId);
+            }
+        } catch (Throwable failure) {
+            error = failure;
+        } finally {
+            ownership.lock.lock();
+            progress.stepRunning = false;
+        }
+        if (error == null) {
+            progress.nodeRegistryComplete = true;
+            return null;
+        }
+        return asFailure(error);
+    }
+
+    private RuntimeException clearCache(OwnershipLock ownership, RetirementProgress progress) {
+        progress.stepRunning = true;
+        Throwable error = null;
+        ownership.lock.unlock();
+        try {
+            progress.onCacheClear.run();
+        } catch (Throwable failure) {
+            error = failure;
+        } finally {
+            ownership.lock.lock();
+            progress.stepRunning = false;
+        }
+        if (error == null) {
+            progress.cacheClearComplete = true;
+            return null;
+        }
+        return asFailure(error);
+    }
+
+    private RuntimeException removeRetiredProfile(String serverId, RetirementProgress progress) {
+        try {
+            if (progress.profilePresent) {
+                removeProfileIfSame(serverId, progress.profile);
+            }
+            progress.profileCleanupComplete = true;
+            return null;
+        } catch (Throwable error) {
+            return asFailure(error);
+        }
+    }
+
+    private RuntimeException asFailure(Throwable error) {
+        return error instanceof RuntimeException runtimeException
+            ? runtimeException : new IllegalStateException("ReSync connection cleanup failed.", error);
+    }
+
+    private void removeProfileIfSame(String serverId, ReSyncConnectionProfile profile) {
+        if (profile != null) {
+            flowProfiles.computeIfPresent(serverId, (ignored, current) -> current == profile ? null : current);
+        }
+    }
+
+    private RuntimeException mergeFailure(RuntimeException current, Throwable next) {
+        if (next == null) {
+            return current;
+        }
+        RuntimeException failure = next instanceof RuntimeException runtimeException
+            ? runtimeException : new IllegalStateException("ReSync connection cleanup failed.", next);
+        if (current == null) {
+            return failure;
+        }
+        if (current != failure) {
+            current.addSuppressed(failure);
+        }
+        return current;
     }
 
     public void setDisconnectListener(Consumer<String> listener) {
         disconnectListener = listener != null ? listener : serverId -> {};
-        flowClients.forEach((serverId, flowClient) -> flowClient.setDisconnectListener(() -> disconnectListener.accept(serverId)));
     }
 
     public void setConnectionListener(Consumer<String> listener) {
         connectionListener = listener != null ? listener : serverId -> {};
-        flowClients.forEach((serverId, flowClient) -> flowClient.setReadyListener(() -> connectionListener.accept(serverId)));
     }
 
-    public void shutdownAll() {
-        List<ReSyncFlowClient> clients = new ArrayList<>(flowClients.values());
-        flowClients.clear();
-        flowProfiles.clear();
-        identities.clear();
-        for (ReSyncFlowClient flowClient : clients) {
-            flowClient.shutdown();
+    private LinkedHashSet<String> shutdownServerIds() {
+        LinkedHashSet<String> serverIds = new LinkedHashSet<>();
+        serverIds.addAll(flowClients.keySet());
+        serverIds.addAll(pendingRetirements.keySet());
+        serverIds.addAll(flowProfiles.keySet());
+        return serverIds;
+    }
+
+    private boolean hasShutdownState(String serverId) {
+        return flowClients.containsKey(serverId) || pendingRetirements.containsKey(serverId)
+            || flowProfiles.containsKey(serverId);
+    }
+
+    private RuntimeException drainShutdownRetirements(ShutdownContext context) {
+        LinkedHashSet<String> serverIds = shutdownServerIds();
+        if (serverIds.isEmpty()) {
+            return null;
         }
+        Map<String, RuntimeException> failures = BrowserSafeState.map();
+        BrowserSafeState.Latch finished = new BrowserSafeState.Latch(serverIds.size());
+        for (String serverId : serverIds) {
+            BrowserWork.execute(() -> {
+                RuntimeException failure = null;
+                try {
+                    for (int attempt = 0; attempt < SHUTDOWN_DRAIN_ATTEMPTS && hasShutdownState(serverId); attempt++) {
+                        if (System.nanoTime() >= context.deadlineNanos) {
+                            break;
+                        }
+                        RetirementProgress progress = pendingRetirements.get(serverId);
+                        RetirementKind kind = progress == null ? RetirementKind.SERVER : progress.kind;
+                        try {
+                            closeRetirement(serverId, kind, null, null, context.deadlineNanos, true);
+                        } catch (Throwable error) {
+                            failure = mergeFailure(failure, error);
+                        }
+                    }
+                } catch (Throwable error) {
+                    failure = mergeFailure(failure, error);
+                } finally {
+                    if (failure != null) {
+                        failures.put(serverId, failure);
+                    }
+                    finished.countDown();
+                }
+            });
+        }
+        while (finished.getCount() > 0L) {
+            long remaining = context.deadlineNanos - System.nanoTime();
+            if (remaining <= 0L) {
+                context.forced = true;
+                context.timedOut = true;
+                break;
+            }
+            try {
+                if (finished.await(remaining)) {
+                    break;
+                }
+            } catch (InterruptedException error) {
+                context.interrupted = true;
+            }
+        }
+        RuntimeException failure = null;
+        for (String serverId : serverIds) {
+            failure = mergeFailure(failure, failures.get(serverId));
+        }
+        if (context.timedOut) {
+            failure = mergeFailure(failure,
+                new IllegalStateException("ReSync connection cleanup exceeded its deadline."));
+        }
+        return failure;
     }
 
-    public void resolveAndStoreProfile(ReSyncServerIdentity identity) {
-        ReSyncServerIdentity canonical = rememberIdentity(identity);
-        if (canonical == null || !canonical.present()) {
+    private void forceShutdownState() {
+        connectionLifecycleAbort = true;
+        LinkedHashSet<String> serverIds = shutdownServerIds();
+        serverIds.addAll(connectionOwnershipLocks.keySet());
+        for (String serverId : serverIds) {
+            OwnedFlowClient owner = flowClients.remove(serverId);
+            if (owner != null) {
+                owner.callbacksSuppressed = true;
+                owner.connectClaimed = false;
+            }
+            pendingRetirements.remove(serverId);
+            flowProfiles.remove(serverId);
+            profileOwnerRefreshRequired.remove(serverId);
+            OwnershipLock ownership = connectionOwnershipLocks.remove(serverId);
+            if (ownership != null && ownership.lock.tryLock()) {
+                try {
+                    ownership.retiring = false;
+                    ownership.lock.signalAll();
+                } finally {
+                    ownership.lock.unlock();
+                }
+            }
+        }
+        flowClients.clear();
+        pendingRetirements.clear();
+        flowProfiles.clear();
+        profileOwnerRefreshRequired.clear();
+        connectionOwnershipLocks.clear();
+    }
+
+    public synchronized void shutdownAll() {
+        if (shutdownTerminal) {
             return;
         }
-        ReSyncConnectionProfile profile = resolveConnectionProfile(canonical);
-        if (profile != null) {
-            flowProfiles.put(canonical.serverId(), profile);
-        } else {
-            flowProfiles.remove(canonical.serverId());
+        ShutdownContext lifecycleContext = new ShutdownContext(System.nanoTime()
+            + ((CONNECTION_LIFECYCLE_SHUTDOWN_TIMEOUT_MILLIS) * 1_000_000L));
+        ShutdownContext cleanupContext = new ShutdownContext(Long.MAX_VALUE);
+        RuntimeException shutdownFailure = null;
+        try {
+            shutdownConnectionLifecycle();
+            shutdownProfileResolution();
+            awaitConnectionLifecycleTermination(lifecycleContext);
+            if (lifecycleContext.timedOut) {
+                shutdownFailure = mergeFailure(shutdownFailure,
+                    new IllegalStateException("ReSync connection shutdown exceeded its deadline."));
+            }
+            cleanupContext = new ShutdownContext(System.nanoTime()
+                + ((CONNECTION_RETIREMENT_SHUTDOWN_TIMEOUT_MILLIS) * 1_000_000L));
+            shutdownFailure = mergeFailure(shutdownFailure, drainShutdownRetirements(cleanupContext));
+            if (shutdownFailure != null) {
+                throw shutdownFailure;
+            }
+        } finally {
+            shutdownTerminal = true;
+            forceShutdownState();
+            if (lifecycleContext.interrupted || cleanupContext.interrupted) {
+                TaskIdentities.access.interrupt();
+            }
         }
     }
 
-    public void resolveAndStoreProfile(String serverId, ClientServerView server) {
-        resolveAndStoreProfile(ReSyncServerIdentity.from(serverId, server));
+    public Async<ProfileResolution> resolveAndStoreProfile(String serverId, ClientServerView server) {
+        ProfileTarget target = captureProfileRequest(serverId, server);
+        if (target.serverId() == null || target.serverId().isBlank()) {
+            return Async.completed(new ProfileResolution("", "", 0L, null, "ServerIdMissing"));
+        }
+        ProfileFlight flight;
+        LinkedHashSet<ProfileFlight> displacedFlights = new LinkedHashSet<>();
+        synchronized (profileResolutionLock) {
+            CachedProfileResolution candidate = profileResolutionCache.get(target.serverId());
+            LinkedHashSet<String> lookupAliases = new LinkedHashSet<>(target.aliases());
+            if (candidate != null && sameProfileLookup(candidate.target(), target)) {
+                lookupAliases.addAll(candidate.target().aliases());
+            }
+            List<String> admittedAliases = lookupAliases.stream().sorted().toList();
+            ProfileFlight current = admittedAliases.stream().map(profileFlights::get)
+                .filter(existing -> existing != null).findFirst().orElse(null);
+            if (current != null && sameProfileRequest(current.target, target)) {
+                return current.completion;
+            }
+            if (profileResolutionClosed) {
+                return Async.completed(new ProfileResolution(target.serverId(), target.instanceId(),
+                    0L, null, "ReSyncProfileResolutionClosed"));
+            }
+            long generation = nextProfileResolutionGeneration.incrementAndGet();
+            String expectedOwnerKey = admittedAliases.stream().filter(alias -> flowClients.get(alias) != null)
+                .findFirst().orElse(target.serverId());
+            OwnedFlowClient expectedOwner = flowClients.get(expectedOwnerKey);
+            flight = new ProfileFlight(target, admittedAliases, candidate, expectedOwnerKey, expectedOwner, generation);
+            for (String alias : admittedAliases) {
+                profileResolutionGenerations.put(alias, generation);
+                profileResolutionCache.remove(alias);
+                flowProfiles.remove(alias);
+                ProfileFlight displaced = profileFlights.put(alias, flight);
+                if (displaced != null && displaced != flight) {
+                    displacedFlights.add(displaced);
+                }
+            }
+        }
+        displacedFlights.forEach(displaced -> {
+            synchronized (profileResolutionLock) {
+                for (String alias : displaced.lookupAliases) {
+                    profileFlights.remove(alias, displaced);
+                    if (profileResolutionGenerations.getOrDefault(alias, 0L) <= flight.generation) {
+                        profileResolutionCache.remove(alias);
+                        flowProfiles.remove(alias);
+                        if (profileFlights.get(alias) == flight) {
+                            profileResolutionGenerations.put(alias, flight.generation);
+                        } else {
+                            profileResolutionGenerations.remove(alias);
+                        }
+                    }
+                }
+            }
+            retireProfileFlight(displaced);
+            completeProfileFlight(displaced, "ReSyncProfileChanged");
+        });
+        startProfileFlight(flight);
+        return flight.completion;
     }
 
-    public ReSyncConnectionProfile resolveConnectionProfile(ReSyncServerIdentity identity) {
-        ReSyncServerIdentity canonical = rememberIdentity(identity);
-        return canonical == null || !canonical.present() ? null : profileProvider.resolve(canonical);
+    public Async<ProfileResolution> resolveConnectionProfileAsync(String serverId, ClientServerView server) {
+        return resolveAndStoreProfile(serverId, server);
     }
 
     public ReSyncConnectionProfile resolveConnectionProfile(String serverId, ClientServerView server) {
-        return resolveConnectionProfile(ReSyncServerIdentity.from(serverId, server));
+        ProfileResolution resolution = resolveAndStoreProfile(serverId, server).getNow(null);
+        return resolution != null ? resolution.profile() : null;
     }
 
-    public String getFlowAvailabilityIssue(ReSyncServerIdentity identity) {
-        ReSyncServerIdentity canonical = rememberIdentity(identity);
-        if (canonical == null || !canonical.present()) {
-            return "ServerIdMissing";
+    public Async<String> getFlowAvailabilityIssueAsync(String serverId, ClientServerView server) {
+        if (serverId != null && !serverId.isBlank() && !staleProfileAliases.contains(serverId)
+            && flowProfiles.get(connectionKey(serverId)) != null) {
+            return Async.completed(null);
         }
-        if (!flowClientFactory.available()) {
-            return "ReSyncUnavailable";
-        }
-        ReSyncConnectionProfile profile = getOrResolveProfile(canonical);
-        if (!profileProvider.connectionAllowed(canonical, profile)) {
-            return "ReSyncUnavailable";
-        }
-        if (profile == null) {
-            return profileProvider.hasInstanceAccess() && profileProvider.findInstance(canonical) == null
-                ? "ServerNotFound" : "ReSyncNotConfigured";
-        }
-        if (profile.apiManaged()) {
-            return apiClient == null ? "ReSyncUnavailable" : null;
-        }
-        if (profile.wsUrl() == null || profile.wsUrl().isBlank()) {
-            return "ReSyncPortMissing";
-        }
-        if (!profile.wsUrl().startsWith("ws://") && !profile.wsUrl().startsWith("wss://")) {
-            return "ReSyncEndpointInvalid";
-        }
-        if (profile.apiKey() == null || profile.apiKey().isBlank()) {
-            return "ReSyncApiKeyMissing";
-        }
-        return null;
+        return resolveAndStoreProfile(serverId, server).thenCompose(resolution ->
+            "ReSyncProfileChanged".equals(resolution.issue())
+                ? resolveAndStoreProfile(serverId, server).thenApply(ProfileResolution::issue)
+                : Async.completed(resolution.issue()));
     }
 
     public String getFlowAvailabilityIssue(String serverId, ClientServerView server) {
-        return getFlowAvailabilityIssue(ReSyncServerIdentity.from(serverId, server));
-    }
-
-    private ReSyncConnectionProfile getOrResolveProfile(ReSyncServerIdentity identity) {
-        ReSyncConnectionProfile profile = flowProfiles.get(identity.serverId());
-        if (profile != null) {
-            return profile;
+        String actualServerId = server != null && server.identifier != null && !server.identifier.isBlank()
+            ? server.identifier : serverId;
+        if (actualServerId == null || actualServerId.isBlank()) {
+            return "ServerIdMissing";
         }
-        profile = resolveConnectionProfile(identity);
-        if (profile != null) {
-            flowProfiles.put(identity.serverId(), profile);
+        if (!staleProfileAliases.contains(actualServerId)
+            && flowProfiles.get(connectionKey(actualServerId)) != null) {
+            return null;
         }
-        return profile;
+        ProfileResolution resolution = resolveAndStoreProfile(serverId, server).getNow(null);
+        return resolution != null ? resolution.issue() : "ReSyncProfileLoading";
     }
 
     public void provisionReSyncForReStudioServer(String serverId, Consumer<Boolean> callback) {
@@ -487,7 +1883,7 @@ public class ReSyncConnectionManager {
             return;
         }
         if (apiClient == null) {
-            notificationSink.show("ReSync", "ReSync Isn't Installed/Enabled", ReSyncNotificationLevel.ERROR);
+            ScreenManager.getInstance().execute(() -> new Notification("ReSync", "ReSync Isn't Installed/Enabled", Notification.Type.ERROR));
             if (callback != null) {
                 callback.accept(false);
             }
@@ -495,20 +1891,24 @@ public class ReSyncConnectionManager {
         }
         apiClient.provisionReSync(serverId).thenAccept(response -> {
             boolean ok = response != null && response.success;
-            if (!ok) {
-                String message = response != null && response.message != null && !response.message.isBlank() ? response.message : "Provision Failed";
-                String normalized = normalizeReSyncNotificationMessage(message);
-                ReSyncNotificationLevel type = "ReSync Connection Timed Out".equals(normalized) ? ReSyncNotificationLevel.WARN : ReSyncNotificationLevel.ERROR;
-                notificationSink.show("ReSync", normalized, type);
-            }
+            ScreenManager.getInstance().execute(() -> {
+                if (!ok) {
+                    String message = response != null && response.message != null && !response.message.isBlank() ? response.message : "Provision Failed";
+                    String normalized = normalizeReSyncNotificationMessage(message);
+                    Notification.Type type = "ReSync Connection Timed Out".equals(normalized) ? Notification.Type.WARN : Notification.Type.ERROR;
+                    new Notification("ReSync", normalized, type);
+                }
+            });
             if (callback != null) {
                 callback.accept(ok);
             }
         }).exceptionally(error -> {
-            String reason = error != null && error.getMessage() != null ? error.getMessage() : "ProvisionFailed";
-            String normalized = normalizeReSyncNotificationMessage(reason);
-            ReSyncNotificationLevel type = "ReSync Connection Timed Out".equals(normalized) ? ReSyncNotificationLevel.WARN : ReSyncNotificationLevel.ERROR;
-            notificationSink.show("ReSync", normalized, type);
+            ScreenManager.getInstance().execute(() -> {
+                String reason = error != null && error.getMessage() != null ? error.getMessage() : "ProvisionFailed";
+                String normalized = normalizeReSyncNotificationMessage(reason);
+                Notification.Type type = "ReSync Connection Timed Out".equals(normalized) ? Notification.Type.WARN : Notification.Type.ERROR;
+                new Notification("ReSync", normalized, type);
+            });
             if (callback != null) {
                 callback.accept(false);
             }
@@ -524,7 +1924,7 @@ public class ReSyncConnectionManager {
             return;
         }
         if (apiClient == null) {
-            notificationSink.show("ReSync", "ReSync Isn't Installed/Enabled", ReSyncNotificationLevel.ERROR);
+            ScreenManager.getInstance().execute(() -> new Notification("ReSync", "ReSync Isn't Installed/Enabled", Notification.Type.ERROR));
             if (callback != null) {
                 callback.accept(false);
             }
@@ -532,20 +1932,24 @@ public class ReSyncConnectionManager {
         }
         apiClient.updateReSync(serverId).thenAccept(response -> {
             boolean ok = response != null && response.success;
-            if (!ok) {
-                String message = response != null && response.message != null && !response.message.isBlank() ? response.message : "Update Failed";
-                String normalized = normalizeReSyncNotificationMessage(message);
-                ReSyncNotificationLevel type = "ReSync Connection Timed Out".equals(normalized) ? ReSyncNotificationLevel.WARN : ReSyncNotificationLevel.ERROR;
-                notificationSink.show("ReSync", normalized, type);
-            }
+            ScreenManager.getInstance().execute(() -> {
+                if (!ok) {
+                    String message = response != null && response.message != null && !response.message.isBlank() ? response.message : "Update Failed";
+                    String normalized = normalizeReSyncNotificationMessage(message);
+                    Notification.Type type = "ReSync Connection Timed Out".equals(normalized) ? Notification.Type.WARN : Notification.Type.ERROR;
+                    new Notification("ReSync", normalized, type);
+                }
+            });
             if (callback != null) {
                 callback.accept(ok);
             }
         }).exceptionally(error -> {
-            String reason = error != null && error.getMessage() != null ? error.getMessage() : "UpdateFailed";
-            String normalized = normalizeReSyncNotificationMessage(reason);
-            ReSyncNotificationLevel type = "ReSync Connection Timed Out".equals(normalized) ? ReSyncNotificationLevel.WARN : ReSyncNotificationLevel.ERROR;
-            notificationSink.show("ReSync", normalized, type);
+            ScreenManager.getInstance().execute(() -> {
+                String reason = error != null && error.getMessage() != null ? error.getMessage() : "UpdateFailed";
+                String normalized = normalizeReSyncNotificationMessage(reason);
+                Notification.Type type = "ReSync Connection Timed Out".equals(normalized) ? Notification.Type.WARN : Notification.Type.ERROR;
+                new Notification("ReSync", normalized, type);
+            });
             if (callback != null) {
                 callback.accept(false);
             }
@@ -557,58 +1961,550 @@ public class ReSyncConnectionManager {
         if (serverId == null || serverId.isBlank() || apiClient == null) {
             return Async.completed("");
         }
-        return apiClient.getReSyncVersion(serverId);
+        Async<String> future = Async.pending();
+        apiClient.getReSyncVersion(serverId).whenComplete((version, error) -> {
+            if (error != null) {
+                future.complete("");
+            } else {
+                future.complete(version == null ? "" : version);
+            }
+        });
+        return future;
     }
 
-    public <T> T getInstanceByServerId(String serverId) {
-        return findInstanceByServerId(ReSyncServerIdentity.of(serverId));
+    public Object getInstanceByServerId(String serverId) {
+        return findInstanceByServerId(serverId, null);
     }
 
-    @SuppressWarnings("unchecked")
-    public <T> T findInstanceByServerId(ReSyncServerIdentity identity) {
-        ReSyncServerIdentity canonical = rememberIdentity(identity);
-        return (T) (canonical == null ? null : profileProvider.findInstance(canonical));
+    public Object findInstanceByServerId(String serverId, ClientServerView server) {
+        return ReSyncLocalInstances.access.find(serverId, server);
     }
 
-    public <T> T findInstanceByServerId(String serverId, ClientServerView server) {
-        return findInstanceByServerId(ReSyncServerIdentity.from(serverId, server));
-    }
-
-    public Object getClient() {
+    public RemotelyClient getClient() {
         return client;
     }
 
-    private ReSyncConnectionProfile profileForLocalInstance(ReSyncServerIdentity identity) {
-        ReSyncServerIdentity canonical = rememberIdentity(identity);
-        if (canonical == null || !canonical.present()) {
-            return null;
+    private ProfileTarget captureProfileRequest(String serverId, ClientServerView server) {
+        String requestedServerId = safeText(serverId).trim();
+        String viewServerId = server != null ? safeText(server.identifier).trim() : "";
+        String actualServerId = !requestedServerId.isBlank() ? requestedServerId : viewServerId;
+        LinkedHashSet<String> aliases = new LinkedHashSet<>();
+        if (!actualServerId.isBlank()) {
+            aliases.add(actualServerId);
         }
-        ReSyncConnectionProfile profile = flowProfiles.get(canonical.serverId());
-        if (profile != null) {
-            return profile;
+        if (!requestedServerId.isBlank()) {
+            aliases.add(requestedServerId);
         }
-        profile = profileProvider.resolve(canonical);
-        if (profile != null) {
-            flowProfiles.put(canonical.serverId(), profile);
+        if (!viewServerId.isBlank()) {
+            aliases.add(viewServerId);
         }
-        return profile;
+        if (server == null && !actualServerId.isBlank()) {
+            String ownerKey = profileConnectionKeys.getOrDefault(actualServerId, actualServerId);
+            profileConnectionKeys.forEach((alias, owner) -> {
+                if (ownerKey.equals(owner)) {
+                    aliases.add(alias);
+                }
+            });
+        }
+        if (server != null) {
+            return new ProfileTarget(actualServerId, List.copyOf(aliases), null, "", "", null, "RESTUDIO", "",
+                Map.of(), true, true);
+        }
+        return new ProfileTarget(actualServerId, List.copyOf(aliases), null, "", "", null, "", "", Map.of(),
+            false, false);
     }
 
-    private ReSyncServerIdentity rememberIdentity(ReSyncServerIdentity identity) {
-        if (identity == null || !identity.present()) {
-            return identity;
+    private ProfileTarget resolveProfileTarget(ProfileTarget request) {
+        Object instance = findInstanceByServerId(request.serverId(), null);
+        if (instance == null) {
+            instance = request.aliases().stream().map(alias -> findInstanceByServerId(alias, null))
+                .filter(candidate -> candidate != null).findFirst().orElse(null);
         }
-        String serverId = identity.serverId();
-        ReSyncServerIdentity existing = identities.get(serverId);
-        if (existing == null) {
-            identities.put(serverId, identity);
-            return identity;
+        if (instance == null) {
+            return new ProfileTarget(request.serverId(), request.aliases(), null, "", "", null, "", "", Map.of(),
+                false, true);
         }
-        String backendType = identity.backendType().isBlank() ? existing.backendType() : identity.backendType();
-        String displayName = identity.displayName().isBlank() ? existing.displayName() : identity.displayName();
-        ReSyncServerIdentity merged = new ReSyncServerIdentity(serverId, displayName, backendType);
-        identities.put(serverId, merged);
-        return merged;
+        Object backendConfig = ReSyncLocalInstances.access.backendConfig(instance);
+        String backendType = ReSyncLocalInstances.access.backendType(backendConfig);
+        Map<String, String> credentials = ReSyncLocalInstances.access.credentials(backendConfig);
+        String backendHost = ReSyncLocalInstances.access.backendHost(instance);
+        String instanceId = safeText(ReSyncLocalInstances.access.instanceId(instance)).trim();
+        String identifier = credentials != null ? safeText(credentials.get("identifier")).trim() : "";
+        LinkedHashSet<String> aliases = new LinkedHashSet<>(request.aliases());
+        if (!instanceId.isBlank()) {
+            aliases.add(instanceId);
+        }
+        if (!identifier.isBlank()) {
+            aliases.add(identifier);
+        }
+        List<String> resolvedAliases = aliases.stream().filter(alias -> alias != null && !alias.isBlank()).sorted().toList();
+        String canonicalServerId = !instanceId.isBlank() ? instanceId
+            : !identifier.isBlank() ? identifier : request.serverId();
+        return new ProfileTarget(canonicalServerId, resolvedAliases, instance, instanceId,
+            ReSyncLocalInstances.access.instancePath(instance), backendConfig, backendType, backendHost,
+            snapshotCredentials(credentials), "RESTUDIO".equalsIgnoreCase(backendType), true);
+    }
+
+    private void startProfileFlight(ProfileFlight flight) {
+        if (flight.target.apiManaged() && flight.target.instance() == null) {
+            finishProfileFlight(flight, new ProfileRead(null, null, true), false);
+            return;
+        }
+        try {
+            flight.timeout = profileTimeoutExecutor.schedule(
+                () -> finishProfileFlight(flight, new ProfileRead(null, "ReSyncProfileResolutionTimedOut", false),
+                    flight.target.resolved()), Duration.ofSeconds(PROFILE_RESOLUTION_TIMEOUT_SECONDS));
+            flight.task = profileResolutionExecutor.submit(() -> {
+                flight.taskThread = TaskIdentities.access.current();
+                try {
+                    if (!flight.target.resolved()) {
+                        CachedProfileResolution candidate = flight.candidate;
+                        ProfileTarget resolved = candidate != null && candidate.target().resolved()
+                            && isProfileTargetCurrent(candidate.target())
+                            ? candidate.target() : resolveProfileTarget(flight.target);
+                        if (!adoptResolvedProfileTarget(flight, resolved)) {
+                            completeChangedProfileFlight(flight);
+                            return;
+                        }
+                    }
+                    if (flight.finished.get()) {
+                        return;
+                    }
+                    CachedProfileResolution candidate = flight.candidate;
+                    if (candidate != null && candidate.expiresAt() > System.nanoTime()
+                        && sameProfileTarget(candidate.target(), flight.target)) {
+                        ProfileResolution cached = candidate.resolution();
+                        finishProfileFlight(flight, new ProfileRead(cached.profile(), cached.issue(), true), true);
+                        return;
+                    }
+                    finishProfileFlight(flight, readProfile(flight.target), true);
+                } catch (RuntimeException error) {
+                    finishProfileFlight(flight, new ProfileRead(null, "ReSyncConfigurationUnavailable", false),
+                        flight.target.resolved());
+                } finally {
+                    flight.taskThread = null;
+                }
+            });
+        } catch (IllegalStateException error) {
+            retireProfileFlight(flight);
+            finishProfileFlight(flight, new ProfileRead(null, "ReSyncProfileResolutionBusy", false), false);
+        }
+    }
+
+    private boolean adoptResolvedProfileTarget(ProfileFlight flight, ProfileTarget resolved) {
+        LinkedHashSet<ProfileFlight> displacedFlights = new LinkedHashSet<>();
+        synchronized (profileResolutionLock) {
+            if (profileResolutionClosed || flight.finished.get()) {
+                return false;
+            }
+            for (String alias : flight.lookupAliases) {
+                if (profileFlights.get(alias) != flight
+                    || profileResolutionGenerations.getOrDefault(alias, 0L) != flight.generation) {
+                    return false;
+                }
+            }
+            for (String alias : resolved.aliases()) {
+                if (profileResolutionGenerations.getOrDefault(alias, 0L) > flight.generation) {
+                    return false;
+                }
+            }
+            for (String alias : flight.lookupAliases) {
+                if (!resolved.aliases().contains(alias)) {
+                    profileFlights.remove(alias, flight);
+                    profileResolutionGenerations.remove(alias, flight.generation);
+                    profileConnectionKeys.remove(alias);
+                }
+            }
+            flight.target = resolved;
+            flight.lookupAliases = resolved.aliases();
+            for (String alias : resolved.aliases()) {
+                ProfileFlight displaced = profileFlights.put(alias, flight);
+                if (displaced != null && displaced != flight) {
+                    displacedFlights.add(displaced);
+                }
+                profileResolutionGenerations.put(alias, flight.generation);
+                profileResolutionCache.remove(alias);
+                flowProfiles.remove(alias);
+            }
+        }
+        displacedFlights.forEach(displaced -> {
+            synchronized (profileResolutionLock) {
+                for (String alias : displaced.lookupAliases) {
+                    profileFlights.remove(alias, displaced);
+                    profileResolutionGenerations.remove(alias, displaced.generation);
+                }
+            }
+            retireProfileFlight(displaced);
+            completeProfileFlight(displaced, "ReSyncProfileChanged");
+        });
+        return true;
+    }
+
+    private void completeChangedProfileFlight(ProfileFlight flight) {
+        synchronized (profileResolutionLock) {
+            for (String alias : flight.lookupAliases) {
+                profileFlights.remove(alias, flight);
+                profileResolutionGenerations.remove(alias, flight.generation);
+            }
+        }
+        retireProfileFlight(flight);
+        completeProfileFlight(flight, "ReSyncProfileChanged");
+    }
+
+    private ProfileRead readProfile(ProfileTarget target) {
+        if (target.apiManaged()) {
+            return new ProfileRead(null, null, true);
+        }
+        if (target.instance() == null) {
+            return new ProfileRead(null, "ServerNotFound", false);
+        }
+        ProfileRead local = tryReadLocalReSyncConfig(target.instance());
+        if (local.found()) {
+            return local;
+        }
+        if (target.backendConfig() == null) {
+            return new ProfileRead(null, "ReSyncNotConfigured", false);
+        }
+        return tryReadReSyncConfigFromBackend(target);
+    }
+
+    private void finishProfileFlight(ProfileFlight flight, ProfileRead read, boolean verifyTarget) {
+        if (!flight.finished.compareAndSet(false, true)) {
+            return;
+        }
+        boolean targetCurrent = !verifyTarget || isProfileTargetCurrent(flight.target);
+        ProfileResolution resolution;
+        boolean retireProfile = false;
+        synchronized (profileResolutionLock) {
+            boolean ownsGeneration = targetCurrent && !profileResolutionClosed;
+            for (String alias : flight.lookupAliases) {
+                ownsGeneration &= profileFlights.get(alias) == flight
+                    && profileResolutionGenerations.getOrDefault(alias, 0L) == flight.generation;
+            }
+            if (!ownsGeneration) {
+                for (String alias : flight.lookupAliases) {
+                    profileFlights.remove(alias, flight);
+                    profileResolutionGenerations.remove(alias, flight.generation);
+                }
+                resolution = new ProfileResolution(flight.target.serverId(), flight.target.instanceId(),
+                    flight.generation, null, "ReSyncProfileChanged");
+            } else {
+                String resolvedServerId = read.profile() != null && read.profile().serverId() != null
+                    && !read.profile().serverId().isBlank() ? read.profile().serverId() : flight.target.serverId();
+                resolution = new ProfileResolution(resolvedServerId, flight.target.instanceId(),
+                    flight.generation, read.profile(), read.issue());
+                long expiresAt = System.nanoTime() + ((PROFILE_CACHE_MILLIS) * 1_000_000L);
+                CachedProfileResolution cached = new CachedProfileResolution(flight.target, resolution, expiresAt);
+                String ownerKey = resolvedServerId;
+                if (flight.expectedOwner != null && flight.candidate != null
+                    && !sameProfileTarget(flight.candidate.target(), flight.target)) {
+                    profileOwnerRefreshRequired.add(ownerKey);
+                }
+                LinkedHashSet<String> resolvedAliases = new LinkedHashSet<>(flight.lookupAliases);
+                resolvedAliases.add(resolvedServerId);
+                for (String alias : resolvedAliases) {
+                    profileFlights.remove(alias, flight);
+                    profileResolutionGenerations.remove(alias, flight.generation);
+                    profileResolutionCache.put(alias, cached);
+                    profileConnectionKeys.put(alias, ownerKey);
+                    staleProfileAliases.remove(alias);
+                    if (resolution.available() && resolution.profile() != null) {
+                        flowProfiles.put(alias, resolution.profile());
+                    } else {
+                        flowProfiles.remove(alias);
+                    }
+                }
+                if (resolution.available() && resolution.profile() != null) {
+                    flowProfiles.put(ownerKey, resolution.profile());
+                    if (flight.expectedOwner != null && flowClients.get(ownerKey) == flight.expectedOwner
+                        && flight.expectedOwner.client.matchesDirectProfile(resolution.profile().wsUrl(),
+                            resolution.profile().apiKey())) {
+                        profileOwnerRefreshRequired.remove(ownerKey);
+                    }
+                } else {
+                    flowProfiles.remove(ownerKey);
+                }
+                staleProfileAliases.remove(ownerKey);
+                trimProfileResolutionCache();
+                retireProfile = targetCurrent && definitiveProfileAbsence(read.issue());
+            }
+        }
+        retireProfileFlight(flight);
+        flight.completion.complete(resolution);
+        if (retireProfile) {
+            scheduleProfileRetirement(flight.expectedOwnerKey, flight.target.serverId(), flight.expectedOwner,
+                flight.generation);
+        }
+    }
+
+    private boolean definitiveProfileAbsence(String issue) {
+        return "ServerNotFound".equals(issue) || "ReSyncNotConfigured".equals(issue)
+            || "ReSyncPortMissing".equals(issue) || "ReSyncApiKeyMissing".equals(issue)
+            || "ReSyncHostMissing".equals(issue);
+    }
+
+    private boolean isProfileTargetCurrent(ProfileTarget target) {
+        if (target.apiManaged() && target.instance() == null) {
+            return true;
+        }
+        Object current = findInstanceByServerId(target.serverId(), null);
+        if (target.instance() == null) {
+            return current == null;
+        }
+        if (current != target.instance()) {
+            return false;
+        }
+        Object backendConfig = ReSyncLocalInstances.access.backendConfig(current);
+        Map<String, String> credentials = ReSyncLocalInstances.access.credentials(backendConfig);
+        String backendHost = ReSyncLocalInstances.access.backendHost(current);
+        return backendConfig == target.backendConfig()
+            && safeText(ReSyncLocalInstances.access.instanceId(current)).equals(target.instanceId())
+            && safeText(ReSyncLocalInstances.access.instancePath(current)).equals(target.path())
+            && ReSyncLocalInstances.access.backendType(backendConfig).equals(target.backendType())
+            && backendHost.equals(target.backendHost())
+            && snapshotCredentials(credentials).equals(target.backendCredentials());
+    }
+
+    private boolean sameProfileRequest(ProfileTarget first, ProfileTarget second) {
+        return first.apiManaged() == second.apiManaged()
+            && (first.serverId().equals(second.serverId()) || first.aliases().stream().anyMatch(second.aliases()::contains));
+    }
+
+    private boolean sameProfileLookup(ProfileTarget resolved, ProfileTarget request) {
+        return resolved.apiManaged() == request.apiManaged()
+            && (resolved.serverId().equals(request.serverId()) || request.aliases().stream().anyMatch(resolved.aliases()::contains));
+    }
+
+    private boolean sameProfileTarget(ProfileTarget first, ProfileTarget second) {
+        return first.serverId().equals(second.serverId())
+            && first.aliases().equals(second.aliases())
+            && first.instance() == second.instance()
+            && first.backendConfig() == second.backendConfig()
+            && first.instanceId().equals(second.instanceId())
+            && first.path().equals(second.path())
+            && first.backendType().equals(second.backendType())
+            && first.backendHost().equals(second.backendHost())
+            && first.backendCredentials().equals(second.backendCredentials())
+            && first.apiManaged() == second.apiManaged()
+            && first.resolved() == second.resolved();
+    }
+
+    private Map<String, String> snapshotCredentials(Map<String, String> credentials) {
+        if (credentials == null || credentials.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, String> snapshot = new TreeMap<>();
+        try {
+            credentials.forEach((key, value) -> {
+                if (key != null) {
+                    snapshot.put(key, safeText(value));
+                }
+            });
+        } catch (RuntimeException error) {
+            return Map.of();
+        }
+        return Map.copyOf(snapshot);
+    }
+
+    private void trimProfileResolutionCache() {
+        if (profileResolutionCache.size() <= PROFILE_CACHE_CAPACITY) {
+            return;
+        }
+        long now = System.nanoTime();
+        profileResolutionCache.entrySet().removeIf(entry -> entry.getValue().expiresAt() <= now);
+        while (profileResolutionCache.size() > PROFILE_CACHE_CAPACITY) {
+            String oldestServerId = null;
+            long oldestExpiry = Long.MAX_VALUE;
+            for (Map.Entry<String, CachedProfileResolution> entry : profileResolutionCache.entrySet()) {
+                if (entry.getValue().expiresAt() < oldestExpiry) {
+                    oldestServerId = entry.getKey();
+                    oldestExpiry = entry.getValue().expiresAt();
+                }
+            }
+            if (oldestServerId == null) {
+                return;
+            }
+            profileResolutionCache.remove(oldestServerId);
+        }
+    }
+
+    private void invalidateProfileResolution(String serverId, boolean removeProfile) {
+        LinkedHashSet<ProfileFlight> flights = new LinkedHashSet<>();
+        synchronized (profileResolutionLock) {
+            nextProfileResolutionGeneration.incrementAndGet();
+            ProfileFlight direct = profileFlights.get(serverId);
+            if (direct != null) {
+                flights.add(direct);
+                for (String alias : direct.lookupAliases) {
+                    profileFlights.remove(alias, direct);
+                    profileResolutionCache.remove(alias);
+                    profileResolutionGenerations.remove(alias);
+                    profileConnectionKeys.remove(alias);
+                    if (removeProfile) {
+                        flowProfiles.remove(alias);
+                    }
+                }
+            } else {
+                CachedProfileResolution cached = profileResolutionCache.get(serverId);
+                List<String> aliases = cached != null ? cached.target().aliases() : List.of(serverId);
+                for (String alias : aliases) {
+                    profileResolutionCache.remove(alias);
+                    profileResolutionGenerations.remove(alias);
+                    profileConnectionKeys.remove(alias);
+                    if (removeProfile) {
+                        flowProfiles.remove(alias);
+                    }
+                }
+            }
+        }
+        flights.forEach(flight -> {
+            retireProfileFlight(flight);
+            completeProfileFlight(flight, "ReSyncProfileChanged");
+        });
+    }
+
+    private void invalidateProfileSources() {
+        LinkedHashSet<ProfileFlight> flights;
+        synchronized (profileResolutionLock) {
+            staleProfileAliases.addAll(profileConnectionKeys.keySet());
+            profileConnectionKeys.values().stream().filter(key -> flowClients.get(key) != null)
+                .forEach(profileOwnerRefreshRequired::add);
+            flights = new LinkedHashSet<>(profileFlights.values());
+            profileFlights.clear();
+            profileResolutionCache.clear();
+            profileResolutionGenerations.clear();
+            nextProfileResolutionGeneration.incrementAndGet();
+        }
+        flights.forEach(flight -> {
+            retireProfileFlight(flight);
+            completeProfileFlight(flight, "ReSyncProfileChanged");
+        });
+    }
+
+    private void shutdownProfileResolution() {
+        LinkedHashSet<ProfileFlight> flights;
+        synchronized (profileResolutionLock) {
+            if (profileResolutionClosed) {
+                return;
+            }
+            profileResolutionClosed = true;
+            flights = new LinkedHashSet<>(profileFlights.values());
+            profileFlights.clear();
+            profileResolutionCache.clear();
+            profileResolutionGenerations.clear();
+            profileConnectionKeys.clear();
+            staleProfileAliases.clear();
+            profileOwnerRefreshRequired.clear();
+            pendingProfileEnsures.clear();
+        }
+        profileTimeoutExecutor.shutdownNow();
+        profileResolutionExecutor.shutdownNow();
+        ReSyncLocalInstances.access.removeListener(profileInstanceChangeListener);
+        flights.forEach(flight -> {
+            retireProfileFlight(flight);
+            completeProfileFlight(flight, "ReSyncProfileResolutionClosed");
+        });
+    }
+
+    private void completeProfileFlight(ProfileFlight flight, String issue) {
+        if (!flight.finished.compareAndSet(false, true)) {
+            return;
+        }
+        flight.completion.complete(new ProfileResolution(flight.target.serverId(), flight.target.instanceId(),
+            flight.generation, null, issue));
+    }
+
+    private void retireProfileFlight(ProfileFlight flight) {
+        TaskScheduler.ScheduledTask timeout = flight.timeout;
+        if (timeout != null) {
+            timeout.cancel();
+        }
+        Async<Void> task = flight.task;
+        if (task != null && !task.isDone() && flight.taskThread != TaskIdentities.access.current()) {
+            task.cancel(true);
+        }
+    }
+
+    private ProfileRead tryReadReSyncConfigFromBackend(ProfileTarget target) {
+        return toProfileRead(ReSyncLocalInstances.access.readBackendProfile(target.instance(), target.path(),
+            target.backendHost()));
+    }
+
+    private ProfileRead tryReadLocalReSyncConfig(Object instance) {
+        return toProfileRead(ReSyncLocalInstances.access.readLocalProfile(instance));
+    }
+
+    private ProfileRead toProfileRead(ReSyncLocalInstances.LocalProfile profile) {
+        if (profile == null) {
+            return new ProfileRead(null, "ReSyncConfigurationUnavailable", false);
+        }
+        if (profile.content() == null) {
+            return new ProfileRead(null, profile.issue() != null ? profile.issue() : "ReSyncConfigurationUnavailable",
+                profile.retryable());
+        }
+        return parseReSyncProfile(profile.content(), profile.host(), profile.serverId());
+    }
+
+    private ProfileRead parseReSyncProfile(String content, String host, String serverId) {
+        if (content == null || content.isBlank()) {
+            return new ProfileRead(null, "ReSyncNotConfigured", true);
+        }
+        String port = "";
+        String apiKey = "";
+        for (String line : content.split("\n")) {
+            String trimmed = line.trim();
+            if (trimmed.isEmpty() || trimmed.startsWith("#")) {
+                continue;
+            }
+            int separator = trimmed.indexOf('=');
+            if (separator < 0) {
+                continue;
+            }
+            String key = trimmed.substring(0, separator).trim();
+            String value = trimmed.substring(separator + 1).trim();
+            switch (key) {
+                case "port" -> port = value;
+                case "api-key" -> apiKey = value;
+            }
+        }
+        if (port.isBlank()) {
+            return new ProfileRead(null, "ReSyncPortMissing", true);
+        }
+        if (apiKey.isBlank()) {
+            return new ProfileRead(null, "ReSyncApiKeyMissing", true);
+        }
+        if (host == null || host.isBlank()) {
+            return new ProfileRead(null, "ReSyncHostMissing", true);
+        }
+        String canonicalServerId;
+        try {
+            canonicalServerId = UUID.fromString(safeText(serverId).trim()).toString();
+        } catch (IllegalArgumentException exception) {
+            return new ProfileRead(null, "ReSyncServerIdInvalid", true);
+        }
+        return new ProfileRead(new ReSyncConnectionProfile(canonicalServerId,
+            normalizeWsUrl(host + ":" + port), apiKey), null, true);
+    }
+
+    private Object findInstanceByServerId(String serverId) {
+        return findInstanceByServerId(serverId, null);
+    }
+
+    private String normalizeWsUrl(String value) {
+        String raw = safeText(value).trim();
+        if (raw.isBlank()) {
+            return null;
+        }
+        if (raw.startsWith("ws://") || raw.startsWith("wss://")) {
+            return raw;
+        }
+        if (raw.startsWith("http://")) {
+            return "ws://" + raw.substring("http://".length());
+        }
+        if (raw.startsWith("https://")) {
+            return "wss://" + raw.substring("https://".length());
+        }
+        return "ws://" + raw;
     }
 
     public String normalizeReSyncNotificationMessage(String message) {
@@ -623,29 +2519,58 @@ public class ReSyncConnectionManager {
             return "ReSync Couldn't Find This Server. Reconnect The Server And Try Again";
         }
         if (normalized.contains("connection refused") || normalized.contains("connectfailed")) {
-            return "ReSync Endpoint Unreachable. Check That The Server And ReSync Are Running";
-        }
-        if (normalized.contains("protocol mismatch") || normalized.contains("protocol version")) {
-            return "ReSync Protocol Mismatch. Update ReSync And Remotely";
-        }
-        if (normalized.contains("flow registry version mismatch") || normalized.contains("flow contract version mismatch")) {
-            return message;
-        }
-        if (normalized.contains("version mismatch") || normalized.contains("runtime version")) {
-            return "ReSync Version Mismatch. Update ReSync And Remotely";
+            return "ReSync Couldn't Connect. Check That The Server And ReSync Are Running";
         }
         return switch (message) {
             case "ServerIdMissing" -> "Server ID Missing";
             case "ServerNotFound" -> "Server Not Found";
             case "ReSyncNotConfigured" -> "ReSync Not Configured";
             case "ReSyncPortMissing" -> "ReSync Port Missing";
-            case "ReSyncEndpointInvalid" -> "ReSync Endpoint Is Invalid";
             case "ReSyncApiKeyMissing" -> "ReSync API Key Missing";
-            case "ReSyncUnavailable" -> "ReSync Unavailable";
+            case "ReSyncHostMissing" -> "ReSync Host Missing";
+            case "ReSyncProfileLoading" -> "Checking ReSync";
+            case "ReSyncProfileResolutionTimedOut" -> "ReSync Connection Timed Out";
+            case "ReSyncProfileResolutionBusy" -> "ReSync Check Is Busy. Try Again";
+            case "ReSyncConfigurationUnavailable" -> "ReSync Configuration Couldn't Be Read";
+            case "ReSyncProfileChanged" -> "ReSync Configuration Changed. Try Again";
+            case "ReSyncProfileResolutionClosed" -> "ReSync Is Closing";
             case "ReSyncNotEnabled" -> "ReSync Isn't Installed/Enabled";
             case "ReSyncServerNotFound" -> "ReSync Server Not Found";
             default -> message;
         };
     }
 
+    private void traceOwnerLifecycle(String serverId, String stage, OwnedFlowClient owner, String reason) {
+        if (!ReSyncLifecycleDiagnostics.enabled() || !ownerLifecycleTraceAllowed(stage)) {
+            return;
+        }
+        ReSyncFlowClient flowClient = owner == null ? null : owner.client;
+        ReSyncFlowClient.traceLifecycle(serverId, stage, "serverId", serverId, "ownerGeneration",
+            owner == null ? -1L : owner.generation, "transportGeneration",
+            flowClient == null ? -1 : flowClient.activeTransportGeneration(), "authorityEpoch",
+            flowClient == null ? 0L : flowClient.authorityEpoch(), "connectionState",
+            flowClient == null ? ReSyncFlowClient.ConnectionState.DISCONNECTED : flowClient.connectionState(),
+            "callbacksSuppressed", owner != null && owner.callbacksSuppressed, "replacementPending",
+            serverId != null && pendingProfileReplacements.containsKey(serverId), "reason", reason);
+    }
+
+    private boolean ownerLifecycleTraceAllowed(String stage) {
+        return switch (stage) {
+            case "connection_owner_lookup_rejected", "connection_owner_callback_dropped",
+                 "connection_owner_callback_failed", "connection_owner_published",
+                 "connection_owner_publication_rejected", "connection_owner_listeners_bound",
+                 "connection_owner_connect_claim_reused", "connection_owner_connect_claimed",
+                 "connection_owner_connect_dropped", "connection_owner_connect_deduplicated",
+                 "connection_owner_connect_executing", "connection_owner_connect_failed",
+                 "connection_owner_connected_callback_dropped", "connection_owner_connected_callback_admitted",
+                 "connection_owner_disconnected_callback_dropped", "connection_owner_disconnected_callback_admitted",
+                 "connection_owner_error_callback_dropped", "connection_owner_error_callback_admitted",
+                 "connection_owner_error_callback_executing" -> true;
+            default -> false;
+        };
+    }
+
+    private String safeText(String value) {
+        return value == null ? "" : value;
+    }
 }

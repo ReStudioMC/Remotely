@@ -1,5 +1,6 @@
 package redxax.oxy.remotely.worldgen.data;
 
+import com.google.gson.JsonObject;
 import redxax.oxy.remotely.nodegraph.editor.GraphModel;
 
 import java.util.ArrayList;
@@ -14,6 +15,7 @@ public class WorldGenGraph implements GraphModel {
     private int version;
     private Map<String, WorldGenNode> nodes;
     private List<WorldGenConnection> connections;
+    private transient JsonObject opaquePayload;
 
     public WorldGenGraph() {
         this.id = UUID.randomUUID().toString();
@@ -52,5 +54,13 @@ public class WorldGenGraph implements GraphModel {
 
     public void setConnections(List<WorldGenConnection> connections) {
         this.connections = connections != null ? connections : new ArrayList<>();
+    }
+
+    JsonObject opaquePayload() {
+        return opaquePayload == null ? null : opaquePayload.deepCopy();
+    }
+
+    void setOpaquePayload(JsonObject opaquePayload) {
+        this.opaquePayload = opaquePayload == null ? null : opaquePayload.deepCopy();
     }
 }

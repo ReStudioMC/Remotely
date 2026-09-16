@@ -5,59 +5,98 @@ import redxax.oxy.remotely.flow.data.FlowDataType;
 import redxax.oxy.remotely.flow.data.FlowGraph;
 import redxax.oxy.remotely.flow.data.FlowNode;
 import redxax.oxy.remotely.flow.data.FlowTypeRef;
-import redxax.oxy.remotely.flow.registry.NodeDefinition;
-import redxax.oxy.remotely.flow.registry.NodeRegistry;
+import redxax.oxy.remotely.flow.ui.FlowNodeWidget;
+import restudio.resync.flow.identity.ContractRef;
+import restudio.resync.flow.identity.FunctionParameterId;
+import restudio.resync.flow.identity.NodeId;
+import restudio.resync.flow.identity.OwnerId;
 
 import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
-import java.util.function.Function;
 
 public final class FunctionSignatureTypeResolver {
-    private static final Set<String> FUNCTION_START_TYPES = Set.of("function_start", "function.start", "function.function_start");
-    private static final Set<String> FUNCTION_END_TYPES = Set.of("function_end", "function.end", "function.function_end");
-
     private FunctionSignatureTypeResolver() {
     }
 
     public static int resolve(String serverId, FlowGraph graph) {
-        NodeRegistry registry = NodeRegistry.getInstance();
-        return registry != null ? resolve(graph, nodeType -> registry.getDefinition(serverId, nodeType)) : 0;
+        FlowManager manager = FlowManager.getInstance();
+        ReSyncFlowClient client = manager != null ? manager.existingFlowClient(serverId) : null;
+        return client != null && ReSyncTypedCatalogConsumer.typedAuthorityAdvertised(client) ? resolve(client, graph) : 0;
     }
 
-    static int resolve(FlowGraph graph, Function<String, NodeDefinition> definitionResolver) {
-        if (graph == null || !graph.isFunction() || graph.getConnections() == null || graph.getNodes() == null || definitionResolver == null) {
+    static int resolve(ReSyncFlowClient client, FlowGraph graph) {
+        if (client == null || client.catalogAuthority() != ReSyncFlowClient.CatalogAuthority.TYPED_PUBLICATION) {
+            return 0;
+        }
+        Optional<ReSyncTypedInteractionProjection> projection = ReSyncTypedInteractionProjection.from(client);
+        if (projection.isEmpty()) {
+            return 0;
+        }
+        FlowNodeWidget.FunctionBoundaryCatalog boundaryCatalog = FlowNodeWidget.fromTypedProjection(projection.orElseThrow());
+        if (!boundaryCatalog.isTypedProjectionAvailable()) {
+            return 0;
+        }
+        return resolve(graph, projection.orElseThrow(), boundaryCatalog);
+    }
+
+    private static int resolve(FlowGraph graph, ReSyncTypedInteractionProjection projection,
+                               FlowNodeWidget.FunctionBoundaryCatalog boundaryCatalog) {
+        if (graph == null || !graph.isFunction() || graph.getConnections() == null || graph.getNodes() == null
+            || projection == null || boundaryCatalog == null || !boundaryCatalog.isTypedProjectionAvailable()) {
             return 0;
         }
         int changes = 0;
         for (FlowConnection connection : graph.getConnections()) {
+            if (connection == null) {
+                continue;
+            }
             FlowNode source = graph.getNodes().get(connection.getSourceNodeId());
             FlowNode target = graph.getNodes().get(connection.getTargetNodeId());
-            if (source != null && target != null && source.getType() != null && FUNCTION_START_TYPES.contains(source.getType()) && !"flow".equals(connection.getSourcePin())) {
-                FlowTypeRef typeRef = pinType(definitionResolver.apply(target.getType()), connection.getTargetPin(), true);
-                changes += applyType(graph.getFunctionInputs(), connection.getSourcePin(), typeRef);
+            FlowNodeWidget.FunctionBoundaryIntent sourceBoundary = boundaryCatalog.intent(source);
+            FlowNodeWidget.FunctionBoundaryIntent targetBoundary = boundaryCatalog.intent(target);
+            if (source != null && target != null && sourceBoundary != null
+                && sourceBoundary.role() == FlowNodeWidget.FunctionBoundaryRole.INPUTS
+                && !Objects.equals(boundaryCatalog.flowPin(source, false), connection.getSourcePinId())) {
+                FlowTypeRef typeRef = projection.pinType(typedIdentity(target.getType()), connection.getTargetPinId(), true).orElse(null);
+                changes += applyStableType(graph.getFunctionInputs(), connection.getSourcePinId(), typeRef);
             }
-            if (source != null && target != null && target.getType() != null && FUNCTION_END_TYPES.contains(target.getType()) && !"flow".equals(connection.getTargetPin())) {
-                FlowTypeRef typeRef = pinType(definitionResolver.apply(source.getType()), connection.getSourcePin(), false);
-                changes += applyType(graph.getFunctionOutputs(), connection.getTargetPin(), typeRef);
+            if (source != null && target != null && targetBoundary != null
+                && targetBoundary.role() == FlowNodeWidget.FunctionBoundaryRole.OUTPUTS
+                && !Objects.equals(boundaryCatalog.flowPin(target, true), connection.getTargetPinId())) {
+                FlowTypeRef typeRef = projection.pinType(typedIdentity(source.getType()), connection.getSourcePinId(), false).orElse(null);
+                changes += applyStableType(graph.getFunctionOutputs(), connection.getTargetPinId(), typeRef);
             }
         }
         return changes;
     }
 
-    private static FlowTypeRef pinType(NodeDefinition definition, String pinName, boolean input) {
-        if (definition == null || pinName == null) {
+    private static ContractRef<NodeId> typedIdentity(String nodeType) {
+        if (nodeType == null || nodeType.isBlank() || !nodeType.equals(nodeType.strip())) {
             return null;
         }
-        List<NodeDefinition.PinDefinition> pins = input ? definition.getInputs() : definition.getOutputs();
-        return pins.stream().filter(pin -> pin != null && pinName.equals(pin.getName())).map(NodeDefinition.PinDefinition::getTypeRef).findFirst().orElse(null);
+        int separator = nodeType.indexOf(':');
+        if (separator <= 0 || separator == nodeType.length() - 1 || nodeType.indexOf(':', separator + 1) >= 0) {
+            return null;
+        }
+        try {
+            return ContractRef.of(new OwnerId(nodeType.substring(0, separator)), new NodeId(nodeType.substring(separator + 1)));
+        } catch (RuntimeException exception) {
+            return null;
+        }
     }
 
-    private static int applyType(List<FlowGraph.FunctionParameter> parameters, String parameterName, FlowTypeRef typeRef) {
-        if (parameters == null || parameterName == null || typeRef == null) {
+    static String parameterIdentity(FlowGraph.FunctionParameter parameter) {
+        return parameter != null ? canonicalParameterId(parameter.getParameterId()) : null;
+    }
+
+    private static int applyStableType(List<FlowGraph.FunctionParameter> parameters, String parameterId, FlowTypeRef typeRef) {
+        if (parameters == null || parameterId == null || parameterId.isBlank() || typeRef == null) {
             return 0;
         }
         for (FlowGraph.FunctionParameter parameter : parameters) {
-            if (parameter == null || !parameterName.equals(parameter.getName())) {
+            if (parameter == null || !parameterId.equals(canonicalParameterId(parameter.getParameterId()))) {
                 continue;
             }
             FlowTypeRef currentType = parameter.getTypeRef();
@@ -69,6 +108,17 @@ public final class FunctionSignatureTypeResolver {
             return 1;
         }
         return 0;
+    }
+
+    private static String canonicalParameterId(String value) {
+        if (value == null || value.isBlank() || !value.equals(value.strip())) {
+            return null;
+        }
+        try {
+            return FunctionParameterId.parseCanonicalText(value).canonicalText();
+        } catch (RuntimeException exception) {
+            return null;
+        }
     }
 
     private static boolean isImprecise(FlowTypeRef typeRef) {

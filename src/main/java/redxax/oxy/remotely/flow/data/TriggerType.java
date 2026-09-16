@@ -4,5 +4,6 @@ public enum TriggerType {
     COMMAND,
     EVENT,
     ITEM_INTERACT,
-    SCHEDULE
+    SCHEDULE,
+    SYSTEM
 }

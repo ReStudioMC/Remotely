@@ -9,9 +9,13 @@ public class Visual {
     private String presetReference;
     private List<String> lore;
     private String name;
+    private boolean enchanted;
+    private List<String> itemFlags;
+    private String headTexture;
 
     public Visual() {
         this.lore = new ArrayList<>();
+        this.itemFlags = new ArrayList<>();
     }
 
     public Visual(String material) {
@@ -64,6 +68,30 @@ public class Visual {
         this.name = name;
     }
 
+    public boolean isEnchanted() {
+        return enchanted;
+    }
+
+    public void setEnchanted(boolean enchanted) {
+        this.enchanted = enchanted;
+    }
+
+    public List<String> getItemFlags() {
+        return itemFlags;
+    }
+
+    public void setItemFlags(List<String> itemFlags) {
+        this.itemFlags = itemFlags != null ? itemFlags : new ArrayList<>();
+    }
+
+    public String getHeadTexture() {
+        return headTexture;
+    }
+
+    public void setHeadTexture(String headTexture) {
+        this.headTexture = headTexture;
+    }
+
     public Visual copy() {
         Visual copy = new Visual();
         copy.setMaterial(this.material);
@@ -73,6 +101,11 @@ public class Visual {
             copy.getLore().addAll(this.lore);
         }
         copy.setName(this.name);
+        copy.setEnchanted(this.enchanted);
+        if (this.itemFlags != null) {
+            copy.getItemFlags().addAll(this.itemFlags);
+        }
+        copy.setHeadTexture(this.headTexture);
         return copy;
     }
 }

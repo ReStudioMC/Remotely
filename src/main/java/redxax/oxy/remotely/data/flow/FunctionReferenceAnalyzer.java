@@ -3,16 +3,22 @@ package redxax.oxy.remotely.data.flow;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import redxax.oxy.remotely.flow.data.FlowConnection;
 import redxax.oxy.remotely.flow.data.FlowGraph;
 import redxax.oxy.remotely.flow.data.FlowNode;
 
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 public final class FunctionReferenceAnalyzer {
     public static final String NODE_PREFIX = "custom_function:";
+    public static final String FUNCTION_INPUT_PIN_PREFIX = "function-input-";
+    public static final String FUNCTION_OUTPUT_PIN_PREFIX = "function-output-";
+    private static final String FLOW_PIN = "flow";
 
     private FunctionReferenceAnalyzer() {
     }
@@ -49,6 +55,24 @@ public final class FunctionReferenceAnalyzer {
     }
 
     public static int reconcileGraphCallers(FlowGraph graph, String functionId, Set<String> inputPins, Set<String> outputPins) {
+        return reconcileGraphCallers(graph, functionId, canonicalPins(inputPins, FUNCTION_INPUT_PIN_PREFIX),
+            canonicalPins(outputPins, FUNCTION_OUTPUT_PIN_PREFIX), false);
+    }
+
+    public static int reconcileLegacyGraphCallers(FlowGraph graph, String functionId, Set<String> inputPins, Set<String> outputPins) {
+        return reconcileGraphCallers(graph, functionId, inputPins, outputPins, true);
+    }
+
+    public static String canonicalInputPin(String parameterId) {
+        return canonicalPin(FUNCTION_INPUT_PIN_PREFIX, parameterId);
+    }
+
+    public static String canonicalOutputPin(String parameterId) {
+        return canonicalPin(FUNCTION_OUTPUT_PIN_PREFIX, parameterId);
+    }
+
+    private static int reconcileGraphCallers(FlowGraph graph, String functionId, Set<String> inputPins, Set<String> outputPins,
+                                             boolean legacy) {
         if (graph == null || graph.getNodes() == null || functionId == null || functionId.isBlank()) {
             return 0;
         }
@@ -60,19 +84,61 @@ public final class FunctionReferenceAnalyzer {
                 continue;
             }
             if (node.getInputValues() != null) {
-                int before = node.getInputValues().size();
-                node.getInputValues().keySet().removeIf(pin -> !inputPins.contains(pin));
-                changes += before - node.getInputValues().size();
+                Map<String, Object> retainedInputs = new HashMap<>(node.getInputValues());
+                int before = retainedInputs.size();
+                retainedInputs.keySet().removeIf(pin -> !FLOW_PIN.equals(pin) && !inputPins.contains(pin));
+                if (before != retainedInputs.size()) {
+                    node.setInputValues(retainedInputs);
+                    changes += before - retainedInputs.size();
+                }
             }
             if (graph.getConnections() != null) {
                 int before = graph.getConnections().size();
                 graph.getConnections().removeIf(connection ->
-                    entry.getKey().equals(connection.getTargetNodeId()) && !"flow".equals(connection.getTargetPin()) && !inputPins.contains(connection.getTargetPin())
-                        || entry.getKey().equals(connection.getSourceNodeId()) && !"flow".equals(connection.getSourcePin()) && !outputPins.contains(connection.getSourcePin()));
+                    connection != null && (entry.getKey().equals(connection.getTargetNodeId())
+                        && !FLOW_PIN.equals(pin(connection, true, legacy)) && !inputPins.contains(pin(connection, true, legacy))
+                        || entry.getKey().equals(connection.getSourceNodeId())
+                        && !FLOW_PIN.equals(pin(connection, false, legacy)) && !outputPins.contains(pin(connection, false, legacy))));
                 changes += before - graph.getConnections().size();
             }
         }
         return changes;
+    }
+
+    private static String pin(FlowConnection connection, boolean target, boolean legacy) {
+        if (legacy) {
+            return target ? connection.getTargetPin() : connection.getSourcePin();
+        }
+        return target ? connection.getTargetPinId() : connection.getSourcePinId();
+    }
+
+    private static Set<String> canonicalPins(Set<String> pins, String prefix) {
+        if (pins == null || pins.isEmpty()) {
+            return Set.of();
+        }
+        Set<String> result = new HashSet<>();
+        for (String pin : pins) {
+            if (pin != null && pin.startsWith(prefix) && pin.length() > prefix.length()) {
+                result.add(pin);
+            }
+        }
+        return Set.copyOf(result);
+    }
+
+    private static String canonicalPin(String prefix, String parameterId) {
+        if (parameterId == null) {
+            return "";
+        }
+        String identity = parameterId.trim();
+        if (identity.isBlank()) {
+            return "";
+        }
+        if (identity.startsWith(FUNCTION_INPUT_PIN_PREFIX)) {
+            identity = identity.substring(FUNCTION_INPUT_PIN_PREFIX.length());
+        } else if (identity.startsWith(FUNCTION_OUTPUT_PIN_PREFIX)) {
+            identity = identity.substring(FUNCTION_OUTPUT_PIN_PREFIX.length());
+        }
+        return identity.isBlank() ? "" : prefix + identity;
     }
 
     public static List<String> findJsonReferences(JsonElement root, String functionId) {

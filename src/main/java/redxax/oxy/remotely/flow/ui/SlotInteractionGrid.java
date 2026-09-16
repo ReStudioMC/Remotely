@@ -1,7 +1,6 @@
 package redxax.oxy.remotely.flow.ui;
 
 import redxax.oxy.remotely.util.BrowserSafeState;
-
 import restudio.rescreen.platform.IDrawContext;
 
 import java.util.ArrayList;

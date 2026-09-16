@@ -12,10 +12,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ContentDesignerAttributesStaticTest {
     private static final Path SOURCE = Path.of("src/main/java/redxax/oxy/remotely/flow/ui/ContentDesignerScreen.java");
+    private static final Path RESCREEN_SOURCE = Path.of(System.getProperty(
+        "restudio.rescreen.sourceDir",
+        System.getenv().getOrDefault("RESCREEN_SOURCE_DIR", "../ReScreen")
+    )).toAbsolutePath().normalize();
 
     @Test
     void attributesEditorCoversRequiredStates() throws IOException {
-        String source = Files.readString(SOURCE);
+        String source = Files.readString(SOURCE).replace("\r\n", "\n");
 
         assertTrue(source.contains("ATTRIBUTE_SCHEMA_SOURCE"));
         assertTrue(source.contains("Loading"));
@@ -30,18 +34,18 @@ class ContentDesignerAttributesStaticTest {
         assertTrue(source.contains("attributeDesignerHidContentBrowser = false;"));
         assertTrue(source.contains("setFocusedWidget(null);"));
         assertTrue(source.contains("attributePanel.hideImmediately();"));
-        assertTrue(Pattern.compile("clearAttributePanelWidgets\\(attributePanel\\.container\\(\\)\\);\\s+attributePanel\\.hideImmediately\\(\\);").matcher(source).find());
+        assertTrue(source.contains("clearAttributePanelWidgets(attributePanel.container());\n            attributePanel.hideImmediately();"));
         assertTrue(source.contains("attributeHeaderWidget = null;"));
-        assertTrue(Pattern.compile("refreshContentPanel\\(\\);\\s+updatePositions\\(\\);").matcher(source).find());
-        assertTrue(Pattern.compile("attributeDesignerPanel\\.show\\(\\);\\s+}\\s+updatePositions\\(\\);").matcher(source).find());
+        assertTrue(source.contains("refreshContentPanel();\n        updatePositions();"));
+        assertTrue(source.contains("attributeDesignerPanel.show();\n        }\n        updatePositions();"));
         assertTrue(Files.readString(Path.of("src/main/java/redxax/oxy/remotely/flow/ui/studio/StudioScreen.java")).contains("!studioContentBrowser.isTemporarilyHidden()"));
         String browserSource = Files.readString(Path.of("src/main/java/redxax/oxy/remotely/flow/ui/studio/ReSyncContentBrowserWidget.java"));
         assertTrue(browserSource.contains("if (temporarilyHidden)"));
         assertTrue(browserSource.contains("screen.clearStudioFocus();"));
         assertTrue(browserSource.contains("sidePanel.hideImmediately();"));
         assertTrue(Files.readString(Path.of("src/main/java/redxax/oxy/remotely/flow/ui/studio/StudioPanel.java")).contains("if (!sidePanel.isVisible())"));
-        String mountableSource = Files.readString(Path.of("../ReScreen/src/main/java/restudio/rescreen/ui/widgets/MountableButtonWidget.java"));
-        String popupSource = Files.readString(Path.of("../ReScreen/src/main/java/restudio/rescreen/ui/widgets/PopupWidget.java"));
+        String mountableSource = Files.readString(reScreenSource("src/main/java/restudio/rescreen/ui/widgets/MountableButtonWidget.java"));
+        String popupSource = Files.readString(reScreenSource("src/main/java/restudio/rescreen/ui/widgets/PopupWidget.java"));
         assertTrue(mountableSource.contains("public int getHeight()"));
         assertTrue(mountableSource.contains("updateEmbeddedPopupBounds();"));
         assertTrue(mountableSource.contains("this.embeddedPopup.fitContentHeight(true);"));
@@ -65,15 +69,15 @@ class ContentDesignerAttributesStaticTest {
         assertTrue(mountableSource.contains("closeEmbeddedBodyDropdowns();"));
         assertTrue(mountableSource.contains("public void renderEmbeddedOverlays"));
         assertTrue(mountableSource.contains("public boolean mouseClickedEmbeddedOverlay"));
-        String containerSource = Files.readString(Path.of("../ReScreen/src/main/java/restudio/rescreen/ui/rescreen/Container.java"));
-        String sidePanelSource = Files.readString(Path.of("../ReScreen/src/main/java/restudio/rescreen/ui/rescreen/SidePanel.java"));
+        String containerSource = Files.readString(reScreenSource("src/main/java/restudio/rescreen/ui/rescreen/Container.java"));
+        String sidePanelSource = Files.readString(reScreenSource("src/main/java/restudio/rescreen/ui/rescreen/SidePanel.java"));
         assertTrue(containerSource.contains("tickManagedLayoutDynamicHeights();"));
         assertTrue(containerSource.contains("mountable.tickEmbeddedPopupLayout();"));
         assertTrue(containerSource.contains("mountable.renderEmbeddedOverlays(ctx, mouseX, mouseY);"));
         assertTrue(containerSource.contains("mountable.mouseClickedEmbeddedOverlay(event.retarget(mountable, event.x(), event.y()))"));
         assertTrue(containerSource.contains("public boolean isMouseOverScrollbar(double mouseX, double mouseY)"));
         assertTrue(sidePanelSource.contains("if (innerContainer.isMouseOverScrollbar(mouseX, mouseY))"));
-        String dropdownSource = Files.readString(Path.of("../ReScreen/src/main/java/restudio/rescreen/ui/widgets/DropDownWidget.java"));
+        String dropdownSource = Files.readString(reScreenSource("src/main/java/restudio/rescreen/ui/widgets/DropDownWidget.java"));
         assertTrue(dropdownSource.contains("public boolean isDropdownVisible()"));
         assertTrue(dropdownSource.contains("return expanded || dropdownAnimationProgress > 0.01f;"));
         assertTrue(popupSource.contains("public void snapAnimatedHeight()"));
@@ -82,8 +86,8 @@ class ContentDesignerAttributesStaticTest {
         assertTrue(popupSource.contains("public void renderEmbedded"));
         assertTrue(popupSource.contains("row.getExpandedDropdownHeight()"));
         assertTrue(popupSource.contains("titledRow.renderExpandedDropdowns(ctx, mouseX, mouseY);"));
-        String titledRowSource = Files.readString(Path.of("../ReScreen/src/main/java/restudio/rescreen/ui/widgets/TitledRowWidget.java"));
-        String rowSource = Files.readString(Path.of("../ReScreen/src/main/java/restudio/rescreen/ui/widgets/RowWidget.java"));
+        String titledRowSource = Files.readString(reScreenSource("src/main/java/restudio/rescreen/ui/widgets/TitledRowWidget.java"));
+        String rowSource = Files.readString(reScreenSource("src/main/java/restudio/rescreen/ui/widgets/RowWidget.java"));
         assertTrue(titledRowSource.contains("public int getExpandedDropdownHeight()"));
         assertTrue(titledRowSource.contains("dropdown.isDropdownVisible()"));
         assertTrue(titledRowSource.contains("public void closeExpandedDropdowns()"));
@@ -121,10 +125,10 @@ class ContentDesignerAttributesStaticTest {
         assertTrue(source.contains("private void refreshAttributeDesignerContent(boolean preserveScroll)"));
         assertTrue(source.contains("refreshAttributeDesignerContent(true);"));
         assertTrue(source.contains("if (attributePanelStaticWidgetCount > 0)"));
-        assertTrue(Pattern.compile("syncAttributeDirtyState\\(\\);\\s+refreshAttributeComponentList\\(preserveScroll\\);").matcher(source).find());
+        assertTrue(source.contains("syncAttributeDirtyState();\n            refreshAttributeComponentList(preserveScroll);"));
         assertTrue(source.contains("contentScreen.refreshAttributeDesignerContent(true);"));
         assertFalse(source.contains("contentScreen.refreshAttributeDesigner();"));
-        assertTrue(Pattern.compile("syncAttributeDirtyState\\(\\);\\s+refreshAttributeComponentList\\(false\\);").matcher(source).find());
+        assertTrue(source.contains("syncAttributeDirtyState();\n            refreshAttributeComponentList(false);"));
         assertTrue(source.contains("syncAttributeDirtyState"));
         assertTrue(source.contains("syncAttributeDirtyState();"));
         assertTrue(source.contains("private final Map<String, Object> attributePreviewValues = new LinkedHashMap<>();"));
@@ -228,7 +232,7 @@ class ContentDesignerAttributesStaticTest {
         assertTrue(source.contains("updateAttributeModifierEntry"));
         assertTrue(source.contains("attributeModifiersValue"));
         assertTrue(source.contains("private List<Object> attributeModifiersValue"));
-        assertTrue(Pattern.compile("return List\\.of\\(Map\\.of\\(\\s+\"type\", \"minecraft:attack_damage\"").matcher(source).find());
+        assertTrue(source.contains("return List.of(Map.of(\n                \"type\", \"minecraft:attack_damage\""));
         assertFalse(source.contains("attributeModifiersTooltip"));
         assertFalse(source.contains("value.put(\"modifiers\", modifiers);"));
         assertTrue(source.contains("parseAttributeModifierLine"));
@@ -336,7 +340,7 @@ class ContentDesignerAttributesStaticTest {
         assertTrue(source.contains("attributeRestoreSearchFocus"));
         assertTrue(source.contains("commitAttributeDesignerDraft"));
         assertTrue(source.contains("refreshContentPanelIfAttributeDesignerClosed"));
-        assertTrue(Pattern.compile("refreshContentPanelIfAttributeDesignerClosed\\(\\);\\s+syncAttributeDirtyState\\(\\);").matcher(source).find());
+        assertTrue(source.contains("refreshContentPanelIfAttributeDesignerClosed();\n        syncAttributeDirtyState();"));
         assertTrue(source.contains("hideAttributeDesigner"));
         assertTrue(source.contains("isAttributeDesignerInteractive"));
         assertTrue(source.contains("copyAttributeComponents"));
@@ -438,8 +442,8 @@ class ContentDesignerAttributesStaticTest {
         assertFalse(source.contains("Boolean.TRUE.equals(metadata.get(\"advanced\"))"));
         assertTrue(source.contains("attributePanel.keyPressed"));
         assertTrue(source.contains("attributePanel.textInput"));
-        assertTrue(source.contains("attributePanel.isLeftAnchored()"));
-        assertTrue(source.contains("fitWidth -= attributePanel.layoutWidth(8)"));
+        assertTrue(source.contains("attributePanel.isVisible() && attributePanel.isLeftAnchored()"));
+        assertTrue(source.contains("fitWidth -= attributePanel.getDesiredWidth() + 8"));
         assertTrue(source.contains("container.getScrollOffset()"));
         assertTrue(source.contains("container.setTargetScrollOffset(previousScroll)"));
         assertTrue(source.contains("private AnimatedWidget selectedAttributeRowWidget;"));
@@ -490,7 +494,7 @@ class ContentDesignerAttributesStaticTest {
 
     @Test
     void attributesEditorUsesServerDescriptionsWithoutGenericJsonEditor() throws IOException {
-        String source = Files.readString(SOURCE).replace("\r\n", "\n");
+        String source = Files.readString(SOURCE);
 
         assertTrue(source.contains("metadata.get(\"schema\")"));
         assertTrue(source.contains("schemaMap"));
@@ -583,7 +587,7 @@ class ContentDesignerAttributesStaticTest {
 
     @Test
     void embeddedAttributeBodyRendersBehindTheRowHeader() throws IOException {
-        String mountableSource = Files.readString(Path.of("../ReScreen/src/main/java/restudio/rescreen/ui/widgets/MountableButtonWidget.java"));
+        String mountableSource = Files.readString(reScreenSource("src/main/java/restudio/rescreen/ui/widgets/MountableButtonWidget.java"));
         int drawContentStart = mountableSource.indexOf("protected void drawContent(IDrawContext ctx, int mouseX, int mouseY)");
         int drawContentEnd = mountableSource.indexOf("protected void renderEmbeddedContent", drawContentStart);
         assertTrue(drawContentStart >= 0);
@@ -605,7 +609,7 @@ class ContentDesignerAttributesStaticTest {
     @Test
     void selectingActiveAttributeDoesNotReplaceTheAttributeList() throws IOException {
         String source = Files.readString(SOURCE);
-        String toggleSource = Files.readString(Path.of("../ReScreen/src/main/java/restudio/rescreen/ui/widgets/ToggleWidget.java"));
+        String toggleSource = Files.readString(reScreenSource("src/main/java/restudio/rescreen/ui/widgets/ToggleWidget.java"));
         int methodStart = source.indexOf("private void handleAttributeComponentClick(String id)");
         int methodEnd = source.indexOf("\n    private void setAttributeComponentEnabled", methodStart);
         int setValueStart = toggleSource.indexOf("public void setValue(boolean value)");
@@ -646,8 +650,8 @@ class ContentDesignerAttributesStaticTest {
 
     @Test
     void sidePanelScrollbarTakesPriorityOverResizeHandle() throws IOException {
-        String containerSource = Files.readString(Path.of("../ReScreen/src/main/java/restudio/rescreen/ui/rescreen/Container.java"));
-        String sidePanelSource = Files.readString(Path.of("../ReScreen/src/main/java/restudio/rescreen/ui/rescreen/SidePanel.java"));
+        String containerSource = Files.readString(reScreenSource("src/main/java/restudio/rescreen/ui/rescreen/Container.java"));
+        String sidePanelSource = Files.readString(reScreenSource("src/main/java/restudio/rescreen/ui/rescreen/SidePanel.java"));
 
         assertTrue(containerSource.contains("int lineWidth = Math.max(4, scrollbarWidth);"));
         assertTrue(containerSource.contains("public boolean isMouseOverScrollbar(double mouseX, double mouseY)"));
@@ -675,5 +679,9 @@ class ContentDesignerAttributesStaticTest {
             index += needle.length();
         }
         return count;
+    }
+
+    private static Path reScreenSource(String relativePath) {
+        return RESCREEN_SOURCE.resolve(relativePath);
     }
 }

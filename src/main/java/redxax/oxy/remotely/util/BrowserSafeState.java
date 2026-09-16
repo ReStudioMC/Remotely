@@ -12,6 +12,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
+import java.util.function.BinaryOperator;
+import java.util.function.IntBinaryOperator;
+import java.util.function.IntUnaryOperator;
+import java.util.function.LongBinaryOperator;
+import java.util.function.LongUnaryOperator;
+import java.util.function.UnaryOperator;
 public final class BrowserSafeState {
     private BrowserSafeState() {
     }
@@ -34,6 +40,14 @@ public final class BrowserSafeState {
 
     public static <E> Queue<E> queue() {
         return new SynchronizedDeque<>();
+    }
+
+    public static long nanosToMillis(long nanos) {
+        return nanos / 1_000_000L;
+    }
+
+    public static long nanosToMicros(long nanos) {
+        return nanos / 1_000L;
     }
 
     public static final class BooleanValue {
@@ -108,6 +122,21 @@ public final class BrowserSafeState {
             this.value = value;
             return true;
         }
+
+        public synchronized int addAndGet(int delta) {
+            value += delta;
+            return value;
+        }
+
+        public synchronized int updateAndGet(IntUnaryOperator updater) {
+            value = updater.applyAsInt(value);
+            return value;
+        }
+
+        public synchronized int accumulateAndGet(int given, IntBinaryOperator accumulator) {
+            value = accumulator.applyAsInt(value, given);
+            return value;
+        }
     }
 
     public static final class LongValue {
@@ -136,6 +165,10 @@ public final class BrowserSafeState {
             return value++;
         }
 
+        public synchronized long decrementAndGet() {
+            return --value;
+        }
+
         public synchronized long getAndSet(long value) {
             long previous = this.value;
             this.value = value;
@@ -146,6 +179,21 @@ public final class BrowserSafeState {
             if (this.value != expected) return false;
             this.value = value;
             return true;
+        }
+
+        public synchronized long addAndGet(long delta) {
+            value += delta;
+            return value;
+        }
+
+        public synchronized long updateAndGet(LongUnaryOperator updater) {
+            value = updater.applyAsLong(value);
+            return value;
+        }
+
+        public synchronized long accumulateAndGet(long given, LongBinaryOperator accumulator) {
+            value = accumulator.applyAsLong(value, given);
+            return value;
         }
     }
 
@@ -177,6 +225,101 @@ public final class BrowserSafeState {
             if (this.value != expected) return false;
             this.value = value;
             return true;
+        }
+
+        public synchronized T updateAndGet(UnaryOperator<T> updater) {
+            value = updater.apply(value);
+            return value;
+        }
+
+        public synchronized T accumulateAndGet(T given, BinaryOperator<T> accumulator) {
+            value = accumulator.apply(value, given);
+            return value;
+        }
+    }
+
+    public static final class Lock {
+        private Object owner;
+        private int depth;
+
+        public synchronized void lock() {
+            Object current = TaskIdentities.access.current();
+            while (owner != null && owner != current) {
+                try {
+                    wait();
+                } catch (InterruptedException error) {
+                    TaskIdentities.access.interrupt();
+                    throw new IllegalStateException("Lock wait interrupted", error);
+                }
+            }
+            owner = current;
+            depth++;
+        }
+
+        public synchronized boolean tryLock() {
+            Object current = TaskIdentities.access.current();
+            if (owner != null && owner != current) {
+                return false;
+            }
+            owner = current;
+            depth++;
+            return true;
+        }
+
+        public synchronized boolean isHeldByCurrentThread() {
+            return owner == TaskIdentities.access.current();
+        }
+
+        public synchronized void unlock() {
+            if (owner != TaskIdentities.access.current()) {
+                throw new IllegalStateException("Unlock by non-owner");
+            }
+            depth--;
+            if (depth == 0) {
+                owner = null;
+                notifyAll();
+            }
+        }
+
+        public synchronized void signalAll() {
+            notifyAll();
+        }
+    }
+
+    public static final class Latch {
+        private int remaining;
+
+        public Latch(int count) {
+            remaining = Math.max(0, count);
+        }
+
+        public synchronized void countDown() {
+            if (remaining > 0) {
+                remaining--;
+            }
+            if (remaining == 0) {
+                notifyAll();
+            }
+        }
+
+        public synchronized long getCount() {
+            return remaining;
+        }
+
+        public synchronized boolean await(long nanos) throws InterruptedException {
+            long deadline = System.nanoTime() + Math.max(0L, nanos);
+            while (remaining > 0) {
+                long left = deadline - System.nanoTime();
+                if (left <= 0L) {
+                    return false;
+                }
+                wait(Math.max(1L, left / 1_000_000L));
+            }
+            return true;
+        }
+
+        public synchronized boolean awaitMillis(long millis) throws InterruptedException {
+            return await(Math.max(0L, millis) * 1_000_000L);
         }
     }
 

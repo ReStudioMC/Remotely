@@ -8,12 +8,15 @@ import com.google.gson.stream.JsonWriter;
 import redxax.oxy.remotely.flow.data.FlowDataType;
 import redxax.oxy.remotely.flow.data.FlowDataTypeAdapter;
 import redxax.oxy.remotely.flow.registry.NodeDefinition;
+import redxax.oxy.remotely.DesktopRemotelyPaths;
 
 import java.io.IOException;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.HashMap;
+import java.util.Map;
 
 public final class DesktopReSyncStorage implements ReSyncStorage {
     private static final Gson GSON = new GsonBuilder()
@@ -30,6 +33,7 @@ public final class DesktopReSyncStorage implements ReSyncStorage {
             }
         })
         .create();
+    private static final Map<String, DesktopReSyncStorage> INTERN = new HashMap<>();
     private final Path path;
 
     private DesktopReSyncStorage(Path path) {
@@ -37,7 +41,23 @@ public final class DesktopReSyncStorage implements ReSyncStorage {
     }
 
     public static ReSyncStorage fromKey(Object key) {
-        return new DesktopReSyncStorage(Path.of(String.valueOf(key)));
+        if (key instanceof ReSyncStorage value) {
+            return value;
+        }
+        Path path;
+        if (key instanceof Path value) {
+            path = value.toAbsolutePath().normalize();
+        } else {
+            String name = String.valueOf(key).replace(':', '_');
+            path = DesktopRemotelyPaths.appDir().resolve("data").resolve("flow").resolve(name + ".json");
+        }
+        synchronized (INTERN) {
+            return INTERN.computeIfAbsent(path.toString(), ignored -> new DesktopReSyncStorage(path));
+        }
+    }
+
+    Path path() {
+        return path;
     }
 
     @Override

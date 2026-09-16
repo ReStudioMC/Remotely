@@ -13,7 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 
 class ReSyncEditorDiagnosticsTest {
     @Test
-    void turnsRequiredInputFailuresIntoEditorGuidance() {
+    void pointsRequiredInputGuidanceToHighlightedNode() {
         EditorError error = new EditorError("SAVE_FAILED", "command", "home", "Command Needs Attention",
             "Fix the highlighted issues before saving.", List.of(
                 new EditorDiagnostic(EditorDiagnostic.Severity.ERROR, "REQUIRED_INPUT_MISSING", "send_message", "message", "",

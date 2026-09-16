@@ -1,6 +1,7 @@
 package redxax.oxy.remotely.flow.sync;
 
 import restudio.resync.flow.contract.FlowTypeMetadata;
+import restudio.resync.protocol.ReSyncProtocolContract;
 
 import com.google.gson.Gson;
 import org.junit.jupiter.api.Test;
@@ -17,8 +18,8 @@ class NodeRegistrySnapshotContractTest {
     @Test
     void matchesTheServerRegistryContractEnvelope() {
         NodeRegistrySnapshot snapshot = new NodeRegistrySnapshot();
-        snapshot.setContractVersion(NodeRegistrySnapshot.CURRENT_CONTRACT_VERSION);
-        snapshot.setMinimumClientContractVersion(NodeRegistrySnapshot.MINIMUM_SUPPORTED_CONTRACT_VERSION);
+        snapshot.setContractVersion(ReSyncProtocolContract.FLOW_CONTRACT.version());
+        snapshot.setMinimumClientContractVersion(ReSyncProtocolContract.FLOW_CONTRACT.minimumClientVersion());
         snapshot.setServerIdentity("server-a");
         snapshot.setCompatibleUntil(1234L);
         snapshot.setCapabilities(List.of("nodes", "resources"));
@@ -45,15 +46,18 @@ class NodeRegistrySnapshotContractTest {
     @Test
     void matchesTheServerRegistryRequestBaselineContract() {
         NodeRegistryRequest request = new NodeRegistryRequest();
-        request.setContractVersion(NodeRegistrySnapshot.CURRENT_CONTRACT_VERSION);
+        request.setContractVersion(ReSyncProtocolContract.FLOW_CONTRACT.version());
         request.setRegistryChecksum("registry-a");
         request.setPluginChecksums(Map.of("request", "plugin-a"));
+        request.setCompatibilityCapability(NodeRegistryRequest.LEGACY_COMPATIBILITY_CAPABILITY);
 
         NodeRegistryRequest restored = new Gson().fromJson(new Gson().toJson(request), NodeRegistryRequest.class);
 
         assertEquals(2, restored.getContractVersion());
         assertEquals("registry-a", restored.getRegistryChecksum());
         assertEquals("plugin-a", restored.getPluginChecksums().get("request"));
+        assertEquals(NodeRegistryRequest.LEGACY_COMPATIBILITY_CAPABILITY, restored.getCompatibilityCapability());
+        assertTrue(restored.requestsLegacyCompatibility());
     }
 
     @Test

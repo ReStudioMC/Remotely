@@ -1,5 +1,6 @@
 package redxax.oxy.remotely.servers;
 
+import java.time.Duration;
 import net.schmizz.sshj.SSHClient;
 import net.schmizz.sshj.common.Buffer;
 import net.schmizz.sshj.common.SSHPacket;
@@ -12,11 +13,14 @@ import redxax.oxy.remotely.config.Config;
 import restudio.rebase.instance.Instance;
 import restudio.rescreen.util.Notification;
 
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+
 import java.lang.reflect.Field;
 import java.net.InetSocketAddress;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.TimeUnit;
 
 
 public class ReverseProxyManager {

@@ -1,14 +1,17 @@
 package redxax.oxy.remotely.flow.ui;
+
 import java.util.Set;
-
 import redxax.oxy.remotely.util.BrowserSafeState;
-
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import redxax.oxy.remotely.host.ApplicationHostRegistry;
+import com.google.gson.JsonParser;
+import redxax.oxy.remotely.RemotelyClient;
 import redxax.oxy.remotely.data.flow.DesignerSaveNotifications;
 import redxax.oxy.remotely.data.flow.FlowManager;
+import redxax.oxy.remotely.data.flow.ReSyncProtocolContract;
 import redxax.oxy.remotely.data.flow.ReSyncResourceType;
 import redxax.oxy.remotely.flow.data.FlowDataType;
 import redxax.oxy.remotely.flow.data.FlowGraph;
@@ -19,6 +22,7 @@ import redxax.oxy.remotely.flow.ui.studio.ReSyncResourceCreator;
 import redxax.oxy.remotely.flow.ui.studio.ReSyncStudioPanelState;
 import redxax.oxy.remotely.flow.ui.studio.StudioPanel;
 import redxax.oxy.remotely.flow.ui.studio.StudioResourceRenameAware;
+import redxax.oxy.remotely.flow.ui.studio.StudioSaveProvider;
 import redxax.oxy.remotely.flow.ui.studio.StudioScreen;
 import restudio.rebase.ui.widgets.editor.TextAreaWidget;
 import restudio.rescreen.game.MinecraftGameAssets;
@@ -50,7 +54,7 @@ import restudio.rescreen.ui.widgets.IconButton;
 import restudio.rescreen.ui.widgets.TextInputWidget;
 import restudio.rescreen.ui.widgets.TitledRowWidget;
 import restudio.rescreen.ui.widgets.ToggleWidget;
-import restudio.rescreen.util.JsonTreeParser;
+import restudio.rescreen.util.Notification;
 import restudio.resync.flow.workspace.WorkspacePatch;
 
 import java.util.ArrayList;
@@ -60,7 +64,7 @@ import java.util.function.Consumer;
 
 import static restudio.rescreen.config.Config.desktopMode;
 
-public class DialogDesignerScreen extends StudioScreen implements DesktopWindowBehaviorProvider, StudioCloseHandledScreen, StudioResourceRenameAware, ReSyncCollaborativeView {
+public class DialogDesignerScreen extends StudioScreen implements DesktopWindowBehaviorProvider, StudioCloseHandledScreen, StudioResourceRenameAware, ReSyncCollaborativeView, StudioSaveProvider {
     private static final Set<DialogDesignerScreen> OPEN_SCREENS = BrowserSafeState.set();
     private static final int DIALOG_WIDTH = 310;
     private static final int HEADER_HEIGHT = 33;
@@ -80,16 +84,24 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
     private static final List<String> INPUT_TYPES = List.of("minecraft:text", "minecraft:boolean", "minecraft:number_range", "minecraft:single_option");
     private static final List<String> ACTION_MODES = List.of("None", "Run Flow", "Run Function", "Run Command", "Open Dialog", "Custom Event");
     private static final List<String> PREDICATE_MODES = CompactBindingSupport.PREDICATE_MODES;
+    private final Gson gson = new GsonBuilder().setPrettyPrinting().create();
     private JsonObject dialog;
+    private final VersionedEditorDraft<JsonObject> dialogDraft;
     private final String serverId;
     private final Object parent;
     private final boolean forceSuperScreen;
     private final boolean animateTopHeader;
     private final ReSyncStudioPanelState panelState = new ReSyncStudioPanelState().padding(6);
-    private final History<String> history = history(() -> JsonTreeParser.write(dialog), this::restore);
+    private final History<String> history = history(() -> gson.toJson(dialog), this::restore);
+    private final HistoryRebaseCoordinator<String> historyRebase;
+    private volatile long collaborationLifecycle = 1L;
 
     @Override
     public void resourceRenamed(String type, String oldId, String newId) {
+        if (dialogDraft.defer(() -> resourceRenamed(type, oldId, newId))) {
+            return;
+        }
+        dialogDraft.markMutation();
         if (oldId.equals(ReSyncResourceType.DIALOG.extractId(dialog))) {
             ReSyncResourceType.DIALOG.applyRename(dialog, newId);
         }
@@ -109,7 +121,7 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
     private int previewHeight;
     private int lastWidth = -1;
     private int lastHeight = -1;
-    private int lastHeaderOffsetY = Integer.MIN_VALUE;
+    private int lastInspectorWidth = -1;
     private boolean closingRequested;
     private boolean closeCompleted;
     private boolean studioCloseNotified;
@@ -123,8 +135,73 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
     }
 
     @Override
+    public long collaborationLifecycle() {
+        return collaborationLifecycle;
+    }
+
+    @Override
+    public long collaborationEditVersion() {
+        return dialogDraft.editVersion();
+    }
+
+    @Override
+    public boolean requestCollaborationDocument(Consumer<CollaborationDocumentSnapshot> completion) {
+        if (completion == null) {
+            return false;
+        }
+        long lifecycle = collaborationLifecycle;
+        return dialogDraft.requestProjection(ReSyncResourceType.DIALOG.typeId(), ReSyncResourceType.DIALOG.extractId(dialog),
+            this::collaborationDocument, projection -> completion.accept(collaborationSnapshot(lifecycle, projection)));
+    }
+
+    private CollaborationDocumentSnapshot collaborationSnapshot(long lifecycle,
+                                                                 VersionedEditorDraft.ProjectionSnapshot projection) {
+        RuntimeException failure = projection.failure();
+        JsonObject document = null;
+        if (failure == null) {
+            try {
+                document = gson.fromJson(projection.payload(), JsonObject.class);
+                if (document == null) {
+                    failure = new IllegalStateException("Collaboration Snapshot Is Empty");
+                }
+            } catch (RuntimeException | Error exception) {
+                failure = exception instanceof RuntimeException runtime ? runtime : new IllegalStateException(exception);
+            }
+        }
+        if (failure == null && lifecycle != collaborationLifecycle) {
+            document = null;
+            failure = new IllegalStateException("Collaboration Snapshot Expired");
+        }
+        return new CollaborationDocumentSnapshot(this, lifecycle, projection.editVersion(), document, failure);
+    }
+
+    @Override
+    public boolean applyCollaborationDocument(JsonObject document, List<WorkspacePatch<JsonElement>> patches,
+                                              Consumer<CollaborationDocumentApplyResult> completion) {
+        if (completion == null) {
+            return false;
+        }
+        long lifecycle = collaborationLifecycle;
+        return dialogDraft.runMutation(() -> {
+            if (document == null) {
+                throw new IllegalArgumentException("Collaboration Document Is Required");
+            }
+            if (dialog == null) {
+                throw new IllegalStateException("Dialog Is Unavailable");
+            }
+            applyCollaborationDocument(document, patches);
+        }, result ->
+            completion.accept(new CollaborationDocumentApplyResult(this, lifecycle, result.beforeEditVersion(),
+                result.afterEditVersion(), result.successful(), result.failure())));
+    }
+
+    @Override
     public void applyCollaborationDocument(JsonObject document, List<WorkspacePatch<JsonElement>> patches) {
-        restore(JsonTreeParser.write(document));
+        if (dialogDraft.defer(() -> applyCollaborationDocument(document, patches))) {
+            return;
+        }
+        dialogDraft.markMutation();
+        restore(gson.toJson(document));
     }
 
     @Override
@@ -132,10 +209,13 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
         if (patches == null || patches.isEmpty()) {
             return;
         }
-        history.rebase(snapshot -> {
-            JsonObject historic = JsonTreeParser.parse(snapshot).getAsJsonObject();
-            FlowWorkspaceDocument.apply(historic, patches);
-            return JsonTreeParser.write(historic);
+        historyRebase.request(patches, copiedPatches -> snapshot -> {
+            JsonObject historic = gson.fromJson(gson.toJson(snapshot), JsonObject.class);
+            if (historic == null) {
+                historic = new JsonObject();
+            }
+            FlowWorkspaceDocument.apply(historic, copiedPatches);
+            return gson.toJson(gson.fromJson(gson.toJson(historic), JsonObject.class));
         });
     }
 
@@ -175,6 +255,12 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
         preserveStateOnDisplay = true;
         OPEN_SCREENS.add(this);
         ensureDefaults();
+        dialogDraft = new VersionedEditorDraft<>(this.dialog, JsonObject::toString,
+            payload -> JsonParser.parseString(payload).getAsJsonObject(), this::rebindDialog, this::failSnapshot,
+            () -> new Notification("Editor Busy", "Try Again", Notification.Type.WARN));
+        historyRebase = new HistoryRebaseCoordinator<>(history,
+            () -> serverId + ":" + ReSyncResourceType.DIALOG.extractId(dialog), () -> collaborationLifecycle,
+            () -> new Notification("Editor Busy", "Try Again", Notification.Type.WARN));
     }
 
     public static void refreshCatalogForServer(String serverId) {
@@ -268,9 +354,16 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
     }
 
     @Override
+    public boolean isStudioCloseAnimationFinished() {
+        return closeCompleted;
+    }
+
+    @Override
     public void renderHandler(IDrawContext context, int mouseX, int mouseY, float delta) {
+        historyRebase.drain();
+        dialogDraft.drain();
         super.renderHandler(context, mouseX, mouseY, delta);
-        if (inspectorStudioPanel != null && inspector != null && inspector.isVisible()) {
+        if (inspectorStudioPanel != null && inspector != null && (inspector.isVisible() || inspector.getAnimatedWidth() > 1f)) {
             renderStudioPanel(inspectorStudioPanel, context, mouseX, mouseY, delta);
         }
     }
@@ -371,6 +464,9 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
 
     @Override
     public boolean keyPressed(ReKeyEvent event) {
+        if (handleStudioSaveShortcut(event)) {
+            return true;
+        }
         if (handleStudioHistoryShortcut(event)) {
             return true;
         }
@@ -400,7 +496,9 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
 
     private void buildHeader() {
         header().reset();
-        header().addRight("close.png", this::requestClose, "Back");
+        if (shouldShowBackButton()) {
+            header().addRight("close.png", this::requestClose, "Back");
+        }
         header().addRight("save.png", this::save, "Save");
         header().addRight("NewVanillaButton.png", this::addAction, "Add Button");
         header().addRight("VanillaInput.png", this::addInput, "Add Input");
@@ -408,11 +506,15 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
         header().build();
     }
 
+    private boolean shouldShowBackButton() {
+        return !desktopMode || shouldForceSuperScreen();
+    }
+
     private void ensureInspector() {
         if (inspector != null) {
             return;
         }
-        inspectorStudioPanel = rightStudioPanel("dialog_inspector").collapsible("Dialog Inspector").show();
+        inspectorStudioPanel = rightStudioPanel("dialog_inspector").show();
         inspector = inspectorStudioPanel.sidePanel();
         inspectorStudioPanel.padding(panelState.padding());
     }
@@ -455,6 +557,9 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
             return;
         }
         closeCompleted = true;
+        collaborationLifecycle++;
+        historyRebase.close();
+        dialogDraft.close();
         OPEN_SCREENS.remove(this);
         super.close();
         if (studioCloseHandler != null) {
@@ -465,27 +570,36 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
             return;
         }
         if (parent != null) {
-            if (ApplicationHostRegistry.current() != null) {
-                ApplicationHostRegistry.current().openParentScreen(this, parent);
+            if (RemotelyClient.INSTANCE != null && RemotelyClient.INSTANCE.getHost() != null) {
+                RemotelyClient.INSTANCE.getHost().openParentScreen(this, parent);
             } else if (parent instanceof Screen screen) {
                 ScreenManager.getInstance().setScreen(screen);
             }
         }
     }
 
+    @Override
+    public void removed() {
+        collaborationLifecycle++;
+        historyRebase.close();
+        dialogDraft.close();
+        OPEN_SCREENS.remove(this);
+        super.removed();
+    }
+
     private void updateLayout(boolean force) {
-        int headerOffsetY = header().getOffsetY();
-        if (!force && width == lastWidth && height == lastHeight && headerOffsetY == lastHeaderOffsetY) {
+        int inspectorWidth = inspector != null ? Math.round(inspector.getAnimatedWidth()) : 0;
+        if (!force && width == lastWidth && height == lastHeight && inspectorWidth == lastInspectorWidth) {
             return;
         }
         lastWidth = width;
         lastHeight = height;
-        lastHeaderOffsetY = headerOffsetY;
+        lastInspectorWidth = inspectorWidth;
         if (inspectorStudioPanel != null) {
             inspectorStudioPanel.layout();
         }
-        int contentTop = topHeaderContentTop(0);
-        int rightWidth = inspector != null ? (int) inspector.getAnimatedWidth() : 0;
+        int contentTop = header().headerSize;
+        int rightWidth = inspectorWidth;
         int availableWidth = Math.max(160, width - rightWidth - 24);
         previewWidth = availableWidth;
         previewHeight = Math.max(120, height - contentTop - 20);
@@ -858,6 +972,9 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
     }
 
     private void addBody() {
+        if (dialogDraft.defer(this::addBody)) {
+            return;
+        }
         snapshot();
         JsonObject body = new JsonObject();
         body.addProperty("type", "minecraft:plain_message");
@@ -868,6 +985,9 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
     }
 
     private void addInput() {
+        if (dialogDraft.defer(this::addInput)) {
+            return;
+        }
         snapshot();
         JsonObject input = new JsonObject();
         input.addProperty("type", "minecraft:text");
@@ -882,6 +1002,9 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
     }
 
     private void addAction() {
+        if (dialogDraft.defer(this::addAction)) {
+            return;
+        }
         snapshot();
         JsonObject action = new JsonObject();
         action.addProperty("label", "Button");
@@ -895,28 +1018,40 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
     }
 
     private boolean deleteSelection() {
-        JsonArray selectedArray = switch (selection.kind()) {
+        Selection target = selection;
+        if (dialogDraft.defer(() -> deleteSelection(target))) {
+            return true;
+        }
+        return deleteSelection(target);
+    }
+
+    private boolean deleteSelection(Selection target) {
+        JsonArray selectedArray = switch (target.kind()) {
             case "body" -> array("body");
             case "input" -> array("inputs");
             case "action" -> array("actions");
             default -> null;
         };
-        if (selectedArray == null || !validIndex(selectedArray, selection.index())) {
+        if (selectedArray == null || !validIndex(selectedArray, target.index())) {
             return false;
         }
         snapshot();
-        selectedArray.remove(selection.index());
+        selectedArray.remove(target.index());
         selection = Selection.global();
         rebuildSelectionSection();
         return true;
     }
 
     private void updateDialogType(String value) {
+        String next = value != null ? value : "";
+        if (dialogDraft.defer(() -> updateDialogType(next))) {
+            return;
+        }
         snapshot();
-        dialog.addProperty("type", value);
-        if ("minecraft:notice".equals(value) && array("actions").isEmpty()) {
+        dialog.addProperty("type", next);
+        if ("minecraft:notice".equals(next) && array("actions").isEmpty()) {
             addDefaultAction("Ok");
-        } else if ("minecraft:confirmation".equals(value) && array("actions").size() < 2) {
+        } else if ("minecraft:confirmation".equals(next) && array("actions").size() < 2) {
             while (array("actions").size() < 2) {
                 addDefaultAction(array("actions").isEmpty() ? "Yes" : "No");
             }
@@ -1031,25 +1166,77 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
     }
 
     private void save() {
-        ensureDefaults();
         FlowManager manager = FlowManager.getInstance();
         String id = text(dialog, "id");
-        DesignerSaveNotifications.start(serverId, ReSyncResourceType.DIALOG, id, textOr(dialog, "displayName", id));
+        DesignerSaveNotifications.SaveTicket ticket = DesignerSaveNotifications.startExact(serverId,
+            ReSyncResourceType.DIALOG, id, textOr(dialog, "displayName", id));
+        observeSave(ticket);
         if (manager != null && serverId != null) {
-            manager.saveJsonResource(serverId, ReSyncResourceType.DIALOG, dialog);
+            if (!dialogDraft.capture(ReSyncResourceType.DIALOG.typeId(), id, ticket,
+                snapshot -> manager.saveJsonResource(serverId, ReSyncResourceType.DIALOG,
+                    snapshot.serialize(payload -> ensureDefaults(JsonParser.parseString(payload).getAsJsonObject())), ticket))) {
+                DesignerSaveNotifications.failExact(ticket, "Save Snapshot Rejected");
+            }
         } else {
-            DesignerSaveNotifications.failResource(serverId, ReSyncResourceType.DIALOG, id, "ReSync Offline");
+            DesignerSaveNotifications.failExact(ticket, "ReSync Offline");
         }
+    }
+
+    @Override
+    public boolean requestStudioSave() {
+        save();
+        return true;
+    }
+
+    private void rebindDialog(JsonObject previous, JsonObject replacement) {
+        JsonObject currentDialog = dialog;
+        try {
+            dialog = replacement;
+            rebuildInspector();
+            updateLayout(true);
+        } catch (RuntimeException | Error exception) {
+            dialog = currentDialog;
+            throw exception;
+        }
+    }
+
+    private void failSnapshot(VersionedEditorDraft.Failure failure) {
+        if (failure.stage() == VersionedEditorDraft.Stage.REBASE) {
+            new Notification("Save Refresh Failed", "Save Paused", Notification.Type.ERROR);
+            return;
+        }
+        if (failure.request() instanceof DesignerSaveNotifications.SaveTicket ticket) {
+            DesignerSaveNotifications.failExact(ticket, "Save Snapshot Failed");
+        }
+    }
+
+    private void observeSave(DesignerSaveNotifications.SaveTicket ticket) {
+        if (ticket == null) {
+            return;
+        }
+        ticket.whenFinished((saved, current) -> ScreenManager.getInstance().execute(() -> {
+            if (!saved || !current) {
+                dialogDraft.discard(ticket);
+                return;
+            }
+            FlowManager manager = FlowManager.getInstance();
+            FlowManager.ResourceReadLease lease = manager != null
+                ? manager.snapshotResource(serverId, ReSyncResourceType.DIALOG.typeId(), ticket.id()) : null;
+            if (lease == null || !dialogDraft.acknowledge(ticket, lease::materialize)) {
+                dialogDraft.discard(ticket);
+            }
+        }));
     }
 
     private void snapshot() {
         if (!history.isRestoring()) {
+            dialogDraft.markMutation();
             history.capture();
         }
     }
 
     private void restore(String json) {
-        JsonObject restored = JsonTreeParser.parse(json).getAsJsonObject();
+        JsonObject restored = JsonParser.parseString(json).getAsJsonObject();
         dialog.keySet().clear();
         for (Map.Entry<String, JsonElement> entry : restored.entrySet()) {
             dialog.add(entry.getKey(), entry.getValue().deepCopy());
@@ -1060,31 +1247,24 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
     }
 
     private void ensureDefaults() {
-        if (dialog.has("widgets") && dialog.get("widgets").isJsonArray()) {
-            migrateCanvasDialog();
-        }
-        dialog.remove("mode");
-        dialog.remove("canvas");
-        dialog.remove("widgets");
-        dialog.remove("external_title");
-        dialog.remove("pause");
-        String id = textOr(dialog, "id", "dialog");
-        dialog.addProperty("id", id);
-        if (!dialog.has("displayName")) dialog.addProperty("displayName", id);
-        if (!dialog.has("folder")) dialog.addProperty("folder", ReSyncResourceType.DIALOG.defaultFolder());
-        if (!dialog.has("enabled")) dialog.addProperty("enabled", true);
-        if (!dialog.has("type")) dialog.addProperty("type", "minecraft:multi_action");
-        if (!dialog.has("title")) dialog.addProperty("title", textOr(dialog, "displayName", id));
-        array("body");
-        array("inputs");
-        array("actions");
-        if (!dialog.has("can_close_with_escape")) dialog.addProperty("can_close_with_escape", true);
-        if (!dialog.has("after_action")) dialog.addProperty("after_action", "close");
-        if (!dialog.has("columns")) dialog.addProperty("columns", 1);
+        ensureDefaults(dialog);
     }
 
-    private void migrateCanvasDialog() {
-        JsonArray widgets = dialog.getAsJsonArray("widgets");
+    private JsonObject ensureDefaults(JsonObject target) {
+        if (target.has("widgets") && target.get("widgets").isJsonArray()) {
+            migrateCanvasDialog(target);
+        }
+        target.remove("mode");
+        target.remove("canvas");
+        target.remove("widgets");
+        target.remove("external_title");
+        target.remove("pause");
+        ReSyncProtocolContract.dialogResource(target, "dialog").applyDefaults(ReSyncResourceType.DIALOG.defaultFolder());
+        return target;
+    }
+
+    private void migrateCanvasDialog(JsonObject target) {
+        JsonArray widgets = target.getAsJsonArray("widgets");
         JsonArray body = new JsonArray();
         JsonArray inputs = new JsonArray();
         JsonArray actions = new JsonArray();
@@ -1095,7 +1275,7 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
             JsonObject widget = element.getAsJsonObject();
             String kind = text(widget, "kind");
             if ("title".equals(kind) && !text(widget, "text").isBlank()) {
-                dialog.addProperty("title", text(widget, "text"));
+                target.addProperty("title", text(widget, "text"));
             } else if ("text".equals(kind)) {
                 JsonObject block = new JsonObject();
                 block.addProperty("type", "minecraft:plain_message");
@@ -1129,13 +1309,13 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
             }
         }
         if (!body.isEmpty()) {
-            dialog.add("body", body);
+            target.add("body", body);
         }
         if (!inputs.isEmpty()) {
-            dialog.add("inputs", inputs);
+            target.add("inputs", inputs);
         }
         if (!actions.isEmpty()) {
-            dialog.add("actions", actions);
+            target.add("actions", actions);
         }
     }
 
@@ -1366,6 +1546,9 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
     }
 
     private void moveSelectedElement(String kind, int index, int direction) {
+        if (dialogDraft.defer(() -> moveSelectedElement(kind, index, direction))) {
+            return;
+        }
         JsonArray array = arrayForKind(kind);
         if (array == null) {
             return;
@@ -1523,7 +1706,13 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
     }
 
     private MinecraftGameAssets getGameAssets() {
-        return ApplicationHostRegistry.gameAssets();
+        if (RemotelyClient.INSTANCE != null && RemotelyClient.INSTANCE.getHost() != null) {
+            MinecraftGameAssets gameAssets = RemotelyClient.INSTANCE.getHost().getGameAssets();
+            if (gameAssets != null) {
+                return gameAssets;
+            }
+        }
+        return MinecraftGameAssets.EMPTY;
     }
 
     private void drawCenteredRichText(IDrawContext context, String text, int x, int y, int width, int color, boolean shadow) {
@@ -1550,7 +1739,7 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
         for (String paragraph : text.replace('\r', '\n').split("\\n")) {
             StringBuilder current = new StringBuilder();
             for (String word : paragraph.split("\\s+")) {
-                String next = current.isEmpty() ? word : current.toString() + " " + word;
+                String next = current.isEmpty() ? word : current + " " + word;
                 if (richTextWidth(next) <= maxWidth) {
                     current.setLength(0);
                     current.append(next);
@@ -1704,13 +1893,13 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
         if ("Run Flow".equals(mode)) {
             createResource(ReSyncResourceDragPayload.FLOW, id -> {
                 updateActionTarget(action, id);
-                openFlowGraph(id);
+                openGraphResource(id, ReSyncResourceType.FLOW);
             });
         } else if ("Run Function".equals(mode)) {
             createResource(ReSyncResourceDragPayload.FUNCTION, id -> {
                 normalizeBindingFunction(id, CompactBindingSupport.playerActionShape());
                 updateActionTarget(action, id);
-                openFlowGraph(id);
+                openGraphResource(id, ReSyncResourceType.FUNCTION);
             });
         } else if ("Open Dialog".equals(mode)) {
             createResource(ReSyncResourceDragPayload.DIALOG, id -> {
@@ -1723,9 +1912,9 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
     private void openActionTarget(JsonObject action) {
         String mode = actionMode(action);
         if ("Run Flow".equals(mode)) {
-            openFlowGraph(text(resync(action), "flowId"));
+            openGraphResource(text(resync(action), "flowId"), ReSyncResourceType.FLOW);
         } else if ("Run Function".equals(mode)) {
-            openFlowGraph(text(optionalObject(resync(action), "action"), "functionId"));
+            openGraphResource(text(optionalObject(resync(action), "action"), "functionId"), ReSyncResourceType.FUNCTION);
         } else if ("Open Dialog".equals(mode)) {
             openDialog(text(resync(action), "dialogId"));
         }
@@ -1782,14 +1971,14 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
             createResource(ReSyncResourceDragPayload.FUNCTION, id -> {
                 normalizeBindingFunction(id, CompactBindingSupport.playerPredicateShape());
                 updatePredicateTarget(action, id);
-                openFlowGraph(id);
+                openGraphResource(id, ReSyncResourceType.FUNCTION);
             });
         }
     }
 
     private void openPredicateTarget(JsonObject action) {
         if ("Function".equals(predicateMode(action))) {
-            openFlowGraph(text(optionalObject(resync(action), "predicate"), "functionId"));
+            openGraphResource(text(optionalObject(resync(action), "predicate"), "functionId"), ReSyncResourceType.FUNCTION);
         }
     }
 
@@ -1823,9 +2012,7 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
     }
 
     private void normalizeBindingFunction(String functionId, CompactBindingSupport.FunctionShape shape) {
-        FlowManager manager = FlowManager.getInstance();
-        FlowGraph function = manager != null && serverId != null ? manager.getGraph(serverId, ReSyncResourceType.FUNCTION, functionId) : null;
-        CompactBindingSupport.normalizeFunction(serverId, function, shape);
+        CompactBindingSupport.initializeFunction(serverId, functionId, shape);
     }
 
     private String functionInputValue(JsonObject call, FlowGraph.FunctionParameter input) {
@@ -1882,13 +2069,13 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
         });
     }
 
-    private void openFlowGraph(String flowId) {
+    private void openGraphResource(String flowId, ReSyncResourceType type) {
         if (flowId == null || flowId.isBlank() || "none".equalsIgnoreCase(flowId)) {
             return;
         }
         FlowManager manager = FlowManager.getInstance();
         if (manager != null && serverId != null) {
-            manager.openFlowEditor(serverId, null, flowId);
+            manager.openGraphEditor(serverId, null, type, flowId);
         }
     }
 

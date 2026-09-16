@@ -221,6 +221,9 @@ public final class CustomContentGraphAdapter {
     }
 
     public static String typeFromNode(String nodeType) {
+        if (nodeType != null && nodeType.startsWith("restudio.resync:")) {
+            nodeType = nodeType.substring("restudio.resync:".length());
+        }
         return CustomContentContract.typeFromNode(nodeType);
     }
 
@@ -269,7 +272,7 @@ public final class CustomContentGraphAdapter {
             storedBranchesPresent = true;
             for (Object entry : list) {
                 if (entry != null) {
-                    branches.add(FlowJson.text(entry));
+                    branches.add(entry.toString());
                 }
             }
         }
@@ -341,7 +344,7 @@ public final class CustomContentGraphAdapter {
         Map<String, Object> result = new LinkedHashMap<>();
         for (Map.Entry<?, ?> entry : source.entrySet()) {
             if (entry.getKey() != null) {
-                result.put(FlowJson.text(entry.getKey()), normalizeJsonValue(entry.getValue()));
+                result.put(entry.getKey().toString(), normalizeJsonValue(entry.getValue()));
             }
         }
         return result;
@@ -362,7 +365,7 @@ public final class CustomContentGraphAdapter {
     }
 
     private static Integer nullableInt(Object value) {
-        if (value == null || FlowJson.text(value).isBlank()) {
+        if (value == null || value.toString().isBlank()) {
             return null;
         }
         return number(value, 0).intValue();
@@ -374,7 +377,7 @@ public final class CustomContentGraphAdapter {
         }
         if (value != null) {
             try {
-                return Double.parseDouble(FlowJson.text(value));
+                return Double.parseDouble(value.toString());
             } catch (NumberFormatException ignored) {
             }
         }
@@ -382,11 +385,11 @@ public final class CustomContentGraphAdapter {
     }
 
     private static boolean bool(Object value) {
-        return value instanceof Boolean b ? b : Boolean.parseBoolean(FlowJson.text(value));
+        return value instanceof Boolean b ? b : Boolean.parseBoolean(String.valueOf(value));
     }
 
     private static String text(Object value, String fallback) {
-        return value != null ? FlowJson.text(value) : fallback;
+        return value != null ? value.toString() : fallback;
     }
 
     private static String normalizeType(String type) {

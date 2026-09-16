@@ -3,6 +3,8 @@ package redxax.oxy.remotely.flow.ui.studio;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import redxax.oxy.remotely.data.flow.world.WorldOperationResult;
+import redxax.oxy.remotely.flow.ui.GraphEditorScreen;
+import redxax.oxy.remotely.flow.ui.StudioCloseHandledScreen;
 import restudio.resync.flow.contract.EditorError;
 import restudio.resync.flow.workspace.WorkspacePatch;
 import restudio.rescreen.platform.IDrawContext;
@@ -17,6 +19,7 @@ import restudio.rescreen.ui.widgets.ItemSelectorWidget;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
 
 public class ScreenBackedStudioView implements ReSyncStudioView, ReSyncCollaborativeView, StudioSelectorView, WorldStudioDocumentView {
     private final Screen host;
@@ -24,6 +27,8 @@ public class ScreenBackedStudioView implements ReSyncStudioView, ReSyncCollabora
     private final boolean fullEditor;
     private boolean initialized;
     private boolean exposingHeaderButtons;
+    private int appliedWidth = Integer.MIN_VALUE;
+    private int appliedHeight = Integer.MIN_VALUE;
 
     public ScreenBackedStudioView(Screen host, Screen screen) {
         this(host, screen, false);
@@ -41,6 +46,19 @@ public class ScreenBackedStudioView implements ReSyncStudioView, ReSyncCollabora
 
     public boolean fullEditor() {
         return fullEditor;
+    }
+
+    public boolean closeAnimationFinished() {
+        return !(screen instanceof StudioCloseHandledScreen closeHandledScreen)
+            || closeHandledScreen.isStudioCloseAnimationFinished();
+    }
+
+    public boolean requestCloseAnimation() {
+        if (!(screen instanceof StudioCloseHandledScreen)) {
+            return false;
+        }
+        screen.close();
+        return true;
     }
 
     public boolean initialized() {
@@ -63,6 +81,40 @@ public class ScreenBackedStudioView implements ReSyncStudioView, ReSyncCollabora
     @Override
     public boolean supportsCollaboration() {
         return screen instanceof ReSyncCollaborativeView collaborative && collaborative.supportsCollaboration();
+    }
+
+    @Override
+    public long collaborationLifecycle() {
+        return screen instanceof ReSyncCollaborativeView collaborative ? collaborative.collaborationLifecycle() : 0L;
+    }
+
+    @Override
+    public long collaborationEditVersion() {
+        return screen instanceof ReSyncCollaborativeView collaborative ? collaborative.collaborationEditVersion() : -1L;
+    }
+
+    @Override
+    public boolean requestCollaborationDocument(Consumer<CollaborationDocumentSnapshot> completion) {
+        if (completion == null || !(screen instanceof ReSyncCollaborativeView collaborative)) {
+            return ReSyncCollaborativeView.super.requestCollaborationDocument(completion);
+        }
+        return collaborative.requestCollaborationDocument(snapshot -> completion.accept(snapshot.transferredTo(this)));
+    }
+
+    @Override
+    public boolean applyCollaborationDocument(JsonObject document, List<WorkspacePatch<JsonElement>> patches,
+                                              Consumer<CollaborationDocumentApplyResult> completion) {
+        if (completion == null) {
+            return false;
+        }
+        if (screen instanceof ReSyncCollaborativeView collaborative) {
+            return collaborative.applyCollaborationDocument(document, patches,
+                result -> completion.accept(result.ownedBy(this)));
+        }
+        ReSyncCollaborativeView.completeApply(completion, new CollaborationDocumentApplyResult(this,
+            collaborationLifecycle(), -1L, -1L, false,
+            new IllegalStateException("Collaboration Apply Unsupported")));
+        return false;
     }
 
     @Override
@@ -106,7 +158,7 @@ public class ScreenBackedStudioView implements ReSyncStudioView, ReSyncCollabora
         if (initialized) {
             return;
         }
-        screen.resize(host.width, host.height);
+        resizeScreen(host.width, host.height);
         screen.init();
         if (screen instanceof ReScreen reScreen) {
             reScreen.header().visible(false);
@@ -117,7 +169,7 @@ public class ScreenBackedStudioView implements ReSyncStudioView, ReSyncCollabora
     @Override
     public void selected() {
         init();
-        screen.resize(host.width, host.height);
+        resizeScreen(host.width, host.height);
         if (screen instanceof StudioDocumentLifecycleScreen lifecycleScreen) {
             lifecycleScreen.studioDocumentSelected();
         }
@@ -153,9 +205,17 @@ public class ScreenBackedStudioView implements ReSyncStudioView, ReSyncCollabora
 
     @Override
     public void tick() {
-        if (initialized) {
+        if (initialized && !(screen instanceof GraphEditorScreen)) {
             screen.tick();
         }
+    }
+
+    @Override
+    public boolean deferResourceRename(String type, String oldId, String newId, Runnable mutation) {
+        if (screen instanceof StudioResourceRenameAware view) {
+            return view.deferResourceRename(type, oldId, newId, mutation);
+        }
+        return false;
     }
 
     @Override
@@ -167,33 +227,44 @@ public class ScreenBackedStudioView implements ReSyncStudioView, ReSyncCollabora
 
     @Override
     public boolean hasUnsavedChanges() {
+        if (screen instanceof ReSyncStudioView view) {
+            return view.hasUnsavedChanges();
+        }
         return screen instanceof StudioInfiniteScreen studioScreen && studioScreen.hasUnsavedChanges();
     }
 
     @Override
     public void markChangesSaved() {
-        if (screen instanceof StudioInfiniteScreen studioScreen) {
+        if (screen instanceof ReSyncStudioView view) {
+            view.markChangesSaved();
+        } else if (screen instanceof StudioInfiniteScreen studioScreen) {
             studioScreen.markChangesSaved();
         }
     }
 
     @Override
     public void markChangesSaving(long sequence) {
-        if (screen instanceof StudioInfiniteScreen studioScreen) {
+        if (screen instanceof ReSyncStudioView view) {
+            view.markChangesSaving(sequence);
+        } else if (screen instanceof StudioInfiniteScreen studioScreen) {
             studioScreen.markChangesSaving(sequence);
         }
     }
 
     @Override
     public void markChangesSaved(long sequence) {
-        if (screen instanceof StudioInfiniteScreen studioScreen) {
+        if (screen instanceof ReSyncStudioView view) {
+            view.markChangesSaved(sequence);
+        } else if (screen instanceof StudioInfiniteScreen studioScreen) {
             studioScreen.markChangesSaved(sequence);
         }
     }
 
     @Override
     public void discardUnsavedChanges() {
-        if (screen instanceof StudioInfiniteScreen studioScreen) {
+        if (screen instanceof ReSyncStudioView view) {
+            view.discardUnsavedChanges();
+        } else if (screen instanceof StudioInfiniteScreen studioScreen) {
             studioScreen.discardUnsavedChanges();
         }
     }
@@ -201,8 +272,17 @@ public class ScreenBackedStudioView implements ReSyncStudioView, ReSyncCollabora
     @Override
     public void resize(int width, int height) {
         if (initialized) {
-            screen.resize(width, height);
+            resizeScreen(width, height);
         }
+    }
+
+    private void resizeScreen(int width, int height) {
+        if (appliedWidth == width && appliedHeight == height) {
+            return;
+        }
+        screen.resize(width, height);
+        appliedWidth = width;
+        appliedHeight = height;
     }
 
     @Override
@@ -264,6 +344,15 @@ public class ScreenBackedStudioView implements ReSyncStudioView, ReSyncCollabora
     @Override
     public boolean keyPressed(ReKeyEvent event) {
         return initialized && Screen.dispatchKeyPressed(screen, event.retarget(screen));
+    }
+
+    @Override
+    public boolean requestSave() {
+        init();
+        if (screen instanceof StudioSaveProvider provider) {
+            return provider.requestStudioSave();
+        }
+        return screen instanceof ReSyncStudioView view && view.requestSave();
     }
 
     @Override

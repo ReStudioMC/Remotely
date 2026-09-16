@@ -19,7 +19,7 @@ public final class DesktopGraphServerAction {
         if (parent == null || manager == null || server == null || RemotelyClient.INSTANCE == null) {
             return;
         }
-        Instance instance = manager.findInstanceByServerId(serverId, server);
+        Instance instance = (Instance) manager.findInstanceByServerId(serverId, server);
         if (instance == null) {
             instance = buildTemporaryInstance(server);
         }

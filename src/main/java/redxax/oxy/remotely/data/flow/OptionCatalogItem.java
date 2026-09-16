@@ -1,6 +1,10 @@
 package redxax.oxy.remotely.data.flow;
 
-import redxax.oxy.remotely.flow.data.FlowJson;
+import restudio.resync.flow.identity.ContractRef;
+import restudio.resync.flow.identity.OwnerId;
+import restudio.resync.flow.identity.ResourceTypeId;
+import restudio.resync.flow.identity.ServerId;
+import restudio.resync.flow.identity.ServerResourceLocator;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -9,7 +13,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.function.IntFunction;
 
 public class OptionCatalogItem {
     private static final String CUSTOM_DATA = "minecraft:custom_data";
@@ -19,9 +22,33 @@ public class OptionCatalogItem {
     private String icon;
     private String group;
     private Map<String, Object> metadata;
+    private String resourceServerId;
+    private String resourceOwnerId;
+    private String resourceTypeId;
+    private String resourceId;
 
     public void setValue(String value) {
+        if (value != null && !value.isBlank() && hasResourceIdentity()) {
+            throw new IllegalStateException("A resource option cannot also carry a string value");
+        }
         this.value = value;
+    }
+
+    public void setResource(ServerResourceLocator resource) {
+        if (resource == null) {
+            resourceServerId = null;
+            resourceOwnerId = null;
+            resourceTypeId = null;
+            resourceId = null;
+            return;
+        }
+        if (value != null && !value.isBlank()) {
+            throw new IllegalStateException("A string option cannot also carry a resource locator");
+        }
+        resourceServerId = resource.serverId().canonicalText();
+        resourceOwnerId = resource.owner().canonicalText();
+        resourceTypeId = resource.resourceType().value();
+        resourceId = resource.id();
     }
 
     public void setLabel(String label) {
@@ -48,8 +75,31 @@ public class OptionCatalogItem {
         return value;
     }
 
+    public ServerResourceLocator getResource() {
+        if (!hasResourceIdentity()) {
+            return null;
+        }
+        if (blank(resourceServerId) || blank(resourceOwnerId) || blank(resourceTypeId) || blank(resourceId)) {
+            throw new IllegalStateException("A resource option requires server, owner, type, and ID");
+        }
+        return new ServerResourceLocator(ServerId.parseCanonicalText(resourceServerId),
+            ContractRef.of(OwnerId.of(resourceOwnerId), ResourceTypeId.of(resourceTypeId)), resourceId);
+    }
+
+    public boolean isResource() {
+        return getResource() != null;
+    }
+
+    public boolean isAvailable() {
+        return !Boolean.FALSE.equals(getMetadata().get("available"));
+    }
+
     public String getLabel() {
-        return label != null && !label.isBlank() ? label : value;
+        if (label != null && !label.isBlank()) {
+            return label;
+        }
+        ServerResourceLocator resource = getResource();
+        return value != null ? value : resource != null ? resource.id() : "";
     }
 
     public String getDescription() {
@@ -68,6 +118,32 @@ public class OptionCatalogItem {
         return metadata != null ? metadata : Map.of();
     }
 
+    public OptionCatalogItem unavailable(String reason) {
+        OptionCatalogItem copy = copy();
+        Map<String, Object> unavailable = new LinkedHashMap<>(copy.getMetadata());
+        unavailable.put("available", false);
+        if (reason != null && !reason.isBlank()) {
+            unavailable.put("unavailableReason", reason);
+        }
+        copy.setMetadata(unavailable);
+        return copy;
+    }
+
+    public OptionCatalogItem copy() {
+        OptionCatalogItem copy = new OptionCatalogItem();
+        if (hasResourceIdentity()) {
+            copy.setResource(getResource());
+        } else {
+            copy.setValue(value);
+        }
+        copy.setLabel(label);
+        copy.setDescription(description);
+        copy.setIcon(icon);
+        copy.setGroup(group);
+        copy.setMetadata(new LinkedHashMap<>(getMetadata()));
+        return copy;
+    }
+
     @Override
     public boolean equals(Object object) {
         if (this == object) {
@@ -77,6 +153,7 @@ public class OptionCatalogItem {
             return false;
         }
         return Objects.equals(getValue(), item.getValue())
+            && Objects.equals(getResource(), item.getResource())
             && Objects.equals(getLabel(), item.getLabel())
             && Objects.equals(getDescription(), item.getDescription())
             && Objects.equals(getIcon(), item.getIcon())
@@ -86,7 +163,15 @@ public class OptionCatalogItem {
 
     @Override
     public int hashCode() {
-        return Objects.hash(getValue(), getLabel(), getDescription(), getIcon(), getGroup(), stableMetadata());
+        return Objects.hash(getValue(), getResource(), getLabel(), getDescription(), getIcon(), getGroup(), stableMetadata());
+    }
+
+    private boolean hasResourceIdentity() {
+        return !blank(resourceServerId) || !blank(resourceOwnerId) || !blank(resourceTypeId) || !blank(resourceId);
+    }
+
+    private static boolean blank(String value) {
+        return value == null || value.isBlank();
     }
 
     private Map<String, Object> stableMetadata() {
@@ -101,7 +186,7 @@ public class OptionCatalogItem {
         if (value instanceof Map<?, ?> map) {
             Map<String, Object> stable = new LinkedHashMap<>();
             for (Map.Entry<?, ?> entry : map.entrySet()) {
-                String key = FlowJson.text(entry.getKey());
+                String key = String.valueOf(entry.getKey());
                 if (!components || !CUSTOM_DATA.equals(key)) {
                     stable.put(key, stableValue(entry.getValue(), false));
                 }
@@ -111,37 +196,17 @@ public class OptionCatalogItem {
         if (value instanceof Collection<?> collection) {
             return collection.stream().map(entry -> stableValue(entry, false)).toList();
         }
-        if (value instanceof Object[] array) {
-            return stableArray(array.length, index -> array[index]);
-        }
-        if (value instanceof boolean[] array) {
-            return stableArray(array.length, index -> array[index]);
-        }
-        if (value instanceof byte[] array) {
-            return stableArray(array.length, index -> array[index]);
-        }
-        if (value instanceof short[] array) {
-            return stableArray(array.length, index -> array[index]);
-        }
-        if (value instanceof int[] array) {
-            return stableArray(array.length, index -> array[index]);
-        }
-        if (value instanceof long[] array) {
-            return stableArray(array.length, index -> array[index]);
-        }
-        if (value instanceof float[] array) {
-            return stableArray(array.length, index -> array[index]);
-        }
-        if (value instanceof double[] array) {
-            return stableArray(array.length, index -> array[index]);
-        }
-        if (value instanceof char[] array) {
-            return stableArray(array.length, index -> array[index]);
+        List<Object> arrayValues = arrayValues(value);
+        if (arrayValues != null) {
+            List<Object> stable = new ArrayList<>(arrayValues.size());
+            for (Object entry : arrayValues) {
+                stable.add(stableValue(entry, false));
+            }
+            return stable;
         }
         if (value instanceof Number number) {
             try {
-                String text = FlowJson.text(number);
-                return new BigDecimal(text).stripTrailingZeros();
+                return new BigDecimal(number.toString()).stripTrailingZeros();
             } catch (NumberFormatException ignored) {
                 return number.doubleValue();
             }
@@ -149,11 +214,70 @@ public class OptionCatalogItem {
         return value;
     }
 
-    private List<Object> stableArray(int length, IntFunction<Object> values) {
-        List<Object> stable = new ArrayList<>(length);
-        for (int index = 0; index < length; index++) {
-            stable.add(stableValue(values.apply(index), false));
+    private static List<Object> arrayValues(Object value) {
+        if (value instanceof Object[] items) {
+            List<Object> values = new ArrayList<>(items.length);
+            for (Object item : items) {
+                values.add(item);
+            }
+            return values;
         }
-        return stable;
+        if (value instanceof int[] items) {
+            List<Object> values = new ArrayList<>(items.length);
+            for (int item : items) {
+                values.add(item);
+            }
+            return values;
+        }
+        if (value instanceof long[] items) {
+            List<Object> values = new ArrayList<>(items.length);
+            for (long item : items) {
+                values.add(item);
+            }
+            return values;
+        }
+        if (value instanceof double[] items) {
+            List<Object> values = new ArrayList<>(items.length);
+            for (double item : items) {
+                values.add(item);
+            }
+            return values;
+        }
+        if (value instanceof boolean[] items) {
+            List<Object> values = new ArrayList<>(items.length);
+            for (boolean item : items) {
+                values.add(item);
+            }
+            return values;
+        }
+        if (value instanceof float[] items) {
+            List<Object> values = new ArrayList<>(items.length);
+            for (float item : items) {
+                values.add(item);
+            }
+            return values;
+        }
+        if (value instanceof short[] items) {
+            List<Object> values = new ArrayList<>(items.length);
+            for (short item : items) {
+                values.add(item);
+            }
+            return values;
+        }
+        if (value instanceof byte[] items) {
+            List<Object> values = new ArrayList<>(items.length);
+            for (byte item : items) {
+                values.add(item);
+            }
+            return values;
+        }
+        if (value instanceof char[] items) {
+            List<Object> values = new ArrayList<>(items.length);
+            for (char item : items) {
+                values.add(item);
+            }
+            return values;
+        }
+        return null;
     }
 }

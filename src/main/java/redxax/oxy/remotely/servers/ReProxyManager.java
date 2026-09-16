@@ -1,5 +1,7 @@
 package redxax.oxy.remotely.servers;
 
+import java.time.Duration;
+import redxax.oxy.remotely.util.BrowserWork;
 import redxax.oxy.remotely.util.BrowserSafeState;
 
 import redxax.oxy.remotely.RemotelyClient;
@@ -11,6 +13,13 @@ import restudio.rescreen.util.Notification;
 
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.WebSocket;
+import java.nio.ByteBuffer;
+import java.time.Duration;
+import java.util.Map;
+import java.util.concurrent.CompletionStage;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
@@ -27,12 +36,9 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.CompletionStage;
-import java.util.concurrent.TimeUnit;
 import restudio.rescreen.platform.Async;
 import restudio.rebase.platform.jvm.JvmAsyncBridge;
 
-import java.util.concurrent.CompletableFuture;
 
 public class ReProxyManager {
     private static final byte FRAME_AUTH_OK = 2;
@@ -282,7 +288,7 @@ public class ReProxyManager {
                         return;
                     }
                     activeSessions.put(localPort, new ReProxySession(instance, response.tunnelId, response.domain, localPort, webSocket, streams, closing, reconnects, notifications));
-                    CompletableFuture.delayedExecutor(AUTH_TIMEOUT_SECONDS, TimeUnit.SECONDS).execute(() -> listener.checkAuthTimeout(webSocket));
+                    BrowserWork.schedule(Duration.ofSeconds(AUTH_TIMEOUT_SECONDS), () -> listener.checkAuthTimeout(webSocket));
                 })
                 .exceptionally(ex -> {
                     change(notification, "ReProxy Unavailable", displayUri + " - " + cleanMessage(ex), Notification.Type.ERROR, null, false);
@@ -297,7 +303,7 @@ public class ReProxyManager {
             notify(notifications, "ReProxy Offline", "Reconnect Failed", Notification.Type.ERROR);
             return;
         }
-        CompletableFuture.delayedExecutor(Math.min(30, attempt * 3L), TimeUnit.SECONDS).execute(() -> start(instance, null, reconnects, notifications, false));
+        BrowserWork.schedule(Duration.ofSeconds(Math.min(30, attempt * 3L)), () -> start(instance, null, reconnects, notifications, false));
     }
 
     private static Runnable completion(int localPort, Runnable onComplete) {

@@ -1,8 +1,14 @@
 package redxax.oxy.remotely.flow.registry;
 
+import com.google.gson.annotations.JsonAdapter;
 import redxax.oxy.remotely.flow.data.FlowDataType;
 import redxax.oxy.remotely.flow.data.FlowTypeRef;
 import restudio.resync.flow.contract.FlowNodeCategoryContract;
+import restudio.resync.flow.identity.ContractRef;
+import restudio.resync.flow.identity.InspectorFieldId;
+import restudio.resync.flow.identity.PinId;
+import restudio.resync.flow.type.TypeExpr;
+import restudio.resync.flow.type.TypeReference;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -13,6 +19,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 public class NodeDefinition {
     public enum PinType {
@@ -26,6 +33,7 @@ public class NodeDefinition {
         OUTPUT
     }
 
+    @JsonAdapter(NodeCategoryAdapter.class)
     public static final class NodeCategory {
         private static final Map<String, NodeCategory> REGISTRY = new LinkedHashMap<>();
 
@@ -175,7 +183,12 @@ public class NodeDefinition {
         SLIDER,
         NUMBER,
         MULTILINE,
-        COLOR
+        COLOR;
+
+        public static WidgetType fromSerializedName(String value) {
+            String normalized = Objects.requireNonNull(value, "Widget type is required").trim().toUpperCase(Locale.ROOT);
+            return "BOOLEAN".equals(normalized) ? TOGGLE : valueOf(normalized);
+        }
     }
 
     public enum NodeKind {
@@ -221,7 +234,6 @@ public class NodeDefinition {
     private final String auditPolicy;
     private final String confirmationPolicy;
     private final String clockDomain;
-    private final AuthoredNodeMetadata authoredMetadata;
 
     private NodeDefinition(Builder builder) {
         this.id = builder.id;
@@ -258,7 +270,6 @@ public class NodeDefinition {
         this.auditPolicy = builder.auditPolicy;
         this.confirmationPolicy = builder.confirmationPolicy;
         this.clockDomain = builder.clockDomain;
-        this.authoredMetadata = builder.authoredMetadata;
     }
 
     public String getId() {
@@ -287,6 +298,10 @@ public class NodeDefinition {
 
     public int getPriority() {
         return NodeDiscoveryPreferences.discoveryPriority(id, priority, recommended);
+    }
+
+    public int getRegistryPriority() {
+        return priority;
     }
 
     public boolean isHidden() {
@@ -397,18 +412,6 @@ public class NodeDefinition {
         return clockDomain != null ? clockDomain : "";
     }
 
-    public AuthoredNodeMetadata getAuthoredMetadata() {
-        return authoredMetadata;
-    }
-
-    public NodeDefinition withAuthoredMetadata(AuthoredNodeMetadata authoredMetadata) {
-        return new Builder(this).authoredMetadata(authoredMetadata).build();
-    }
-
-    public NodeDefinition withId(String id) {
-        return new Builder(this).id(id).build();
-    }
-
     public record PinMapping(String source, String target) {
     }
 
@@ -460,17 +463,125 @@ public class NodeDefinition {
         }
     }
 
+    public static final class TypedDefault {
+        private static final Set<String> KNOWN_FIELDS = Set.of("state", "type", "variantId", "value", "locator");
+        private final String state;
+        private final FlowTypeRef typeRef;
+        private final Object material;
+        private final String variantId;
+        private final Map<String, Object> unknown;
+
+        public TypedDefault(String state, FlowTypeRef typeRef, Object material) {
+            this(state, typeRef, material, null, Map.of());
+        }
+
+        public TypedDefault(String state, FlowTypeRef typeRef, Object material, String variantId,
+                            Map<String, ?> unknown) {
+            String normalized = state == null ? "" : state.strip().toLowerCase(Locale.ROOT);
+            if (!List.of("absent", "null", "value", "locator", "opaque").contains(normalized)) {
+                throw new IllegalArgumentException("Typed default state is unsupported");
+            }
+            if (typeRef == null || typeRef.getTypeId() == null || typeRef.getTypeId().isBlank()) {
+                throw new IllegalArgumentException("Typed default type is required");
+            }
+            boolean empty = "absent".equals(normalized) || "null".equals(normalized);
+            boolean nullableOpaque = "opaque".equals(normalized);
+            if (empty && material != null || !empty && !nullableOpaque && material == null) {
+                throw new IllegalArgumentException("Typed default material does not match its state");
+            }
+            String normalizedVariant = variantId == null ? null : TypeReference.requireLocalId(variantId);
+            boolean union = "union".equals(typeRef.getTypeId());
+            if (empty && normalizedVariant != null || !empty && union != (normalizedVariant != null)) {
+                throw new IllegalArgumentException("Typed default variant does not match its type and state");
+            }
+            LinkedHashMap<String, Object> unknownCopy = new LinkedHashMap<>();
+            if (unknown != null) {
+                for (Map.Entry<String, ?> entry : unknown.entrySet()) {
+                    String key = Objects.requireNonNull(entry.getKey(), "Typed default unknown field is required");
+                    if (KNOWN_FIELDS.contains(key)) {
+                        throw new IllegalArgumentException("Typed default unknown data contains a known field");
+                    }
+                    unknownCopy.put(key, freezeValue(entry.getValue()));
+                }
+            }
+            this.state = normalized;
+            this.typeRef = typeRef;
+            this.material = freezeValue(material);
+            this.variantId = normalizedVariant;
+            this.unknown = Collections.unmodifiableMap(unknownCopy);
+        }
+
+        public String getState() {
+            return state;
+        }
+
+        public FlowTypeRef getTypeRef() {
+            return typeRef;
+        }
+
+        public Object getMaterial() {
+            return material;
+        }
+
+        public String getVariantId() {
+            return variantId;
+        }
+
+        public Map<String, Object> getUnknown() {
+            return unknown;
+        }
+
+        public boolean isAbsent() {
+            return "absent".equals(state);
+        }
+
+        public boolean isNull() {
+            return "null".equals(state);
+        }
+
+        public boolean isLocator() {
+            return "locator".equals(state);
+        }
+
+        public boolean isOpaque() {
+            return "opaque".equals(state);
+        }
+    }
+
+    private static Object freezeValue(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            LinkedHashMap<String, Object> copy = new LinkedHashMap<>();
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                if (!(entry.getKey() instanceof String key)) {
+                    throw new IllegalArgumentException("Typed default map keys must be strings");
+                }
+                copy.put(key, freezeValue(entry.getValue()));
+            }
+            return Collections.unmodifiableMap(copy);
+        }
+        if (value instanceof List<?> list) {
+            return list.stream().map(NodeDefinition::freezeValue).toList();
+        }
+        return value;
+    }
+
     public static class RepeatablePin {
         private final String groupId;
         private final int minItems;
         private final int maxItems;
         private final String itemLabel;
+        private final boolean ordered;
 
         public RepeatablePin(String groupId, int minItems, int maxItems, String itemLabel) {
+            this(groupId, minItems, maxItems, itemLabel, true);
+        }
+
+        public RepeatablePin(String groupId, int minItems, int maxItems, String itemLabel, boolean ordered) {
             this.groupId = groupId;
             this.minItems = Math.max(0, minItems);
             this.maxItems = Math.max(this.minItems, maxItems);
             this.itemLabel = itemLabel;
+            this.ordered = ordered;
         }
 
         public String getGroupId() {
@@ -488,10 +599,15 @@ public class NodeDefinition {
         public String getItemLabel() {
             return itemLabel;
         }
+
+        public boolean isOrdered() {
+            return ordered;
+        }
     }
 
     public static class PinDefinition {
-        private final String name;
+        private final PinId id;
+        private final String displayName;
         private final PinType type;
         private final PinDirection direction;
         private final FlowDataType dataType;
@@ -500,40 +616,43 @@ public class NodeDefinition {
         private final WidgetType widgetType;
         private final List<String> options;
         private final String optionsSource;
+        private final ContractRef<InspectorFieldId> optionSourceRef;
         private final String defaultValue;
+        private final TypedDefault typedDefault;
+        private final TypeExpr typedType;
         private final PinConstraints constraints;
         private final Map<String, String> visibleWhen;
         private final String description;
         private final boolean optional;
 
         public PinDefinition(String name, PinType type, PinDirection direction, FlowDataType dataType) {
-            this(name, type, direction, dataType, null, null, null, null, null, null, null, false);
+            this(PinId.of(name), name, type, direction, dataType, null, null, null, null, null, null, null, false);
         }
 
         public PinDefinition(String name, PinType type, PinDirection direction, FlowDataType dataType, boolean optional) {
-            this(name, type, direction, dataType, null, null, null, null, null, null, null, optional);
+            this(PinId.of(name), name, type, direction, dataType, null, null, null, null, null, null, null, optional);
         }
 
         public PinDefinition(String name, PinType type, PinDirection direction, FlowDataType dataType, FlowTypeRef typeRef) {
-            this(name, type, direction, dataType, null, null, null, null, null, null, null, false, typeRef);
+            this(PinId.of(name), name, type, direction, dataType, null, null, null, null, null, null, null, false, typeRef);
         }
 
         public PinDefinition(String name, PinType type, PinDirection direction, FlowDataType dataType,
                              WidgetType widgetType, List<String> options, String defaultValue,
                               PinConstraints constraints, Map<String, String> visibleWhen, String description) {
-            this(name, type, direction, dataType, widgetType, options, null, defaultValue, constraints, visibleWhen, description, false);
+            this(PinId.of(name), name, type, direction, dataType, widgetType, options, null, defaultValue, constraints, visibleWhen, description, false);
         }
 
         public PinDefinition(String name, PinType type, PinDirection direction, FlowDataType dataType,
                              WidgetType widgetType, List<String> options, String optionsSource, String defaultValue,
                              PinConstraints constraints, Map<String, String> visibleWhen, String description) {
-            this(name, type, direction, dataType, widgetType, options, optionsSource, defaultValue, constraints, visibleWhen, description, false);
+            this(PinId.of(name), name, type, direction, dataType, widgetType, options, optionsSource, defaultValue, constraints, visibleWhen, description, false);
         }
 
         public PinDefinition(String name, PinType type, PinDirection direction, FlowDataType dataType,
                              WidgetType widgetType, List<String> options, String optionsSource, String defaultValue,
                              PinConstraints constraints, Map<String, String> visibleWhen, String description, boolean optional) {
-            this(name, type, direction, dataType, widgetType, options, optionsSource, defaultValue, constraints, visibleWhen,
+            this(PinId.of(name), name, type, direction, dataType, widgetType, options, optionsSource, defaultValue, constraints, visibleWhen,
                 description, optional, dataType != null ? FlowTypeRef.simple(dataType.getId()) : FlowTypeRef.simple("any"));
         }
 
@@ -541,15 +660,77 @@ public class NodeDefinition {
                              WidgetType widgetType, List<String> options, String optionsSource, String defaultValue,
                              PinConstraints constraints, Map<String, String> visibleWhen, String description, boolean optional,
                              FlowTypeRef typeRef) {
-            this(name, type, direction, dataType, widgetType, options, optionsSource, defaultValue, constraints, visibleWhen,
+            this(PinId.of(name), name, type, direction, dataType, widgetType, options, optionsSource, defaultValue, constraints, visibleWhen,
                 description, optional, typeRef, null);
+        }
+
+        public PinDefinition(PinId id, String displayName, PinType type, PinDirection direction, FlowDataType dataType) {
+            this(id, displayName, type, direction, dataType, null, null, null, null, null, null, null, false);
+        }
+
+        public PinDefinition(PinId id, String displayName, PinType type, PinDirection direction, FlowDataType dataType,
+                             boolean optional) {
+            this(id, displayName, type, direction, dataType, null, null, null, null, null, null, null, optional);
+        }
+
+        public PinDefinition(PinId id, String displayName, PinType type, PinDirection direction, FlowDataType dataType,
+                             FlowTypeRef typeRef) {
+            this(id, displayName, type, direction, dataType, null, null, null, null, null, null, null, false, typeRef);
+        }
+
+        public PinDefinition(PinId id, String displayName, PinType type, PinDirection direction, FlowDataType dataType,
+                             WidgetType widgetType, List<String> options, String optionsSource, String defaultValue,
+                             PinConstraints constraints, Map<String, String> visibleWhen, String description) {
+            this(id, displayName, type, direction, dataType, widgetType, options, optionsSource, defaultValue, constraints,
+                visibleWhen, description, false);
+        }
+
+        public PinDefinition(PinId id, String displayName, PinType type, PinDirection direction, FlowDataType dataType,
+                             WidgetType widgetType, List<String> options, String optionsSource, String defaultValue,
+                             PinConstraints constraints, Map<String, String> visibleWhen, String description, boolean optional) {
+            this(id, displayName, type, direction, dataType, widgetType, options, optionsSource, defaultValue, constraints,
+                visibleWhen, description, optional, dataType != null ? FlowTypeRef.simple(dataType.getId()) : FlowTypeRef.simple("any"));
+        }
+
+        public PinDefinition(PinId id, String displayName, PinType type, PinDirection direction, FlowDataType dataType,
+                             WidgetType widgetType, List<String> options, String optionsSource, String defaultValue,
+                             PinConstraints constraints, Map<String, String> visibleWhen, String description, boolean optional,
+                             FlowTypeRef typeRef) {
+            this(id, displayName, type, direction, dataType, widgetType, options, optionsSource, defaultValue, constraints,
+                visibleWhen, description, optional, typeRef, null);
         }
 
         public PinDefinition(String name, PinType type, PinDirection direction, FlowDataType dataType,
                              WidgetType widgetType, List<String> options, String optionsSource, String defaultValue,
                              PinConstraints constraints, Map<String, String> visibleWhen, String description, boolean optional,
                              FlowTypeRef typeRef, RepeatablePin repeatable) {
-            this.name = name;
+            this(PinId.of(name), name, type, direction, dataType, widgetType, options, optionsSource, defaultValue, constraints,
+                visibleWhen, description, optional, typeRef, repeatable);
+        }
+
+        public PinDefinition(PinId id, String displayName, PinType type, PinDirection direction, FlowDataType dataType,
+                             WidgetType widgetType, List<String> options, String optionsSource, String defaultValue,
+                             PinConstraints constraints, Map<String, String> visibleWhen, String description, boolean optional,
+                             FlowTypeRef typeRef, RepeatablePin repeatable) {
+            this(id, displayName, type, direction, dataType, widgetType, options, optionsSource, defaultValue, constraints,
+                visibleWhen, description, optional, typeRef, repeatable, null);
+        }
+
+        public PinDefinition(PinId id, String displayName, PinType type, PinDirection direction, FlowDataType dataType,
+                             WidgetType widgetType, List<String> options, String optionsSource, String defaultValue,
+                             PinConstraints constraints, Map<String, String> visibleWhen, String description, boolean optional,
+                             FlowTypeRef typeRef, RepeatablePin repeatable, TypedDefault typedDefault) {
+            this(id, displayName, type, direction, dataType, widgetType, options, optionsSource, null, defaultValue,
+                constraints, visibleWhen, description, optional, typeRef, repeatable, typedDefault, null);
+        }
+
+        public PinDefinition(PinId id, String displayName, PinType type, PinDirection direction, FlowDataType dataType,
+                             WidgetType widgetType, List<String> options, String optionsSource,
+                             ContractRef<InspectorFieldId> optionSourceRef, String defaultValue,
+                             PinConstraints constraints, Map<String, String> visibleWhen, String description, boolean optional,
+                             FlowTypeRef typeRef, RepeatablePin repeatable, TypedDefault typedDefault, TypeExpr typedType) {
+            this.id = Objects.requireNonNull(id, "Pin ID is required");
+            this.displayName = displayName != null && !displayName.isBlank() ? displayName : id.value();
             this.type = type;
             this.direction = direction;
             this.dataType = dataType;
@@ -558,7 +739,10 @@ public class NodeDefinition {
             this.widgetType = widgetType;
             this.options = options != null ? options : Collections.emptyList();
             this.optionsSource = optionsSource;
+            this.optionSourceRef = optionSourceRef;
             this.defaultValue = defaultValue;
+            this.typedDefault = typedDefault;
+            this.typedType = typedType;
             this.constraints = constraints;
             this.visibleWhen = visibleWhen != null ? visibleWhen : Collections.emptyMap();
             this.description = description;
@@ -566,7 +750,15 @@ public class NodeDefinition {
         }
 
         public String getName() {
-            return name;
+            return id.value();
+        }
+
+        public PinId getId() {
+            return id;
+        }
+
+        public String getDisplayName() {
+            return displayName;
         }
 
         public PinType getType() {
@@ -601,8 +793,20 @@ public class NodeDefinition {
             return optionsSource;
         }
 
+        public ContractRef<InspectorFieldId> getOptionSourceRef() {
+            return optionSourceRef;
+        }
+
         public String getDefaultValue() {
             return defaultValue;
+        }
+
+        public TypedDefault getTypedDefault() {
+            return typedDefault;
+        }
+
+        public TypeExpr getTypedType() {
+            return typedType;
         }
 
         public PinConstraints getConstraints() {
@@ -657,7 +861,6 @@ public class NodeDefinition {
         private String auditPolicy = "none";
         private String confirmationPolicy = "none";
         private String clockDomain = "";
-        private AuthoredNodeMetadata authoredMetadata;
 
         public Builder(String id, String displayName, NodeCategory category) {
             this.id = id;
@@ -665,51 +868,8 @@ public class NodeDefinition {
             this.category = category;
         }
 
-        private Builder(NodeDefinition definition) {
-            this.id = definition.id;
-            this.displayName = definition.displayName;
-            this.category = definition.category;
-            this.inputs.addAll(definition.inputs);
-            this.outputs.addAll(definition.outputs);
-            this.color = definition.color;
-            this.priority = definition.priority;
-            this.hidden = definition.hidden;
-            this.hiddenReason = definition.hiddenReason;
-            this.owner = definition.owner;
-            this.description = definition.description;
-            this.handler = definition.handler;
-            this.handlerConfig = definition.handlerConfig;
-            this.trigger = definition.trigger;
-            this.eventType = definition.eventType;
-            this.aliases = definition.aliases;
-            this.outputMappings = definition.outputMappings;
-            this.schemaVersion = definition.schemaVersion;
-            this.kind = definition.kind;
-            this.availability = definition.availability;
-            this.canonicalId = definition.canonicalId;
-            this.legacyIds = definition.legacyIds;
-            this.deprecated = definition.deprecated;
-            this.tags = definition.tags;
-            this.examples = definition.examples;
-            this.family = definition.family;
-            this.recommended = definition.recommended;
-            this.replacementFor = definition.replacementFor;
-            this.authorizationPolicy = definition.authorizationPolicy;
-            this.sensitive = definition.sensitive;
-            this.destructive = definition.destructive;
-            this.auditPolicy = definition.auditPolicy;
-            this.confirmationPolicy = definition.confirmationPolicy;
-            this.clockDomain = definition.clockDomain;
-            this.authoredMetadata = definition.authoredMetadata;
-        }
-
         public Builder input(String name, PinType type, FlowDataType dataType) {
             inputs.add(new PinDefinition(name, type, PinDirection.INPUT, dataType));
-            return this;
-        }
-
-        public Builder id(String id) {
-            this.id = id;
             return this;
         }
 
@@ -880,19 +1040,11 @@ public class NodeDefinition {
             return this;
         }
 
-        public Builder authoredMetadata(AuthoredNodeMetadata authoredMetadata) {
-            this.authoredMetadata = authoredMetadata;
-            return this;
-        }
-
         public Builder hidden() {
             return hidden(true);
         }
 
         public NodeDefinition build() {
-            if (authoredMetadata != null && !authoredIdentityMatches(id, owner, authoredMetadata.id())) {
-                throw new IllegalArgumentException("Authored node identity does not match the node definition identity");
-            }
             if (color == 0xFFAAAAAA && category != null) {
                 color(category);
             }
@@ -926,13 +1078,6 @@ public class NodeDefinition {
             return new NodeDefinition(this);
         }
 
-        private static boolean authoredIdentityMatches(String id, String owner, String authoredId) {
-            if (Objects.equals(id, authoredId)) {
-                return true;
-            }
-            return owner != null && !owner.isBlank() && Objects.equals(id, owner + ":" + authoredId);
-        }
-
         private String defaultUsageHint() {
             return switch (kind) {
                 case EVENT -> "Connect the event Flow output to the actions that should run.";
@@ -963,7 +1108,8 @@ public class NodeDefinition {
     }
 
     public static class PinBuilder {
-        private String name;
+        private PinId id;
+        private String displayName;
         private PinType type;
         private PinDirection direction;
         private FlowDataType dataType;
@@ -972,18 +1118,41 @@ public class NodeDefinition {
         private WidgetType widgetType;
         private List<String> options;
         private String optionsSource;
+        private ContractRef<InspectorFieldId> optionSourceRef;
         private String defaultValue;
+        private TypedDefault typedDefault;
+        private TypeExpr typedType;
         private PinConstraints constraints;
         private Map<String, String> visibleWhen;
         private String description;
         private boolean optional;
 
         public PinBuilder(String name, PinType type, PinDirection direction, FlowDataType dataType) {
-            this.name = name;
+            this.id = PinId.of(name);
+            this.displayName = name;
             this.type = type;
             this.direction = direction;
             this.dataType = dataType;
             this.typeRef = dataType != null ? FlowTypeRef.simple(dataType.getId()) : FlowTypeRef.simple("any");
+        }
+
+        public PinBuilder(PinId id, String displayName, PinType type, PinDirection direction, FlowDataType dataType) {
+            this.id = Objects.requireNonNull(id, "Pin ID is required");
+            this.displayName = displayName != null && !displayName.isBlank() ? displayName : id.value();
+            this.type = type;
+            this.direction = direction;
+            this.dataType = dataType;
+            this.typeRef = dataType != null ? FlowTypeRef.simple(dataType.getId()) : FlowTypeRef.simple("any");
+        }
+
+        public PinBuilder id(PinId id) {
+            this.id = Objects.requireNonNull(id, "Pin ID is required");
+            return this;
+        }
+
+        public PinBuilder displayName(String displayName) {
+            this.displayName = displayName;
+            return this;
         }
 
         public PinBuilder typeRef(FlowTypeRef typeRef) {
@@ -993,6 +1162,11 @@ public class NodeDefinition {
 
         public PinBuilder repeatable(String groupId, int minItems, int maxItems, String itemLabel) {
             this.repeatable = new RepeatablePin(groupId, minItems, maxItems, itemLabel);
+            return this;
+        }
+
+        public PinBuilder repeatable(String groupId, int minItems, int maxItems, String itemLabel, boolean ordered) {
+            this.repeatable = new RepeatablePin(groupId, minItems, maxItems, itemLabel, ordered);
             return this;
         }
 
@@ -1011,8 +1185,23 @@ public class NodeDefinition {
             return this;
         }
 
+        public PinBuilder optionSourceRef(ContractRef<InspectorFieldId> optionSourceRef) {
+            this.optionSourceRef = optionSourceRef;
+            return this;
+        }
+
         public PinBuilder defaultValue(String defaultValue) {
             this.defaultValue = defaultValue;
+            return this;
+        }
+
+        public PinBuilder typedDefault(TypedDefault typedDefault) {
+            this.typedDefault = typedDefault;
+            return this;
+        }
+
+        public PinBuilder typedType(TypeExpr typedType) {
+            this.typedType = typedType;
             return this;
         }
 
@@ -1048,8 +1237,9 @@ public class NodeDefinition {
         }
 
         public PinDefinition build() {
-            return new PinDefinition(name, type, direction, dataType, widgetType, options, optionsSource, defaultValue, constraints,
-                visibleWhen, description, optional, typeRef, repeatable);
+            return new PinDefinition(id, displayName, type, direction, dataType, widgetType, options, optionsSource,
+                optionSourceRef, defaultValue, constraints,
+                visibleWhen, description, optional, typeRef, repeatable, typedDefault, typedType);
         }
     }
 }

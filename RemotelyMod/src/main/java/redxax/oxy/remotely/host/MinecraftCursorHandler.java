@@ -18,7 +18,14 @@ public final class MinecraftCursorHandler implements CursorHandler {
 
     @Override
     public boolean windowActive() {
+        //#if MC >= 26.3
         return windowHandle() != 0 && !minecraft.getWindow().isIconified() && minecraft.getWindow().isFocused();
+        //#else
+        //$$ long window = windowHandle();
+        //$$ return window != 0
+        //$$     && GLFW.glfwGetWindowAttrib(window, GLFW.GLFW_ICONIFIED) != GLFW.GLFW_TRUE
+        //$$     && GLFW.glfwGetWindowAttrib(window, GLFW.GLFW_FOCUSED) != GLFW.GLFW_FALSE;
+        //#endif
     }
 
     @Override

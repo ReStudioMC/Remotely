@@ -1,16 +1,16 @@
 package redxax.oxy.remotely.data.flow;
 
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
+import com.google.gson.Gson;
 import restudio.resync.flow.contract.EditorDiagnostic;
 import restudio.resync.flow.contract.EditorError;
-import restudio.rescreen.util.JsonTreeParser;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
 public final class ReSyncEditorDiagnostics {
+    private static final Gson GSON = new Gson();
+
     private ReSyncEditorDiagnostics() {
     }
 
@@ -19,36 +19,10 @@ public final class ReSyncEditorDiagnostics {
             return null;
         }
         try {
-            JsonElement parsed = JsonTreeParser.parse(message.substring(EditorError.PREFIX.length()));
-            if (!parsed.isJsonObject()) return null;
-            JsonObject root = parsed.getAsJsonObject();
-            List<EditorDiagnostic> diagnostics = new ArrayList<>();
-            JsonElement encodedDiagnostics = root.get("diagnostics");
-            if (encodedDiagnostics != null && encodedDiagnostics.isJsonArray()) {
-                for (JsonElement value : encodedDiagnostics.getAsJsonArray()) {
-                    if (!value.isJsonObject()) continue;
-                    JsonObject diagnostic = value.getAsJsonObject();
-                    EditorDiagnostic.Severity severity;
-                    try {
-                        severity = EditorDiagnostic.Severity.valueOf(string(diagnostic, "severity"));
-                    } catch (IllegalArgumentException exception) {
-                        severity = EditorDiagnostic.Severity.ERROR;
-                    }
-                    diagnostics.add(new EditorDiagnostic(severity, string(diagnostic, "code"), string(diagnostic, "nodeId"),
-                        string(diagnostic, "field"), string(diagnostic, "path"), string(diagnostic, "message"),
-                        string(diagnostic, "remediation")));
-                }
-            }
-            return new EditorError(string(root, "code"), string(root, "resourceType"), string(root, "resourceId"),
-                string(root, "title"), string(root, "message"), diagnostics);
+            return GSON.fromJson(message.substring(EditorError.PREFIX.length()), EditorError.class);
         } catch (RuntimeException ignored) {
             return null;
         }
-    }
-
-    private static String string(JsonObject object, String key) {
-        JsonElement value = object.get(key);
-        return value != null && !value.isJsonNull() ? value.getAsString() : "";
     }
 
     public static String title(EditorError error) {
@@ -85,7 +59,8 @@ public final class ReSyncEditorDiagnostics {
         }
         String field = label(diagnostic.field());
         return switch (diagnostic.code()) {
-            case "REQUIRED_INPUT_MISSING" -> "Connect or enter a value for " + fallback(field, "the highlighted input") + " in the highlighted node.";
+            case "REQUIRED_INPUT_MISSING" ->
+                "Connect or enter a value for " + fallback(field, "the required input") + " in the highlighted node.";
             case "LITERAL_TYPE_INVALID", "INVALID_LITERAL", "INPUT_LITERAL_INVALID" ->
                 "Enter a valid value for " + fallback(field, "the highlighted input") + ".";
             case "UNKNOWN_NODE_TYPE" -> "Replace the highlighted node because its type is unavailable.";

@@ -1,5 +1,6 @@
 package redxax.oxy.remotely.flow.ui;
 
+import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import redxax.oxy.remotely.data.flow.FlowManager;
@@ -9,7 +10,6 @@ import redxax.oxy.remotely.data.flow.world.WorldInventoryGroup;
 import redxax.oxy.remotely.data.flow.world.WorldOperationResult;
 import redxax.oxy.remotely.data.flow.world.WorldProfileSettings;
 import redxax.oxy.remotely.data.flow.world.WorldRegistryEntry;
-import redxax.oxy.remotely.data.flow.world.WorldRegistryJson;
 import redxax.oxy.remotely.flow.data.ReSyncResourceDragPayload;
 import redxax.oxy.remotely.flow.data.FlowWorkspaceDocument;
 import redxax.oxy.remotely.flow.ui.studio.ReSyncCollaborativeView;
@@ -32,14 +32,11 @@ import restudio.rescreen.ui.core.Widget;
 import restudio.rescreen.ui.desktop.DesktopWindowBehaviorProvider;
 import restudio.rescreen.ui.rescreen.Container;
 import restudio.rescreen.ui.rescreen.layout.ManagedLayout;
-import restudio.rescreen.ui.settings.Setting;
-import restudio.rescreen.ui.settings.SettingsForm;
 import restudio.rescreen.ui.widgets.AnimatedButton;
 import restudio.rescreen.ui.widgets.AnimatedWidget;
 import restudio.rescreen.ui.widgets.ContextMenuWidget;
 import restudio.rescreen.ui.widgets.IconButton;
 import restudio.rescreen.ui.widgets.ItemSelectorWidget;
-import restudio.rescreen.ui.widgets.MountableButtonWidget;
 import restudio.rescreen.ui.widgets.DropDownWidget;
 import restudio.rescreen.ui.widgets.PopupWidget;
 import restudio.rescreen.ui.widgets.RowWidget;
@@ -59,12 +56,14 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
 import static restudio.rescreen.config.Config.desktopMode;
 
 public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBehaviorProvider, StudioHeaderProvider, StudioSelectorView, WorldStudioDocumentView, ReSyncCollaborativeView {
+    private static final Gson GSON = new Gson();
     private static final List<String> DIFFICULTY_OPTIONS = List.of("PEACEFUL", "EASY", "NORMAL", "HARD");
     private static final List<String> GAME_MODE_OPTIONS = List.of("SURVIVAL", "CREATIVE", "ADVENTURE", "SPECTATOR");
     private static final List<String> EDITABLE_WORLD_FIELDS = List.of(
@@ -82,15 +81,15 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
     private final Object parent;
     protected final StudioScreen host;
     private final Container detailPane;
-    private final Container inventoryPane;
-    private boolean inventoryView;
-    private Runnable saveInventoryGroup;
+    private final VersionedEditorDraft<JsonObject> worldDraft;
     private final List<AnimatedWidget> detailWidgets = new ArrayList<>();
     private final List<AnimatedWidget> headerActions = new ArrayList<>();
     private IconButton actionsHeaderButton;
     private ItemSelectorWidget activePlayerSelector;
     private WorldDetailForm detailForm;
     private final History<JsonObject> worldHistory = history(this::worldDocumentSnapshot, this::restoreWorldDocument);
+    private final HistoryRebaseCoordinator<JsonObject> historyRebase;
+    private volatile long collaborationLifecycle = 1L;
     private boolean worldHistoryReady;
     private boolean applyingWorldDocument;
     private boolean initialized;
@@ -106,7 +105,7 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
         if (world == null) {
             return null;
         }
-        JsonObject document = WorldRegistryJson.write(world);
+        JsonObject document = GSON.toJsonTree(world).getAsJsonObject();
         if (detailForm == null) {
             return document;
         }
@@ -160,14 +159,81 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
     }
 
     @Override
+    public long collaborationLifecycle() {
+        return collaborationLifecycle;
+    }
+
+    @Override
+    public long collaborationEditVersion() {
+        return worldDraft.editVersion();
+    }
+
+    @Override
+    public boolean requestCollaborationDocument(Consumer<CollaborationDocumentSnapshot> completion) {
+        if (completion == null) {
+            return false;
+        }
+        long lifecycle = collaborationLifecycle;
+        return worldDraft.requestProjection(ReSyncResourceDragPayload.WORLD, worldName, this::collaborationDocument,
+            projection -> completion.accept(collaborationSnapshot(lifecycle, projection)));
+    }
+
+    private CollaborationDocumentSnapshot collaborationSnapshot(long lifecycle,
+                                                                 VersionedEditorDraft.ProjectionSnapshot projection) {
+        RuntimeException failure = projection.failure();
+        JsonObject document = null;
+        if (failure == null) {
+            try {
+                document = GSON.fromJson(projection.payload(), JsonObject.class);
+                if (document == null) {
+                    failure = new IllegalStateException("Collaboration Snapshot Is Empty");
+                }
+            } catch (RuntimeException | Error exception) {
+                failure = exception instanceof RuntimeException runtime ? runtime : new IllegalStateException(exception);
+            }
+        }
+        if (failure == null && collaborationLifecycle != lifecycle) {
+            document = null;
+            failure = new IllegalStateException("Collaboration Snapshot Expired");
+        }
+        return new CollaborationDocumentSnapshot(this, lifecycle, projection.editVersion(), document, failure);
+    }
+
+    @Override
+    public boolean applyCollaborationDocument(JsonObject document, List<WorkspacePatch<JsonElement>> patches,
+                                              Consumer<CollaborationDocumentApplyResult> completion) {
+        if (completion == null) {
+            return false;
+        }
+        long lifecycle = collaborationLifecycle;
+        JsonObject semanticDocument = document != null ? document.deepCopy() : null;
+        return worldDraft.runMutation(() -> {
+            if (semanticDocument == null) {
+                throw new IllegalArgumentException("Collaboration Document Is Required");
+            }
+            if (worldManager() == null) {
+                throw new IllegalStateException("World Manager Is Required");
+            }
+            applyCollaborationDocument(semanticDocument, List.of());
+        }, result ->
+            completion.accept(new CollaborationDocumentApplyResult(this, lifecycle, result.beforeEditVersion(),
+                result.afterEditVersion(), result.successful(), result.failure())));
+    }
+
+    @Override
     public void applyCollaborationDocument(JsonObject document, List<WorkspacePatch<JsonElement>> patches) {
-        FlowManager manager = worldManager();
-        if (manager == null || document == null) {
+        JsonObject semanticDocument = document != null ? document.deepCopy() : null;
+        if (worldDraft.defer(() -> applyCollaborationDocument(semanticDocument, List.of()))) {
             return;
         }
+        FlowManager manager = worldManager();
+        if (manager == null || semanticDocument == null) {
+            return;
+        }
+        worldDraft.markMutation();
         applyingWorldDocument = true;
         try {
-            manager.applyCollaborativeWorld(serverId, WorldRegistryJson.read(document));
+            manager.applyCollaborativeWorld(serverId, GSON.fromJson(semanticDocument, WorldRegistryEntry.class));
             refreshDetails();
         } finally {
             applyingWorldDocument = false;
@@ -179,10 +245,13 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
         if (patches == null || patches.isEmpty()) {
             return;
         }
-        worldHistory.rebase(snapshot -> {
-            JsonObject rebased = snapshot.deepCopy();
-            FlowWorkspaceDocument.apply(rebased, patches);
-            return rebased;
+        historyRebase.request(patches, copiedPatches -> snapshot -> {
+            JsonObject rebased = GSON.fromJson(GSON.toJson(snapshot), JsonObject.class);
+            if (rebased == null) {
+                rebased = new JsonObject();
+            }
+            FlowWorkspaceDocument.apply(rebased, copiedPatches);
+            return GSON.fromJson(GSON.toJson(rebased), JsonObject.class);
         });
     }
 
@@ -221,17 +290,22 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
     }
 
     private void restoreWorldDocument(JsonObject snapshot) {
-        FlowManager manager = worldManager();
-        if (manager == null || snapshot == null || snapshot.isEmpty()) {
+        JsonObject semanticSnapshot = snapshot != null ? snapshot.deepCopy() : null;
+        if (worldDraft.defer(() -> restoreWorldDocument(semanticSnapshot))) {
             return;
         }
+        FlowManager manager = worldManager();
+        if (manager == null || semanticSnapshot == null || semanticSnapshot.isEmpty()) {
+            return;
+        }
+        worldDraft.markMutation();
         JsonObject current = collaborationDocument();
-        JsonObject restored = current != null ? current.deepCopy() : snapshot.deepCopy();
+        JsonObject restored = current != null ? current.deepCopy() : semanticSnapshot.deepCopy();
         FlowWorkspaceDocument.apply(restored, FlowWorkspaceDocument.diff(
-            editableWorldDocument(current), editableWorldDocument(snapshot)));
+            editableWorldDocument(current), editableWorldDocument(semanticSnapshot)));
         applyingWorldDocument = true;
         try {
-            manager.applyCollaborativeWorld(serverId, WorldRegistryJson.read(restored));
+            manager.applyCollaborativeWorld(serverId, GSON.fromJson(restored, WorldRegistryEntry.class));
             detailForm = null;
             refreshDetails();
         } finally {
@@ -267,8 +341,12 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
         this.host = parent instanceof StudioScreen screen ? screen : null;
         this.detailPane = new Container("world-detail", 0, 0, 300, 100);
         this.detailPane.layout(new ManagedLayout()).columns(1).padding(5).scrolling(true).backgroundDrawing(true);
-        this.inventoryPane = new Container("world-inventory", 0, 0, 300, 100);
-        this.inventoryPane.layout(new ManagedLayout()).columns(1).padding(5).scrolling(true).backgroundDrawing(true);
+        this.worldDraft = new VersionedEditorDraft<>(new JsonObject(), JsonObject::toString,
+            payload -> GSON.fromJson(payload, JsonObject.class), (previous, replacement) -> {}, failure -> {},
+            () -> new Notification("Editor Busy", "Try Again", Notification.Type.WARN));
+        this.historyRebase = new HistoryRebaseCoordinator<>(worldHistory,
+            () -> serverId + ":" + worldName, () -> collaborationLifecycle,
+            () -> new Notification("Editor Busy", "Try Again", Notification.Type.WARN));
         createHeaderActions();
     }
 
@@ -289,47 +367,76 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
     @Override
     public void resize(int width, int height) {
         int panelWidth = host != null ? host.studioContentBrowserPanelWidth() : 0;
-        this.x = Math.max(18, panelWidth + ReSyncContentBrowserWidget.STUDIO_CONTENT_BROWSER_GAP);
+        int gap = panelWidth > 0 ? ReSyncContentBrowserWidget.STUDIO_CONTENT_BROWSER_GAP : 18;
+        int rightPad = panelWidth > 0 ? ReSyncContentBrowserWidget.STUDIO_CONTENT_BROWSER_GAP : 18;
+        this.x = panelWidth > 0 ? panelWidth + gap : 18;
         this.y = ReSyncContentBrowserWidget.STUDIO_CONTENT_BROWSER_TOP;
         this.height = Math.max(80, height - this.y - ReSyncContentBrowserWidget.STUDIO_CONTENT_BROWSER_BOTTOM);
-        this.width = Math.max(120, width - this.x - 18);
+        this.width = Math.max(120, width - this.x - rightPad);
         updateLayout();
     }
 
     @Override
     public void render(IDrawContext context, int mouseX, int mouseY, float delta) {
+        worldDraft.drain();
+        historyRebase.drain();
         init();
         updateLayout();
-        activeDetailPane().render(context, mouseX, mouseY, delta);
+        detailPane.render(context, mouseX, mouseY, delta);
+    }
+
+    @Override
+    public void removed() {
+        collaborationLifecycle++;
+        historyRebase.close();
+        worldDraft.close();
+        super.removed();
+    }
+
+    @Override
+    public void close() {
+        collaborationLifecycle++;
+        historyRebase.close();
+        worldDraft.close();
+        super.close();
     }
 
 
     @Override
     public boolean mouseClicked(ReMouseEvent event) {
+        if (routeStudioContextMenuMouseClicked(event)) {
+            return true;
+        }
         init();
         if (activePlayerSelector != null && activePlayerSelector.visible && Widget.dispatchMouseClicked(activePlayerSelector, event)) {
             return true;
         }
         captureWorldHistory();
-        return Widget.dispatchMouseClicked(activeDetailPane(), event);
+        return dispatchWorldInput(() -> Widget.dispatchMouseClicked(detailPane, event));
     }
 
 
     @Override
     public boolean mouseReleased(ReMouseEvent event) {
+        if (routeStudioContextMenuMouseReleased(event)) {
+            return true;
+        }
         if (activePlayerSelector != null && activePlayerSelector.visible && Widget.dispatchMouseReleased(activePlayerSelector, event)) {
             return true;
         }
-        return Widget.dispatchMouseReleased(activeDetailPane(), event);
+        return dispatchWorldInput(() -> Widget.dispatchMouseReleased(detailPane, event));
     }
 
 
     @Override
     public boolean mouseDragged(ReMouseEvent event) {
+        if (routeStudioContextMenuMouseDragged(event)) {
+            return true;
+        }
         if (activePlayerSelector != null && activePlayerSelector.visible && Widget.dispatchMouseDragged(activePlayerSelector, event)) {
             return true;
         }
-        return Widget.dispatchMouseDragged(activeDetailPane(), event);
+        return dispatchWorldInput(() -> Widget.dispatchMouseDragged(detailPane, event));
     }
 
 
@@ -338,19 +445,19 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
         if (activePlayerSelector != null && activePlayerSelector.visible && Widget.dispatchMouseScrolled(activePlayerSelector, event)) {
             return true;
         }
-        return Widget.dispatchMouseScrolled(activeDetailPane(), event);
+        return dispatchWorldInput(() -> Widget.dispatchMouseScrolled(detailPane, event));
     }
 
     @Override
     public boolean keyPressed(ReKeyEvent event) {
-        if (!inventoryView && handleStudioHistoryShortcut(event)) {
+        if (handleStudioHistoryShortcut(event)) {
             return true;
         }
         if (activePlayerSelector != null && activePlayerSelector.visible && Widget.dispatchKeyPressed(activePlayerSelector, event)) {
             return true;
         }
         captureWorldHistory();
-        return Widget.dispatchKeyPressed(activeDetailPane(), event);
+        return dispatchWorldInput(() -> Widget.dispatchKeyPressed(detailPane, event));
     }
 
     @Override
@@ -359,7 +466,16 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
             return true;
         }
         captureWorldHistory();
-        return Widget.dispatchTextInput(activeDetailPane(), event);
+        return dispatchWorldInput(() -> Widget.dispatchTextInput(detailPane, event));
+    }
+
+    private boolean dispatchWorldInput(BooleanSupplier dispatch) {
+        JsonObject before = editableWorldDocument(worldDocumentSnapshot());
+        boolean handled = dispatch.getAsBoolean();
+        if (!before.equals(editableWorldDocument(worldDocumentSnapshot()))) {
+            worldDraft.markMutation();
+        }
+        return handled;
     }
 
     @Override
@@ -377,10 +493,6 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
     }
 
     private void saveCurrentWorld() {
-        if (inventoryView) {
-            if (saveInventoryGroup != null) saveInventoryGroup.run();
-            return;
-        }
         if (detailForm == null) {
             return;
         }
@@ -441,17 +553,6 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
     private void updateLayout() {
         detailPane.setPosition(x, y);
         detailPane.setSize(Math.max(120, width), height);
-        inventoryPane.setPosition(x, y);
-        inventoryPane.setSize(Math.max(120, width), height);
-    }
-
-    private Container activeDetailPane() {
-        return inventoryView ? inventoryPane : detailPane;
-    }
-
-    private void showWorldDetails() {
-        inventoryView = false;
-        refreshDetails();
     }
 
     @Override
@@ -472,7 +573,7 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
         if (detailForm != null && worldName.equalsIgnoreCase(detailForm.worldName)) {
             boolean replaceDraft = applyingWorldDocument || !hasUnsavedChanges();
             boolean authoritativeChange = replaceDraft && !editableWorldDocument(worldDocumentSnapshot())
-                .equals(editableWorldDocument(WorldRegistryJson.write(world)));
+                .equals(editableWorldDocument(GSON.toJsonTree(world).getAsJsonObject()));
             detailForm.update(world, replaceDraft);
             if (authoritativeChange && !applyingWorldDocument && worldHistoryReady) {
                 worldHistory.clear();
@@ -532,53 +633,17 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
         IconButton generatorMetric = metricButton("", "resources.png", 160);
 
         addDetailWidget(metricRow(rowWidth, statusMetric, playersMetric, environmentMetric, generatorMetric));
-        addDetailWidget(section("Identity", rowWidth,
-            SettingsForm.field("Alias", "The display name for this world.", alias),
-            SettingsForm.field("Difficulty", "The difficulty used in this world.", difficulty.widget())));
-        addDetailWidget(section("Access", rowWidth,
-            SettingsForm.field("Hidden", "Hide this world from players.", hidden),
-            SettingsForm.field("Force Game Mode", "Apply the selected game mode when players enter.", forceGameMode),
-            SettingsForm.field("Game Mode", "The game mode used when Force Game Mode is enabled.", gameMode.widget()),
-            SettingsForm.field("Access Permission", "Leave empty to allow entry without a permission check.", accessPermission),
-            SettingsForm.field("Bypass Permission", "The permission that bypasses entry restrictions.", bypassPermission)));
-        addDetailWidget(section("Messages", rowWidth,
-            SettingsForm.field("Arrival Message", "Shown when a player enters this world.", arrivalMessage),
-            SettingsForm.field("Deny Message", "Shown when a player cannot enter this world.", denyMessage)));
-        addDetailWidget(section("World Rules", rowWidth,
-            SettingsForm.field("PVP", "Allow players to damage each other.", pvp),
-            SettingsForm.field("Auto Save", "Save world changes automatically.", autoSave),
-            SettingsForm.field("Keep Spawn Loaded", "Keep the spawn area loaded.", keepSpawn),
-            SettingsForm.field("Animal Spawns", "Allow animals to spawn.", animals),
-            SettingsForm.field("Monster Spawns", "Allow monsters to spawn.", monsters),
-            SettingsForm.field("Other Entity Spawns", "Allow non-living entities to spawn.", miscSpawns)));
-        addDetailWidget(section("Player State", rowWidth,
-            SettingsForm.field("Hunger", "Allow hunger to decrease.", hunger),
-            SettingsForm.field("Auto Heal", "Allow natural health regeneration.", autoHeal),
-            SettingsForm.field("Bed Respawn", "Allow players to respawn at their beds.", bedRespawn),
-            SettingsForm.field("Anchor Respawn", "Allow players to respawn at respawn anchors.", anchorRespawn),
-            SettingsForm.field("Isolated State", "Keep player state separate from other worlds.", isolated)));
-        addDetailWidget(section("Travel", rowWidth,
-            SettingsForm.field("Respawn World", "The world players return to after death.", respawnWorld.widget()),
-            SettingsForm.field("Inventory Group", "The group that shares player data with this world.", inventoryGroup.widget())));
-        addDetailWidget(section("Spawn", rowWidth,
-            SettingsForm.field("Custom Spawn", "Use the position and direction below.", customSpawn),
-            SettingsForm.field("X", "", spawnX), SettingsForm.field("Y", "", spawnY), SettingsForm.field("Z", "", spawnZ),
-            SettingsForm.field("Yaw", "Horizontal facing direction.", spawnYaw),
-            SettingsForm.field("Pitch", "Vertical facing direction.", spawnPitch)));
-        addDetailWidget(section("World Links", rowWidth,
-            SettingsForm.field("Nether World", "The destination for Nether travel.", netherWorld.widget()),
-            SettingsForm.field("End World", "The destination for End travel.", endWorld.widget()),
-            SettingsForm.field("Overworld", "The return destination from linked dimensions.", overworld.widget()),
-            SettingsForm.field("Nether Scale", "Scale coordinates when traveling to the Nether.", netherScale),
-            SettingsForm.field("End Scale", "Scale coordinates when traveling to the End.", endScale),
-            SettingsForm.field("Auto Link Nether Portals", "Connect Nether portals to the linked world.", autoNether),
-            SettingsForm.field("Auto Link End Portals", "Connect End portals to the linked world.", autoEnd)));
-        addDetailWidget(section("Time And Weather", rowWidth,
-            SettingsForm.field("Time Lock", "Keep the world at the selected time.", timeLock),
-            SettingsForm.field("Locked Time", "The time to use while Time Lock is enabled.", lockedTime),
-            SettingsForm.field("Weather Lock", "Keep the selected weather conditions.", weatherLock),
-            SettingsForm.field("Storm", "Keep rain or snow active while weather is locked.", storm),
-            SettingsForm.field("Thunder", "Keep thunder active while weather is locked.", thundering)));
+        addDetailWidget(row("Identity", rowWidth, alias, difficulty.widget()));
+        addDetailWidget(row("Access", rowWidth, hidden, forceGameMode, gameMode.widget()));
+        addDetailWidget(row("Permissions", rowWidth, accessPermission, bypassPermission));
+        addDetailWidget(row("Messages", rowWidth, arrivalMessage, denyMessage));
+        addDetailWidget(row("Rules", rowWidth, pvp, autoSave, keepSpawn, animals, monsters));
+        addDetailWidget(row("Player State", rowWidth, hunger, autoHeal, bedRespawn, anchorRespawn, miscSpawns));
+        addDetailWidget(row("Travel", rowWidth, respawnWorld.widget(), inventoryGroup.widget()));
+        addDetailWidget(row("Spawn", rowWidth, customSpawn, spawnX, spawnY, spawnZ, spawnYaw, spawnPitch));
+        addDetailWidget(row("Links", rowWidth, netherWorld.widget(), endWorld.widget(), overworld.widget()));
+        addDetailWidget(row("Portal Scale", rowWidth, netherScale, endScale, autoNether, autoEnd));
+        addDetailWidget(row("Runtime", rowWidth, isolated, timeLock, lockedTime, weatherLock, storm, thundering));
         detailForm = new WorldDetailForm(world.getWorldName(), alias, difficulty, hidden, forceGameMode, gameMode, pvp, autoSave,
             keepSpawn, animals, monsters, hunger, autoHeal, bedRespawn, anchorRespawn, miscSpawns, accessPermission,
             bypassPermission, arrivalMessage, denyMessage, respawnWorld, inventoryGroup, customSpawn, spawnX, spawnY, spawnZ,
@@ -804,15 +869,6 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
             .gap(4);
         for (AnimatedWidget widget : widgets) {
             builder.addWidget(widget);
-        }
-        return builder.build();
-    }
-
-    private Setting section(String title, int rowWidth, MountableButtonWidget... fields) {
-        Setting.Builder builder = new Setting.Builder(title);
-        builder.width(rowWidth);
-        for (MountableButtonWidget field : fields) {
-            builder.addRow("", field);
         }
         return builder.build();
     }
@@ -1364,9 +1420,8 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
         if (manager == null) {
             return;
         }
-        inventoryView = true;
-        inventoryPane.clearWidgets();
-        saveInventoryGroup = null;
+        clearDetailWidgets();
+        detailForm = null;
         List<WorldInventoryGroup> groups = new ArrayList<>(manager.getWorldInventoryGroupsForServer(serverId));
         groups.sort(Comparator.comparing(group -> safeText(group == null ? "" : group.getGroupId()), String.CASE_INSENSITIVE_ORDER));
         int rowWidth = Math.max(220, detailPane.getWidth() - 18);
@@ -1383,16 +1438,17 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
             .imagePath("close.png")
             .size(86, 18)
             .entranceAnimation(false)
-            .onClick(this::showWorldDetails)
+            .onClick(this::refreshDetails)
             .build();
-        inventoryPane.addWidget(row("Groups", rowWidth, createButton, closeButton));
+        addDetailWidget(row("Groups", rowWidth, createButton, closeButton));
         if (groups.isEmpty()) {
-            inventoryPane.addWidget(row("Saved Groups", rowWidth, readOnlyButton("No Groups")));
+            addDetailWidget(row("Saved Groups", rowWidth, readOnlyButton("No Groups")));
         } else {
             for (WorldInventoryGroup group : groups) {
                 if (group == null || safeText(group.getGroupId()).isBlank()) {
                     continue;
                 }
+                IconButton label = readOnlyButton(inventoryGroupSummary(group));
                 SquareButtonWidget edit = new SquareButtonWidget.Builder()
                     .imagePath("edit.png")
                     .hint("Edit Group")
@@ -1407,14 +1463,10 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
                         showInventoryGroupsPopup();
                     })
                     .build();
-                String name = safeText(group.getDisplayName()).isBlank() ? group.getGroupId() : group.getDisplayName();
-                MountableButtonWidget groupRow = new MountableButtonWidget.Builder(name)
-                    .description(inventoryGroupSummary(group)).addWidget(edit).addWidget(delete).build();
-                groupRow.setSize(rowWidth, 34);
-                inventoryPane.addWidget(groupRow);
+                addDetailWidget(row(group.getGroupId(), rowWidth, label, edit, delete));
             }
         }
-        inventoryPane.updateWidgetPositions();
+        detailPane.updateWidgetPositions();
     }
 
     private String inventoryGroupSummary(WorldInventoryGroup group) {
@@ -1445,8 +1497,8 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
             return;
         }
         boolean editing = existingGroup != null;
-        inventoryView = true;
-        inventoryPane.clearWidgets();
+        clearDetailWidgets();
+        detailForm = null;
         int rowWidth = Math.max(220, detailPane.getWidth() - 18);
         TextInputWidget displayName = new TextInputWidget.Builder()
             .text(editing ? safeText(existingGroup.getDisplayName()) : "")
@@ -1467,23 +1519,11 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
         ToggleWidget potions = detailToggle("Potions", !editing || existingGroup.isSharePotionEffects(), 90);
         ToggleWidget lastLocation = detailToggle("Last Location", !editing || existingGroup.isShareLastLocation(), 115);
         ToggleWidget bedSpawn = detailToggle("Bed Spawn", !editing || existingGroup.isShareBedSpawn(), 100);
-        inventoryPane.addWidget(section(editing ? "Edit Group" : "Create Group", rowWidth,
-            SettingsForm.field("Name", "The display name for this group.", displayName)));
+        addDetailWidget(row(editing ? "Edit Group" : "Create Group", rowWidth, displayName));
         addInventoryGroupWorldRow(rowWidth, selectedWorlds);
-        inventoryPane.addWidget(section("Inventory", rowWidth,
-            SettingsForm.field("Inventory", "Share the main inventory.", inventory),
-            SettingsForm.field("Armor", "Share equipped armor.", armor),
-            SettingsForm.field("Offhand", "Share the offhand item.", offhand),
-            SettingsForm.field("Ender Chest", "Share Ender Chest contents.", enderChest)));
-        inventoryPane.addWidget(section("Player State", rowWidth,
-            SettingsForm.field("Health", "Share player health.", health),
-            SettingsForm.field("Hunger", "Share hunger levels.", hunger),
-            SettingsForm.field("Experience", "Share experience points and levels.", experience),
-            SettingsForm.field("Game Mode", "Share the current game mode.", gameMode),
-            SettingsForm.field("Potion Effects", "Share active potion effects.", potions)));
-        inventoryPane.addWidget(section("Location", rowWidth,
-            SettingsForm.field("Last Location", "Remember the last location in each world.", lastLocation),
-            SettingsForm.field("Bed Spawn", "Share the player's bed spawn.", bedSpawn)));
+        addDetailWidget(row("Inventory", rowWidth, inventory, armor, offhand, enderChest));
+        addDetailWidget(row("Player State", rowWidth, health, hunger, experience, gameMode));
+        addDetailWidget(row("Location", rowWidth, potions, lastLocation, bedSpawn));
         IconButton save = new IconButton.Builder()
             .label(editing ? "Save" : "Create")
             .imagePath("save.png")
@@ -1538,23 +1578,23 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
             .entranceAnimation(false)
             .onClick(this::showInventoryGroupsPopup)
             .build();
-        saveInventoryGroup = () -> save.onClick(0, 0, 0);
-        inventoryPane.addWidget(row("Actions", rowWidth, save, cancel));
-        inventoryPane.updateWidgetPositions();
+        addDetailWidget(row("Actions", rowWidth, save, cancel));
+        detailPane.updateWidgetPositions();
     }
 
     private void addInventoryGroupWorldRow(int rowWidth, Set<String> selectedWorlds) {
         List<String> worlds = worldNameOptions();
         if (worlds.isEmpty()) {
-            inventoryPane.addWidget(row("Worlds", rowWidth, readOnlyButton("No Worlds")));
+            addDetailWidget(row("Worlds", rowWidth, readOnlyButton("No Worlds")));
             return;
         }
-        List<MountableButtonWidget> worldRows = new ArrayList<>();
+        int buttonWidth = Math.max(110, (rowWidth - 24) / 3);
+        List<ToggleWidget> rowToggles = new ArrayList<>();
         for (String world : worlds) {
             ToggleWidget toggle = new ToggleWidget.Builder()
                 .label(world)
                 .toggled(containsIgnoreCase(selectedWorlds, world))
-                .size(32, 16)
+                .size(buttonWidth, 20)
                 .entranceAnimation(false)
                 .onChange(value -> {
                     if (value) {
@@ -1564,9 +1604,15 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
                     }
                 })
                 .build();
-            worldRows.add(SettingsForm.field(world, "Include this world in the group.", toggle));
+            rowToggles.add(toggle);
+            if (rowToggles.size() == 3) {
+                addDetailWidget(row("Worlds", rowWidth, rowToggles.toArray(new AnimatedWidget[0])));
+                rowToggles.clear();
+            }
         }
-        inventoryPane.addWidget(section("Worlds", rowWidth, worldRows.toArray(new MountableButtonWidget[0])));
+        if (!rowToggles.isEmpty()) {
+            addDetailWidget(row("Worlds", rowWidth, rowToggles.toArray(new AnimatedWidget[0])));
+        }
     }
 
     private String inventoryGroupIdFromName(String name) {
@@ -1689,6 +1735,9 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
 
     @Override
     public <T extends Widget> T addDrawableChild(T widget) {
+        if (widget instanceof ContextMenuWidget) {
+            return super.addDrawableChild(widget);
+        }
         if (parent instanceof Screen screen && screen != this) {
             screen.addDrawableChild(widget);
             return widget;
@@ -1698,6 +1747,10 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
 
     @Override
     public void remove(Widget widget) {
+        if (widget instanceof ContextMenuWidget) {
+            super.remove(widget);
+            return;
+        }
         if (parent instanceof Screen screen && screen != this) {
             screen.remove(widget);
             return;

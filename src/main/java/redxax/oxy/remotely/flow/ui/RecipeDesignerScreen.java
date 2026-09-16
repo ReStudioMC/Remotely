@@ -358,7 +358,7 @@ public class RecipeDesignerScreen extends FocusedJsonResourceDesignerScreen impl
             return "Run Command";
         }
         String draftMode = recipeBindingDraftModes.get(field);
-        return recipeBindingModes(flowField, commandField).contains(draftMode) ? draftMode : "None";
+        return draftMode != null && recipeBindingModes(flowField, commandField).contains(draftMode) ? draftMode : "None";
     }
 
     protected List<CompactBindingWidget.BindingInput> compactRecipeBindingInputs(String bindingField, String flowField, String functionBase, String commandField) {
@@ -402,7 +402,8 @@ public class RecipeDesignerScreen extends FocusedJsonResourceDesignerScreen impl
         String id = "Run Function".equals(mode) || "Function".equals(mode) ? jsonPathTextRaw(functionBase + ".functionId") : "Run Flow".equals(mode) ? jsonPathTextRaw(flowField) : "";
         if (!id.isBlank()) {
             if (host != null) {
-                host.openWorkspaceFlowEditor(id);
+                host.openWorkspaceResource("Run Function".equals(mode) || "Function".equals(mode)
+                    ? ReSyncResourceDragPayload.FUNCTION : ReSyncResourceDragPayload.FLOW, id);
             }
         }
     }
@@ -934,6 +935,9 @@ public class RecipeDesignerScreen extends FocusedJsonResourceDesignerScreen impl
     }
 
     protected void normalizeRecipeSchema(String recipeType) {
+        if (deferResourceMutation(() -> normalizeRecipeSchema(recipeType))) {
+            return;
+        }
         switch (RecipeSchema.kind(recipeType)) {
             case SHAPED -> normalizeShapedRecipe();
             case LIST -> {
@@ -1059,6 +1063,9 @@ public class RecipeDesignerScreen extends FocusedJsonResourceDesignerScreen impl
     }
 
     protected void putRecipeFieldAmount(String field, int amount) {
+        if (deferResourceMutation(() -> putRecipeFieldAmount(field, amount))) {
+            return;
+        }
         if ("output.material".equals(field) || "template.material".equals(field) || "base.material".equals(field) || "addition.material".equals(field)) {
             String[] parts = field.split("\\.", 2);
             JsonObject object = jsonObject(parts[0]);
@@ -1092,6 +1099,9 @@ public class RecipeDesignerScreen extends FocusedJsonResourceDesignerScreen impl
     }
 
     protected void putRecipeIngredientAmount(int index, int amount) {
+        if (deferResourceMutation(() -> putRecipeIngredientAmount(index, amount))) {
+            return;
+        }
         JsonArray ingredients = resource.has("ingredients") && resource.get("ingredients").isJsonArray() ? resource.getAsJsonArray("ingredients") : new JsonArray();
         resource.add("ingredients", ingredients);
         while (ingredients.size() <= index) {

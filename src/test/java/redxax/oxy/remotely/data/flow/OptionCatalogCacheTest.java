@@ -94,11 +94,12 @@ class OptionCatalogCacheTest {
         item.setIcon("minecraft:dragon_head");
         item.setGroup("Campaign");
         item.setMetadata(Map.of("owner", "request", "available", true));
-        OptionCatalogCache cache = new OptionCatalogCache(DesktopReSyncStorage.fromKey(path));
+        OptionCatalogCache cache = new OptionCatalogCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path));
 
         cache.put("server-a", "server:request:quests", "{\"world\":\"world\"}", "quests-42", 42L,
             List.of("request:dragon_hunt"), List.of(item), "available", "");
-        OptionCatalogCache restored = new OptionCatalogCache(DesktopReSyncStorage.fromKey(path));
+        cache.persistenceCompletion().join();
+        OptionCatalogCache restored = new OptionCatalogCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path));
 
         assertEquals(List.of("request:dragon_hunt"), restored.getValues("server-a", "server:request:quests", "{\"world\":\"world\"}"));
         assertEquals("Dragon Hunt", restored.getItems("server-a", "server:request:quests", "{\"world\":\"world\"}").getFirst().getLabel());
@@ -106,6 +107,28 @@ class OptionCatalogCacheTest {
         assertTrue(restored.isStale("server-a", "server:request:quests", "{\"world\":\"world\"}"));
         assertEquals("stale", restored.getStatus("server-a", "server:request:quests", "{\"world\":\"world\"}"));
         assertEquals("Cached catalog is awaiting refresh", restored.getDiagnostic("server-a", "server:request:quests", "{\"world\":\"world\"}"));
+    }
+
+    @Test
+    void exactAuthoritativeRefreshDoesNotRewriteTheDurableCache() {
+        OptionCatalogCache cache = new OptionCatalogCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(tempDirectory.resolve("exact-catalogs.json")), true);
+        String serverId = "catalog-exact-server";
+        String sourceId = "server:fixture:exact";
+
+        assertTrue(cache.put(serverId, sourceId, "exact", 8L, List.of("value"), List.of()));
+        cache.persistenceCompletion().join();
+        OptionCatalogCache.PersistenceMetrics persisted = cache.persistenceMetrics();
+        long lookupRevision = cache.lookup(serverId, sourceId).revision();
+        cache.markStale(serverId, sourceId);
+
+        assertTrue(cache.put(serverId, sourceId, "exact", 8L, List.of("value"), List.of()));
+
+        OptionCatalogCache.PersistenceMetrics refreshed = cache.persistenceMetrics();
+        assertEquals(persisted.writes(), refreshed.writes());
+        assertEquals(persisted.requestedRevision(), refreshed.requestedRevision());
+        assertEquals(persisted.persistedRevision(), refreshed.persistedRevision());
+        assertEquals(persisted.unchangedRefreshes() + 1L, refreshed.unchangedRefreshes());
+        assertEquals(lookupRevision, cache.lookup(serverId, sourceId).revision());
     }
 
     @Test
@@ -140,6 +163,6 @@ class OptionCatalogCacheTest {
     }
 
     private OptionCatalogCache cache() {
-        return new OptionCatalogCache(DesktopReSyncStorage.fromKey(tempDirectory.resolve("catalogs.json")));
+        return new OptionCatalogCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(tempDirectory.resolve("catalogs.json")));
     }
 }

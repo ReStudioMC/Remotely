@@ -93,7 +93,7 @@ public final class DesktopFlowManagerUiAdapter implements FlowManagerUiAdapter {
     public boolean openWorldMap(FlowManager manager, ApplicationHost host, String serverId, ClientServerView server,
                                String worldName, Object parent) {
         String actualServerId = ReSyncServerIdentity.from(serverId, server).serverId();
-        Instance instance = manager.findInstanceByServerId(actualServerId, server);
+        Instance instance = (Instance) manager.findInstanceByServerId(actualServerId, server);
         if (instance == null) {
             host.notify("World Map", "Instance Unavailable", ReSyncNotificationLevel.ERROR);
             return true;

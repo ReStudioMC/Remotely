@@ -248,7 +248,9 @@ val browserDesktopOnlyClasses = setOf(
     "redxax.oxy.remotely.servers.QuickServerSyncManager",
     "redxax.oxy.remotely.servers.ReProxyAutoStartService",
     "redxax.oxy.remotely.servers.ReProxyManager",
-    "redxax.oxy.remotely.servers.ReverseProxyManager"
+    "redxax.oxy.remotely.servers.ReverseProxyManager",
+    "redxax.oxy.remotely.flow.ui.BoundedAssetLoadQueue",
+    "redxax.oxy.remotely.flow.ui.BoundedImageDecoder"
 )
 val browserSourceIncludes = browserRequiredSources.filterNot { it.className in browserDesktopOnlyClasses }.map { it.relativePath }.toSortedSet()
 
@@ -261,17 +263,11 @@ val browser by sourceSets.creating {
 
 dependencies {
     add(browser.implementationConfigurationName, "com.google.code.gson:gson:2.10.1")
-    if (useReStudioSourceDependencies) {
-        add(browser.implementationConfigurationName, files(
-            "../ReScreen/build/libs/ReScreen-1.0-browser.jar",
-            "../Rebase/build/libs/Rebase-1.0-SNAPSHOT-browser.jar",
-            "../ReSync/ReSyncCore/build/libs/ReSyncCore-1.3.0-browser.jar"
-        ))
-    } else {
-        add(browser.implementationConfigurationName, "dev.restudio:rescreen:1.0:browser")
-        add(browser.implementationConfigurationName, "dev.restudio:rebase:1.0-SNAPSHOT:browser")
-        add(browser.implementationConfigurationName, "restudio.resync:ReSyncCore:1.3.0:browser")
-    }
+    add(browser.implementationConfigurationName, files(
+        "../ReScreen/build/libs/ReScreen-1.0-browser.jar",
+        "../RebaseBuild/build/libs/Rebase-1.0-SNAPSHOT-browser.jar",
+        "../ReSync/ReSyncCore/build/libs/ReSyncCore-1.3.0-browser.jar"
+    ))
 }
 
 tasks.named(browser.compileJavaTaskName) {
@@ -502,6 +498,7 @@ dependencies {
     implementation("org.eclipse.lsp4j:org.eclipse.lsp4j.jsonrpc:0.24.0")
 
     implementation("com.google.code.gson:gson:2.10.1")
+    implementation("org.java-websocket:Java-WebSocket:1.5.7")
     implementation("net.kyori:adventure-text-minimessage:4.25.0")
     implementation("net.kyori:adventure-text-serializer-legacy:4.25.0")
     implementation("io.github.canary-prism:querz-nbt:6.2.1")

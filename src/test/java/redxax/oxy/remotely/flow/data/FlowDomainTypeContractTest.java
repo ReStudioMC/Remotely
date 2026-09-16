@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class FlowDomainTypeContractTest {
@@ -54,5 +55,25 @@ class FlowDomainTypeContractTest {
         assertTrue(variable.isTypeVariable());
         assertEquals("t", variable.getTypeVariableName());
         assertEquals("list<type:t>", FlowTypeRef.parse("list<type:t>").toString());
+    }
+
+    @Test
+    void resourceReferencesResolveNominalIdentitiesWithoutResolvingOrdinaryValues() {
+        assertTrue(FlowTypeRef.parse("resource_reference<player>").isResolved());
+        FlowTypeRef resource = FlowTypeRef.parse("resource_reference<extension:future>");
+        assertTrue(resource.isResolved());
+        assertEquals("resource_reference<extension:future>", resource.toString());
+        assertFalse(FlowTypeRef.parse("extension:future").isResolved());
+        assertFalse(FlowTypeRef.parse("list<extension:future>").isResolved());
+        assertTrue(resource.isAssignableFrom(FlowTypeRef.parse(resource.toString())));
+        FlowTypeRef otherOwner = FlowTypeRef.parse("resource_reference<other:future>");
+        assertTrue(otherOwner.isResolved());
+        assertFalse(resource.isAssignableFrom(otherOwner));
+        assertFalse(otherOwner.isAssignableFrom(resource));
+        for (String invalid : List.of("resource_reference<bad_owner:future>", "resource_reference<extension:>",
+            "resource_reference<extension:future:extra>", "resource_reference<extension:future,builtin:gui>",
+            "resource_reference<list<player>>", "resource_reference<extension:future<player>>")) {
+            assertFalse(FlowTypeRef.parse(invalid).isResolved(), invalid);
+        }
     }
 }

@@ -1,11 +1,10 @@
 package redxax.oxy.remotely.flow.ui;
 
 import redxax.oxy.remotely.util.BrowserSafeState;
-
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import redxax.oxy.remotely.host.ApplicationHostRegistry;
+import redxax.oxy.remotely.RemotelyClient;
 import redxax.oxy.remotely.data.flow.DesignerSaveNotifications;
 import redxax.oxy.remotely.data.flow.FlowManager;
 import redxax.oxy.remotely.data.flow.OptionCatalogCache;
@@ -18,6 +17,7 @@ import redxax.oxy.remotely.flow.ui.studio.ReSyncStudioPanelState;
 import redxax.oxy.remotely.flow.ui.studio.ReSyncResourceCreator;
 import redxax.oxy.remotely.flow.ui.studio.StudioPanel;
 import redxax.oxy.remotely.flow.ui.studio.StudioResourceRenameAware;
+import redxax.oxy.remotely.flow.ui.studio.StudioSaveProvider;
 import redxax.oxy.remotely.flow.ui.studio.StudioScreen;
 import restudio.rebase.ui.widgets.editor.TextAreaWidget;
 import restudio.rescreen.game.MinecraftAssetReference;
@@ -52,6 +52,7 @@ import restudio.rescreen.ui.widgets.ScrollSelectorWidget;
 import restudio.rescreen.ui.widgets.TextInputWidget;
 import restudio.rescreen.ui.widgets.ToggleWidget;
 import restudio.rescreen.util.Identifier;
+import restudio.rescreen.util.Notification;
 import restudio.resync.flow.workspace.WorkspacePatch;
 
 import java.util.ArrayList;
@@ -61,11 +62,12 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 
 
 import static restudio.rescreen.config.Config.desktopMode;
 
-public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBehaviorProvider, ReSyncCollaborativeView, StudioCloseHandledScreen, StudioResourceRenameAware, CollaborativeSlotView {
+public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBehaviorProvider, ReSyncCollaborativeView, StudioCloseHandledScreen, StudioResourceRenameAware, CollaborativeSlotView, StudioSaveProvider {
     private static final int GRID_COLUMNS = 9;
     private static final int PANEL_PADDING = 8;
     private static final int MIN_SLOT_SIZE = 16;
@@ -111,7 +113,8 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
         }
     }
 
-    private final GuiDefinition gui;
+    private GuiDefinition gui;
+    private final VersionedEditorDraft<GuiDefinition> guiDraft;
     private final String serverId;
     private final Object parent;
     private final ReSyncStudioPanelState panelState = new ReSyncStudioPanelState().padding(6);
@@ -120,6 +123,10 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
 
     @Override
     public void resourceRenamed(String type, String oldId, String newId) {
+        if (guiDraft.defer(() -> resourceRenamed(type, oldId, newId))) {
+            return;
+        }
+        guiDraft.markMutation();
         if (oldId.equals(gui.getId())) {
             ReSyncResourceType.GUI.applyRename(gui, newId);
         }
@@ -178,11 +185,14 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
     private int slotSize;
     private int lastWidth = -1;
     private int lastHeight = -1;
+    private int lastInspectorWidth = -1;
     private boolean closingRequested;
     private boolean closeCompleted;
     private boolean studioCloseNotified;
     private Runnable studioCloseHandler;
     private final History<GuiSnapshot> history = history(this::createSnapshot, this::restoreSnapshot);
+    private final HistoryRebaseCoordinator<GuiSnapshot> historyRebase;
+    private volatile long collaborationLifecycle = 1L;
 
     @Override
     public JsonObject collaborationDocument() {
@@ -190,8 +200,94 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
     }
 
     @Override
+    public long collaborationLifecycle() {
+        return collaborationLifecycle;
+    }
+
+    @Override
+    public long collaborationEditVersion() {
+        return guiDraft.editVersion();
+    }
+
+    @Override
+    public boolean requestCollaborationDocument(Consumer<CollaborationDocumentSnapshot> completion) {
+        if (completion == null) {
+            return false;
+        }
+        long lifecycle = collaborationLifecycle;
+        return guiDraft.requestProjection(ReSyncResourceType.GUI.typeId(), ReSyncResourceType.GUI.extractId(gui),
+            this::collaborationSource, projection -> completion.accept(collaborationSnapshot(lifecycle, projection)));
+    }
+
+    private GuiDefinition collaborationSource() {
+        GuiDefinition source = new GuiDefinition(gui.getId(), gui.getTitle(), gui.getRows());
+        source.setEnabled(gui.isEnabled());
+        source.setExtendToPlayerInventory(gui.isExtendToPlayerInventory());
+        List<GuiElement> elements = new ArrayList<>();
+        if (gui.getElements() != null) {
+            for (GuiElement element : gui.getElements()) {
+                elements.add(element != null ? element.copy() : null);
+            }
+        }
+        source.setElements(elements);
+        return source;
+    }
+
+    private CollaborationDocumentSnapshot collaborationSnapshot(long lifecycle,
+                                                                 VersionedEditorDraft.ProjectionSnapshot projection) {
+        RuntimeException failure = projection.failure();
+        JsonObject document = null;
+        if (failure == null) {
+            try {
+                document = gson.fromJson(projection.payload(), JsonObject.class);
+                if (document == null) {
+                    failure = new IllegalStateException("Collaboration Snapshot Is Empty");
+                }
+            } catch (RuntimeException | Error exception) {
+                failure = exception instanceof RuntimeException runtime ? runtime : new IllegalStateException(exception);
+            }
+        }
+        if (failure == null && !collaborationLifecycleEquals(lifecycle)) {
+            document = null;
+            failure = new IllegalStateException("Collaboration Snapshot Expired");
+        }
+        return new CollaborationDocumentSnapshot(this, lifecycle, projection.editVersion(), document, failure);
+    }
+
+    private boolean collaborationLifecycleEquals(long lifecycle) {
+        return collaborationLifecycle == lifecycle;
+    }
+
+    @Override
+    public boolean applyCollaborationDocument(JsonObject document, List<WorkspacePatch<JsonElement>> patches,
+                                              Consumer<CollaborationDocumentApplyResult> completion) {
+        if (completion == null) {
+            return false;
+        }
+        long lifecycle = collaborationLifecycle;
+        return guiDraft.runMutation(() -> {
+            if (document == null) {
+                throw new IllegalArgumentException("Collaboration Document Is Required");
+            }
+            if (gui == null) {
+                throw new IllegalStateException("GUI Is Unavailable");
+            }
+            if (ReSyncCollaborationDocuments.to(document, GuiDefinition.class) == null) {
+                throw new IllegalArgumentException("Collaboration Document Is Invalid");
+            }
+            applyCollaborationDocument(document, patches);
+        }, result ->
+            completion.accept(new CollaborationDocumentApplyResult(this, lifecycle, result.beforeEditVersion(),
+                result.afterEditVersion(), result.successful(), result.failure())));
+    }
+
+    @Override
     public void applyCollaborationDocument(JsonObject document, List<WorkspacePatch<JsonElement>> patches) {
-        GuiDefinition incoming = ReSyncCollaborationDocuments.toGui(document);
+        if (guiDraft.defer(() -> applyCollaborationDocument(document, patches))) {
+            return;
+        }
+        guiDraft.markMutation();
+        GuiDefinition incoming = ReSyncCollaborationDocuments.to(document, GuiDefinition.class);
         if (incoming == null) {
             return;
         }
@@ -217,17 +313,25 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
         if (patches == null || patches.isEmpty()) {
             return;
         }
-        history.rebase(snapshot -> {
-            GuiDefinition historic = new GuiDefinition(gui.getId(), snapshot.title, snapshot.rows);
-            historic.setEnabled(gui.isEnabled());
+        String guiId = gui.getId();
+        boolean guiEnabled = gui.isEnabled();
+        historyRebase.request(patches, copiedPatches -> snapshot -> {
+            GuiDefinition historic = new GuiDefinition(guiId, snapshot.title, snapshot.rows);
+            historic.setEnabled(guiEnabled);
             historic.setRows(snapshot.rows);
             historic.setExtendToPlayerInventory(snapshot.extendToPlayerInventory);
             historic.setElements(snapshot.elements);
-            JsonObject document = ReSyncCollaborationDocuments.from(historic);
-            FlowWorkspaceDocument.apply(document, patches);
-            GuiDefinition rebased = ReSyncCollaborationDocuments.toGui(document);
-            return new GuiSnapshot(rebased.getTitle(), rebased.getRows(), rebased.isExtendToPlayerInventory(),
-                rebased.getElements(), snapshot.selectedIndex, snapshot.placementTemplate);
+            JsonObject document = gson.fromJson(gson.toJson(ReSyncCollaborationDocuments.from(historic)), JsonObject.class);
+            if (document == null) {
+                document = new JsonObject();
+            }
+            FlowWorkspaceDocument.apply(document, copiedPatches);
+            GuiDefinition rebased = ReSyncCollaborationDocuments.to(document, GuiDefinition.class);
+            JsonObject serialized = gson.fromJson(gson.toJson(ReSyncCollaborationDocuments.from(rebased)), JsonObject.class);
+            GuiDefinition stable = ReSyncCollaborationDocuments.to(serialized, GuiDefinition.class);
+            return new GuiSnapshot(stable.getTitle(), stable.getRows(), stable.isExtendToPlayerInventory(),
+                stable.getElements(), snapshot.selectedIndex,
+                snapshot.placementTemplate != null ? snapshot.placementTemplate.copy() : null);
         });
     }
 
@@ -267,6 +371,11 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
         this.autoResizeContainers = false;
         OPEN_SCREENS.add(this);
         ensureGuiDefaults();
+        this.guiDraft = new VersionedEditorDraft<>(this.gui, FlowSerializer::serializeGui, FlowSerializer::deserializeGui,
+            this::rebindGui, this::failSnapshot, () -> new Notification("Editor Busy", "Try Again", Notification.Type.WARN));
+        this.historyRebase = new HistoryRebaseCoordinator<>(history,
+            () -> serverId + ":" + gui.getId(), () -> collaborationLifecycle,
+            () -> new Notification("Editor Busy", "Try Again", Notification.Type.WARN));
     }
 
     public static void refreshCatalogForServer(String serverId) {
@@ -367,6 +476,11 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
         this.studioCloseHandler = closeHandler;
     }
 
+    @Override
+    public boolean isStudioCloseAnimationFinished() {
+        return closeCompleted;
+    }
+
 
     @Override
     public void renderHandler(IDrawContext context, int mouseX, int mouseY, float delta) {
@@ -379,6 +493,8 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
 
     @Override
     public void render(IDrawContext context, int mouseX, int mouseY, float delta) {
+        historyRebase.drain();
+        guiDraft.drain();
         updateTopHeaderAnimation();
         updateLayout(false);
         updateCloseAnimation();
@@ -439,6 +555,9 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
             return;
         }
         closeCompleted = true;
+        collaborationLifecycle++;
+        historyRebase.close();
+        guiDraft.close();
         OPEN_SCREENS.remove(this);
         super.close();
         if (studioCloseHandler != null) {
@@ -449,12 +568,21 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
             return;
         }
         if (parent != null) {
-            if (ApplicationHostRegistry.current() != null) {
-                ApplicationHostRegistry.current().openParentScreen(this, parent);
+            if (RemotelyClient.INSTANCE != null && RemotelyClient.INSTANCE.getHost() != null) {
+                RemotelyClient.INSTANCE.getHost().openParentScreen(this, parent);
             } else if (parent instanceof Screen screen) {
                 ScreenManager.getInstance().setScreen(screen);
             }
         }
+    }
+
+    @Override
+    public void removed() {
+        collaborationLifecycle++;
+        historyRebase.close();
+        guiDraft.close();
+        OPEN_SCREENS.remove(this);
+        super.removed();
     }
 
     private void renderGuiPreview(IDrawContext context) {
@@ -663,6 +791,9 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
 
     @Override
     public boolean keyPressed(ReKeyEvent event) {
+        if (handleStudioSaveShortcut(event)) {
+            return true;
+        }
         if (handleStudioHistoryShortcut(event)) {
             return true;
         }
@@ -695,7 +826,6 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
         return super.textInput(event);
     }
 
-
     private int mouseButtonCode(ReMouseEvent event) {
         ReMouseButton button = event.button();
         return switch (button) {
@@ -714,7 +844,9 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
 
     private void buildHeader() {
         header().reset();
-        header().addRight("close.png", this::requestClose, "Back");
+        if (shouldShowBackButton()) {
+            header().addRight("close.png", this::requestClose, "Back");
+        }
         header().addRight("save.png", this::saveGui, "Save GUI");
         placeToggle = new ToggleWidget.Builder()
             .label("Place")
@@ -727,6 +859,10 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
         header().build();
     }
 
+    private boolean shouldShowBackButton() {
+        return !desktopMode || shouldForceSuperScreen();
+    }
+
     private void buildContainers() {
         gridContainer = createContainer("gui_grid", 0, 0, 200, 200);
         gridContainer.layout(new FreeLayout()).columns(1).padding(0).scrolling(false).enableSelecting(false).backgroundDrawing(false);
@@ -737,7 +873,6 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
         addDrawableChild(tooltipOverlay);
 
         inspectorStudioPanel = rightStudioPanel("gui_inspector")
-            .collapsible("GUI Inspector")
             .show();
         inspectorPanel = inspectorStudioPanel.sidePanel();
         inspectorStudioPanel.padding(panelState.padding());
@@ -875,7 +1010,7 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
         buildActionEditor(container, rowWidth);
 
         TextInputWidget modelInput = new TextInputWidget.Builder()
-            .text(visual.getModelData() != null ? Integer.toString(visual.getModelData()) : "")
+            .text(visual.getModelData() != null ? String.valueOf(visual.getModelData()) : "")
             .placeholder("Model Data")
             .forcePlaceholder(false)
             .size(rowWidth, ReSyncStudioPanelState.FIELD_HEIGHT)
@@ -1076,9 +1211,7 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
     }
 
     private void normalizeBindingFunction(String functionId, CompactBindingSupport.FunctionShape shape) {
-        FlowManager manager = FlowManager.getInstance();
-        FlowGraph function = manager != null && serverId != null ? manager.getGraph(serverId, ReSyncResourceType.FUNCTION, functionId) : null;
-        CompactBindingSupport.normalizeFunction(serverId, function, shape);
+        CompactBindingSupport.initializeFunction(serverId, functionId, shape);
     }
 
     private String functionInputValue(JsonObject call, FlowGraph.FunctionParameter input) {
@@ -1217,7 +1350,7 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
         if (inspectorPanel == null) {
             return Math.max(ReSyncStudioPanelState.MIN_ROW_WIDTH, ReSyncStudioPanelState.DEFAULT_WIDTH - panelState.padding() * 2);
         }
-        return inspectorStudioPanel != null ? inspectorStudioPanel.rowWidth() : Math.max(ReSyncStudioPanelState.MIN_ROW_WIDTH, inspectorPanel.getConfiguredWidth() - panelState.padding() * 2);
+        return inspectorStudioPanel != null ? inspectorStudioPanel.rowWidth() : Math.max(ReSyncStudioPanelState.MIN_ROW_WIDTH, inspectorPanel.getDesiredWidth() - panelState.padding() * 2);
     }
 
     private List<String> materialOptions() {
@@ -1528,7 +1661,7 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
         }
         FlowManager flowManager = FlowManager.getInstance();
         if (flowManager != null && serverId != null) {
-            flowManager.openFlowEditor(serverId, null, functionId);
+            flowManager.openGraphEditor(serverId, null, ReSyncResourceType.FUNCTION, functionId);
         }
     }
 
@@ -1555,7 +1688,7 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
                 actionBinding.refresh();
             }
             if (flowManager != null) {
-                flowManager.openFlowEditor(serverId, null, result.id());
+                flowManager.openGraphEditor(serverId, null, ReSyncResourceType.FUNCTION, result.id());
             }
         });
     }
@@ -1671,7 +1804,7 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
         GuiElement element = slotElements.get(slot);
         if (element != null) {
             if (button == ReMouseButton.RIGHT.code()) {
-                removeElement(element);
+                removeElementAtSlot(slot);
                 return;
             }
             if (button == ReMouseButton.LEFT.code()) {
@@ -1693,6 +1826,13 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
             return;
         }
         selectElement(null);
+    }
+
+    private void removeElementAtSlot(int slot) {
+        if (guiDraft.defer(() -> removeElementAtSlot(slot))) {
+            return;
+        }
+        removeElement(slotElements.get(slot));
     }
 
     private void selectElement(GuiElement element) {
@@ -1722,6 +1862,9 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
 
     private void updateRows(int rows) {
         int clamped = Math.clamp(rows, 1, 6);
+        if (guiDraft.defer(() -> updateRows(clamped))) {
+            return;
+        }
         if (clamped == gui.getRows()) {
             return;
         }
@@ -1736,6 +1879,9 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
     }
 
     private void setExtendInventoryMode(boolean enabled) {
+        if (guiDraft.defer(() -> setExtendInventoryMode(enabled))) {
+            return;
+        }
         if (gui.isExtendToPlayerInventory() == enabled) {
             if (extendInventoryToggle != null && extendInventoryToggle.getValue() != enabled) {
                 extendInventoryToggle.setValue(enabled);
@@ -1947,11 +2093,13 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
     }
 
     private void updateLayout(boolean force) {
-        if (!force && width == lastWidth && height == lastHeight) {
+        int inspectorWidth = inspectorPanel != null ? Math.round(inspectorPanel.getAnimatedWidth()) : 0;
+        if (!force && width == lastWidth && height == lastHeight && inspectorWidth == lastInspectorWidth) {
             return;
         }
         lastWidth = width;
         lastHeight = height;
+        lastInspectorWidth = inspectorWidth;
 
         int contentTop = header().headerSize + 5;
         int contentHeight = Math.max(120, height - contentTop - PANEL_PADDING);
@@ -1962,7 +2110,7 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
             }
         }
 
-        int rightWidth = inspectorPanel != null ? (int) inspectorPanel.getAnimatedWidth() : 0;
+        int rightWidth = inspectorWidth;
         int availableWidth = width - rightWidth - PANEL_PADDING * 2;
         int centerWidth = Math.max(120, availableWidth);
         slotSize = SLOT_BASE_SIZE;
@@ -1995,12 +2143,90 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
         FlowManager flowManager = FlowManager.getInstance();
         String id = gui.getId();
         String title = gui.getTitle() != null ? gui.getTitle() : id;
-        DesignerSaveNotifications.start(serverId, ReSyncResourceType.GUI, id, title);
+        DesignerSaveNotifications.SaveTicket ticket = DesignerSaveNotifications.startExact(serverId, ReSyncResourceType.GUI, id, title);
+        observeSave(ticket);
         if (flowManager != null && serverId != null) {
-            flowManager.saveGui(serverId, gui);
+            if (!guiDraft.capture(ReSyncResourceType.GUI.typeId(), id, ticket,
+                snapshot -> flowManager.saveGui(serverId, snapshot.serialize(FlowSerializer::deserializeGui), ticket))) {
+                DesignerSaveNotifications.failExact(ticket, "Save Snapshot Rejected");
+            }
         } else {
-            DesignerSaveNotifications.failResource(serverId, ReSyncResourceType.GUI, id, "ReSync Offline");
+            DesignerSaveNotifications.failExact(ticket, "ReSync Offline");
         }
+    }
+
+    @Override
+    public boolean requestStudioSave() {
+        saveGui();
+        return true;
+    }
+
+    private void rebindGui(GuiDefinition previous, GuiDefinition replacement) {
+        GuiDefinition currentGui = gui;
+        GuiElement currentSelectedElement = selectedElement;
+        GuiElement currentDragResizeElement = dragResizeElement;
+        GuiElement currentPendingResizeElement = pendingResizeElement;
+        GuiElement currentLastInspectorElement = lastInspectorElement;
+        boolean currentDraggingPlacement = draggingPlacement;
+        SlotInteractionGrid.Stroke currentPlacementStroke = placementStroke;
+        SlotButton currentHoveredSlotButton = hoveredSlotButton;
+        GuiActionMode currentInspectorActionMode = inspectorActionMode;
+        try {
+            int selectedIndex = selectedElement != null && previous != null && previous.getElements() != null
+                ? previous.getElements().indexOf(selectedElement) : -1;
+            gui = replacement;
+            List<GuiElement> replacementElements = gui.getElements();
+            selectedElement = selectedIndex >= 0 && replacementElements != null && selectedIndex < replacementElements.size()
+                ? replacementElements.get(selectedIndex) : null;
+            dragResizeElement = null;
+            pendingResizeElement = null;
+            lastInspectorElement = null;
+            draggingPlacement = false;
+            placementStroke = null;
+            hoveredSlotButton = null;
+            rebuildGrid();
+            buildInspectorPanel();
+            updateLayout(true);
+        } catch (RuntimeException | Error exception) {
+            gui = currentGui;
+            selectedElement = currentSelectedElement;
+            dragResizeElement = currentDragResizeElement;
+            pendingResizeElement = currentPendingResizeElement;
+            lastInspectorElement = currentLastInspectorElement;
+            draggingPlacement = currentDraggingPlacement;
+            placementStroke = currentPlacementStroke;
+            hoveredSlotButton = currentHoveredSlotButton;
+            inspectorActionMode = currentInspectorActionMode;
+            throw exception;
+        }
+    }
+
+    private void failSnapshot(VersionedEditorDraft.Failure failure) {
+        if (failure.stage() == VersionedEditorDraft.Stage.REBASE) {
+            new Notification("Save Refresh Failed", "Save Paused", Notification.Type.ERROR);
+            return;
+        }
+        if (failure.request() instanceof DesignerSaveNotifications.SaveTicket ticket) {
+            DesignerSaveNotifications.failExact(ticket, "Save Snapshot Failed");
+        }
+    }
+
+    private void observeSave(DesignerSaveNotifications.SaveTicket ticket) {
+        if (ticket == null) {
+            return;
+        }
+        ticket.whenFinished((saved, current) -> ScreenManager.getInstance().execute(() -> {
+            if (!saved || !current) {
+                guiDraft.discard(ticket);
+                return;
+            }
+            FlowManager manager = FlowManager.getInstance();
+            FlowManager.ResourceReadLease lease = manager != null
+                ? manager.snapshotResource(serverId, ReSyncResourceType.GUI.typeId(), ticket.id()) : null;
+            if (lease == null || !guiDraft.acknowledge(ticket, lease::materialize)) {
+                guiDraft.discard(ticket);
+            }
+        }));
     }
 
     private void ensureGuiDefaults() {
@@ -2022,8 +2248,11 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
     }
 
     private void updateGuiTitle(String title) {
-        String current = gui.getTitle() != null ? gui.getTitle() : "";
         String next = title != null ? title : "";
+        if (guiDraft.defer(() -> updateGuiTitle(next))) {
+            return;
+        }
+        String current = gui.getTitle() != null ? gui.getTitle() : "";
         if (current.equals(next)) {
             return;
         }
@@ -2105,6 +2334,7 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
     }
 
     private void captureSnapshot() {
+        guiDraft.markMutation();
         history.capture();
     }
 
@@ -2220,7 +2450,13 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
     }
 
     private MinecraftGameAssets getGameAssets() {
-        return ApplicationHostRegistry.gameAssets();
+        if (RemotelyClient.INSTANCE != null && RemotelyClient.INSTANCE.getHost() != null) {
+            MinecraftGameAssets gameAssets = RemotelyClient.INSTANCE.getHost().getGameAssets();
+            if (gameAssets != null) {
+                return gameAssets;
+            }
+        }
+        return MinecraftGameAssets.EMPTY;
     }
 
     private void drawGuiTexture(IDrawContext context, MinecraftGameAssets gameAssets, MinecraftAssetReference reference, Identifier fallbackId, int x, int y, int width, int height, int u, int v, int regionWidth, int regionHeight) {
@@ -2238,7 +2474,7 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
     }
 
     private MinecraftAssetReference cachedMaterialTexture(String material, Integer modelData) {
-        String key = (material != null ? material : "") + '\u0000' + (modelData != null ? Integer.toString(modelData) : "");
+        String key = (material != null ? material : "") + '\u0000' + (modelData != null ? modelData : "");
         MinecraftAssetReference reference = materialTextureReferences.get(key);
         if (reference == null) {
             reference = getGameAssets().resolveMaterialTexture(material, modelData);

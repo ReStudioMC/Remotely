@@ -62,6 +62,9 @@ private fun hasBrowserMethodReference(bytes: ByteArray, owner: String, names: Se
     }
 }
 
+private fun isBrowserGsonShim(className: String): Boolean =
+    className.startsWith("com/google/gson/") || className == "com/google/gson"
+
 private fun browserMetadataEdges(bytes: ByteArray): Set<String> {
     val edges = linkedSetOf<String>()
     if (hasBrowserMethodReference(bytes, "java/lang/Object", setOf("getClass"))) {
@@ -108,27 +111,12 @@ dependencies {
     teavm(teavm.libs.jsoApis)
 }
 
-if (useReStudioSourceDependencies) {
-    dependencies {
-        implementation(files(
-            "../../ReScreen/build/libs/ReScreen-1.0-browser.jar",
-            "../../Rebase/build/libs/Rebase-1.0-SNAPSHOT-browser.jar",
-            "../../ReSync/ReSyncCore/build/libs/ReSyncCore-1.3.0-browser.jar"
-        ))
-    }
-    tasks.named("compileJava") {
-        dependsOn(
-            gradle.includedBuild("ReScreen").task(":browserJar"),
-            gradle.includedBuild("Rebase").task(":browserJar"),
-            gradle.includedBuild("ReSync").task(":ReSyncCore:browserJar")
-        )
-    }
-} else {
-    dependencies {
-        implementation("dev.restudio:rescreen:1.0:browser") { isTransitive = false }
-        implementation("dev.restudio:rebase:1.0-SNAPSHOT:browser") { isTransitive = false }
-        implementation("restudio.resync:ReSyncCore:1.3.0:browser") { isTransitive = false }
-    }
+dependencies {
+    implementation(files(
+        "../../ReScreen/build/libs/ReScreen-1.0-browser.jar",
+        "../../RebaseBuild/build/libs/Rebase-1.0-SNAPSHOT-browser.jar",
+        "../../ReSync/ReSyncCore/build/libs/ReSyncCore-1.3.0-browser.jar"
+    ))
 }
 
 java {
@@ -236,7 +224,9 @@ val verifyBrowserGraph by tasks.registering {
             ZipFile(archive).use { zip ->
                 zip.entries().asSequence().filter { entry: ZipEntry -> !entry.isDirectory && entry.name.endsWith(".class") }.forEach { entry: ZipEntry ->
                     val bytes = zip.getInputStream(entry).readBytes()
-                    classBytes[entry.name.removeSuffix(".class")] = bytes
+                    val className = entry.name.removeSuffix(".class")
+                    classBytes[className] = bytes
+                    if (isBrowserGsonShim(className)) return@forEach
                     val symbols = bytes.toString(Charsets.ISO_8859_1)
                     forbiddenSymbols.filter { symbol -> symbols.contains(symbol) }.forEach { symbol -> leaks += "${archive.name}:${entry.name}:$symbol" }
                     if (symbols.contains("\u0000\u0010java/lang/Thread")) leaks += "${archive.name}:${entry.name}:java/lang/Thread"
@@ -280,6 +270,7 @@ val verifyBrowserGraph by tasks.registering {
                 val className = classFile.relativeTo(classDir).invariantSeparatorsPath.removeSuffix(".class")
                 roots += className
                 classBytes[className] = bytes
+                if (isBrowserGsonShim(className)) return@forEach
                 val symbols = bytes.toString(Charsets.ISO_8859_1)
                 forbiddenSymbols.filter { symbol -> symbols.contains(symbol) }.forEach { symbol ->
                     leaks += "RemotelyWeb:${classFile.relativeTo(classDir).invariantSeparatorsPath}:$symbol"

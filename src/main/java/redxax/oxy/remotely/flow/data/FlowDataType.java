@@ -1,10 +1,13 @@
 package redxax.oxy.remotely.flow.data;
 
+import com.google.gson.annotations.JsonAdapter;
+
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
+@JsonAdapter(FlowDataTypeAdapter.class)
 public final class FlowDataType {
     private static final Map<String, FlowDataType> REGISTRY = new LinkedHashMap<>();
 
@@ -44,7 +47,7 @@ public final class FlowDataType {
     public static final FlowDataType MATERIAL = new FlowDataType("material", null, 0x00AA00, "Material");
     public static final FlowDataType BLOCK = new FlowDataType("block", null, 0x228B22, "Block");
     public static final FlowDataType ITEM = new FlowDataType("item", MATERIAL, 0x32CD32, "Item");
-    public static final FlowDataType ITEMSTACK = ITEM;
+    public static final FlowDataType ITEMSTACK = new FlowDataType("itemstack", ITEM, 0x32CD32, "Item Stack");
     public static final FlowDataType WORLD = new FlowDataType("world", null, 0x00CED1, "World");
     public static final FlowDataType BIOME = new FlowDataType("biome", null, 0x20B2AA, "Biome");
     public static final FlowDataType VECTOR = new FlowDataType("vector", null, 0x7FFFD4, "Vector");

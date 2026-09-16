@@ -1,20 +1,31 @@
 package redxax.oxy.remotely.flow.ui;
 
+import redxax.oxy.remotely.util.BrowserSafeState;
+import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import redxax.oxy.remotely.RemotelyClient;
 import redxax.oxy.remotely.data.flow.FlowManager;
+import redxax.oxy.remotely.data.flow.CoreGraphEditorSession;
+import redxax.oxy.remotely.data.flow.CoreGraphUiProjection;
+import redxax.oxy.remotely.data.flow.CoreGraphAuthoringAdapter;
+import redxax.oxy.remotely.data.flow.CustomContentCoreEditor;
+import redxax.oxy.remotely.data.flow.DesignerSaveNotifications;
+import redxax.oxy.remotely.data.flow.ReSyncCatalogPublicationProjection;
+import redxax.oxy.remotely.data.flow.ReSyncGenericDescriptorProjection;
+import redxax.oxy.remotely.data.flow.ReSyncResourceRevisionReconciler;
 import redxax.oxy.remotely.data.flow.ReSyncResourceType;
 import redxax.oxy.remotely.data.flow.OptionCatalogCache;
 import redxax.oxy.remotely.data.flow.OptionCatalogItem;
 import redxax.oxy.remotely.data.flow.OptionCatalogLoader;
 import redxax.oxy.remotely.data.flow.ReSyncFlowClient;
+import redxax.oxy.remotely.data.flow.ReSyncGenericWidgetCapabilities;
 import redxax.oxy.remotely.data.flow.SyncedResourceState;
 import redxax.oxy.remotely.flow.data.CustomAbilityBinding;
 import redxax.oxy.remotely.flow.data.CustomContentDefinition;
 import redxax.oxy.remotely.flow.data.CustomContentGraphAdapter;
 import redxax.oxy.remotely.flow.data.FlowConnection;
 import redxax.oxy.remotely.flow.data.FlowGraph;
-import redxax.oxy.remotely.flow.data.FlowJson;
 import redxax.oxy.remotely.flow.data.FlowNode;
 import redxax.oxy.remotely.flow.registry.NodeDefinition;
 import redxax.oxy.remotely.flow.ui.studio.ReSyncStudioPanelState;
@@ -49,27 +60,60 @@ import restudio.rescreen.ui.widgets.TextInputWidget;
 import restudio.rescreen.ui.widgets.ToggleWidget;
 import restudio.rescreen.util.Notification;
 import restudio.resync.flow.workspace.WorkspacePatch;
+import restudio.resync.flow.cache.CatalogAuthoringPublication;
+import restudio.resync.flow.cache.CatalogCachePublication;
+import restudio.resync.flow.cache.CatalogCacheState;
+import restudio.resync.flow.graph.GraphDocument;
+import restudio.resync.flow.graph.GraphNode;
+import restudio.resync.flow.identity.ContractRef;
+import restudio.resync.flow.identity.NodeInstanceId;
+import restudio.resync.flow.identity.OwnerId;
+import restudio.resync.flow.identity.ResourceTypeId;
+import restudio.resync.flow.identity.ServerResourceLocator;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Deque;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 public class ContentDesignerScreen extends GraphEditorScreen implements StudioDocumentLifecycleScreen, StudioSelectorView {
+    private static final Gson COLLABORATION_GSON = new Gson();
     private final String flowId;
+    private String contentId;
     private final FlowManager flowManager;
+    private CoreGraphEditorSession contentCoreSession;
+    private CustomContentDefinition contentCoreAuthority;
+    private FlowManager.CustomContentAuthority contentAuthorityToken;
+    private CatalogAuthoringPublication contentCorePublication;
+    private CatalogAuthoringPublication contentObservedPublication;
+    private long contentObservedGeneration = -1L;
+    private ReSyncResourceRevisionReconciler.Stamp contentObservedStamp;
+    private boolean contentCorePreparationPending;
+    private boolean contentCoreClosed;
+    private long contentCoreGeneration;
+    private String contentCoreIssue = "Editor Loading";
+    private ContentSave pendingContentSave;
+    private final java.util.Queue<Runnable> contentCoreCompletions = BrowserSafeState.queue();
     private final Screen contentDesignerParent;
     private final boolean quickEditMode;
     private final String quickEditSessionId;
     private final List<CustomAbilityBinding> quickEditOriginalAbilities;
     private final Map<String, Object> quickEditOriginalComponents;
     private final ReSyncStudioPanelState panelState = new ReSyncStudioPanelState();
+    private volatile ContentPanelSnapshot contentPanelSnapshot;
+    private volatile AttributeProjection contentAttributeProjection;
     private StudioPanel contentStudioPanel;
     private StudioPanel attributeDesignerPanel;
     private SidePanel contentPanel;
@@ -77,11 +121,22 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     private String selectedBranch = "";
     private String selectedAttributeComponent = "";
     private MountableButtonWidget summaryWidget;
-    private final Map<String, MountableButtonWidget> eventRows = new HashMap<>();
-    private final List<AnimatedWidget> contentPanelWidgets = new ArrayList<>();
-    private final Map<String, Consumer<Object>> contentCollaborationBindings = new LinkedHashMap<>();
+    private Map<String, MountableButtonWidget> eventRows = new HashMap<>();
+    private Deque<AnimatedWidget> contentPanelWidgets = new ArrayDeque<>();
+    private final Deque<Deque<AnimatedWidget>> contentPanelRetirements = new ArrayDeque<>();
+    private Map<String, Consumer<Object>> contentCollaborationBindings = new LinkedHashMap<>();
     private final List<AnimatedWidget> attributePanelWidgets = new ArrayList<>();
-    private final List<DropDownWidget<String>> panelDropdowns = new ArrayList<>();
+    private List<DropDownWidget<String>> panelDropdowns = new ArrayList<>();
+    private Map<String, DropDownWidget<String>> contentDropdowns = new LinkedHashMap<>();
+    private Deque<Runnable> contentPanelDiffs = new ArrayDeque<>();
+    private long contentPanelRequestVersion;
+    private volatile long contentPanelCatalogVersion;
+    private long contentPanelValidationVersion;
+    private long contentPanelDiffMutationVersion;
+    private long contentPanelDiffRequestVersion;
+    private String contentPanelKey = "";
+    private boolean contentPanelRefreshPending;
+    private boolean contentPanelStructurePending;
     private List<AnimatedWidget> collectingAttributeEditorWidgets;
     private MountableButtonWidget attributeHeaderWidget;
     private AnimatedWidget selectedAttributeRowWidget;
@@ -102,6 +157,9 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     private static final String ATTRIBUTE_SCHEMA_SOURCE = "server:minecraft:item_attribute_schema";
     private static final OptionCatalogLoader.Profile CONTENT_CATALOGS = OptionCatalogLoader.profile(
         "server:minecraft:material", "server:minecraft:world", "server:custom_content:provider");
+    private static final Set<String> CONTENT_PANEL_CATALOG_SOURCES = Set.of(
+        "server:minecraft:attribute", "server:minecraft:material", "server:minecraft:world",
+        "server:custom_content:asset", "server:custom_content:provider");
     private static final Set<String> STUDIO_ROOT_INPUTS = Set.of(
         "content_id",
         "name",
@@ -130,6 +188,264 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         CustomContentGraphAdapter.FLOW_BRANCHES_KEY
     );
 
+    private record ContentPanelSnapshot(CustomContentDefinition definition, String type, String key,
+                                        long generation, long mutationVersion, long requestVersion, long catalogVersion,
+                                        long validationVersion, List<String> branches, Map<String, Integer> actionCounts,
+                                        List<String> providers, List<String> materials, List<String> providerAssets,
+                                        AttributeProjection attributeProjection) {
+    }
+
+    private record ContentSave(GraphDocument document, DesignerSaveNotifications.SaveTicket ticket, boolean acknowledged) {
+    }
+
+    private record ContentPreparation(long generation, long cacheGeneration, CoreGraphEditorSession previous,
+                                      GraphDocument previousGraph, FlowManager.CustomContentAuthority authority,
+                                      ReSyncResourceRevisionReconciler.Stamp stamp,
+                                      CustomContentDefinition definition, CatalogAuthoringPublication publication,
+                                      CoreGraphEditorSession session, ContentSave submitted, String issue) {
+    }
+
+    private record AttributeProjection(String type, String displayName, String material, String schemaSource,
+                                       List<String> lore, Map<String, Object> components,
+                                       Map<String, OptionCatalogItem> catalog, Map<String, String> componentLabels,
+                                       Map<String, Map<String, Object>> componentSchemas,
+                                       Map<String, OptionCatalogItem> catalogByKey,
+                                       Map<String, String> componentLabelsByKey,
+                                       Map<String, Map<String, Object>> componentSchemasByKey,
+                                       Map<String, OptionCatalogItem> attributeValueCatalogByKey) {
+        private AttributeProjection(String type, String displayName, String material, String schemaSource,
+                                     List<String> lore, Map<String, Object> components,
+                                     Map<String, OptionCatalogItem> catalog, Map<String, String> componentLabels,
+                                     Map<String, Map<String, Object>> componentSchemas) {
+            this(type, displayName, material, schemaSource, lore, components, catalog, componentLabels, componentSchemas,
+                null, null, null, null);
+        }
+
+        private AttributeProjection(String type, String displayName, String material, String schemaSource,
+                                     List<String> lore, Map<String, Object> components,
+                                     Map<String, OptionCatalogItem> catalog, Map<String, String> componentLabels,
+                                     Map<String, Map<String, Object>> componentSchemas,
+                                     Map<String, OptionCatalogItem> attributeValueCatalogByKey) {
+            this(type, displayName, material, schemaSource, lore, components, catalog, componentLabels, componentSchemas,
+                null, null, null, attributeValueCatalogByKey);
+        }
+
+        private AttributeProjection {
+            type = type != null ? type : "";
+            displayName = displayName != null ? displayName : "";
+            material = material != null ? material : "";
+            schemaSource = schemaSource != null ? schemaSource : ATTRIBUTE_SCHEMA_SOURCE;
+            lore = freezeProjectionList(lore);
+            components = freezeProjectionMap(components);
+            catalog = freezeCatalog(catalog);
+            componentLabels = componentLabels == null ? labelsForCatalog(catalog) : freezeProjectionStringMap(componentLabels);
+            componentSchemas = componentSchemas == null ? schemasForCatalog(catalog) : freezeProjectionSchemas(componentSchemas);
+            catalogByKey = catalogByKey == null ? catalogIndex(catalog) : freezeCatalog(catalogByKey);
+            componentLabelsByKey = componentLabelsByKey == null ? normalizedLabels(componentLabels) : freezeProjectionStringMap(componentLabelsByKey);
+            componentSchemasByKey = componentSchemasByKey == null ? normalizedSchemas(componentSchemas) : freezeProjectionSchemas(componentSchemasByKey);
+            attributeValueCatalogByKey = attributeValueCatalogByKey == null ? Map.of() : freezeCatalog(attributeValueCatalogByKey);
+        }
+
+        private AttributeProjection withComponents(Map<String, Object> nextComponents) {
+            return new AttributeProjection(type, displayName, material, schemaSource, lore, nextComponents, catalog,
+                componentLabels, componentSchemas, attributeValueCatalogByKey);
+        }
+
+        private AttributeProjection withMaterial(String nextMaterial, String nextSchemaSource) {
+            return new AttributeProjection(type, displayName, nextMaterial, nextSchemaSource, lore, components,
+                Map.of(), null, null, Map.of());
+        }
+
+        private AttributeProjection withDisplayName(String nextDisplayName) {
+            return new AttributeProjection(type, nextDisplayName, material, schemaSource, lore, components, catalog,
+                componentLabels, componentSchemas, attributeValueCatalogByKey);
+        }
+
+        private AttributeProjection withLore(List<String> nextLore) {
+            return new AttributeProjection(type, displayName, material, schemaSource, nextLore, components, catalog,
+                componentLabels, componentSchemas, attributeValueCatalogByKey);
+        }
+
+        private AttributeProjection withType(String nextType) {
+            return new AttributeProjection(nextType, displayName, material, schemaSource, lore, components, catalog,
+                componentLabels, componentSchemas, attributeValueCatalogByKey);
+        }
+    }
+
+    private static List<String> freezeProjectionList(List<String> values) {
+        if (values == null || values.isEmpty()) {
+            return List.of();
+        }
+        return Collections.unmodifiableList(new ArrayList<>(values));
+    }
+
+    private static Map<String, Object> freezeProjectionMap(Map<String, Object> values) {
+        if (values == null || values.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Object> copy = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> entry : values.entrySet()) {
+            if (entry.getKey() != null) {
+                copy.put(entry.getKey(), freezeProjectionValue(entry.getValue()));
+            }
+        }
+        return Collections.unmodifiableMap(copy);
+    }
+
+    private static Map<String, String> freezeProjectionStringMap(Map<String, String> values) {
+        if (values == null || values.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, String> copy = new LinkedHashMap<>();
+        for (Map.Entry<String, String> entry : values.entrySet()) {
+            if (entry.getKey() != null && entry.getValue() != null) {
+                copy.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return Collections.unmodifiableMap(copy);
+    }
+
+    private static Map<String, Map<String, Object>> freezeProjectionSchemas(Map<String, Map<String, Object>> values) {
+        if (values == null || values.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Map<String, Object>> copy = new LinkedHashMap<>();
+        for (Map.Entry<String, Map<String, Object>> entry : values.entrySet()) {
+            if (entry.getKey() != null) {
+                copy.put(entry.getKey(), freezeProjectionMap(entry.getValue()));
+            }
+        }
+        return Collections.unmodifiableMap(copy);
+    }
+
+    private static Map<String, OptionCatalogItem> freezeCatalog(Map<String, OptionCatalogItem> values) {
+        if (values == null || values.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, OptionCatalogItem> copy = new LinkedHashMap<>();
+        for (Map.Entry<String, OptionCatalogItem> entry : values.entrySet()) {
+            if (entry.getKey() != null && entry.getValue() != null) {
+                copy.put(entry.getKey(), freezeCatalogItem(entry.getValue()));
+            }
+        }
+        return Collections.unmodifiableMap(copy);
+    }
+
+    private static OptionCatalogItem freezeCatalogItem(OptionCatalogItem item) {
+        OptionCatalogItem copy = new OptionCatalogItem();
+        copy.setValue(item.getValue());
+        copy.setLabel(item.getLabel());
+        copy.setDescription(item.getDescription());
+        copy.setIcon(item.getIcon());
+        copy.setGroup(item.getGroup());
+        copy.setMetadata(freezeProjectionMap(item.getMetadata()));
+        return copy;
+    }
+
+    private static Object freezeProjectionValue(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            Map<String, Object> copy = new LinkedHashMap<>();
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                if (entry.getKey() != null) {
+                    copy.put(entry.getKey().toString(), freezeProjectionValue(entry.getValue()));
+                }
+            }
+            return Collections.unmodifiableMap(copy);
+        }
+        if (value instanceof List<?> list) {
+            List<Object> copy = new ArrayList<>(list.size());
+            for (Object item : list) {
+                copy.add(freezeProjectionValue(item));
+            }
+            return Collections.unmodifiableList(copy);
+        }
+        return value;
+    }
+
+    private static Map<String, String> labelsForCatalog(Map<String, OptionCatalogItem> catalog) {
+        if (catalog == null || catalog.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, String> labels = new LinkedHashMap<>();
+        for (OptionCatalogItem item : catalog.values()) {
+            if (item != null && item.getValue() != null && !item.getValue().isBlank()) {
+                labels.put(item.getValue(), item.getLabel());
+            }
+        }
+        return Collections.unmodifiableMap(labels);
+    }
+
+    private static Map<String, OptionCatalogItem> catalogIndex(Map<String, OptionCatalogItem> catalog) {
+        if (catalog == null || catalog.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, OptionCatalogItem> index = new LinkedHashMap<>();
+        for (Map.Entry<String, OptionCatalogItem> entry : catalog.entrySet()) {
+            if (entry.getKey() != null && entry.getValue() != null) {
+                index.putIfAbsent(normalizedProjectionKey(entry.getKey()), entry.getValue());
+            }
+        }
+        return Collections.unmodifiableMap(index);
+    }
+
+    private static Map<String, String> normalizedLabels(Map<String, String> labels) {
+        if (labels == null || labels.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, String> index = new LinkedHashMap<>();
+        for (Map.Entry<String, String> entry : labels.entrySet()) {
+            if (entry.getKey() != null && entry.getValue() != null) {
+                index.putIfAbsent(normalizedProjectionKey(entry.getKey()), entry.getValue());
+            }
+        }
+        return Collections.unmodifiableMap(index);
+    }
+
+    private static Map<String, Map<String, Object>> schemasForCatalog(Map<String, OptionCatalogItem> catalog) {
+        if (catalog == null || catalog.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Map<String, Object>> schemas = new LinkedHashMap<>();
+        for (OptionCatalogItem item : catalog.values()) {
+            if (item == null || item.getValue() == null || item.getValue().isBlank()) {
+                continue;
+            }
+            Map<String, Object> metadata = item.getMetadata();
+            schemas.put(item.getValue(), schemaMapForProjection(metadata.get("schema")));
+        }
+        return Collections.unmodifiableMap(schemas);
+    }
+
+    private static Map<String, Map<String, Object>> normalizedSchemas(Map<String, Map<String, Object>> schemas) {
+        if (schemas == null || schemas.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Map<String, Object>> index = new LinkedHashMap<>();
+        for (Map.Entry<String, Map<String, Object>> entry : schemas.entrySet()) {
+            if (entry.getKey() != null && entry.getValue() != null) {
+                index.putIfAbsent(normalizedProjectionKey(entry.getKey()), entry.getValue());
+            }
+        }
+        return Collections.unmodifiableMap(index);
+    }
+
+    private static String normalizedProjectionKey(String value) {
+        return value != null ? value.toLowerCase(Locale.ROOT) : "";
+    }
+
+    private static Map<String, Object> schemaMapForProjection(Object value) {
+        if (!(value instanceof Map<?, ?> map) || map.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Object> schema = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> entry : map.entrySet()) {
+            if (entry.getKey() != null) {
+                schema.put(entry.getKey().toString(), freezeProjectionValue(entry.getValue()));
+            }
+        }
+        return Collections.unmodifiableMap(schema);
+    }
+
     public ContentDesignerScreen(String serverId, ClientServerView server, String flowId, Screen parent) {
         this(serverId, loadGraph(serverId, flowId), flowId, parent, false, "");
     }
@@ -145,12 +461,309 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     private ContentDesignerScreen(String serverId, FlowGraph graph, String flowId, Screen parent, boolean quickEditMode, String quickEditSessionId, List<CustomAbilityBinding> quickEditOriginalAbilities, Map<String, Object> quickEditOriginalComponents) {
         super(graph, serverId, parent);
         this.flowId = flowId;
+        this.contentId = initialContentId(graph, flowId);
         this.contentDesignerParent = parent;
         this.quickEditMode = quickEditMode;
         this.quickEditSessionId = quickEditSessionId != null ? quickEditSessionId : "";
         this.quickEditOriginalAbilities = quickEditOriginalAbilities != null ? new ArrayList<>(quickEditOriginalAbilities) : List.of();
         this.quickEditOriginalComponents = quickEditOriginalComponents != null ? new LinkedHashMap<>(quickEditOriginalComponents) : Map.of();
-        this.flowManager = FlowManager.getInstance();
+        FlowManager manager = RemotelyClient.INSTANCE != null ? RemotelyClient.INSTANCE.getFlowManager() : null;
+        this.flowManager = manager != null ? manager : FlowManager.getInstance();
+        setCoreGraphSaveHandler(this::saveContentCore);
+    }
+
+    @Override
+    protected boolean ownsCoreGraphSession(CoreGraphEditorSession session) {
+        return !contentCoreClosed && session != null && session == contentCoreSession;
+    }
+
+    @Override
+    protected boolean ownsCoreNodeFields(GraphNode node, ReSyncGenericDescriptorProjection.Projection descriptor) {
+        ReSyncFlowClient client = typedCatalogClient();
+        ReSyncCatalogPublicationProjection.Snapshot catalog = client != null ? client.catalogPublicationProjection().active().orElse(null) : null;
+        CatalogCachePublication.Entry entry = node != null && catalog != null ? catalog.entries().get(node.definition()) : null;
+        return node != null && descriptor != null && ownsCoreGraphSession(contentCoreSession)
+            && entry != null && !entry.tombstone() && !entry.opaque() && entry.state() == CatalogCacheState.ACTIVE
+            && "restudio.resync".equals(node.definition().owner().canonicalText())
+            && CustomContentGraphAdapter.typeFromNode(node.definition().id().canonicalText()) != null
+            && descriptor.definitionKey().equals(node.definition())
+            && (descriptor.status() == ReSyncGenericDescriptorProjection.Status.ACTIVE
+                || descriptor.status() == ReSyncGenericDescriptorProjection.Status.READ_ONLY)
+            && descriptor.fields().stream().allMatch(field -> field.editable() || ownedContentField(descriptor, field));
+    }
+
+    private static boolean ownedContentField(ReSyncGenericDescriptorProjection.Projection descriptor,
+                                              ReSyncGenericDescriptorProjection.Field field) {
+        if (!field.id().startsWith("pin:") || field.typeExpression().isBlank()) return false;
+        String id = field.id().substring("pin:".length());
+        return STUDIO_ROOT_INPUTS.contains(id) && descriptor.pin(id, true).isPresent()
+            && Set.of("The descriptor does not declare a supported editor capability.",
+                "The editor capability is not supported by this client.",
+                "The declared input widget is not supported by this client.").contains(field.reason());
+    }
+
+    private void prepareContentCoreSession(boolean force) {
+        if (contentCoreClosed || contentCorePreparationPending || flowManager == null || contentId == null || contentId.isBlank()) {
+            return;
+        }
+        ReSyncFlowClient client = typedCatalogClient();
+        CatalogAuthoringPublication publication = client != null ? client.activeCatalogAuthoringPublication().orElse(null) : null;
+        ReSyncCatalogPublicationProjection.Snapshot catalog = client != null ? client.catalogPublicationProjection().active().orElse(null) : null;
+        if (publication == null || catalog == null) {
+            return;
+        }
+        long cacheGeneration = quickEditMode ? 0L : flowManager.getCustomContentRevision(serverId, contentId);
+        ReSyncResourceRevisionReconciler.Stamp stamp = quickEditMode ? null : flowManager.customContentStamp(serverId, contentId);
+        if (!force && contentObservedGeneration == cacheGeneration && contentObservedPublication == publication
+            && Objects.equals(stamp, contentObservedStamp)) {
+            return;
+        }
+        if (contentCoreSession != null && hasPendingCoreMutation(contentCoreSession)) {
+            return;
+        }
+        long generation = ++contentCoreGeneration;
+        CoreGraphEditorSession previous = contentCoreSession;
+        GraphDocument previousGraph = previous != null ? previous.graphDocument() : null;
+        GraphDocument previousBaseline = previous != null ? previous.baselineGraphDocument() : null;
+        CustomContentDefinition quickDefinition = quickEditMode ? contentCoreAuthority : null;
+        ContentSave submitted = pendingContentSave;
+        contentCorePreparationPending = true;
+        if (quickEditMode && quickDefinition == null) {
+            boolean accepted = submitFrozenWorkspaceGraph(frozen -> {
+                buildContentCorePreparation(generation, cacheGeneration, previous, previousGraph, previousBaseline,
+                    publication, catalog, submitted, CustomContentGraphAdapter.toDefinition(frozen));
+                return true;
+            }, completed -> {
+                if (!completed && generation == contentCoreGeneration) contentCorePreparationPending = false;
+            });
+            if (!accepted) contentCorePreparationPending = false;
+            return;
+        }
+        if (!submitLifecycleTask(() -> buildContentCorePreparation(generation, cacheGeneration, previous, previousGraph,
+            previousBaseline, publication, catalog, submitted, quickDefinition))) {
+            contentCorePreparationPending = false;
+        }
+    }
+
+    private void buildContentCorePreparation(long generation, long cacheGeneration, CoreGraphEditorSession previous,
+                                             GraphDocument previousGraph, GraphDocument previousBaseline,
+                                             CatalogAuthoringPublication publication, ReSyncCatalogPublicationProjection.Snapshot catalog,
+                                             ContentSave submitted, CustomContentDefinition quickDefinition) {
+        FlowManager.CustomContentAuthority authority = null;
+        ReSyncResourceRevisionReconciler.Stamp observedStamp = quickEditMode ? null : flowManager.customContentStamp(serverId, contentId);
+        CustomContentDefinition definition = quickDefinition;
+        CoreGraphEditorSession prepared = null;
+        String issue = "";
+        try {
+            authority = quickEditMode ? null : flowManager.customContentAuthority(serverId, contentId);
+            if (!quickEditMode && authority == null) {
+                ReSyncResourceRevisionReconciler.Stamp stamp = flowManager.customContentStamp(serverId, contentId);
+                throw new IllegalStateException(stamp != null && stamp.deleted() ? "Content Was Deleted" : "Content Is Still Loading");
+            }
+            definition = quickEditMode ? quickDefinition : authority.materialize();
+            ServerResourceLocator resource = new ServerResourceLocator(catalog.publication().key().serverId(),
+                ContractRef.of(OwnerId.of("restudio.resync"), ResourceTypeId.of(ReSyncResourceType.CUSTOM_CONTENT.typeId())), contentId);
+            prepared = CustomContentCoreEditor.prepare(definition, resource, authority != null ? authority.result().revision() : 0L,
+                publication, catalog.entries().values());
+            if (previousGraph != null) {
+                GraphDocument saved = submitted != null && authority != null
+                    && acknowledgedContentSave(submitted, authority)
+                    ? submitted.document() : null;
+                CustomContentCoreEditor.rebase(prepared, previousBaseline, previousGraph, saved);
+            }
+        } catch (RuntimeException exception) {
+            issue = exception.getMessage() == null ? "Content Editor Unavailable" : exception.getMessage();
+        }
+        ContentPreparation result = new ContentPreparation(generation, cacheGeneration, previous, previousGraph, authority,
+            authority != null ? ReSyncResourceRevisionReconciler.Stamp.from(authority.result()) : observedStamp,
+            definition, publication, prepared, submitted, issue);
+        contentCoreCompletions.add(() -> applyContentCorePreparation(result));
+    }
+
+    private void applyContentCorePreparation(ContentPreparation result) {
+        if (contentCoreClosed || result.generation() != contentCoreGeneration) {
+            return;
+        }
+        contentCorePreparationPending = false;
+        ReSyncFlowClient client = typedCatalogClient();
+        if (client == null || client.activeCatalogAuthoringPublication().orElse(null) != result.publication()
+            || result.submitted() != pendingContentSave
+            || result.previous() != contentCoreSession
+            || result.previous() != null && (result.previousGraph() != result.previous().graphDocument()
+                || hasPendingCoreMutation(result.previous()))
+            || result.authority() != null && !flowManager.isCurrentCustomContentAuthority(result.authority())) {
+            return;
+        }
+        contentObservedGeneration = result.cacheGeneration();
+        contentObservedPublication = result.publication();
+        contentObservedStamp = result.stamp();
+        if (!result.issue().isBlank()) {
+            contentCoreIssue = result.issue();
+            return;
+        }
+        boolean sameAuthority = contentCoreSession != null && contentCorePublication == result.publication()
+            && (quickEditMode || contentAuthorityToken != null && result.authority() != null
+                && contentAuthorityToken.result().revision() == result.authority().result().revision()
+                && Objects.equals(contentAuthorityToken.result().payloadHash(), result.authority().result().payloadHash()));
+        contentCoreIssue = "";
+        contentCoreAuthority = result.definition();
+        contentAuthorityToken = result.authority();
+        contentCorePublication = result.publication();
+        if (pendingContentSave != null && result.authority() != null
+            && acknowledgedContentSave(pendingContentSave, result.authority())) {
+            pendingContentSave = null;
+        }
+        if (!sameAuthority) {
+            contentCoreSession = result.session();
+            setCoreGraphEditorSession(contentCoreSession);
+            contentPanelRefreshPending = true;
+        }
+    }
+
+    private static boolean acknowledgedContentSave(ContentSave save, FlowManager.CustomContentAuthority authority) {
+        return Objects.equals(save.ticket().mutationId(), authority.result().mutationId())
+            || save.acknowledged() && authority.result().revision() > save.document().revision();
+    }
+
+    private boolean saveContentCore(CoreGraphEditorSession session, DesignerSaveNotifications.SaveTicket ticket) {
+        ReSyncFlowClient client = typedCatalogClient();
+        CatalogAuthoringPublication publication = client != null ? client.activeCatalogAuthoringPublication().orElse(null) : null;
+        ReSyncCatalogPublicationProjection.Snapshot catalog = client != null ? client.catalogPublicationProjection().active().orElse(null) : null;
+        if (!ownsCoreGraphSession(session) || quickEditMode || contentAuthorityToken == null || !contentCoreIssue.isBlank()
+            || pendingContentSave != null || publication == null || catalog == null || publication != contentCorePublication) {
+            return false;
+        }
+        GraphDocument document = session.graphDocument();
+        CustomContentDefinition definition = contentCoreAuthority;
+        FlowManager.CustomContentAuthority expected = contentAuthorityToken;
+        ContentSave save = new ContentSave(document, ticket, false);
+        pendingContentSave = save;
+        ticket.whenFinished((saved, current) -> contentCoreCompletions.add(() -> {
+            if (!contentCoreClosed) {
+                if (pendingContentSave == save) {
+                    pendingContentSave = saved ? new ContentSave(document, ticket, true) : null;
+                }
+                contentObservedGeneration = -1L;
+                prepareContentCoreSession(true);
+            }
+        }));
+        boolean accepted = submitLifecycleTask(() -> {
+            try {
+                CoreGraphEditorSession frozen = new CoreGraphEditorSession(document, session.activeAuthoringChecksum(),
+                    session.authoringCapabilities(), session.editCapabilities());
+                CustomContentDefinition content = CustomContentCoreEditor.materialize(frozen, definition, publication, catalog.entries().values());
+                if (client.activeCatalogAuthoringPublication().orElse(null) != publication
+                    || client.catalogPublicationProjection().active().orElse(null) != catalog) {
+                    DesignerSaveNotifications.failExact(ticket, "Content Catalog Changed Before Save");
+                    return;
+                }
+                if (!flowManager.saveCustomContent(serverId, content, ticket, expected)) {
+                    DesignerSaveNotifications.failExact(ticket, "Content Save Rejected");
+                }
+            } catch (RuntimeException exception) {
+                DesignerSaveNotifications.failExact(ticket, exception.getMessage() == null ? "Content Save Failed" : exception.getMessage());
+            }
+        });
+        if (!accepted && pendingContentSave == save) pendingContentSave = null;
+        return accepted;
+    }
+
+    private boolean submitContentGraph(Function<FlowGraph, Boolean> action, Consumer<Boolean> completion) {
+        return submitContentGraph(action, completion, true);
+    }
+
+    private boolean submitContentGraph(Function<FlowGraph, Boolean> action, Consumer<Boolean> completion, boolean requireCurrent) {
+        CoreGraphEditorSession session = contentCoreSession;
+        if (session == null) {
+            return submitFrozenWorkspaceGraph(action, completion);
+        }
+        if (hasPendingCoreMutation(session)) {
+            return false;
+        }
+        CoreGraphUiProjection.EditorSnapshot snapshot = CoreGraphUiProjection.EditorSnapshot.capture(session);
+        long generation = contentCoreGeneration;
+        return submitLifecycleTask(() -> {
+            boolean applied;
+            try {
+                CoreGraphUiProjection.ProjectionResult projection = new CoreGraphUiProjection().projectEditorSnapshot(snapshot);
+                applied = projection.complete() && Boolean.TRUE.equals(action.apply(projection.graph()));
+            } catch (RuntimeException exception) {
+                applied = false;
+            }
+            boolean result = applied;
+            contentCoreCompletions.add(() -> {
+                if (!contentCoreClosed && (!requireCurrent || generation == contentCoreGeneration)) {
+                    completion.accept(result && (!requireCurrent || snapshot.currentFor(contentCoreSession)));
+                }
+            });
+        });
+    }
+
+    @Override
+    protected void synchronizeCoreWorkspaceMutation() {
+        CoreGraphEditorSession session = contentCoreSession;
+        FlowNode root = CustomContentGraphAdapter.findStartNode(graph);
+        String rootId = contentRootNodeId(graph);
+        ReSyncFlowClient client = typedCatalogClient();
+        ReSyncCatalogPublicationProjection.Snapshot catalog = client != null ? client.catalogPublicationProjection().active().orElse(null) : null;
+        if (session == null || root == null || rootId == null || catalog == null) {
+            return;
+        }
+        String type = root.getType();
+        Map<String, Object> inputs = freezeProjectionMap(root.getInputValues());
+        Map<String, Object> properties = freezeProjectionMap(graph.getContentProperties());
+        submitCoreWorkspaceMutation("Content Settings", candidate -> {
+            CoreGraphUiProjection.ProjectionResult projected = new CoreGraphUiProjection().projectEditorSession(candidate);
+            if (!projected.complete()) return false;
+            FlowGraph current = projected.graph();
+            FlowNode currentRoot = current.getNodes().get(rootId);
+            if (currentRoot == null) return false;
+            currentRoot.setInputValues(new LinkedHashMap<>(inputs));
+            current.setContentProperties(new LinkedHashMap<>(properties));
+            if (!Objects.equals(CustomContentGraphAdapter.typeFromNode(currentRoot.getType()), CustomContentGraphAdapter.typeFromNode(type))) {
+                currentRoot.setType(type.contains(":") ? type : "restudio.resync:" + type);
+                CoreGraphAuthoringAdapter.Context context = CoreGraphAuthoringAdapter.Context.strict(ReSyncResourceType.CUSTOM_CONTENT,
+                    candidate.resource(), candidate.catalogBinding(), candidate.graphDocument().schemaVersion(), catalog.entries().values(),
+                    candidate.revision());
+                GraphNode replacement = new CoreGraphAuthoringAdapter().createNode(NodeInstanceId.parseCanonicalText(rootId), currentRoot, context);
+                List<GraphNode> nodes = candidate.graphDocument().nodes().stream()
+                    .map(node -> node.instanceId().canonicalText().equals(rootId) ? replacement : node).toList();
+                candidate.setNodes(nodes);
+                currentRoot.setVersion(replacement.definitionVersion());
+            }
+            CoreGraphAuthoringAdapter.Result converted = CustomContentCoreEditor.convert(current, candidate, catalog.entries().values());
+            if (!converted.lossless()) return false;
+            candidate.replaceGraph(converted.graphDocument());
+            return true;
+        });
+    }
+
+    @Override
+    protected void onCoreGraphProjectionPublished(FlowGraph previous, FlowGraph current) {
+        contentPanelRefreshPending = true;
+    }
+
+    private static String initialContentId(FlowGraph graph, String flowId) {
+        String id = "";
+        if (graph != null) {
+            Object value = CustomContentGraphAdapter.getContentProperty(graph, "content_id", "");
+            id = value != null ? String.valueOf(value).trim() : "";
+        }
+        if (id.isBlank()) {
+            id = contentIdFromFlowId(graph != null ? graph.getId() : "");
+        }
+        if (id.isBlank()) {
+            id = contentIdFromFlowId(flowId);
+        }
+        return id;
+    }
+
+    private static String contentIdFromFlowId(String flowId) {
+        if (flowId == null || !flowId.startsWith("content.")) {
+            return "";
+        }
+        int separator = flowId.indexOf('.', "content.".length());
+        return separator >= 0 && separator + 1 < flowId.length() ? flowId.substring(separator + 1) : "";
     }
 
     public static ContentDesignerScreen quickEdit(String serverId, String sessionId, CustomContentDefinition definition, Screen parent) {
@@ -158,13 +771,16 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     }
 
     private static FlowGraph loadGraph(String serverId, String flowId) {
-        FlowManager manager = FlowManager.getInstance();
+        FlowManager manager = RemotelyClient.INSTANCE != null ? RemotelyClient.INSTANCE.getFlowManager() : null;
+        if (manager == null) {
+            manager = FlowManager.getInstance();
+        }
         if (manager == null || serverId == null || flowId == null) {
             return new FlowGraph();
         }
-        FlowGraph graph = manager.getGraph(serverId, ReSyncResourceType.FLOW, flowId);
-        if (graph != null) {
-            return graph;
+        CustomContentDefinition exact = manager.getCustomContent(serverId, flowId);
+        if (exact != null && exact.getGraph() != null) {
+            return exact.getGraph();
         }
         CustomContentDefinition content = manager.getCustomContentForServer(serverId).values().stream()
             .filter(candidate -> candidate != null && flowId.equals(candidate.getFlowId()) && candidate.getGraph() != null)
@@ -228,6 +844,105 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         return "quickedit." + (sessionId != null && !sessionId.isBlank() ? sessionId : "item");
     }
 
+    private AttributeProjection createAttributeProjection(CustomContentDefinition definition) {
+        if (definition == null) {
+            return null;
+        }
+        String material = projectionMaterial(definition.getMaterial());
+        String source = attributeSchemaSource(definition.getMaterial());
+        Map<String, OptionCatalogItem> attributeValueCatalog = attributeCatalog("server:minecraft:attribute");
+        return new AttributeProjection(definition.getType(), definition.getDisplayName(), material, source,
+            definition.getLore(), definition.getComponents(), attributeCatalog(source), null, null, catalogIndex(attributeValueCatalog));
+    }
+
+    private AttributeProjection currentAttributeProjection() {
+        return contentPanelSnapshot != null ? contentAttributeProjection : null;
+    }
+
+    private void updateAttributeProjectionProperty(String key, Object value) {
+        AttributeProjection current = contentAttributeProjection;
+        if (current == null || key == null) {
+            return;
+        }
+        switch (key) {
+            case "__type" -> contentAttributeProjection = current.withType(value != null ? value.toString() : "");
+            case "name" -> contentAttributeProjection = current.withDisplayName(value != null ? value.toString() : "");
+            case "material" -> {
+                String material = projectionMaterial(value != null ? value.toString() : "");
+                if (!material.equals(current.material())) {
+                    String source = attributeSchemaSource(material);
+                    contentAttributeProjection = current.withMaterial(material, source);
+                    requestCatalog(source);
+                    refreshContentPanel();
+                    if (attributeDesignerOpen) {
+                        refreshAttributeDesignerContent(true);
+                    }
+                }
+            }
+            case "components" -> contentAttributeProjection = current.withComponents(projectionComponents(value));
+            case "lore" -> contentAttributeProjection = current.withLore(projectionList(value));
+            default -> {
+            }
+        }
+    }
+
+    private void updateAttributeProjectionWorkspace(Set<String> inputKeys, Set<String> propertyKeys, FlowNode root) {
+        if (root != null && root.getType() != null) {
+            AttributeProjection current = contentAttributeProjection;
+            if (current != null) {
+                String type = CustomContentGraphAdapter.typeFromNode(root.getType());
+                if (type != null && !type.equals(current.type())) {
+                    contentAttributeProjection = current.withType(type);
+                }
+            }
+        }
+        if (root != null && root.getInputValues() != null && inputKeys != null) {
+            for (String key : inputKeys) {
+                updateAttributeProjectionProperty(key, root.getInputValues().get(key));
+            }
+        }
+        if (graph != null && graph.getContentProperties() != null && propertyKeys != null) {
+            for (String key : propertyKeys) {
+                updateAttributeProjectionProperty(key, graph.getContentProperties().get(key));
+            }
+        }
+    }
+
+    private Map<String, Object> projectionComponents(Object value) {
+        if (!(value instanceof Map<?, ?> map)) {
+            return Map.of();
+        }
+        Map<String, Object> components = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> entry : map.entrySet()) {
+            if (entry.getKey() != null) {
+                components.put(entry.getKey().toString(), entry.getValue());
+            }
+        }
+        return components;
+    }
+
+    private List<String> projectionList(Object value) {
+        if (value == null || value.toString().isBlank()) {
+            return List.of();
+        }
+        List<String> values = new ArrayList<>();
+        for (String part : value.toString().split("[,\\r\\n]+")) {
+            String trimmed = part.trim();
+            if (!trimmed.isBlank()) {
+                values.add(trimmed);
+            }
+        }
+        return values;
+    }
+
+    private String projectionMaterial(String value) {
+        String material = value != null ? value.trim() : "";
+        if (material.startsWith("minecraft:")) {
+            material = material.substring("minecraft:".length());
+        }
+        return material.isBlank() ? "STICK" : material.toUpperCase(Locale.ROOT);
+    }
+
     public FlowGraph getContentGraph() {
         return graph;
     }
@@ -267,7 +982,17 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     @Override
     protected FlowNodeWidget createNodeWidget(String nodeId, FlowNode node) {
         if (node != null && CustomContentGraphAdapter.typeFromNode(node.getType()) != null) {
-            FlowNodeWidget widget = new StudioRootNodeWidget((int) node.getX(), (int) node.getY(), node, graph, nodeId, serverId, () -> {}, this::markWorkspaceMutation);
+            ReSyncGenericWidgetCapabilities.WidgetDefinition definition = genericWidgetDefinition(node.getType());
+            GraphNode coreNode = contentCoreSession != null ? contentCoreSession.graphDocument().nodes().stream()
+                .filter(value -> value.instanceId().canonicalText().equals(nodeId)).findFirst().orElse(null) : null;
+            ReSyncGenericDescriptorProjection.Projection descriptor = coreNode != null && typedCatalogClient() != null ? typedCatalogClient()
+                .typedInteractionProjection().flatMap(value -> value.descriptor(coreNode.definition())).orElse(null) : null;
+            if (definition != null && ownsCoreNodeFields(coreNode, descriptor)) {
+                definition = new ReSyncGenericWidgetCapabilities.WidgetDefinition(definition.definition(), false,
+                    definition.identity(), definition.inspector());
+            }
+            FlowNodeWidget widget = new StudioRootNodeWidget((int) node.getX(), (int) node.getY(), node, graph,
+                nodeId, serverId, () -> {}, this::markWorkspaceMutation, definition);
             widget.setEditorDiagnostics(editorDiagnosticsForNode(nodeId));
             return widget;
         }
@@ -295,21 +1020,50 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
 
     @Override
     protected boolean shouldCreatePaletteSidePanel() {
-        return false;
+        return true;
     }
 
     @Override
     protected void onOptionCatalogRefreshed() {
-        super.onOptionCatalogRefreshed();
+        onOptionCatalogRefreshed(null);
+    }
+
+    @Override
+    protected String workspaceCatalogFence() {
+        return super.workspaceCatalogFence() + "|content=" + contentPanelCatalogVersion;
+    }
+
+    @Override
+    protected void onOptionCatalogRefreshed(String sourceId) {
+        super.onOptionCatalogRefreshed(sourceId);
+        if (sourceId != null && !contentPanelCatalogSource(sourceId)) {
+            return;
+        }
+        contentPanelCatalogVersion++;
         refreshContentPanel();
+        prepareContentCoreSession(false);
         if (attributeDesignerOpen) {
             refreshAttributeDesignerContent(true);
         }
     }
 
+    private boolean contentPanelCatalogSource(String sourceId) {
+        String source = attributeCatalogSource(sourceId);
+        AttributeProjection projection = contentAttributeProjection;
+        String attributeSource = projection != null ? attributeCatalogSource(projection.schemaSource()) : ATTRIBUTE_SCHEMA_SOURCE;
+        return CONTENT_PANEL_CATALOG_SOURCES.contains(source) || attributeSource.equals(source);
+    }
+
     @Override
     public void renderHandler(IDrawContext context, int mouseX, int mouseY, float delta) {
+        for (int index = 0; index < 4; index++) {
+            Runnable completion = contentCoreCompletions.poll();
+            if (completion == null) break;
+            completion.run();
+        }
+        prepareContentCoreSession(false);
         super.renderHandler(context, mouseX, mouseY, delta);
+        drainContentPanelDiffs();
         if (contentStudioPanel != null) {
             renderStudioPanel(contentStudioPanel, context, mouseX, mouseY, delta);
         }
@@ -453,27 +1207,54 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
 
     @Override
     protected void onSave() {
+        if (contentCoreSession == null || !contentCoreIssue.isBlank()) {
+            prepareContentCoreSession(true);
+            new Notification(getDesktopAppTitle(), contentCoreIssue.isBlank() ? "Editor Loading" : contentCoreIssue, Notification.Type.ERROR);
+            return;
+        }
         if (quickEditMode) {
             applyQuickEdit();
             return;
         }
+        if (pendingContentSave != null) {
+            new Notification("Content Designer", "Save In Progress", Notification.Type.INFO);
+            return;
+        }
         super.onSave();
-        updateSummary();
+        if (!deferFrozenWorkspaceMutation(this::updateSummary)) {
+            updateSummary();
+        }
+    }
+
+    @Override
+    protected SaveTicketIdentity saveTicketIdentity(ReSyncResourceType materializationType, FlowGraph target,
+                                                    String notificationName) {
+        String name = notificationName != null && !notificationName.isBlank() ? notificationName : contentId;
+        return new SaveTicketIdentity(ReSyncResourceType.CUSTOM_CONTENT, contentId, name);
     }
 
     private void applyQuickEdit() {
-        CustomContentDefinition definition = CustomContentGraphAdapter.toDefinition(graph);
-        if (definition == null || quickEditSessionId.isBlank()) {
+        if (quickEditSessionId.isBlank()) {
             new Notification("Quick Edit", "Apply Failed", Notification.Type.ERROR);
             return;
         }
-        if ((definition.getAbilities() == null || definition.getAbilities().isEmpty()) && !quickEditOriginalAbilities.isEmpty()) {
-            definition.setAbilities(new ArrayList<>(quickEditOriginalAbilities));
+        boolean submitted = submitContentGraph(frozenGraph -> {
+            CustomContentDefinition definition = CustomContentGraphAdapter.toDefinition(frozenGraph);
+            if (definition == null) {
+                return false;
+            }
+            if ((definition.getAbilities() == null || definition.getAbilities().isEmpty()) && !quickEditOriginalAbilities.isEmpty()) {
+                definition.setAbilities(new ArrayList<>(quickEditOriginalAbilities));
+            }
+            definition.setComponents(persistedQuickEditComponents(definition.getComponents()));
+            definition.setGraph(null);
+            flowManager.applyQuickEdit(serverId, quickEditSessionId, definition);
+            return true;
+        }, applied -> new Notification("Quick Edit", applied ? "Applying" : "Apply Failed",
+            applied ? Notification.Type.INFO : Notification.Type.ERROR), false);
+        if (!submitted) {
+            new Notification("Quick Edit", "Apply Failed", Notification.Type.ERROR);
         }
-        definition.setComponents(persistedQuickEditComponents(definition.getComponents()));
-        definition.setGraph(null);
-        flowManager.applyQuickEdit(serverId, quickEditSessionId, definition);
-        new Notification("Quick Edit", "Applying", Notification.Type.INFO);
     }
 
     private Map<String, Object> persistedQuickEditComponents(Map<String, Object> components) {
@@ -491,16 +1272,34 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
 
     @Override
     public void close() {
+        contentCoreClosed = true;
+        contentCoreGeneration++;
+        contentCoreCompletions.clear();
+        contentPanelRequestVersion++;
+        contentPanelDiffs = new ArrayDeque<>();
+        contentPanelRefreshPending = false;
+        contentPanelStructurePending = false;
         closeStudioSelector();
         hideAttributeDesigner();
+        contentPanelSnapshot = null;
+        contentAttributeProjection = null;
         super.close();
     }
 
     @Override
     public void removed() {
+        contentCoreClosed = true;
+        contentCoreGeneration++;
+        contentCoreCompletions.clear();
+        contentPanelRequestVersion++;
+        contentPanelDiffs = new ArrayDeque<>();
+        contentPanelRefreshPending = false;
+        contentPanelStructurePending = false;
         closeStudioSelector();
         restoreAttributeDesignerContentBrowser();
         dismissStudioWorkspace();
+        contentPanelSnapshot = null;
+        contentAttributeProjection = null;
         super.removed();
     }
 
@@ -518,20 +1317,13 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     }
 
     private void buildContentPanel() {
-        contentStudioPanel = rightStudioPanel("contentPanel")
-            .collapsible("Content Inspector")
+        contentStudioPanel = leftStudioPanel("contentPanel")
             .show();
         contentPanel = contentStudioPanel.sidePanel();
         contentStudioPanel.padding(panelState.padding());
         attributeDesignerPanel = leftStudioPanel("attributeDesignerPanel")
-            .dismissible("Item Attributes")
             .hide();
         attributePanel = attributeDesignerPanel.sidePanel();
-        attributePanel.onUserVisibilityChanged(visible -> {
-            if (!visible) {
-                hideAttributeDesigner();
-            }
-        });
         attributePanel.minWidth(360).width(420);
         attributeDesignerPanel.padding(panelState.padding());
     }
@@ -540,6 +1332,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         for (GraphEditorScreen screen : OPEN_SCREENS) {
             if (screen instanceof ContentDesignerScreen contentScreen && serverId != null && serverId.equals(contentScreen.getServerId())) {
                 contentScreen.attributeValidationErrors = errors != null ? List.copyOf(errors) : List.of();
+                contentScreen.contentPanelValidationVersion++;
                 if (contentScreen.attributeDesignerOpen) {
                     contentScreen.refreshAttributeDesignerContent(true);
                 } else {
@@ -553,141 +1346,377 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         if (contentPanel == null) {
             return;
         }
-        Container container = contentPanel.container();
-        clearContentPanelWidgets(container);
-        contentCollaborationBindings.clear();
-        eventRows.clear();
-        panelDropdowns.clear();
-        CustomContentDefinition definition = CustomContentGraphAdapter.toDefinition(graph);
-        String type = CustomContentGraphAdapter.contentType(graph);
-        if (definition == null || type == null) {
+        long requestVersion = ++contentPanelRequestVersion;
+        long generation = workspaceSnapshotGeneration();
+        long mutationVersion = workspaceMutationVersion();
+        long catalogVersion = contentPanelCatalogVersion;
+        long validationVersion = contentPanelValidationVersion;
+        BrowserSafeState.ReferenceValue<ContentPanelSnapshot> prepared = new BrowserSafeState.ReferenceValue<>();
+        boolean submitted = submitContentGraph(frozenGraph -> {
+            CustomContentDefinition definition = CustomContentGraphAdapter.toDefinition(frozenGraph);
+            String type = CustomContentGraphAdapter.contentType(frozenGraph);
+            if (definition == null || type == null) {
+                return false;
+            }
+            List<String> branches = List.copyOf(CustomContentGraphAdapter.getEnabledTriggerBranches(frozenGraph));
+            Map<String, Integer> actionCounts = new LinkedHashMap<>();
+            for (CustomContentGraphAdapter.TriggerDescriptor trigger : CustomContentGraphAdapter.triggersForType(type)) {
+                actionCounts.put(trigger.pin(), branchActionCount(frozenGraph, trigger.pin()));
+            }
+            Set<String> componentKeys = definition.getComponents() != null ? definition.getComponents().keySet() : Set.of();
+            String key = type + "\n" + definition.getProvider() + "\n"
+                + String.join("\n", branches) + "\n"
+                + String.join("\n", componentKeys) + "\n" + Objects.hashCode(definition.getComponents());
+            prepared.set(new ContentPanelSnapshot(definition, type, key, generation, mutationVersion, requestVersion,
+                catalogVersion, validationVersion, branches, Map.copyOf(actionCounts), List.copyOf(providerOptions()),
+                List.copyOf(materialOptions()), List.copyOf(providerAssetOptions(definition.getProvider(), type)),
+                createAttributeProjection(definition)));
+            return true;
+        }, applied -> {
+            ContentPanelSnapshot snapshot = prepared.get();
+            if (!applied || !OPEN_SCREENS.contains(this) || snapshot == null
+                || snapshot.generation() != workspaceSnapshotGeneration()
+                || snapshot.requestVersion() != contentPanelRequestVersion
+                || snapshot.catalogVersion() != contentPanelCatalogVersion
+                || snapshot.validationVersion() != contentPanelValidationVersion
+                || snapshot.mutationVersion() != workspaceMutationVersion()) {
+                contentPanelRefreshPending = true;
+                return;
+            }
+            contentPanelRefreshPending = false;
+            applyContentPanel(snapshot);
+        });
+        if (!submitted) {
+            contentPanelRefreshPending = true;
+        }
+    }
+
+    private void applyContentPanel(ContentPanelSnapshot snapshot) {
+        contentAttributeProjection = snapshot.attributeProjection();
+        contentPanelSnapshot = snapshot;
+        if (contentAttributeProjection != null) {
+            requestCatalog(contentAttributeProjection.schemaSource());
+        }
+        if (attributeDesignerOpen) {
+            refreshAttributeDesignerContent(true);
+        }
+        CustomContentDefinition definition = snapshot.definition();
+        String type = snapshot.type();
+        if (snapshot.key().equals(contentPanelKey) && !contentPanelStructurePending) {
+            contentPanelDiffs = new ArrayDeque<>();
+            queueContentPanelValues(snapshot);
             return;
         }
+        Container container = contentPanel.container();
+        Deque<AnimatedWidget> retired = contentPanelWidgets;
+        contentPanelWidgets = new ArrayDeque<>();
+        if (!retired.isEmpty()) {
+            contentPanelRetirements.addLast(retired);
+        }
+        contentCollaborationBindings = new LinkedHashMap<>();
+        eventRows = new HashMap<>();
+        panelDropdowns = new ArrayList<>();
+        contentDropdowns = new LinkedHashMap<>();
+        contentPanelDiffs = new ArrayDeque<>();
+        contentPanelKey = snapshot.key();
+        contentPanelStructurePending = true;
+        contentPanelDiffMutationVersion = snapshot.mutationVersion();
+        contentPanelDiffRequestVersion = snapshot.requestVersion();
         int rowWidth = contentRowWidth();
-        summaryWidget = new MountableButtonWidget.Builder(definition.getDisplayName())
-            .description(contentSummary(definition))
-            .iconPath(iconForType(type))
-            .onClick(() -> selectedBranch = firstBranch())
-            .build();
-        summaryWidget.setSize(rowWidth, 30);
-        insertContentPanelWidget(container, summaryWidget);
-        insertContentPanelWidget(container, textRow("Name", definition.getDisplayName(), rowWidth, value -> {
+        container.beginBatchAdd();
+        queueContentPanelRetirement(container);
+        queueContentPanelWidget(container, () -> {
+            summaryWidget = new MountableButtonWidget.Builder(definition.getDisplayName())
+                .description(contentSummary(definition)).iconPath(iconForType(type))
+                .onClick(() -> selectedBranch = firstBranch()).build();
+            summaryWidget.setSize(rowWidth, 30);
+            return summaryWidget;
+        });
+        queueContentPanelWidget(container, () -> textRow("Name", definition.getDisplayName(), rowWidth, value -> {
             setProperty("name", value);
             updateSummary();
         }));
-        insertContentPanelWidget(container, dropdownRow("Type", List.of("item", "armor", "block", "projectile"), type, rowWidth, value -> {
-            FlowNode start = CustomContentGraphAdapter.findStartNode(graph);
-            if (start != null) {
-                start.setType(CustomContentGraphAdapter.nodeType(value));
-                if ("armor".equals(value)) {
-                    CustomContentGraphAdapter.setContentConfiguration(graph, "armor_slot", "chest");
-                } else {
-                    CustomContentGraphAdapter.removeContentConfiguration(graph, "armor_slot");
+        queueContentPanelWidget(container, () -> dropdownRow("Type", List.of("item", "armor", "block", "projectile"), type, rowWidth,
+            this::setContentType));
+        queueTypeRows(container, snapshot, rowWidth);
+        queueAssetRows(container, snapshot, rowWidth);
+        queueTextRows(container, definition, rowWidth);
+        queueComponentRows(container, definition, rowWidth);
+        queueRuleRows(container, type, rowWidth);
+        queueEventRows(container, snapshot, rowWidth);
+        contentPanelDiffs.addLast(() -> {
+            container.endBatchAdd();
+            contentPanelStructurePending = false;
+        });
+    }
+
+    private void queueContentPanelRetirement(Container container) {
+        if (contentPanelRetirements.isEmpty()) {
+            return;
+        }
+        contentPanelDiffs.addLast(new Runnable() {
+            @Override
+            public void run() {
+                Deque<AnimatedWidget> retired = contentPanelRetirements.peekLast();
+                AnimatedWidget widget = retired != null ? retired.peekLast() : null;
+                if (widget != null && container.removeLastWidget(widget)) {
+                    retired.pollLast();
                 }
-                setProperty("material", defaultMaterial(value));
-                selectedBranch = firstBranch();
-                refreshNodeRegistry();
-                refreshContentPanel();
+                if (retired != null && retired.isEmpty()) {
+                    contentPanelRetirements.pollLast();
+                }
+                if (!contentPanelRetirements.isEmpty()) {
+                    contentPanelDiffs.addFirst(this);
+                }
             }
-        }));
-        if ("armor".equals(type)) {
+        });
+    }
+
+    private void queueContentPanelWidget(Container container, Supplier<AnimatedWidget> supplier) {
+        contentPanelDiffs.addLast(() -> insertContentPanelWidget(container, supplier.get()));
+    }
+
+    private void queueTypeRows(Container container, ContentPanelSnapshot snapshot, int rowWidth) {
+        CustomContentDefinition definition = snapshot.definition();
+        if ("armor".equals(snapshot.type())) {
             String armorSlot = definition.getArmorSlot() == null || definition.getArmorSlot().isBlank() ? "chest" : definition.getArmorSlot();
-            insertContentPanelWidget(container, dropdownRow("Armor Slot", List.of("head", "chest", "legs", "feet"), armorSlot, rowWidth,
-                value -> {
-                    CustomContentGraphAdapter.setContentConfiguration(graph, "armor_slot", value);
-                    markWorkspaceMutation();
-                }));
+            queueContentPanelWidget(container, () -> dropdownRow("Armor Slot", List.of("head", "chest", "legs", "feet"), armorSlot, rowWidth, value -> {
+                setContentConfiguration("armor_slot", value);
+            }));
+        } else if ("projectile".equals(snapshot.type())) {
+            queueProjectileRows(container, rowWidth);
         }
-        if ("projectile".equals(type)) {
-            addProjectileRows(container, rowWidth);
-        }
-        insertContentPanelWidget(container, dropdownRow("Provider", providerOptions(), definition.getProvider(), rowWidth, value -> {
+    }
+
+    private void queueProjectileRows(Container container, int rowWidth) {
+        queueContentPanelWidget(container, () -> contentSectionHeader("Projectile Behavior", projectileConfigurationText("entity_type", "ARROW") + " | "
+            + projectileConfigurationText("launch_source", "Automatic"), rowWidth));
+        queueContentPanelWidget(container, () -> dropdownRow("Projectile", List.of("ARROW", "SPECTRAL_ARROW", "TRIDENT", "SNOWBALL", "EGG", "ENDER_PEARL", "FIREBALL",
+            "SMALL_FIREBALL", "DRAGON_FIREBALL", "WITHER_SKULL", "SHULKER_BULLET", "LLAMA_SPIT", "WIND_CHARGE", "BREEZE_WIND_CHARGE"),
+            projectileConfigurationText("entity_type", "ARROW"), rowWidth, value -> setProjectileConfiguration("entity_type", value)));
+        queueContentPanelWidget(container, () -> dropdownRow("Launch Source", List.of("Automatic", "Bow Ammo", "Item Use", "Both"),
+            projectileConfigurationText("launch_source", "Automatic"), rowWidth, value -> setProjectileConfiguration("launch_source", value)));
+        queueContentPanelWidget(container, () -> textRow("Speed", projectileConfigurationText("speed", "2.4"), rowWidth, value -> setProjectileConfiguration("speed", value)));
+        queueContentPanelWidget(container, () -> textRow("Damage", projectileConfigurationText("damage", "0"), rowWidth, value -> setProjectileConfiguration("damage", value)));
+        queueContentPanelWidget(container, () -> dropdownRow("Gravity", List.of("Enabled", "Disabled"),
+            projectileConfigurationFlag("gravity", true) ? "Enabled" : "Disabled", rowWidth, value -> setProjectileConfiguration("gravity", "Enabled".equals(value))));
+        queueContentPanelWidget(container, () -> dropdownRow("Glowing", List.of("Disabled", "Enabled"),
+            projectileConfigurationFlag("glowing", false) ? "Enabled" : "Disabled", rowWidth, value -> setProjectileConfiguration("glowing", "Enabled".equals(value))));
+        queueContentPanelWidget(container, () -> dropdownRow("Consume Item", List.of("Enabled", "Disabled"),
+            projectileConfigurationFlag("consume_item", true) ? "Enabled" : "Disabled", rowWidth, value -> setProjectileConfiguration("consume_item", "Enabled".equals(value))));
+        queueContentPanelWidget(container, () -> dropdownRow("Pickup", List.of("Allowed", "Disallowed", "Creative Only"),
+            projectileConfigurationText("pickup", "Allowed"), rowWidth, value -> setProjectileConfiguration("pickup", value)));
+        queueContentPanelWidget(container, () -> textRow("Fire Sound", projectileConfigurationText("fire_sound", ""), rowWidth,
+            value -> setProjectileConfiguration("fire_sound", value)));
+        queueContentPanelWidget(container, () -> textRow("Hit Sound", projectileConfigurationText("hit_sound", ""), rowWidth,
+            value -> setProjectileConfiguration("hit_sound", value)));
+        queueContentPanelWidget(container, () -> textRow("Sound Volume", projectileConfigurationText("sound_volume", "1"), rowWidth,
+            value -> setProjectileConfiguration("sound_volume", value)));
+        queueContentPanelWidget(container, () -> textRow("Sound Pitch", projectileConfigurationText("sound_pitch", "1"), rowWidth,
+            value -> setProjectileConfiguration("sound_pitch", value)));
+        queueContentPanelWidget(container, () -> dropdownRow("Remove On Hit", List.of("Disabled", "Enabled"),
+            projectileConfigurationFlag("remove_on_hit", false) ? "Enabled" : "Disabled", rowWidth,
+            value -> setProjectileConfiguration("remove_on_hit", "Enabled".equals(value))));
+    }
+
+    private void queueAssetRows(Container container, ContentPanelSnapshot snapshot, int rowWidth) {
+        CustomContentDefinition definition = snapshot.definition();
+        queueContentPanelWidget(container, () -> dropdownRow("Provider", snapshot.providers(), definition.getProvider(), rowWidth, value -> {
             setProperty("provider", value);
             refreshNodeRegistry();
             refreshContentPanel();
         }));
         if ("vanilla".equalsIgnoreCase(definition.getProvider())) {
-            insertContentPanelWidget(container, searchableRow("Material", materialOptions(), definition.getMaterial(), rowWidth, value -> {
+            queueContentPanelWidget(container, () -> searchableRow("Material", snapshot.materials(), definition.getMaterial(), rowWidth, value -> {
                 setProperty("material", value.toUpperCase(Locale.ROOT));
                 requestCatalog(attributeSchemaSource(value));
                 updateSummary();
             }));
         } else {
-            insertContentPanelWidget(container, searchableRow("External ID", providerAssetOptions(definition.getProvider()), definition.getExternalId(), rowWidth, value -> {
+            queueContentPanelWidget(container, () -> searchableRow("External ID", snapshot.providerAssets(), definition.getExternalId(), rowWidth, value -> {
                 setProperty("external_id", value);
                 updateSummary();
             }));
         }
-        insertContentPanelWidget(container, textRow("Model", valueText(definition.getCustomModelData()), rowWidth, value -> {
-            setProperty("custom_model_data", value);
-            updateSummary();
-        }));
-        insertContentPanelWidget(container, contentSectionHeader("Display Text", textSummary(definition), rowWidth));
-        addTextRows(container, definition, rowWidth);
-        insertContentPanelWidget(container, contentSectionHeader("Item Behavior", componentCountSummary(visibleAttributeComponents(definition)), rowWidth));
-        addComponentDashboardRows(container, definition, rowWidth);
-        insertContentPanelWidget(container, contentSectionHeader("Trigger Rules", ruleSummary(), rowWidth));
-        addRulesRows(container, type, rowWidth);
-        insertContentPanelWidget(container, contentSectionHeader("Events", CustomContentGraphAdapter.getEnabledTriggerBranches(graph).size() + " Enabled", rowWidth));
-        for (CustomContentGraphAdapter.TriggerDescriptor trigger : CustomContentGraphAdapter.triggersForType(type)) {
-            insertContentPanelWidget(container, eventRow(trigger, rowWidth));
-        }
-        container.updateWidgetPositions();
+        queueContentPanelWidget(container, () -> textRow("Model", definition.getCustomModelData() == null ? "" : String.valueOf(definition.getCustomModelData()), rowWidth,
+            value -> setProperty("custom_model_data", value)));
     }
 
-    private void addProjectileRows(Container container, int rowWidth) {
-        insertContentPanelWidget(container, contentSectionHeader("Projectile Behavior", projectileConfigurationText("entity_type", "ARROW") + " | "
-            + projectileConfigurationText("launch_source", "Automatic"), rowWidth));
-        insertContentPanelWidget(container, dropdownRow("Projectile", List.of("ARROW", "SPECTRAL_ARROW", "TRIDENT", "SNOWBALL", "EGG", "ENDER_PEARL", "FIREBALL",
-            "SMALL_FIREBALL", "DRAGON_FIREBALL", "WITHER_SKULL", "SHULKER_BULLET", "LLAMA_SPIT", "WIND_CHARGE", "BREEZE_WIND_CHARGE"),
-            projectileConfigurationText("entity_type", "ARROW"), rowWidth, value -> setProjectileConfiguration("entity_type", value)));
-        insertContentPanelWidget(container, dropdownRow("Launch Source", List.of("Automatic", "Bow Ammo", "Item Use", "Both"),
-            projectileConfigurationText("launch_source", "Automatic"), rowWidth, value -> setProjectileConfiguration("launch_source", value)));
-        insertContentPanelWidget(container, textRow("Speed", projectileConfigurationText("speed", "2.4"), rowWidth, value -> setProjectileConfiguration("speed", value)));
-        insertContentPanelWidget(container, textRow("Damage", projectileConfigurationText("damage", "0"), rowWidth, value -> setProjectileConfiguration("damage", value)));
-        insertContentPanelWidget(container, dropdownRow("Gravity", List.of("Enabled", "Disabled"), projectileConfigurationFlag("gravity", true) ? "Enabled" : "Disabled", rowWidth,
-            value -> setProjectileConfiguration("gravity", "Enabled".equals(value))));
-        insertContentPanelWidget(container, dropdownRow("Glowing", List.of("Disabled", "Enabled"), projectileConfigurationFlag("glowing", false) ? "Enabled" : "Disabled", rowWidth,
-            value -> setProjectileConfiguration("glowing", "Enabled".equals(value))));
-        insertContentPanelWidget(container, dropdownRow("Consume Item", List.of("Enabled", "Disabled"), projectileConfigurationFlag("consume_item", true) ? "Enabled" : "Disabled", rowWidth,
-            value -> setProjectileConfiguration("consume_item", "Enabled".equals(value))));
-        insertContentPanelWidget(container, dropdownRow("Pickup", List.of("Allowed", "Disallowed", "Creative Only"), projectileConfigurationText("pickup", "Allowed"), rowWidth,
-            value -> setProjectileConfiguration("pickup", value)));
-        insertContentPanelWidget(container, textRow("Fire Sound", projectileConfigurationText("fire_sound", ""), rowWidth, value -> setProjectileConfiguration("fire_sound", value)));
-        insertContentPanelWidget(container, textRow("Hit Sound", projectileConfigurationText("hit_sound", ""), rowWidth, value -> setProjectileConfiguration("hit_sound", value)));
-        insertContentPanelWidget(container, textRow("Sound Volume", projectileConfigurationText("sound_volume", "1"), rowWidth, value -> setProjectileConfiguration("sound_volume", value)));
-        insertContentPanelWidget(container, textRow("Sound Pitch", projectileConfigurationText("sound_pitch", "1"), rowWidth, value -> setProjectileConfiguration("sound_pitch", value)));
-        insertContentPanelWidget(container, dropdownRow("Remove On Hit", List.of("Disabled", "Enabled"), projectileConfigurationFlag("remove_on_hit", false) ? "Enabled" : "Disabled", rowWidth,
-            value -> setProjectileConfiguration("remove_on_hit", "Enabled".equals(value))));
+    private void queueTextRows(Container container, CustomContentDefinition definition, int rowWidth) {
+        queueContentPanelWidget(container, () -> contentSectionHeader("Display Text", textSummary(definition), rowWidth));
+        queueContentPanelWidget(container, () -> loreRow(definition, rowWidth));
+        queueContentPanelWidget(container, () -> textRow("Tags", String.join(", ", definition.getTags() != null ? definition.getTags() : List.of()), rowWidth,
+            value -> setProperty("tags", value)));
+    }
+
+    private void queueComponentRows(Container container, CustomContentDefinition definition, int rowWidth) {
+        Map<String, Object> components = definition.getComponents() != null ? definition.getComponents() : Map.of();
+        Map<String, Object> visibleComponents = visibleAttributeComponents(definition);
+        queueContentPanelWidget(container, () -> contentSectionHeader("Item Behavior", componentCountSummary(visibleComponents), rowWidth));
+        queueContentPanelWidget(container, () -> componentToggleRow("Consumable", consumableSummary(components),
+            components.containsKey("minecraft:consumable") || components.containsKey("minecraft:food"), rowWidth, this::setConsumableEnabled));
+        queueContentPanelWidget(container, () -> componentToggleRow("Glint", glintSummary(components),
+            Boolean.TRUE.equals(components.get("minecraft:enchantment_glint_override")), rowWidth, this::setGlintEnabled));
+        queueContentPanelWidget(container, () -> componentsRow(visibleComponents, rowWidth));
+    }
+
+    private void queueRuleRows(Container container, String type, int rowWidth) {
+        queueContentPanelWidget(container, () -> contentSectionHeader("Trigger Rules", ruleSummary(), rowWidth));
+        queueContentPanelWidget(container, () -> textRow("Permission", textProperty("permission"), rowWidth, value -> setProperty("permission", value)));
+        queueContentPanelWidget(container, () -> textRow("Cooldown", textProperty("cooldown_ticks"), rowWidth, value -> setProperty("cooldown_ticks", parseInt(value))));
+        queueContentPanelWidget(container, () -> textRow("Chance", textProperty("chance_percent"), rowWidth, value -> setProperty("chance_percent", parseDouble(value))));
+        queueContentPanelWidget(container, () -> worldsRow(rowWidth));
+        queueContentPanelWidget(container, () -> eventFlagsRow(rowWidth));
+        if (showsHandFilter(type, selectedBranch)) {
+            queueContentPanelWidget(container, () -> dropdownRow("Hand", List.of("any", "main hand", "offhand"), textProperty("hand_filter"), rowWidth,
+                value -> setProperty("hand_filter", value)));
+        }
+        if (showsTargetFilter(selectedBranch)) {
+            queueContentPanelWidget(container, () -> dropdownRow("Target", List.of("any", "player", "living entity", "hostile", "passive"),
+                textProperty("target_filter"), rowWidth, value -> setProperty("target_filter", value)));
+        }
+    }
+
+    private void queueEventRows(Container container, ContentPanelSnapshot snapshot, int rowWidth) {
+        queueContentPanelWidget(container, () -> contentSectionHeader("Events", snapshot.branches().size() + " Enabled", rowWidth));
+        List<CustomContentGraphAdapter.TriggerDescriptor> triggers = CustomContentGraphAdapter.triggersForType(snapshot.type());
+        if (triggers.isEmpty()) {
+            return;
+        }
+        contentPanelDiffs.addLast(new Runnable() {
+            private int index;
+
+            @Override
+            public void run() {
+                insertContentPanelWidget(container, eventRow(triggers.get(index++), rowWidth, snapshot));
+                if (index < triggers.size()) {
+                    contentPanelDiffs.addFirst(this);
+                }
+            }
+        });
+    }
+
+    private void drainContentPanelDiffs() {
+        if (contentPanelRefreshPending && contentPanelDiffs.isEmpty()) {
+            contentPanelRefreshPending = false;
+            refreshContentPanel();
+            return;
+        }
+        if (contentPanelDiffs.isEmpty()) {
+            return;
+        }
+        if (contentPanelDiffRequestVersion != contentPanelRequestVersion
+            || contentPanelDiffMutationVersion != workspaceMutationVersion()) {
+            contentPanelDiffs = new ArrayDeque<>();
+            contentPanelKey = "";
+            contentPanelStructurePending = false;
+            contentPanelRefreshPending = true;
+            return;
+        }
+        long deadline = System.nanoTime() + 1_500_000L;
+        int applied = 0;
+        while (applied < 2 && System.nanoTime() < deadline) {
+            Runnable diff = contentPanelDiffs.pollFirst();
+            if (diff == null) {
+                break;
+            }
+            diff.run();
+            applied++;
+        }
+    }
+
+    private void queueContentPanelValues(ContentPanelSnapshot snapshot) {
+        contentPanelDiffMutationVersion = snapshot.mutationVersion();
+        contentPanelDiffRequestVersion = snapshot.requestVersion();
+        CustomContentDefinition definition = snapshot.definition();
+        if (summaryWidget != null) {
+            contentPanelDiffs.addLast(() -> {
+                summaryWidget.setName(definition.getDisplayName());
+                summaryWidget.setDescription(contentSummary(definition));
+            });
+        }
+        DropDownWidget<String> provider = contentDropdowns.get("provider");
+        if (provider != null) {
+            contentPanelDiffs.addLast(() -> {
+                List<String> options = normalizedOptions(snapshot.providers(), definition.getProvider());
+                provider.setItems(options, resolveSelectedOption(options, definition.getProvider()));
+            });
+        }
+        Iterator<Map.Entry<String, MountableButtonWidget>> rows = eventRows.entrySet().iterator();
+        if (rows.hasNext()) {
+            contentPanelDiffs.addLast(new Runnable() {
+                @Override
+                public void run() {
+                    Map.Entry<String, MountableButtonWidget> entry = rows.next();
+                    boolean enabled = snapshot.branches().contains(entry.getKey());
+                    MountableButtonWidget row = entry.getValue();
+                    int count = snapshot.actionCounts().getOrDefault(entry.getKey(), 0);
+                    row.setDescription((enabled ? "Enabled" : "Off") + " | " + (count == 1 ? "1 Action" : count + " Actions"));
+                    row.setSelected(entry.getKey().equals(selectedBranch));
+                    if (rows.hasNext()) {
+                        contentPanelDiffs.addFirst(this);
+                    }
+                }
+            });
+        }
     }
 
     private String projectileConfigurationText(String key, String fallback) {
         Object value = CustomContentGraphAdapter.getContentConfiguration(graph, "projectile." + key, fallback);
-        return value != null ? valueText(value) : fallback;
+        return value != null ? value.toString() : fallback;
     }
 
     private boolean projectileConfigurationFlag(String key, boolean fallback) {
         Object value = CustomContentGraphAdapter.getContentConfiguration(graph, "projectile." + key, fallback);
-        return value instanceof Boolean flag ? flag : value != null ? Boolean.parseBoolean(valueText(value)) : fallback;
+        return value instanceof Boolean flag ? flag : value != null ? Boolean.parseBoolean(value.toString()) : fallback;
     }
 
     private void setProjectileConfiguration(String key, Object value) {
+        if (deferFrozenWorkspaceMutation(() -> setProjectileConfiguration(key, value))) {
+            return;
+        }
         CustomContentGraphAdapter.setContentConfiguration(graph, "projectile." + key, value);
         markWorkspaceMutation();
         updateSummary();
     }
 
-    private void clearContentPanelWidgets(Container container) {
-        for (AnimatedWidget widget : new ArrayList<>(contentPanelWidgets)) {
-            container.removeWidget(widget);
+    private void setContentType(String value) {
+        if (deferFrozenWorkspaceMutation(() -> setContentType(value))) {
+            return;
         }
-        contentPanelWidgets.clear();
+        FlowNode start = CustomContentGraphAdapter.findStartNode(graph);
+        if (start == null) {
+            return;
+        }
+        start.setType(CustomContentGraphAdapter.nodeType(value));
+        updateAttributeProjectionProperty("__type", value);
+        if ("armor".equals(value)) {
+            CustomContentGraphAdapter.setContentConfiguration(graph, "armor_slot", "chest");
+        } else {
+            CustomContentGraphAdapter.removeContentConfiguration(graph, "armor_slot");
+        }
+        String material = defaultMaterial(value);
+        CustomContentGraphAdapter.setContentProperty(graph, "material", material);
+        updateAttributeProjectionProperty("material", material);
+        synchronizeContentIdentity();
+        markWorkspaceMutation();
+        selectedBranch = firstBranch();
+        refreshNodeRegistry();
+        refreshContentPanel();
+    }
+
+    private void setContentConfiguration(String key, Object value) {
+        if (deferFrozenWorkspaceMutation(() -> setContentConfiguration(key, value))) {
+            return;
+        }
+        CustomContentGraphAdapter.setContentConfiguration(graph, key, value);
+        markWorkspaceMutation();
     }
 
     private void insertContentPanelWidget(Container container, AnimatedWidget widget) {
         ReSyncStudioPanelState.disableEntrance(widget);
         container.addWidget(widget);
-        contentPanelWidgets.add(widget);
+        contentPanelWidgets.addLast(widget);
     }
 
     private void clearAttributePanelWidgets(Container container) {
@@ -713,14 +1742,14 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         if (contentPanel == null) {
             return Math.max(ReSyncStudioPanelState.MIN_ROW_WIDTH, ReSyncStudioPanelState.DEFAULT_WIDTH - panelState.padding() * 2);
         }
-        return contentStudioPanel != null ? contentStudioPanel.rowWidth() : Math.max(ReSyncStudioPanelState.MIN_ROW_WIDTH, contentPanel.getConfiguredWidth() - panelState.padding() * 2);
+        return contentStudioPanel != null ? contentStudioPanel.rowWidth() : Math.max(ReSyncStudioPanelState.MIN_ROW_WIDTH, contentPanel.getDesiredWidth() - panelState.padding() * 2);
     }
 
     private int attributeRowWidth() {
         if (attributePanel == null) {
             return 400;
         }
-        int desired = attributePanel.getConfiguredWidth();
+        int desired = attributePanel.getDesiredWidth();
         if (desired <= 0) {
             desired = 420;
         }
@@ -730,8 +1759,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     @Override
     protected int viewportFitLeft() {
         int left = super.viewportFitLeft();
-        if (attributePanel != null && attributePanel.isLeftAnchored()) {
-            left += attributePanel.layoutWidth(8);
+        if (attributePanel != null && attributePanel.isVisible() && attributePanel.isLeftAnchored()) {
+            left += attributePanel.getDesiredWidth() + 8;
         }
         return left;
     }
@@ -739,11 +1768,11 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     @Override
     protected int viewportFitWidth() {
         int fitWidth = super.viewportFitWidth();
-        if (attributePanel != null && attributePanel.isLeftAnchored()) {
-            fitWidth -= attributePanel.layoutWidth(8);
+        if (attributePanel != null && attributePanel.isVisible() && attributePanel.isLeftAnchored()) {
+            fitWidth -= attributePanel.getDesiredWidth() + 8;
         }
-        if (contentPanel != null) {
-            fitWidth -= contentPanel.layoutWidth(8);
+        if (contentPanel != null && contentPanel.isVisible()) {
+            fitWidth -= contentPanel.getDesiredWidth() + 8;
         }
         return Math.max(1, fitWidth);
     }
@@ -775,32 +1804,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         insertContentPanelWidget(container, textRow("Permission", textProperty("permission"), rowWidth, value -> setProperty("permission", value)));
         insertContentPanelWidget(container, textRow("Cooldown", textProperty("cooldown_ticks"), rowWidth, value -> setProperty("cooldown_ticks", parseInt(value))));
         insertContentPanelWidget(container, textRow("Chance", textProperty("chance_percent"), rowWidth, value -> setProperty("chance_percent", parseDouble(value))));
-        TextInputWidget worlds = new TextInputWidget.Builder()
-            .text(textProperty("allowed_worlds"))
-            .placeholder("Worlds")
-            .forcePlaceholder(false)
-            .size(174, 18)
-            .onChange(value -> setProperty("allowed_worlds", value))
-            .build();
-        contentCollaborationBindings.put("allowed_worlds", next -> worlds.setText(valueText(next)));
-        ReSyncStudioPanelState.disableEntrance(worlds);
-        TitledRowWidget worldsRow = new TitledRowWidget.Builder().title("Worlds").description(contentPanelDescription("Worlds")).size(rowWidth, 36).gap(4).addWidget(searchableInputRow(worlds, worldOptions(), true, "server:minecraft:world")).build();
-        ReSyncStudioPanelState.identify(worldsRow, "content-field:allowed_worlds");
-        insertContentPanelWidget(container, worldsRow);
-        ToggleWidget cancel = new ToggleWidget.Builder().label("Cancel").toggled(boolProperty("cancel_event")).size(90, 18).entranceAnimation(false)
-            .onChange(value -> setProperty("cancel_event", value)).build();
-        ToggleWidget consume = new ToggleWidget.Builder().label("Consume").toggled(boolProperty("consume_event")).size(90, 18).entranceAnimation(false)
-            .onChange(value -> setProperty("consume_event", value)).build();
-        contentCollaborationBindings.put("cancel_event", next -> cancel.setValue(next instanceof Boolean value ? value : Boolean.parseBoolean(valueText(next))));
-        contentCollaborationBindings.put("consume_event", next -> consume.setValue(next instanceof Boolean value ? value : Boolean.parseBoolean(valueText(next))));
-        RowWidget toggles = new RowWidget.Builder()
-            .size(rowWidth, 18)
-            .padding(4)
-            .addWidget(cancel)
-            .addWidget(consume)
-            .build();
-        ReSyncStudioPanelState.identify(toggles, "content-field:event_flags");
-        insertContentPanelWidget(container, toggles);
+        insertContentPanelWidget(container, worldsRow(rowWidth));
+        insertContentPanelWidget(container, eventFlagsRow(rowWidth));
         if (showsHandFilter(type, selectedBranch)) {
             insertContentPanelWidget(container, dropdownRow("Hand", List.of("any", "main hand", "offhand"), textProperty("hand_filter"), rowWidth, value -> setProperty("hand_filter", value)));
         }
@@ -809,12 +1814,48 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         }
     }
 
+    private TitledRowWidget worldsRow(int rowWidth) {
+        TextInputWidget worlds = new TextInputWidget.Builder()
+            .text(textProperty("allowed_worlds"))
+            .placeholder("Worlds")
+            .forcePlaceholder(false)
+            .size(174, 18)
+            .onChange(value -> setProperty("allowed_worlds", value))
+            .build();
+        contentCollaborationBindings.put("allowed_worlds", next -> worlds.setText(next == null ? "" : String.valueOf(next)));
+        ReSyncStudioPanelState.disableEntrance(worlds);
+        TitledRowWidget worldsRow = new TitledRowWidget.Builder().title("Worlds").description(contentPanelDescription("Worlds")).size(rowWidth, 36).gap(4).addWidget(searchableInputRow(worlds, worldOptions(), true, "server:minecraft:world")).build();
+        ReSyncStudioPanelState.identify(worldsRow, "content-field:allowed_worlds");
+        return worldsRow;
+    }
+
+    private RowWidget eventFlagsRow(int rowWidth) {
+        ToggleWidget cancel = new ToggleWidget.Builder().label("Cancel").toggled(boolProperty("cancel_event")).size(90, 18).entranceAnimation(false)
+            .onChange(value -> setProperty("cancel_event", value)).build();
+        ToggleWidget consume = new ToggleWidget.Builder().label("Consume").toggled(boolProperty("consume_event")).size(90, 18).entranceAnimation(false)
+            .onChange(value -> setProperty("consume_event", value)).build();
+        contentCollaborationBindings.put("cancel_event", next -> cancel.setValue(next instanceof Boolean value ? value : Boolean.parseBoolean(String.valueOf(next))));
+        contentCollaborationBindings.put("consume_event", next -> consume.setValue(next instanceof Boolean value ? value : Boolean.parseBoolean(String.valueOf(next))));
+        RowWidget toggles = new RowWidget.Builder()
+            .size(rowWidth, 18)
+            .padding(4)
+            .addWidget(cancel)
+            .addWidget(consume)
+            .build();
+        ReSyncStudioPanelState.identify(toggles, "content-field:event_flags");
+        return toggles;
+    }
+
     private void addTextRows(Container container, CustomContentDefinition definition, int rowWidth) {
         addQuickTextRows(container, definition, rowWidth);
         insertContentPanelWidget(container, textRow("Tags", String.join(", ", definition.getTags() != null ? definition.getTags() : List.of()), rowWidth, value -> setProperty("tags", value)));
     }
 
     private void addQuickTextRows(Container container, CustomContentDefinition definition, int rowWidth) {
+        insertContentPanelWidget(container, loreRow(definition, rowWidth));
+    }
+
+    private TitledRowWidget loreRow(CustomContentDefinition definition, int rowWidth) {
         CodeEditorWidget lore = new CodeEditorWidget(0, 0, Math.max(180, rowWidth - 18), 78);
         ReSyncStudioPanelState.disableEntrance(lore);
         lore.setShowLineNumbers(false);
@@ -825,7 +1866,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         lore.setWordWrap(true);
         lore.setText(String.join("\n", definition.getLore() != null ? definition.getLore() : List.of()));
         lore.onChange = text -> setProperty("lore", text);
-        contentCollaborationBindings.put("lore", next -> lore.setText(valueText(next)));
+        contentCollaborationBindings.put("lore", next -> lore.setText(next == null ? "" : String.valueOf(next)));
         TitledRowWidget loreRow = new TitledRowWidget.Builder()
             .title("Lore")
             .description(contentPanelDescription("Lore"))
@@ -834,7 +1875,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             .addWidget(lore)
             .build();
         ReSyncStudioPanelState.identify(loreRow, "content-field:lore");
-        insertContentPanelWidget(container, loreRow);
+        return loreRow;
     }
 
     private MountableButtonWidget contentSectionHeader(String title, String description, int width) {
@@ -893,7 +1934,30 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
                 updateSummary();
             }));
         }
-        insertContentPanelWidget(container, textRow("Model", valueText(definition.getCustomModelData()), rowWidth, value -> setProperty("custom_model_data", value)));
+        insertContentPanelWidget(container, textRow("Model", definition.getCustomModelData() == null ? "" : String.valueOf(definition.getCustomModelData()), rowWidth, value -> setProperty("custom_model_data", value)));
+    }
+
+    private void addPanelAssetRows(Container container, ContentPanelSnapshot snapshot, int rowWidth) {
+        CustomContentDefinition definition = snapshot.definition();
+        insertContentPanelWidget(container, dropdownRow("Provider", snapshot.providers(), definition.getProvider(), rowWidth, value -> {
+            setProperty("provider", value);
+            refreshNodeRegistry();
+            refreshContentPanel();
+        }));
+        if ("vanilla".equalsIgnoreCase(definition.getProvider())) {
+            insertContentPanelWidget(container, searchableRow("Material", snapshot.materials(), definition.getMaterial(), rowWidth, value -> {
+                setProperty("material", value.toUpperCase(Locale.ROOT));
+                requestCatalog(attributeSchemaSource(value));
+                updateSummary();
+            }));
+        } else {
+            insertContentPanelWidget(container, searchableRow("External ID", snapshot.providerAssets(), definition.getExternalId(), rowWidth, value -> {
+                setProperty("external_id", value);
+                updateSummary();
+            }));
+        }
+        insertContentPanelWidget(container, textRow("Model", definition.getCustomModelData() == null ? "" : String.valueOf(definition.getCustomModelData()), rowWidth,
+            value -> setProperty("custom_model_data", value)));
     }
 
     private void addPreviewRows(Container container, CustomContentDefinition definition, String type, int rowWidth) {
@@ -932,13 +1996,17 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             rowWidth,
             this::setGlintEnabled
         ));
+        insertContentPanelWidget(container, componentsRow(visibleComponents, rowWidth));
+    }
+
+    private MountableButtonWidget componentsRow(Map<String, Object> visibleComponents, int rowWidth) {
         MountableButtonWidget componentsRow = new MountableButtonWidget.Builder("Components")
             .description(componentCountSummary(visibleComponents))
             .iconPath("item.png")
             .addButton(new SquareButtonWidget.Builder().imagePath("graph.png").hint("Edit Attributes").entranceAnimation(false).onClick(this::openAttributeDesigner).build())
             .build();
         componentsRow.setSize(rowWidth, 30);
-        insertContentPanelWidget(container, componentsRow);
+        return componentsRow;
     }
 
     private MountableButtonWidget componentToggleRow(String title, String description, boolean enabled, int rowWidth, Consumer<Boolean> onChange) {
@@ -999,8 +2067,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             if (seconds instanceof Number number) {
                 return formatDashboardNumber(number.doubleValue());
             }
-            if (seconds != null && !valueText(seconds).isBlank()) {
-                return valueText(seconds);
+            if (seconds != null && !seconds.toString().isBlank()) {
+                return seconds.toString();
             }
         }
         return "";
@@ -1012,8 +2080,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             if (nutrition instanceof Number number) {
                 return formatDashboardNumber(number.doubleValue());
             }
-            if (nutrition != null && !valueText(nutrition).isBlank()) {
-                return valueText(nutrition);
+            if (nutrition != null && !nutrition.toString().isBlank()) {
+                return nutrition.toString();
             }
         }
         return "";
@@ -1021,7 +2089,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
 
     private String formatDashboardNumber(double value) {
         if (Math.abs(value - Math.rint(value)) < 0.00001) {
-            return valueText((long) Math.rint(value));
+            return String.valueOf((long) Math.rint(value));
         }
         return String.format(Locale.ROOT, "%.1f", value);
     }
@@ -1057,8 +2125,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     }
 
     private Map<String, Object> currentComponents() {
-        CustomContentDefinition definition = CustomContentGraphAdapter.toDefinition(graph);
-        return definition != null && definition.getComponents() != null ? copyAttributeComponents(definition.getComponents()) : new LinkedHashMap<>();
+        AttributeProjection projection = currentAttributeProjection();
+        return projection != null ? copyAttributeComponents(projection.components()) : new LinkedHashMap<>();
     }
 
     private void setComponentsAndRefresh(Map<String, Object> components) {
@@ -1078,17 +2146,21 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         return activateNormalizedAttributeComponents(stored);
     }
 
+    private Map<String, Object> initialAttributeComponents(AttributeProjection projection) {
+        return activateNormalizedAttributeComponents(projection != null ? projection.components() : Map.of());
+    }
+
     private Map<String, Object> visibleAttributeComponents(CustomContentDefinition definition) {
         Map<String, Object> stored = definition != null && definition.getComponents() != null ? definition.getComponents() : Map.of();
         return normalizeAttributeComponents(stored);
     }
 
-    private List<String> materialBackedAttributeIds(CustomContentDefinition definition) {
-        if (definition == null) {
+    private List<String> materialBackedAttributeIds(AttributeProjection projection) {
+        if (projection == null) {
             return List.of();
         }
-        String material = definition.getMaterial() != null ? definition.getMaterial().toUpperCase(Locale.ROOT) : "";
-        String type = definition.getType() != null ? definition.getType().toLowerCase(Locale.ROOT) : "";
+        String material = projection.material() != null ? projection.material().toUpperCase(Locale.ROOT) : "";
+        String type = projection.type() != null ? projection.type().toLowerCase(Locale.ROOT) : "";
         List<String> ids = new ArrayList<>();
         boolean axe = isStandaloneAxeMaterial(material);
         boolean weapon = materialContains(material, "SWORD", "TRIDENT", "MACE") || axe;
@@ -1176,8 +2248,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     }
 
     private Object defaultComponentValue(String id) {
-        CustomContentDefinition definition = CustomContentGraphAdapter.toDefinition(graph);
-        String source = definition != null ? attributeSchemaSource(definition.getMaterial()) : ATTRIBUTE_SCHEMA_SOURCE;
+        AttributeProjection projection = currentAttributeProjection();
+        String source = projection != null ? projection.schemaSource() : ATTRIBUTE_SCHEMA_SOURCE;
         OptionCatalogItem item = attributeCatalogItem(source, id);
         if (item != null) {
             Object value = defaultComponentValueFromItem(item);
@@ -1185,7 +2257,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
                 return value;
             }
         }
-        Object fallback = defaultCommonComponentValue(id, definition);
+        Object fallback = defaultCommonComponentValue(id, projection);
         if (fallback != null) {
             requestCatalog(source);
             return fallback;
@@ -1198,9 +2270,9 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         return value instanceof Map<?, ?> map && map.isEmpty();
     }
 
-    private Object defaultCommonComponentValue(String id, CustomContentDefinition definition) {
-        String material = definition != null && definition.getMaterial() != null && !definition.getMaterial().isBlank()
-            ? definition.getMaterial().toLowerCase(Locale.ROOT)
+    private Object defaultCommonComponentValue(String id, AttributeProjection projection) {
+        String material = projection != null && projection.material() != null && !projection.material().isBlank()
+            ? projection.material().toLowerCase(Locale.ROOT)
             : "stick";
         if ("minecraft:food".equals(id)) {
             Map<String, Object> value = new LinkedHashMap<>();
@@ -1223,13 +2295,13 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             return "minecraft:" + material;
         }
         if ("minecraft:item_name".equals(id)) {
-            return Map.of("text", definition != null && definition.getDisplayName() != null && !definition.getDisplayName().isBlank() ? definition.getDisplayName() : "Item Name");
+            return Map.of("text", projection != null && !projection.displayName().isBlank() ? projection.displayName() : "Item Name");
         }
         if ("minecraft:custom_name".equals(id)) {
-            return Map.of("text", definition != null && definition.getDisplayName() != null && !definition.getDisplayName().isBlank() ? definition.getDisplayName() : "Custom Name");
+            return Map.of("text", projection != null && !projection.displayName().isBlank() ? projection.displayName() : "Custom Name");
         }
         if ("minecraft:lore".equals(id)) {
-            List<String> lore = definition != null && definition.getLore() != null && !definition.getLore().isEmpty() ? definition.getLore() : List.of("Lore");
+            List<String> lore = projection != null && !projection.lore().isEmpty() ? projection.lore() : List.of("Lore");
             return lore.stream().map(line -> Map.of("text", line)).toList();
         }
         if ("minecraft:tooltip_display".equals(id)) {
@@ -1463,7 +2535,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             .build();
         String collaborationKey = contentCollaborationKey(label);
         if (collaborationKey != null) {
-            contentCollaborationBindings.put(collaborationKey, next -> input.setText(valueText(next)));
+            contentCollaborationBindings.put(collaborationKey, next -> input.setText(next == null ? "" : String.valueOf(next)));
         }
         ReSyncStudioPanelState.disableEntrance(input);
         TitledRowWidget row = new TitledRowWidget.Builder().title(label).description(contentPanelDescription(label)).size(width, 36).gap(4).addWidget(input).build();
@@ -1488,6 +2560,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         String collaborationKey = contentCollaborationKey(label);
         if (collaborationKey != null) {
             contentCollaborationBindings.put(collaborationKey, next -> dropdown.setSelectedItem(contentCollaborationDropdownValue(collaborationKey, next)));
+            contentDropdowns.put(collaborationKey, dropdown);
         }
         panelDropdowns.add(dropdown);
         TitledRowWidget row = new TitledRowWidget.Builder().title(label).description(contentPanelDescription(label)).size(width, 36).gap(4).addWidget(dropdown).build();
@@ -1506,27 +2579,36 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             .build();
         String collaborationKey = contentCollaborationKey(label);
         if (collaborationKey != null) {
-            contentCollaborationBindings.put(collaborationKey, next -> {
-                String text = valueText(next);
-                button.setMessage(text.isBlank() ? "Select" : text);
-            });
+            contentCollaborationBindings.put(collaborationKey, next -> button.setMessage(next == null || String.valueOf(next).isBlank() ? "Select" : String.valueOf(next)));
         }
         button.setAction(() -> {
+            String provider = textProperty("provider");
+            List<String> currentOptions;
+            String currentSelected;
+            if ("Material".equals(label)) {
+                currentOptions = normalizedOptions(materialOptions(), textProperty("material"));
+                currentSelected = textProperty("material");
+            } else if ("External ID".equals(label)) {
+                currentOptions = normalizedOptions(providerAssetOptions(provider), textProperty("external_id"));
+                currentSelected = textProperty("external_id");
+            } else {
+                currentOptions = options;
+                currentSelected = selected;
+            }
             Consumer<String> selection = value -> {
                 if (isRealOption(value)) {
                     button.setMessage(value);
                     onChange.accept(value);
                 }
             };
-            CustomContentDefinition definition = CustomContentGraphAdapter.toDefinition(graph);
             if ("Material".equals(label)) {
-                showCatalogSearchSelector(options, selected, selection, button.getX(), button.getY() + button.getHeight(),
+                showCatalogSearchSelector(currentOptions, currentSelected, selection, button.getX(), button.getY() + button.getHeight(),
                     "server:minecraft:material", Map.of());
-            } else if ("External ID".equals(label) && definition != null) {
-                showCatalogSearchSelector(options, selected, selection, button.getX(), button.getY() + button.getHeight(),
-                    "server:custom_content:asset", customContentCatalogContext(definition.getProvider()));
+            } else if ("External ID".equals(label)) {
+                showCatalogSearchSelector(currentOptions, currentSelected, selection, button.getX(), button.getY() + button.getHeight(),
+                    "server:custom_content:asset", customContentCatalogContext(provider));
             } else {
-                showSearchSelector(options, selected, selection, button.getX(), button.getY() + button.getHeight());
+                showSearchSelector(currentOptions, currentSelected, selection, button.getX(), button.getY() + button.getHeight());
             }
         });
         TitledRowWidget row = new TitledRowWidget.Builder().title(label).description(contentPanelDescription(label)).size(width, 36).gap(4).addWidget(button).build();
@@ -1568,7 +2650,13 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     }
 
     private MountableButtonWidget eventRow(CustomContentGraphAdapter.TriggerDescriptor trigger, int width) {
-        boolean enabled = CustomContentGraphAdapter.getEnabledTriggerBranches(graph).contains(trigger.pin());
+        return eventRow(trigger, width, null);
+    }
+
+    private MountableButtonWidget eventRow(CustomContentGraphAdapter.TriggerDescriptor trigger, int width,
+                                           ContentPanelSnapshot snapshot) {
+        boolean enabled = snapshot != null ? snapshot.branches().contains(trigger.pin())
+            : CustomContentGraphAdapter.getEnabledTriggerBranches(graph).contains(trigger.pin());
         boolean selected = trigger.pin().equals(selectedBranch);
         ToggleWidget toggle = new ToggleWidget.Builder()
             .toggled(enabled)
@@ -1577,7 +2665,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             .entranceAnimation(false)
             .build();
         MountableButtonWidget row = new MountableButtonWidget.Builder(eventTitle(trigger.pin()))
-            .description((enabled ? "Enabled" : "Off") + " | " + actionSummary(trigger.pin()))
+            .description((enabled ? "Enabled" : "Off") + " | " + panelActionSummary(snapshot, trigger.pin()))
             .onClick(() -> {
                 selectedBranch = trigger.pin();
                 focusContentBranch(selectedBranch);
@@ -1591,22 +2679,33 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         return row;
     }
 
+    private String panelActionSummary(ContentPanelSnapshot snapshot, String branch) {
+        if (snapshot == null) {
+            return actionSummary(branch);
+        }
+        int count = snapshot.actionCounts().getOrDefault(branch, 0);
+        return count == 1 ? "1 Action" : count + " Actions";
+    }
+
     private void openAttributeDesigner() {
         openAttributeDesigner("");
     }
 
     private void openAttributeDesigner(String query) {
         activeAttributeQuery = query != null ? query : "";
-        CustomContentDefinition definition = CustomContentGraphAdapter.toDefinition(graph);
-        if (definition == null) {
+        AttributeProjection projection = currentAttributeProjection();
+        if (projection == null) {
             return;
         }
         closeStudioSelector();
-        String source = attributeSchemaSource(definition.getMaterial());
+        String source = projection.schemaSource();
         requestCatalog(source);
-        activeAttributeComponents = initialAttributeComponents(definition);
+        activeAttributeComponents = initialAttributeComponents(projection);
         editedAttributeComponents.clear();
         attributeDesignerOpen = true;
+        if (contentStudioPanel != null) {
+            contentStudioPanel.hide();
+        }
         if (contentDesignerParent instanceof StudioScreen studioScreen) {
             studioScreen.setStudioContentBrowserTemporarilyHidden(true);
             attributeDesignerHidContentBrowser = true;
@@ -1639,20 +2738,21 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         float previousScroll = container.getScrollOffset();
         clearAttributePanelWidgets(container);
         selectedAttributeRowWidget = null;
-        CustomContentDefinition definition = CustomContentGraphAdapter.toDefinition(graph);
-        if (definition == null) {
+        AttributeProjection projection = currentAttributeProjection();
+        if (projection == null) {
             hideAttributeDesigner();
             return;
         }
-        String source = attributeSchemaSource(definition.getMaterial());
+        String source = projection.schemaSource();
         requestCatalog(source);
         if (activeAttributeComponents == null) {
-            activeAttributeComponents = initialAttributeComponents(definition);
+            activeAttributeComponents = initialAttributeComponents(projection);
         }
         int rowWidth = attributeRowWidth();
         MountableButtonWidget header = new MountableButtonWidget.Builder("Item Attributes")
-            .description(attributeDesignerSummary(definition, source))
+            .description(attributeDesignerSummary(projection))
             .iconPath("item.png")
+            .addButton(new SquareButtonWidget.Builder().imagePath("close.png").hint("Close").entranceAnimation(false).onClick(this::hideAttributeDesigner).build())
             .build();
         header.setSize(rowWidth, 30);
         attributeHeaderWidget = header;
@@ -1660,7 +2760,6 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         TextInputWidget search = new TextInputWidget.Builder()
             .text(activeAttributeQuery)
             .placeholder("Attribute Name")
-            .search(true)
             .forcePlaceholder(false)
             .size(Math.max(120, rowWidth - 8), 18)
             .build();
@@ -1707,8 +2806,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         if (!attributeDesignerOpen || attributePanel == null || attributeDesignerPanel == null) {
             return;
         }
-        CustomContentDefinition definition = CustomContentGraphAdapter.toDefinition(graph);
-        if (definition == null) {
+        AttributeProjection projection = currentAttributeProjection();
+        if (projection == null) {
             hideAttributeDesigner();
             return;
         }
@@ -1718,7 +2817,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             attributePanelWidgets.removeLast();
         }
         selectedAttributeRowWidget = null;
-        String source = attributeSchemaSource(definition.getMaterial());
+        String source = projection.schemaSource();
         int rowWidth = attributeRowWidth();
         collectingAttributePanelOrder = true;
         try {
@@ -1744,10 +2843,9 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             return;
         }
         if (attributeHeaderWidget != null) {
-            CustomContentDefinition definition = CustomContentGraphAdapter.toDefinition(graph);
-            if (definition != null) {
-                String source = attributeSchemaSource(definition.getMaterial());
-                attributeHeaderWidget.setDescription(attributeDesignerSummary(definition, source));
+            AttributeProjection projection = currentAttributeProjection();
+            if (projection != null) {
+                attributeHeaderWidget.setDescription(attributeDesignerSummary(projection));
             }
         }
     }
@@ -1763,6 +2861,9 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         }
         restoreAttributeDesignerContentBrowser();
         attributeDesignerOpen = false;
+        if (contentStudioPanel != null) {
+            contentStudioPanel.show();
+        }
         attributeDesignerHidContentBrowser = false;
         activeAttributeComponents = new LinkedHashMap<>();
         attributePreviewValues.clear();
@@ -1789,10 +2890,11 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         return attributeDesignerOpen && attributePanel != null && attributePanel.isVisible();
     }
 
-    private String attributeDesignerSummary(CustomContentDefinition definition, String source) {
+    private String attributeDesignerSummary(AttributeProjection projection) {
         int count = activeAttributeComponents != null ? activeAttributeComponents.size() : 0;
-        boolean loaded = OptionCatalogCache.getInstance().hasCatalog(serverId, source);
-        String material = definition.getMaterial() != null && !definition.getMaterial().isBlank() ? definition.getMaterial() : "material";
+        String source = projection != null ? projection.schemaSource() : ATTRIBUTE_SCHEMA_SOURCE;
+        boolean loaded = hasAttributeCatalog(source);
+        String material = projection != null && !projection.material().isBlank() ? projection.material() : "material";
         return material + " | " + (count == 1 ? "1 Attribute" : count + " Attributes") + " | " + (loaded ? "Synced" : "Syncing");
     }
 
@@ -1821,8 +2923,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
                 insertAttributePanelWidget(container, attributeStatusRow("Errors", (attributeValidationErrors.size() - count) + " More", rowWidth, true, "validationMore"));
                 return;
             }
-            String component = valueText(error.getOrDefault("component", ""));
-            String message = valueText(error.getOrDefault("message", "Invalid Component"));
+            String component = String.valueOf(error.getOrDefault("component", ""));
+            String message = String.valueOf(error.getOrDefault("message", "Invalid Component"));
             insertAttributePanelWidget(container, attributeStatusRow(component.isBlank() ? "Error" : component, message, rowWidth, true, "validation" + count));
             count++;
         }
@@ -1853,13 +2955,14 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     }
 
     private void populateAttributeComponents(Container container, String source, Map<String, Object> components, String query) {
-        Map<String, OptionCatalogItem> catalog = attributeCatalog(source);
+        AttributeProjection projection = currentAttributeProjection();
+        Map<String, OptionCatalogItem> catalog = projection != null && Objects.equals(source, projection.schemaSource())
+            ? projection.catalog() : Map.of();
         Map<String, Object> displayComponents = displayAttributeComponents(components, catalog);
         int rowWidth = attributeRowWidth();
         ensureAttributeComponentRowStates(catalog, rowWidth);
         List<String> active = activeComponents(displayComponents, catalog);
-        CustomContentDefinition definition = CustomContentGraphAdapter.toDefinition(graph);
-        String material = definition != null ? definition.getMaterial() : "";
+        String material = projection != null ? projection.material() : "";
         List<OptionCatalogItem> available = availableComponents(displayComponents, catalog, query, material);
         ensureSelectedAttribute(displayComponents, active);
         insertAttributePanelWidget(container, attributeSectionHeader("Current Attributes", active.isEmpty() ? "None" : active.size() + " Total", rowWidth));
@@ -2114,11 +3217,11 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
 
     private Map<String, Object> persistedAttributeComponents(Map<String, Object> components) {
         Map<String, Object> normalized = normalizeAttributeComponents(components);
-        CustomContentDefinition definition = CustomContentGraphAdapter.toDefinition(graph);
-        if (definition == null) {
+        AttributeProjection projection = currentAttributeProjection();
+        if (projection == null) {
             return normalized;
         }
-        for (String id : materialBackedAttributeIds(definition)) {
+        for (String id : materialBackedAttributeIds(projection)) {
             if (!normalized.containsKey(id)) {
                 continue;
             }
@@ -2126,7 +3229,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
                 normalized.remove(id);
                 continue;
             }
-            Object defaultValue = defaultCommonComponentValue(id, definition);
+            Object defaultValue = defaultCommonComponentValue(id, projection);
             if (defaultValue != null && copyAttributeValue(defaultValue).equals(copyAttributeValue(normalized.get(id)))) {
                 normalized.remove(id);
             }
@@ -2326,7 +3429,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             return "Creative Locked";
         }
         if ("minecraft:lock".equals(id)) {
-            return value != null && !valueText(value).isBlank() ? "Lock " + valueText(value) : "No Lock Key";
+            return value != null && !value.toString().isBlank() ? "Lock " + value : "No Lock Key";
         }
         if ("minecraft:suspicious_stew_effects".equals(id)) {
             int count = arrayValue(value).size();
@@ -2334,7 +3437,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         }
         if ("minecraft:lodestone_tracker".equals(id)) {
             Map<String, Object> target = objectValue(objectValue(value).get("target"));
-            return "Dimension " + valueText(target.getOrDefault("dimension", "minecraft:overworld"));
+            return "Dimension " + target.getOrDefault("dimension", "minecraft:overworld");
         }
         if ("minecraft:block_state".equals(id)) {
             int count = objectValue(value).size();
@@ -2343,7 +3446,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         if ("minecraft:block_entity_data".equals(id) || "minecraft:bucket_entity_data".equals(id) || "minecraft:entity_data".equals(id)) {
             Map<String, Object> map = objectValue(value);
             Object entityId = map.get("id");
-            return entityId != null && !valueText(entityId).isBlank() ? "ID " + valueText(entityId) : map.size() + " Fields";
+            return entityId != null && !entityId.toString().isBlank() ? "ID " + entityId : map.size() + " Fields";
         }
         if ("minecraft:debug_stick_state".equals(id)) {
             int count = objectValue(value).size();
@@ -2641,7 +3744,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             return true;
         }
         if ("minecraft:rarity".equals(componentId)) {
-            insertAttributePanelWidget(container, attributeEditorRow("Rarity", attributeChoiceEditor(components, componentId, componentId, List.of("common", "uncommon", "rare", "epic"), valueText(value != null ? value : "common"))));
+            insertAttributePanelWidget(container, attributeEditorRow("Rarity", attributeChoiceEditor(components, componentId, componentId, List.of("common", "uncommon", "rare", "epic"), String.valueOf(value != null ? value : "common"))));
             return true;
         }
         if ("minecraft:enchantable".equals(componentId)) {
@@ -2850,14 +3953,14 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
                 return Math.clamp(number.intValue(), 0, 0xFFFFFF);
             }
             if (rgb != null) {
-                return parseColorValue(0xFFFFFF, valueText(rgb));
+                return parseColorValue(0xFFFFFF, rgb.toString());
             }
         }
         if (value instanceof Number number) {
             return Math.clamp(number.intValue(), 0, 0xFFFFFF);
         }
         if (value != null) {
-            return parseColorValue(0xFFFFFF, valueText(value));
+            return parseColorValue(0xFFFFFF, value.toString());
         }
         return 0xFFFFFF;
     }
@@ -2924,7 +4027,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     private void addEnchantmentEntryRow(Container container, Map<String, Object> components, String componentId, String key, int level, int index) {
         String[] keyRef = {key};
         TextInputWidget idInput = attributeCompactInput(key, "Enchantment");
-        TextInputWidget levelInput = attributeCompactInput(valueText(level), "Level");
+        TextInputWidget levelInput = attributeCompactInput(String.valueOf(level), "Level");
         idInput.setOnChange(() -> {
             Map<String, Integer> next = enchantmentLevels(currentAttributeValue(components, componentId));
             String previous = keyRef[0];
@@ -2954,7 +4057,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     private String enchantmentText(Object value) {
         List<String> lines = new ArrayList<>();
         for (Map.Entry<String, Integer> entry : enchantmentLevels(value).entrySet()) {
-            lines.add(valueText(entry.getKey()) + " " + valueText(entry.getValue()));
+            lines.add(entry.getKey() + " " + entry.getValue());
         }
         return String.join("\n", lines);
     }
@@ -2973,7 +4076,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         if (rawLevels instanceof Map<?, ?> map) {
             for (Map.Entry<?, ?> entry : map.entrySet()) {
                 if (entry.getKey() != null) {
-                    levels.put(normalizeMinecraftKey(valueText(entry.getKey())), parsePositiveInt(entry.getValue(), 1));
+                    levels.put(normalizeMinecraftKey(entry.getKey().toString()), parsePositiveInt(entry.getValue(), 1));
                 }
             }
         }
@@ -3031,11 +4134,11 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     }
 
     private void addAttributeModifierEntryRow(Container container, Map<String, Object> components, String componentId, Map<String, Object> modifier, int index) {
-        String type = valueText(modifier.getOrDefault("type", "minecraft:attack_damage"));
+        String type = String.valueOf(modifier.getOrDefault("type", "minecraft:attack_damage"));
         TextInputWidget amountInput = attributeCompactInput(formatComponentValue(modifier.getOrDefault("amount", 1.0)), "Amount");
         AttributeModifierDropdownRefs dropdowns = new AttributeModifierDropdownRefs();
-        dropdowns.operation = attributeOperationDropdown(valueText(modifier.getOrDefault("operation", "add_value")), value -> updateAttributeModifierEntry(components, componentId, index, type, amountInput.getText(), value, selectedDropdownValue(dropdowns.slot)));
-        dropdowns.slot = attributeDropdown(List.of("any", "mainhand", "offhand", "head", "chest", "legs", "feet", "body"), valueText(modifier.getOrDefault("slot", "any")), value -> updateAttributeModifierEntry(components, componentId, index, type, amountInput.getText(), selectedDropdownValue(dropdowns.operation), value));
+        dropdowns.operation = attributeOperationDropdown(String.valueOf(modifier.getOrDefault("operation", "add_value")), value -> updateAttributeModifierEntry(components, componentId, index, type, amountInput.getText(), value, selectedDropdownValue(dropdowns.slot)));
+        dropdowns.slot = attributeDropdown(List.of("any", "mainhand", "offhand", "head", "chest", "legs", "feet", "body"), String.valueOf(modifier.getOrDefault("slot", "any")), value -> updateAttributeModifierEntry(components, componentId, index, type, amountInput.getText(), selectedDropdownValue(dropdowns.operation), value));
         amountInput.setOnChange(() -> updateAttributeModifierEntry(components, componentId, index, type, amountInput.getText(), selectedDropdownValue(dropdowns.operation), selectedDropdownValue(dropdowns.slot)));
         insertAttributePanelWidget(container, attributeEntryRow(attributeValueLabel("server:minecraft:attribute", type), attributeOperationLabel(selectedDropdownValue(dropdowns.operation)) + " | " + titleCaseAttributeToken(selectedDropdownValue(dropdowns.slot)), amountInput, dropdowns.operation, dropdowns.slot, attributeDeleteButton(() -> removeListAttributeEntry(components, componentId, index))));
     }
@@ -3052,10 +4155,10 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     private String attributeModifiersText(Object value) {
         List<String> lines = new ArrayList<>();
         for (Map<String, Object> modifier : attributeModifiers(value)) {
-            String type = valueText(modifier.getOrDefault("type", "minecraft:attack_damage"));
+            String type = String.valueOf(modifier.getOrDefault("type", "minecraft:attack_damage"));
             String amount = formatComponentValue(modifier.getOrDefault("amount", 1.0));
-            String operation = valueText(modifier.getOrDefault("operation", "add_value"));
-            String slot = valueText(modifier.getOrDefault("slot", "any"));
+            String operation = String.valueOf(modifier.getOrDefault("operation", "add_value"));
+            String slot = String.valueOf(modifier.getOrDefault("slot", "any"));
             lines.add(type + " " + amount + " " + operation + " " + slot);
         }
         return String.join("\n", lines);
@@ -3130,12 +4233,12 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         Object material = map.get("material");
         Object pattern = map.get("pattern");
         if (material != null && pattern != null) {
-            return "Material " + valueText(material) + " | Pattern " + valueText(pattern);
+            return "Material " + material + " | Pattern " + pattern;
         }
         if (material != null) {
-            return "Material " + valueText(material);
+            return "Material " + material;
         }
-        return pattern != null ? "Pattern " + valueText(pattern) : "Trim";
+        return pattern != null ? "Pattern " + pattern : "Trim";
     }
 
     private void addFireworksEditorRows(Container container, Map<String, Object> components, String componentId, Map<String, Object> value) {
@@ -3146,7 +4249,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
 
     private void addFireworkExplosionEditorRows(Container container, Map<String, Object> components, String componentId, String path, Object value) {
         Map<String, Object> explosion = fireworkExplosionValue(value);
-            insertAttributePanelWidget(container, attributeEditorRow("Shape", attributeDropdown(List.of("small_ball", "large_ball", "star", "creeper", "burst"), valueText(explosion.getOrDefault("shape", "small_ball")), next -> updateFireworkExplosionField(components, componentId, path, "shape", next))));
+        insertAttributePanelWidget(container, attributeEditorRow("Shape", attributeDropdown(List.of("small_ball", "large_ball", "star", "creeper", "burst"), String.valueOf(explosion.getOrDefault("shape", "small_ball")), next -> updateFireworkExplosionField(components, componentId, path, "shape", next))));
         TextInputWidget colors = new TextInputWidget.Builder()
             .text(colorListText(explosion.get("colors")))
             .placeholder("#RRGGBB, #RRGGBB")
@@ -3229,12 +4332,12 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         if (value instanceof Map<?, ?> map) {
             Object shape = map.get("shape");
             if (shape != null) {
-                return valueText(shape);
+                return shape.toString();
             }
             Object duration = map.get("flight_duration");
             Object explosions = map.get("explosions");
             int count = explosions instanceof List<?> list ? list.size() : 0;
-            return "Flight " + valueText(duration != null ? duration : 1) + " | " + (count == 1 ? "1 Explosion" : count + " Explosions");
+            return "Flight " + (duration != null ? duration : 1) + " | " + (count == 1 ? "1 Explosion" : count + " Explosions");
         }
         return "Firework";
     }
@@ -3244,8 +4347,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         for (Object item : arrayValue(value)) {
             if (item instanceof Number number) {
                 colors.add(formatColorValue(number.intValue()));
-            } else if (item != null && !valueText(item).isBlank()) {
-                colors.add(formatColorValue(parseColorValue(0xFFFFFF, valueText(item))));
+            } else if (item != null && !item.toString().isBlank()) {
+                colors.add(formatColorValue(parseColorValue(0xFFFFFF, item.toString())));
             }
         }
         return String.join(", ", colors);
@@ -3266,8 +4369,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     private String bannerPatternsText(Object value) {
         List<String> lines = new ArrayList<>();
         for (Map<String, Object> pattern : bannerPatterns(value)) {
-            String id = valueText(pattern.getOrDefault("pattern", "minecraft:stripe_bottom"));
-            String color = valueText(pattern.getOrDefault("color", "white"));
+            String id = String.valueOf(pattern.getOrDefault("pattern", "minecraft:stripe_bottom"));
+            String color = String.valueOf(pattern.getOrDefault("color", "white"));
             lines.add(id + " " + color);
         }
         return String.join("\n", lines);
@@ -3312,7 +4415,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     private void addWrittenBookContentEditorRows(Container container, Map<String, Object> components, String componentId, Map<String, Object> value) {
         addWrittenBookTitleEditorRow(container, components, componentId, value.getOrDefault("title", "Book Title"));
         insertAttributePanelWidget(container, attributeEditorRow("Author", attributeSearchTextEditor(components, componentId, componentId + ".author", value.getOrDefault("author", "Author"), List.of(), false, "", false)));
-        DropDownWidget<String> generation = attributeDropdown(List.of("0", "1", "2", "3"), valueText(value.getOrDefault("generation", 0)), next -> updateNestedAttributeComponent(components, componentId, componentId + ".generation", parseNonNegativeInt(next, 0)), this::bookGenerationLabel);
+        DropDownWidget<String> generation = attributeDropdown(List.of("0", "1", "2", "3"), String.valueOf(value.getOrDefault("generation", 0)), next -> updateNestedAttributeComponent(components, componentId, componentId + ".generation", parseNonNegativeInt(next, 0)), this::bookGenerationLabel);
         insertAttributePanelWidget(container, attributeEditorRow("Generation", generation));
         insertAttributePanelWidget(container, attributeEditorRow("Resolved", attributeBooleanEditor(components, componentId, componentId + ".resolved", value.getOrDefault("resolved", false))));
         addBookPageRows(container, components, componentId, value, true);
@@ -3368,16 +4471,16 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         if (value instanceof Map<?, ?> map) {
             Object text = map.get("text");
             if (text != null) {
-                return valueText(text);
+                return text.toString();
             }
             Object raw = map.get("raw");
             if (raw != null) {
-                return valueText(raw);
+                return raw.toString();
             }
             Object filtered = map.get("filtered");
-            return filtered != null ? valueText(filtered) : "";
+            return filtered != null ? filtered.toString() : "";
         }
-        return value != null ? valueText(value) : "";
+        return value != null ? value.toString() : "";
     }
 
     private void updateBookPage(Map<String, Object> components, String componentId, int index, String text, boolean textComponents) {
@@ -3429,9 +4532,9 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         insertAttributePanelWidget(container, attributeStatusRow("Patterns", patterns.isEmpty() ? "No Patterns" : patterns.size() + " Patterns", attributeRowWidth(), false, componentId + "PatternsHeader"));
         for (int i = 0; i < patterns.size(); i++) {
             Map<String, Object> pattern = patterns.get(i);
-            TextInputWidget patternInput = attributeCompactInput(valueText(pattern.getOrDefault("pattern", "minecraft:stripe_bottom")), "Pattern");
+            TextInputWidget patternInput = attributeCompactInput(String.valueOf(pattern.getOrDefault("pattern", "minecraft:stripe_bottom")), "Pattern");
             int index = i;
-            DropDownWidget<String> color = attributeDropdown(dyeColorOptions(), valueText(pattern.getOrDefault("color", "white")), next -> updateBannerPatternEntry(components, componentId, index, patternInput.getText(), next));
+            DropDownWidget<String> color = attributeDropdown(dyeColorOptions(), String.valueOf(pattern.getOrDefault("color", "white")), next -> updateBannerPatternEntry(components, componentId, index, patternInput.getText(), next));
             patternInput.setOnChange(() -> updateBannerPatternEntry(components, componentId, index, patternInput.getText(), color.getSelectedItem()));
             insertAttributePanelWidget(container, attributeEntryRow("Pattern " + (i + 1), patternInput.getText() + " | " + color.getSelectedItem(), patternInput, attributeSearchButton(patternInput, bannerPatternOptions(), "server:minecraft:banner_pattern", selected -> {
                 patternInput.setText(normalizeMinecraftKey(selected));
@@ -3512,9 +4615,9 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             slot = parseNonNegativeInt(entry.get("slot"), index);
             stack = objectValue(entry.get("item"));
         }
-        TextInputWidget itemInput = attributeCompactInput(valueText(stack.getOrDefault("id", "minecraft:stone")), "Item");
-        TextInputWidget countInput = attributeCompactInput(valueText(parsePositiveInt(stack.get("count"), 1)), "Count");
-        TextInputWidget slotInput = attributeCompactInput(valueText(slot), "Slot");
+        TextInputWidget itemInput = attributeCompactInput(String.valueOf(stack.getOrDefault("id", "minecraft:stone")), "Item");
+        TextInputWidget countInput = attributeCompactInput(String.valueOf(parsePositiveInt(stack.get("count"), 1)), "Count");
+        TextInputWidget slotInput = attributeCompactInput(String.valueOf(slot), "Slot");
         itemInput.setOnChange(() -> updateItemStackEntry(components, componentId, index, slotted, slotInput.getText(), itemInput.getText(), countInput.getText()));
         countInput.setOnChange(() -> updateItemStackEntry(components, componentId, index, slotted, slotInput.getText(), itemInput.getText(), countInput.getText()));
         slotInput.setOnChange(() -> updateItemStackEntry(components, componentId, index, slotted, slotInput.getText(), itemInput.getText(), countInput.getText()));
@@ -3556,7 +4659,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     }
 
     private String itemStackLine(Map<String, Object> stack) {
-        String id = valueText(stack.getOrDefault("id", "minecraft:stone"));
+        String id = String.valueOf(stack.getOrDefault("id", "minecraft:stone"));
         int count = parsePositiveInt(stack.get("count"), 1);
         return id + " " + count;
     }
@@ -3627,7 +4730,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         }
         if (value != null) {
             try {
-                return Math.max(1, Integer.parseInt(valueText(value).trim()));
+                return Math.max(1, Integer.parseInt(value.toString().trim()));
             } catch (NumberFormatException ignored) {
             }
         }
@@ -3640,7 +4743,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         }
         if (value != null) {
             try {
-                return Math.max(0, Integer.parseInt(valueText(value).trim()));
+                return Math.max(0, Integer.parseInt(value.toString().trim()));
             } catch (NumberFormatException ignored) {
             }
         }
@@ -3665,7 +4768,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         }
         if (value != null) {
             try {
-                return Double.parseDouble(valueText(value).trim());
+                return Double.parseDouble(value.toString().trim());
             } catch (NumberFormatException ignored) {
             }
         }
@@ -3706,8 +4809,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             return "Potion";
         }
         Object potion = map.get("potion");
-        if (potion != null && !valueText(potion).isBlank()) {
-            return valueText(potion);
+        if (potion != null && !potion.toString().isBlank()) {
+            return potion.toString();
         }
         if (map.containsKey("custom_color")) {
             return "Color " + formatColorValue(potionCustomColor(map));
@@ -3718,9 +4821,9 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     private String jukeboxPlayableSummary(Object value) {
         if (value instanceof Map<?, ?> map) {
             Object song = map.get("song");
-            return song != null && !valueText(song).isBlank() ? "Song " + valueText(song) : "Song";
+            return song != null && !song.toString().isBlank() ? "Song " + song : "Song";
         }
-        return value != null && !valueText(value).isBlank() ? "Song " + valueText(value) : "Song";
+        return value != null && !value.toString().isBlank() ? "Song " + value : "Song";
     }
 
     private int potionCustomColor(Object value) {
@@ -3730,7 +4833,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
                 return Math.clamp(number.intValue(), 0, 0xFFFFFF);
             }
             if (color != null) {
-                return parseColorValue(0xFFFFFF, valueText(color));
+                return parseColorValue(0xFFFFFF, color.toString());
             }
         }
         return 0xFFFFFF;
@@ -3915,9 +5018,9 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     private String plainTextComponentValue(Object value) {
         if (value instanceof Map<?, ?> map) {
             Object text = map.get("text");
-            return text != null ? valueText(text) : "";
+            return text != null ? text.toString() : "";
         }
-        return value != null ? valueText(value) : "";
+        return value != null ? value.toString() : "";
     }
 
     private void addLoreEditorRow(Container container, Map<String, Object> components, String componentId, Object value) {
@@ -4001,9 +5104,9 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     private String firstBlockPredicateValue(Map<String, Object> predicate) {
         Object blocks = predicate.get("blocks");
         if (blocks instanceof List<?> list && !list.isEmpty() && list.getFirst() != null) {
-            return valueText(list.getFirst());
+            return list.getFirst().toString();
         }
-        return blocks != null && !valueText(blocks).isBlank() ? valueText(blocks) : "minecraft:stone";
+        return blocks != null && !blocks.toString().isBlank() ? blocks.toString() : "minecraft:stone";
     }
 
     private String blockPredicateText(Object value) {
@@ -4012,12 +5115,12 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             Object blocks = predicate.get("blocks");
             if (blocks instanceof List<?> list) {
                 for (Object block : list) {
-                    if (block != null && !valueText(block).isBlank()) {
-                        lines.add(valueText(block));
+                    if (block != null && !block.toString().isBlank()) {
+                        lines.add(block.toString());
                     }
                 }
-            } else if (blocks != null && !valueText(blocks).isBlank()) {
-                lines.add(valueText(blocks));
+            } else if (blocks != null && !blocks.toString().isBlank()) {
+                lines.add(blocks.toString());
             }
         }
         return String.join("\n", lines);
@@ -4063,8 +5166,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         }
         List<String> result = new ArrayList<>();
         for (Object item : list) {
-            if (item != null && !valueText(item).isBlank()) {
-                result.add(valueText(item));
+            if (item != null && !item.toString().isBlank()) {
+                result.add(item.toString());
             }
         }
         return result;
@@ -4072,7 +5175,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
 
     private void addConsumableEditorRows(Container container, Map<String, Object> components, String componentId, Map<String, Object> value) {
         insertAttributePanelWidget(container, attributeEditorRow("Use Time", attributeNumberEditor(components, componentId, componentId + ".consume_seconds", value.getOrDefault("consume_seconds", 1.6), "Seconds")));
-        insertAttributePanelWidget(container, attributeEditorRow("Animation", attributeChoiceEditor(components, componentId, componentId + ".animation", List.of("eat", "drink", "block", "bow", "crossbow", "spear", "spyglass", "toot_horn", "brush"), valueText(value.getOrDefault("animation", "eat")))));
+        insertAttributePanelWidget(container, attributeEditorRow("Animation", attributeChoiceEditor(components, componentId, componentId + ".animation", List.of("eat", "drink", "block", "bow", "crossbow", "spear", "spyglass", "toot_horn", "brush"), String.valueOf(value.getOrDefault("animation", "eat")))));
         insertAttributePanelWidget(container, attributeEditorRow("Sound", attributeSearchTextEditor(components, componentId, componentId + ".sound", value.getOrDefault("sound", "minecraft:entity.generic.eat"), soundOptions(), false, "server:minecraft:sound")));
         ToggleWidget particles = new ToggleWidget.Builder()
             .label("Show Particles")
@@ -4302,7 +5405,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     }
 
     private void addSwingAnimationEditorRows(Container container, Map<String, Object> components, String componentId, Map<String, Object> value) {
-        insertAttributePanelWidget(container, attributeEditorRow("Swing Type", attributeChoiceEditor(components, componentId, componentId + ".type", List.of("none", "whack", "stab"), valueText(value.getOrDefault("type", "whack")))));
+        insertAttributePanelWidget(container, attributeEditorRow("Swing Type", attributeChoiceEditor(components, componentId, componentId + ".type", List.of("none", "whack", "stab"), String.valueOf(value.getOrDefault("type", "whack")))));
         insertAttributePanelWidget(container, attributeEditorRow("Swing Duration", attributeNumberEditor(components, componentId, componentId + ".duration", value.getOrDefault("duration", 6), "Ticks")));
     }
 
@@ -4410,7 +5513,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     }
 
     private void addDeathEffectEntryRow(Container container, Map<String, Object> components, String componentId, Map<String, Object> effect, int index) {
-        String selectedType = valueText(effect.getOrDefault("type", "minecraft:play_sound"));
+        String selectedType = String.valueOf(effect.getOrDefault("type", "minecraft:play_sound"));
         DropDownWidget<String> type = attributeDropdown(deathEffectTypeOptions(), selectedType, next -> updateDeathEffectEntry(components, componentId, index, next, soundInputText(effect)));
         TextInputWidget sound = attributeCompactInput(soundInputText(effect), "Sound");
         sound.setOnChange(() -> updateDeathEffectEntry(components, componentId, index, type.getSelectedItem(), sound.getText()));
@@ -4533,9 +5636,9 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     }
 
     private void addPositionRow(Container container, Map<String, Object> components, String componentId, List<Integer> pos) {
-        TextInputWidget x = attributeCompactInput(valueText(pos.get(0)), "X");
-        TextInputWidget y = attributeCompactInput(valueText(pos.get(1)), "Y");
-        TextInputWidget z = attributeCompactInput(valueText(pos.get(2)), "Z");
+        TextInputWidget x = attributeCompactInput(String.valueOf(pos.get(0)), "X");
+        TextInputWidget y = attributeCompactInput(String.valueOf(pos.get(1)), "Y");
+        TextInputWidget z = attributeCompactInput(String.valueOf(pos.get(2)), "Z");
         x.setOnChange(() -> updateLodestonePosition(components, componentId, x.getText(), y.getText(), z.getText()));
         y.setOnChange(() -> updateLodestonePosition(components, componentId, x.getText(), y.getText(), z.getText()));
         z.setOnChange(() -> updateLodestonePosition(components, componentId, x.getText(), y.getText(), z.getText()));
@@ -4578,7 +5681,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             ToggleWidget toggle = new ToggleWidget.Builder()
                 .toggled(Boolean.parseBoolean(text))
                 .size(80, 18)
-                .onChange(next -> updateBlockStateEntry(components, componentId, key, valueText(next)))
+                .onChange(next -> updateBlockStateEntry(components, componentId, key, String.valueOf(next)))
                 .entranceAnimation(false)
                 .build();
             insertAttributePanelWidget(container, attributeEntryRow(titleCaseAttributeToken(key), "Boolean Block State", toggle, attributeDeleteButton(() -> removeMapEntry(components, componentId, key))));
@@ -4761,7 +5864,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         }
         if (value != null) {
             try {
-                return Integer.parseInt(valueText(value).trim());
+                return Integer.parseInt(value.toString().trim());
             } catch (NumberFormatException ignored) {
             }
         }
@@ -4773,14 +5876,14 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     }
 
     private boolean isNumericBooleanField(String key, Object value) {
-        return "NoAI".equalsIgnoreCase(key) && ("1".equals(valueText(value)) || "0".equals(valueText(value)));
+        return "NoAI".equalsIgnoreCase(key) && ("1".equals(String.valueOf(value)) || "0".equals(String.valueOf(value)));
     }
 
     private boolean booleanDataValue(Object value) {
         if (value instanceof Boolean bool) {
             return bool;
         }
-        String text = valueText(value);
+        String text = String.valueOf(value);
         return "1".equals(text) || Boolean.parseBoolean(text);
     }
 
@@ -4805,7 +5908,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     private RowWidget attributeStackSizeEditor(Map<String, Object> components, String componentId, Object value) {
         int stackSize = Math.clamp(parsePositiveInt(value, 64), 1, 99);
         TextInputWidget input = new TextInputWidget.Builder()
-            .text(valueText(stackSize))
+            .text(String.valueOf(stackSize))
             .placeholder("1-99")
             .forcePlaceholder(false)
             .size(56, 18)
@@ -4818,7 +5921,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
                 DoubleSliderWidget sliderWidget = sliderRef[0];
                 int next = 1 + (int) Math.round(sliderWidget.getValue() * 98.0);
                 sliderWidget.label = "Stack " + next;
-                input.setText(valueText(next));
+                input.setText(String.valueOf(next));
                 updateNestedAttributeComponent(components, componentId, componentId, next);
             })
             .size(Math.max(140, attributeRowWidth() - 80), 18)
@@ -4860,7 +5963,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     }
 
     private void addEquippableEditorRows(Container container, Map<String, Object> components, String componentId, Map<String, Object> value) {
-        insertAttributePanelWidget(container, attributeEditorRow("Slot", attributeChoiceEditor(components, componentId, componentId + ".slot", equipmentSlotOptions(), valueText(value.getOrDefault("slot", "head")))));
+        insertAttributePanelWidget(container, attributeEditorRow("Slot", attributeChoiceEditor(components, componentId, componentId + ".slot", equipmentSlotOptions(), String.valueOf(value.getOrDefault("slot", "head")))));
         insertAttributePanelWidget(container, attributeEditorRow("Equip Sound", attributeSearchTextEditor(components, componentId, componentId + ".equip_sound", value.getOrDefault("equip_sound", "minecraft:item.armor.equip_generic"), soundOptions(), false, "server:minecraft:sound")));
         insertAttributePanelWidget(container, attributeEditorRow("Asset ID", attributeOptionalSearchTextEditor(components, componentId, componentId + ".asset_id", value.getOrDefault("asset_id", ""), equipmentAssetOptions(), "")));
         insertAttributePanelWidget(container, attributeEditorRow("Camera Overlay", attributeOptionalSearchTextEditor(components, componentId, componentId + ".camera_overlay", value.getOrDefault("camera_overlay", ""), materialModelOptions(), "server:minecraft:material")));
@@ -4876,7 +5979,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         }
         Object damage = map.get("item_damage_per_attack");
         Object disable = map.get("disable_blocking_for_seconds");
-        return "Damage Cost " + valueText(damage != null ? damage : 1) + " | Shield Disable " + valueText(disable != null ? disable : 0) + "s";
+        return "Damage Cost " + (damage != null ? damage : 1) + " | Shield Disable " + (disable != null ? disable : 0) + "s";
     }
 
     private String blocksAttacksSummary(Object value) {
@@ -4885,7 +5988,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         }
         Object delay = map.get("block_delay_seconds");
         int reductions = map.get("damage_reductions") instanceof List<?> list ? list.size() : 0;
-        return "Delay " + valueText(delay != null ? delay : 0.25) + "s | " + (reductions == 1 ? "1 Reduction" : reductions + " Reductions");
+        return "Delay " + (delay != null ? delay : 0.25) + "s | " + (reductions == 1 ? "1 Reduction" : reductions + " Reductions");
     }
 
     private String piercingWeaponSummary(Object value) {
@@ -4903,7 +6006,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         }
         Object movement = map.get("forward_movement");
         Object damage = map.get("damage_multiplier");
-        return "Movement " + valueText(movement != null ? movement : 1.0) + " | Damage " + valueText(damage != null ? damage : 1.0);
+        return "Movement " + (movement != null ? movement : 1.0) + " | Damage " + (damage != null ? damage : 1.0);
     }
 
     private String attackRangeSummary(Object value) {
@@ -4912,7 +6015,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         }
         Object minimum = map.get("min_reach");
         Object maximum = map.get("max_reach");
-        return "Reach " + valueText(minimum != null ? minimum : 0.0) + "-" + valueText(maximum != null ? maximum : 3.0);
+        return "Reach " + (minimum != null ? minimum : 0.0) + "-" + (maximum != null ? maximum : 3.0);
     }
 
     private String swingAnimationSummary(Object value) {
@@ -4921,7 +6024,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         }
         Object type = map.get("type");
         Object duration = map.get("duration");
-        return titleCaseAttributeToken(valueText(type != null ? type : "whack")) + " | " + valueText(duration != null ? duration : 6) + " Ticks";
+        return titleCaseAttributeToken(String.valueOf(type != null ? type : "whack")) + " | " + (duration != null ? duration : 6) + " Ticks";
     }
 
     private String useEffectsSummary(Object value) {
@@ -4930,14 +6033,14 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         }
         Object speed = map.get("speed_multiplier");
         boolean sprint = !Boolean.FALSE.equals(map.get("can_sprint"));
-        return "Speed " + valueText(speed != null ? speed : 1.0) + " | " + (sprint ? "Can Sprint" : "No Sprint");
+        return "Speed " + (speed != null ? speed : 1.0) + " | " + (sprint ? "Can Sprint" : "No Sprint");
     }
 
     private String repairableSummary(Object value) {
         if (value instanceof Map<?, ?> map) {
             Object items = map.get("items");
-            if (items != null && !valueText(items).isBlank()) {
-                return "Repairs With " + valueText(items);
+            if (items != null && !items.toString().isBlank()) {
+                return "Repairs With " + items;
             }
         }
         return "Repairable";
@@ -4946,8 +6049,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     private String containerLootSummary(Object value) {
         if (value instanceof Map<?, ?> map) {
             Object table = map.get("loot_table");
-            if (table != null && !valueText(table).isBlank()) {
-                return "Loot " + valueText(table);
+            if (table != null && !table.toString().isBlank()) {
+                return "Loot " + table;
             }
         }
         return "Container Loot";
@@ -4959,8 +6062,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         }
         Object slot = map.get("slot");
         Object sound = map.get("equip_sound");
-        String slotText = slot != null && !valueText(slot).isBlank() ? titleCaseAttributeToken(valueText(slot)) : "Slot";
-        return sound != null && !valueText(sound).isBlank() ? "Slot " + slotText + " | Sound " + valueText(sound) : "Slot " + slotText;
+        String slotText = slot != null && !slot.toString().isBlank() ? titleCaseAttributeToken(slot.toString()) : "Slot";
+        return sound != null && !sound.toString().isBlank() ? "Slot " + slotText + " | Sound " + sound : "Slot " + slotText;
     }
 
     private ToggleWidget attributeBooleanEditor(Map<String, Object> components, String componentId, String path, Object value) {
@@ -5026,8 +6129,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         if (value instanceof List<?> list) {
             List<String> values = new ArrayList<>();
             for (Object item : list) {
-                if (item != null && !valueText(item).isBlank()) {
-                    values.add(valueText(item));
+                if (item != null && !item.toString().isBlank()) {
+                    values.add(item.toString());
                 }
             }
             return String.join(", ", values);
@@ -5055,7 +6158,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             List<String> lines = new ArrayList<>();
             for (Map.Entry<?, ?> entry : map.entrySet()) {
                 if (entry.getKey() != null) {
-                    lines.add(valueText(entry.getKey()) + "=" + conditionFieldText(entry.getValue()));
+                    lines.add(entry.getKey() + "=" + conditionFieldText(entry.getValue()));
                 }
             }
             return String.join("\n", lines);
@@ -5067,8 +6170,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         if (value instanceof List<?> list) {
             List<String> values = new ArrayList<>();
             for (Object item : list) {
-                if (item != null && !valueText(item).isBlank()) {
-                    values.add(valueText(item));
+                if (item != null && !item.toString().isBlank()) {
+                    values.add(item.toString());
                 }
             }
             return String.join(", ", values);
@@ -5120,8 +6223,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         if (value instanceof List<?> list) {
             List<String> items = new ArrayList<>();
             for (Object item : list) {
-                if (item != null && !valueText(item).isBlank()) {
-                    items.add(valueText(item));
+                if (item != null && !item.toString().isBlank()) {
+                    items.add(item.toString());
                 }
             }
             return String.join(", ", items);
@@ -5147,8 +6250,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     private String damageResistantSummary(Object value) {
         if (value instanceof Map<?, ?> map) {
             Object types = map.get("types");
-            if (types != null && !valueText(types).isBlank()) {
-                return "Resists " + valueText(types);
+            if (types != null && !types.toString().isBlank()) {
+                return "Resists " + types;
             }
         }
         return "Damage Resistant";
@@ -5159,8 +6262,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             return "Cooldown";
         }
         Object seconds = map.get("seconds");
-        if (seconds != null && !valueText(seconds).isBlank()) {
-            return "Cooldown " + valueText(seconds) + "s";
+        if (seconds != null && !seconds.toString().isBlank()) {
+            return "Cooldown " + seconds + "s";
         }
         return "Cooldown";
     }
@@ -5697,7 +6800,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             Map<String, Object> copy = new LinkedHashMap<>();
             for (Map.Entry<?, ?> entry : map.entrySet()) {
                 if (entry.getKey() != null) {
-                    copy.put(valueText(entry.getKey()), entry.getValue());
+                    copy.put(entry.getKey().toString(), entry.getValue());
                 }
             }
             if (tail.isBlank() && value == null) {
@@ -5748,7 +6851,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         Map<String, Object> result = new LinkedHashMap<>();
         for (Map.Entry<?, ?> entry : map.entrySet()) {
             if (entry.getKey() != null) {
-                result.put(valueText(entry.getKey()), entry.getValue());
+                result.put(entry.getKey().toString(), entry.getValue());
             }
         }
         return result;
@@ -5759,17 +6862,17 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     }
 
     private Map<String, Object> attributeComponentSchema(String componentId) {
-        CustomContentDefinition definition = CustomContentGraphAdapter.toDefinition(graph);
-        String source = definition != null ? attributeSchemaSource(definition.getMaterial()) : ATTRIBUTE_SCHEMA_SOURCE;
-        OptionCatalogItem item = attributeCatalogItem(source, componentId);
-        Map<String, Object> metadata = item != null && item.getMetadata() != null ? item.getMetadata() : Map.of();
-        return schemaMap(metadata.get("schema"));
+        AttributeProjection projection = currentAttributeProjection();
+        if (projection == null || componentId == null) {
+            return Map.of();
+        }
+        return projection.componentSchemasByKey().getOrDefault(normalizedProjectionKey(componentId), Map.of());
     }
 
     private String schemaKind(Map<String, Object> schema, Object value) {
         Object kind = schema != null ? schema.get("kind") : null;
-        if (kind != null && !valueText(kind).isBlank() && !"raw".equals(valueText(kind))) {
-            return valueText(kind);
+        if (kind != null && !kind.toString().isBlank() && !"raw".equals(kind.toString())) {
+            return kind.toString();
         }
         if (value instanceof Boolean) {
             return "boolean";
@@ -5793,7 +6896,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         Map<String, Object> result = new LinkedHashMap<>();
         for (Map.Entry<?, ?> entry : map.entrySet()) {
             if (entry.getKey() != null) {
-                result.put(valueText(entry.getKey()), entry.getValue());
+                result.put(entry.getKey().toString(), entry.getValue());
             }
         }
         return result;
@@ -5882,9 +6985,11 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     }
 
     private Map<String, Object> displayAttributeComponentsForCurrent() {
-        CustomContentDefinition definition = CustomContentGraphAdapter.toDefinition(graph);
-        String source = definition != null ? attributeSchemaSource(definition.getMaterial()) : ATTRIBUTE_SCHEMA_SOURCE;
-        return displayAttributeComponents(activeAttributeComponents, attributeCatalog(source));
+        AttributeProjection projection = currentAttributeProjection();
+        Map<String, Object> components = attributeDesignerOpen && activeAttributeComponents != null
+            ? activeAttributeComponents : projection != null ? projection.components() : Map.of();
+        Map<String, OptionCatalogItem> catalog = projection != null ? projection.catalog() : Map.of();
+        return displayAttributeComponents(components, catalog);
     }
 
     private boolean isPrimaryAttributeForMaterial(String id, String material) {
@@ -6211,7 +7316,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         }
         if (value != null) {
             try {
-                return Integer.parseInt(valueText(value));
+                return Integer.parseInt(value.toString());
             } catch (NumberFormatException ignored) {
             }
         }
@@ -6224,17 +7329,17 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             return bool;
         }
         if (value != null) {
-            return Boolean.parseBoolean(valueText(value));
+            return Boolean.parseBoolean(value.toString());
         }
         return fallback;
     }
 
     private String metadataString(OptionCatalogItem item, String key, String fallback) {
         Object value = metadataValue(item, key);
-        if (value == null || valueText(value).isBlank()) {
+        if (value == null || value.toString().isBlank()) {
             return fallback;
         }
-        return valueText(value);
+        return value.toString();
     }
 
     private Object metadataValue(OptionCatalogItem item, String key) {
@@ -6260,7 +7365,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             StringBuilder builder = new StringBuilder();
             for (Map.Entry<?, ?> entry : map.entrySet()) {
                 if (entry.getKey() != null) {
-                    builder.append(' ').append(metadataSearchText(entry.getKey()));
+                    builder.append(' ').append(entry.getKey());
                 }
                 builder.append(' ').append(metadataSearchText(entry.getValue()));
             }
@@ -6273,31 +7378,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             }
             return builder.toString();
         }
-        if (value instanceof JsonElement element) {
-            return FlowJson.write(element);
-        }
-        if (value instanceof String text) {
-            return text;
-        }
-        if (value instanceof Number number) {
-            if (number instanceof Byte || number instanceof Short || number instanceof Integer) {
-                return Integer.toString(number.intValue());
-            }
-            if (number instanceof Long) {
-                return Long.toString(number.longValue());
-            }
-            if (number instanceof Float) {
-                return Float.toString(number.floatValue());
-            }
-            return Double.toString(number.doubleValue());
-        }
-        if (value instanceof Boolean bool) {
-            return bool ? "true" : "false";
-        }
-        if (value instanceof Character character) {
-            return Character.toString(character);
-        }
-        return "";
+        return value.toString();
     }
 
     private String attributeSearchAliases(String id) {
@@ -6501,11 +7582,11 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
                 return Math.clamp(number.intValue(), 0, 0xFFFFFF);
             }
             if (rgb != null) {
-                return parseColorValue(0xFFFFFF, valueText(rgb));
+                return parseColorValue(0xFFFFFF, rgb.toString());
             }
         }
         if ("minecraft:jukebox_playable".equals(id) && value instanceof Map<?, ?> map && map.get("song") != null) {
-            return normalizeMinecraftKey(valueText(map.get("song")));
+            return normalizeMinecraftKey(map.get("song").toString());
         }
         if ("minecraft:blocks_attacks".equals(id) && value instanceof Map<?, ?> map) {
             Map<String, Object> copy = objectValue(map);
@@ -6546,7 +7627,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             Map<String, Object> copy = new LinkedHashMap<>();
             for (Map.Entry<?, ?> entry : map.entrySet()) {
                 if (entry.getKey() != null) {
-                    copy.put(valueText(entry.getKey()), copyAttributeValue(entry.getValue()));
+                    copy.put(entry.getKey().toString(), copyAttributeValue(entry.getValue()));
                 }
             }
             return copy;
@@ -6701,10 +7782,15 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     }
 
     private OptionCatalogItem attributeCatalogItem(String source, String id) {
-        for (OptionCatalogItem item : attributeCatalogItems(source)) {
-            if (id != null && id.equalsIgnoreCase(item.getValue())) {
-                return item;
-            }
+        AttributeProjection projection = currentAttributeProjection();
+        if (projection == null || id == null) {
+            return null;
+        }
+        if (Objects.equals(source, projection.schemaSource())) {
+            return projection.catalogByKey().get(normalizedProjectionKey(id));
+        }
+        if ("server:minecraft:attribute".equals(source)) {
+            return projection.attributeValueCatalogByKey().get(normalizedProjectionKey(id));
         }
         return null;
     }
@@ -6714,7 +7800,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         if (item != null && item.getLabel() != null && !item.getLabel().isBlank()) {
             return item.getLabel();
         }
-        String cleaned = value != null && value.contains(":") ? value.substring(value.indexOf(':') + 1) : valueText(value);
+        String cleaned = value != null && value.contains(":") ? value.substring(value.indexOf(':') + 1) : String.valueOf(value);
         if (cleaned.startsWith("generic.")) {
             cleaned = cleaned.substring("generic.".length());
         }
@@ -6722,12 +7808,12 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     }
 
     private String componentLabel(String id) {
-        CustomContentDefinition definition = CustomContentGraphAdapter.toDefinition(graph);
-        OptionCatalogItem item = definition != null ? attributeCatalogItem(attributeSchemaSource(definition.getMaterial()), id) : null;
-        if (item != null && item.getLabel() != null && !item.getLabel().isBlank()) {
-            return item.getLabel();
+        AttributeProjection projection = currentAttributeProjection();
+        String label = projection != null && id != null ? projection.componentLabelsByKey().get(normalizedProjectionKey(id)) : null;
+        if (label != null && !label.isBlank()) {
+            return label;
         }
-        String cleaned = id != null && id.contains(":") ? id.substring(id.indexOf(':') + 1) : valueText(id);
+        String cleaned = id != null && id.contains(":") ? id.substring(id.indexOf(':') + 1) : String.valueOf(id);
         StringBuilder builder = new StringBuilder();
         for (String part : cleaned.replace('_', ' ').replace('.', ' ').replace('/', ' ').split("\\s+")) {
             if (part.isBlank()) {
@@ -6761,7 +7847,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     private List<OptionCatalogItem> attributeCatalogItems(String source) {
         String catalogSource = attributeCatalogSource(source);
         Map<String, Object> context = attributeCatalogContext(source);
-        ReSyncFlowClient client = flowManager != null ? flowManager.ensureFlowClient(serverId) : null;
+        ReSyncFlowClient client = flowManager != null ? flowManager.existingFlowClient(serverId) : null;
         String contextKey = client != null ? client.optionCatalogContextKey(context) : "";
         return OptionCatalogCache.getInstance().getItems(serverId, catalogSource, contextKey);
     }
@@ -6769,16 +7855,16 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     private boolean hasAttributeCatalog(String source) {
         String catalogSource = attributeCatalogSource(source);
         Map<String, Object> context = attributeCatalogContext(source);
-        ReSyncFlowClient client = flowManager != null ? flowManager.ensureFlowClient(serverId) : null;
+        ReSyncFlowClient client = flowManager != null ? flowManager.existingFlowClient(serverId) : null;
         String contextKey = client != null ? client.optionCatalogContextKey(context) : "";
         return OptionCatalogCache.getInstance().hasCatalog(serverId, catalogSource, contextKey);
     }
 
     private void preloadAttributeSchema() {
         requestCatalog(ATTRIBUTE_SCHEMA_SOURCE);
-        CustomContentDefinition definition = CustomContentGraphAdapter.toDefinition(graph);
-        if (definition != null) {
-            requestCatalog(attributeSchemaSource(definition.getMaterial()));
+        AttributeProjection projection = currentAttributeProjection();
+        if (projection != null) {
+            requestCatalog(projection.schemaSource());
         }
     }
 
@@ -6786,62 +7872,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         if (value == null) {
             return "";
         }
-        return valueText(value);
-    }
-
-    private static String valueText(Object value) {
-        if (value == null) {
-            return "";
-        }
-        if (value instanceof JsonElement element) {
-            return FlowJson.write(element);
-        }
-        if (value instanceof String text) {
-            return text;
-        }
-        if (value instanceof Number number) {
-            if (number instanceof Byte || number instanceof Short || number instanceof Integer) {
-                return Integer.toString(number.intValue());
-            }
-            if (number instanceof Long) {
-                return Long.toString(number.longValue());
-            }
-            if (number instanceof Float) {
-                return Float.toString(number.floatValue());
-            }
-            return Double.toString(number.doubleValue());
-        }
-        if (value instanceof Boolean bool) {
-            return bool ? "true" : "false";
-        }
-        if (value instanceof Character character) {
-            return Character.toString(character);
-        }
-        if (value instanceof Map<?, ?> map) {
-            StringBuilder result = new StringBuilder("{");
-            boolean first = true;
-            for (Map.Entry<?, ?> entry : map.entrySet()) {
-                if (!first) {
-                    result.append(", ");
-                }
-                first = false;
-                result.append(valueText(entry.getKey())).append('=').append(valueText(entry.getValue()));
-            }
-            return result.append('}').toString();
-        }
-        if (value instanceof Iterable<?> iterable) {
-            StringBuilder result = new StringBuilder("[");
-            boolean first = true;
-            for (Object item : iterable) {
-                if (!first) {
-                    result.append(", ");
-                }
-                first = false;
-                result.append(valueText(item));
-            }
-            return result.append(']').toString();
-        }
-        return "";
+        return String.valueOf(value);
     }
 
     private Object parseComponentEditorValue(Object previous, String value) {
@@ -7035,6 +8066,9 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     }
 
     private void setBranchEnabled(String branch, boolean enabled) {
+        if (deferFrozenWorkspaceMutation(() -> setBranchEnabled(branch, enabled))) {
+            return;
+        }
         List<String> branches = enabled
             ? new ArrayList<>(CustomContentGraphAdapter.getEnabledTriggerBranches(graph))
             : new ArrayList<>(storedBranches());
@@ -7056,16 +8090,32 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         updateEventRows();
     }
 
-    private void setProperty(String key, Object value) {
-        CustomContentGraphAdapter.setContentProperty(graph, key, value);
-        markWorkspaceMutation();
-        if ("content_id".equals(key)) {
-            String type = CustomContentGraphAdapter.contentType(graph);
-            String id = value == null ? "" : valueText(value).trim();
-            if (type != null && !id.isBlank()) {
-                graph.setId(CustomContentGraphAdapter.contentFlowId(type, id));
-            }
+    private void synchronizeContentIdentity() {
+        if (contentCoreSession != null) {
+            contentId = contentCoreSession.resource().id();
+            graph.setId(contentId);
+            CustomContentGraphAdapter.setContentProperty(graph, "content_id", contentId);
+            return;
         }
+        Object value = CustomContentGraphAdapter.getContentProperty(graph, "content_id", contentId != null ? contentId : "");
+        String id = value != null ? String.valueOf(value).trim() : "";
+        String type = CustomContentGraphAdapter.contentType(graph);
+        contentId = id;
+        if (type != null && !id.isBlank()) {
+            graph.setId(CustomContentGraphAdapter.contentFlowId(type, id));
+        }
+    }
+
+    private void setProperty(String key, Object value) {
+        if (deferFrozenWorkspaceMutation(() -> setProperty(key, value))) {
+            return;
+        }
+        CustomContentGraphAdapter.setContentProperty(graph, key, value);
+        if ("content_id".equals(key)) {
+            synchronizeContentIdentity();
+        }
+        updateAttributeProjectionProperty(key, value);
+        markWorkspaceMutation();
     }
 
     @Override
@@ -7103,6 +8153,9 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             }
             applyValues(currentRoot.getInputValues(), incomingInputs, changedInputs);
             currentRoot.setType(text(incomingRoot.get("type")));
+            if (typeChanged || changedInputs.contains("content_id")) {
+                synchronizeContentIdentity();
+            }
             if (typeChanged || changedInputs.stream().anyMatch(key -> !STUDIO_ROOT_INPUTS.contains(key))) {
                 refreshInputWidgets(rootNodeId);
             }
@@ -7110,6 +8163,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         if (!changedProperties.isEmpty()) {
             applyValues(graph.getContentProperties(), object(document, "contentProperties"), changedProperties);
         }
+        updateAttributeProjectionWorkspace(changedInputs, changedProperties, currentRoot);
         graph.setResourceRevision(number(document.get("resourceRevision")));
         graph.setResourceHash(text(document.get("resourceHash")));
         graph.setResourceMutationId(text(document.get("resourceMutationId")));
@@ -7130,7 +8184,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             if (value == null || value.isJsonNull()) {
                 target.remove(key);
             } else {
-                target.put(key, FlowJson.value(value));
+                target.put(key, COLLABORATION_GSON.fromJson(value, Object.class));
             }
         }
     }
@@ -7263,10 +8317,10 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
 
     private static String contentCollaborationDropdownValue(String key, Object value) {
         if (Set.of("projectile.gravity", "projectile.glowing", "projectile.consume_item", "projectile.remove_on_hit").contains(key)) {
-            boolean enabled = value instanceof Boolean flag ? flag : Boolean.parseBoolean(valueText(value));
+            boolean enabled = value instanceof Boolean flag ? flag : Boolean.parseBoolean(String.valueOf(value));
             return enabled ? "Enabled" : "Disabled";
         }
-        return value == null ? "" : valueText(value);
+        return value == null ? "" : String.valueOf(value);
     }
 
     private static String collaborationKey(String label) {
@@ -7276,12 +8330,12 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
 
     private String textProperty(String key) {
         Object value = CustomContentGraphAdapter.getContentProperty(graph, key, "");
-        return value == null ? "" : valueText(value);
+        return value == null ? "" : String.valueOf(value);
     }
 
     private boolean boolProperty(String key) {
         Object value = CustomContentGraphAdapter.getContentProperty(graph, key, false);
-        return value instanceof Boolean b ? b : Boolean.parseBoolean(valueText(value));
+        return value instanceof Boolean b ? b : Boolean.parseBoolean(String.valueOf(value));
     }
 
     private String firstBranch() {
@@ -7321,10 +8375,13 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     }
 
     private void updateSummary() {
-        CustomContentDefinition definition = CustomContentGraphAdapter.toDefinition(graph);
-        if (summaryWidget != null && definition != null) {
-            summaryWidget.setName(definition.getDisplayName());
-            summaryWidget.setDescription(contentSummary(definition));
+        if (summaryWidget != null) {
+            String name = textProperty("name");
+            String type = CustomContentGraphAdapter.contentType(graph);
+            String provider = textProperty("provider");
+            summaryWidget.setName(name);
+            summaryWidget.setDescription((type != null ? type : "item") + " | "
+                + (!provider.isBlank() ? provider : "vanilla"));
         }
     }
 
@@ -7344,9 +8401,21 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     }
 
     private int branchActionCount(String branch) {
-        FlowNode start = CustomContentGraphAdapter.findStartNode(graph);
-        String startId = start != null ? findNodeId(start) : null;
-        if (startId == null || graph.getConnections() == null) {
+        return branchActionCount(graph, branch);
+    }
+
+    private static int branchActionCount(FlowGraph source, String branch) {
+        FlowNode start = CustomContentGraphAdapter.findStartNode(source);
+        String startId = null;
+        if (start != null && source.getNodes() != null) {
+            for (Map.Entry<String, FlowNode> entry : source.getNodes().entrySet()) {
+                if (entry.getValue() == start) {
+                    startId = entry.getKey();
+                    break;
+                }
+            }
+        }
+        if (startId == null || source.getConnections() == null) {
             return 0;
         }
         int count = 0;
@@ -7354,7 +8423,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         String pin = branch;
         while (true) {
             FlowConnection next = null;
-            for (FlowConnection connection : graph.getConnections()) {
+            for (FlowConnection connection : source.getConnections()) {
                 if (nodeId.equals(connection.getSourceNodeId()) && pin.equals(connection.getSourcePin())) {
                     next = connection;
                     break;
@@ -7384,7 +8453,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         if (value instanceof List<?> list) {
             for (Object item : list) {
                 if (item != null) {
-                    branches.add(valueText(item));
+                    branches.add(item.toString());
                 }
             }
         }
@@ -7426,8 +8495,15 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         return catalogOptions("server:custom_content:asset", customContentCatalogContext(provider));
     }
 
+    private List<String> providerAssetOptions(String provider, String contentType) {
+        return catalogOptions("server:custom_content:asset", customContentCatalogContext(provider, contentType));
+    }
+
     private Map<String, Object> customContentCatalogContext(String provider) {
-        String contentType = CustomContentGraphAdapter.contentType(graph);
+        return customContentCatalogContext(provider, CustomContentGraphAdapter.contentType(graph));
+    }
+
+    private Map<String, Object> customContentCatalogContext(String provider, String contentType) {
         return Map.of(
             "provider", provider != null ? provider : "",
             "content_type", contentType != null ? contentType : ""
@@ -7435,7 +8511,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     }
 
     private List<String> catalogOptions(String source, Map<String, Object> context) {
-        ReSyncFlowClient client = flowManager != null ? flowManager.ensureFlowClient(serverId) : null;
+        ReSyncFlowClient client = flowManager != null ? flowManager.existingFlowClient(serverId) : null;
         String contextKey = client != null ? client.optionCatalogContextKey(context) : "";
         boolean missing = !OptionCatalogCache.getInstance().hasCatalog(serverId, source, contextKey);
         requestCatalog(source, context);
@@ -7537,8 +8613,12 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     }
 
     private static final class StudioRootNodeWidget extends FlowNodeWidget {
-        StudioRootNodeWidget(int x, int y, FlowNode node, FlowGraph graph, String nodeId, String serverId, Runnable onClose, Runnable onMutation) {
-            super(x, y, node, graph, nodeId, serverId, onClose, onMutation);
+        StudioRootNodeWidget(int x, int y, FlowNode node, FlowGraph graph, String nodeId, String serverId,
+                             Runnable onClose, Runnable onMutation,
+                             ReSyncGenericWidgetCapabilities.WidgetDefinition definition) {
+            super(x, y, node, graph, nodeId, serverId, onClose, onMutation,
+                FlowNodeWidget.boundaryCatalogForServer(serverId), definition != null ? definition.definition() : null,
+                definition == null || definition.readOnly(), definition == null);
         }
 
         @Override

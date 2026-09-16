@@ -90,7 +90,7 @@ public final class DesktopReSyncProvisioningAdapter implements ReSyncProvisionin
 
     private Instance findInstance(String serverId, ServerModels.ClientServerView startupServer) {
         FlowManager manager = FlowManager.getInstance();
-        return manager == null ? null : manager.findInstanceByServerId(serverId, startupServer);
+        return manager == null ? null : (Instance) manager.findInstanceByServerId(serverId, startupServer);
     }
 
     private Async<ReSyncProvisioningService.OperationResult> execute(Operation operation) {

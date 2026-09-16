@@ -1,8 +1,10 @@
 package redxax.oxy.remotely.flow.data;
 
+import com.google.gson.JsonElement;
 import redxax.oxy.remotely.nodegraph.editor.GraphNode;
 
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 public class FlowNode implements GraphNode {
@@ -12,6 +14,7 @@ public class FlowNode implements GraphNode {
     private double x;
     private double y;
     private Map<String, Object> inputValues;
+    private transient Map<String, JsonElement> opaqueProperties;
 
     public FlowNode() {
         this.version = CURRENT_VERSION;
@@ -69,5 +72,20 @@ public class FlowNode implements GraphNode {
     @Override
     public void setInputValue(String key, Object value) {
         inputValues.put(key, value);
+    }
+
+    public Map<String, JsonElement> getOpaqueProperties() {
+        if (opaqueProperties == null) {
+            opaqueProperties = new LinkedHashMap<>();
+        }
+        return opaqueProperties;
+    }
+
+    Map<String, JsonElement> peekOpaqueProperties() {
+        return opaqueProperties;
+    }
+
+    public void setOpaqueProperties(Map<String, JsonElement> opaqueProperties) {
+        this.opaqueProperties = opaqueProperties != null ? new LinkedHashMap<>(opaqueProperties) : new LinkedHashMap<>();
     }
 }

@@ -15,7 +15,8 @@ class OptionCatalogSnapshotContractTest {
     void readsTheSharedRichContextualCatalogFixture() throws Exception {
         OptionCatalogSnapshot snapshot = new Gson().fromJson(Files.readString(Path.of("contracts", "option-catalog-v2.fixture.json")), OptionCatalogSnapshot.class);
 
-        assertEquals(OptionCatalogSnapshot.CURRENT_VERSION, snapshot.getVersion());
+        assertEquals(3, OptionCatalogSnapshot.CURRENT_VERSION);
+        assertEquals(2, snapshot.getVersion());
         assertEquals("server:request:quests", snapshot.getSourceId());
         assertEquals("{\"world\":\"world_nether\"}", snapshot.getContextKey());
         assertEquals("quests-42", snapshot.getRevision());

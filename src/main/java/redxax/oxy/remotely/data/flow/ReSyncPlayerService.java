@@ -1,7 +1,6 @@
 package redxax.oxy.remotely.data.flow;
 
 import redxax.oxy.remotely.util.BrowserSafeState;
-
 import redxax.oxy.remotely.data.flow.player.PlayerDossier;
 import redxax.oxy.remotely.data.flow.player.PlayerTrackingUpdate;
 
@@ -11,6 +10,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import java.util.Map;
 
 public class ReSyncPlayerService {
     private final Map<String, PlayerDossier> playerDossierCache = BrowserSafeState.map();
@@ -66,7 +66,7 @@ public class ReSyncPlayerService {
         if (serverId == null || playerId == null) {
             return null;
         }
-        return playerDossierCache.get(serverId + ":" + playerId.toString());
+        return playerDossierCache.get(serverId + ":" + playerId);
     }
 
     public void applyPlayerTrackingUpdate(String serverId, PlayerTrackingUpdate update) {

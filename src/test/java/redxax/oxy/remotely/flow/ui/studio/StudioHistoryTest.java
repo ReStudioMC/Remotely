@@ -6,6 +6,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class StudioHistoryTest {
@@ -124,5 +125,40 @@ class StudioHistoryTest {
         assertTrue(history.isDirty(Integer::equals));
         history.markSaved();
         assertFalse(history.isDirty(Integer::equals));
+    }
+
+    @Test
+    void preparedRestoreFailureDoesNotAdvanceUndoOrRedoHistory() {
+        AtomicInteger value = new AtomicInteger();
+        StudioScreen.History<Integer> history = new StudioScreen.History<>(value::get, value::set, 20);
+        history.clear();
+        history.capture();
+        value.set(1);
+        Integer undo = history.peekUndo();
+
+        assertThrows(IllegalStateException.class, () -> history.undoPrepared(undo, restored -> {
+            value.set(restored);
+            throw new IllegalStateException("restore failed");
+        }));
+        assertTrue(history.canUndo());
+        assertFalse(history.canRedo());
+        assertEquals(undo, history.peekUndo());
+
+        value.set(1);
+        assertTrue(history.undoPrepared(undo, value::set));
+        assertEquals(0, value.get());
+        Integer redo = history.peekRedo();
+
+        assertThrows(IllegalStateException.class, () -> history.redoPrepared(redo, restored -> {
+            value.set(restored);
+            throw new IllegalStateException("restore failed");
+        }));
+        assertFalse(history.canUndo());
+        assertTrue(history.canRedo());
+        assertEquals(redo, history.peekRedo());
+
+        value.set(0);
+        assertTrue(history.redoPrepared(redo, value::set));
+        assertEquals(1, value.get());
     }
 }

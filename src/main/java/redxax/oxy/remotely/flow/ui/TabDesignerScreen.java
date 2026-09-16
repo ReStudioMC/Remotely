@@ -2,10 +2,11 @@ package redxax.oxy.remotely.flow.ui;
 
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import redxax.oxy.remotely.host.ApplicationHostRegistry;
+import redxax.oxy.remotely.RemotelyClient;
 import redxax.oxy.remotely.data.flow.DesignerSaveNotifications;
 import redxax.oxy.remotely.data.flow.FlowManager;
 import redxax.oxy.remotely.data.flow.ReSyncResourceType;
+import redxax.oxy.remotely.flow.data.FlowSerializer;
 import redxax.oxy.remotely.flow.data.FlowWorkspaceDocument;
 import redxax.oxy.remotely.flow.data.TabDefinition;
 import redxax.oxy.remotely.flow.ui.studio.ReSyncCollaborationDocuments;
@@ -13,10 +14,10 @@ import redxax.oxy.remotely.flow.ui.studio.ReSyncCollaborativeView;
 import redxax.oxy.remotely.flow.ui.studio.ReSyncStudioPanelState;
 import redxax.oxy.remotely.flow.ui.studio.StudioPanel;
 import redxax.oxy.remotely.flow.ui.studio.StudioResourceRenameAware;
+import redxax.oxy.remotely.flow.ui.studio.StudioSaveProvider;
 import redxax.oxy.remotely.flow.ui.studio.StudioScreen;
 import restudio.resync.flow.workspace.WorkspacePatch;
 import restudio.rescreen.platform.IDrawContext;
-import restudio.rescreen.platform.ITextRenderer;
 import restudio.rescreen.platform.input.ReKey;
 import restudio.rescreen.platform.input.ReKeyEvent;
 import restudio.rescreen.platform.input.ReMouseEvent;
@@ -29,6 +30,7 @@ import restudio.rescreen.ui.rescreen.Container;
 import restudio.rescreen.ui.rescreen.SidePanel;
 import restudio.rebase.ui.widgets.editor.CodeEditorWidget;
 import restudio.rescreen.ui.widgets.TextInputWidget;
+import restudio.rescreen.util.Notification;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -36,16 +38,18 @@ import java.util.List;
 import java.util.Objects;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.function.Consumer;
 
 import static restudio.rescreen.config.Config.desktopMode;
 
-public class TabDesignerScreen extends StudioScreen implements DesktopWindowBehaviorProvider, StudioCloseHandledScreen, StudioResourceRenameAware, ReSyncCollaborativeView {
+public class TabDesignerScreen extends StudioScreen implements DesktopWindowBehaviorProvider, StudioCloseHandledScreen, StudioResourceRenameAware, ReSyncCollaborativeView, StudioSaveProvider {
     private static final int PANEL_PADDING = 8;
     private static final int PREVIEW_BG = 0x7F101010;
     private static final int PREVIEW_TEXT = 0xFFFFFFFF;
     private static final Pattern MINI_HEX_PATTERN = Pattern.compile("<#([0-9a-fA-F]{6})>");
 
-    private final TabDefinition tab;
+    private TabDefinition tab;
+    private final VersionedEditorDraft<TabDefinition> tabDraft;
     private final String serverId;
     private final Object parent;
     private final boolean forceSuperScreen;
@@ -54,6 +58,10 @@ public class TabDesignerScreen extends StudioScreen implements DesktopWindowBeha
 
     @Override
     public void resourceRenamed(String type, String oldId, String newId) {
+        if (tabDraft.defer(() -> resourceRenamed(type, oldId, newId))) {
+            return;
+        }
+        tabDraft.markMutation();
         if (oldId.equals(tab.getId())) {
             ReSyncResourceType.TAB.applyRename(tab, newId);
         }
@@ -67,12 +75,15 @@ public class TabDesignerScreen extends StudioScreen implements DesktopWindowBeha
     private String previewHeader = "";
     private String previewEntry = "%player%";
     private String previewFooter = "";
+    private int previewRequestRevision;
     private Runnable studioCloseHandler;
     private boolean closingRequested;
     private boolean closeCompleted;
     private boolean studioCloseNotified;
     private boolean applyingCollaboration;
     private final History<JsonObject> history = history(() -> collaborationDocument().deepCopy(), this::restoreCollaborationDocument);
+    private final HistoryRebaseCoordinator<JsonObject> historyRebase;
+    private volatile long collaborationLifecycle = 1L;
 
     @Override
     public JsonObject collaborationDocument() {
@@ -80,7 +91,85 @@ public class TabDesignerScreen extends StudioScreen implements DesktopWindowBeha
     }
 
     @Override
+    public long collaborationLifecycle() {
+        return collaborationLifecycle;
+    }
+
+    @Override
+    public long collaborationEditVersion() {
+        return tabDraft.editVersion();
+    }
+
+    @Override
+    public boolean requestCollaborationDocument(Consumer<CollaborationDocumentSnapshot> completion) {
+        if (completion == null) {
+            return false;
+        }
+        long lifecycle = collaborationLifecycle;
+        return tabDraft.requestProjection(ReSyncResourceType.TAB.typeId(), ReSyncResourceType.TAB.extractId(tab),
+            this::collaborationSource, projection -> completion.accept(collaborationSnapshot(lifecycle, projection)));
+    }
+
+    private TabDefinition collaborationSource() {
+        TabDefinition source = new TabDefinition();
+        source.setId(tab.getId());
+        source.setEnabled(tab.isEnabled());
+        source.setHeader(tab.getHeader());
+        source.setEntryFormat(tab.getEntryFormat());
+        source.setFooter(tab.getFooter());
+        return source;
+    }
+
+    private CollaborationDocumentSnapshot collaborationSnapshot(long lifecycle,
+                                                                 VersionedEditorDraft.ProjectionSnapshot projection) {
+        RuntimeException failure = projection.failure();
+        JsonObject document = null;
+        if (failure == null) {
+            try {
+                document = gson.fromJson(projection.payload(), JsonObject.class);
+                if (document == null) {
+                    failure = new IllegalStateException("Collaboration Snapshot Is Empty");
+                }
+            } catch (RuntimeException | Error exception) {
+                failure = exception instanceof RuntimeException runtime ? runtime : new IllegalStateException(exception);
+            }
+        }
+        if (failure == null && collaborationLifecycle != lifecycle) {
+            document = null;
+            failure = new IllegalStateException("Collaboration Snapshot Expired");
+        }
+        return new CollaborationDocumentSnapshot(this, lifecycle, projection.editVersion(), document, failure);
+    }
+
+    @Override
+    public boolean applyCollaborationDocument(JsonObject document, List<WorkspacePatch<JsonElement>> patches,
+                                              Consumer<CollaborationDocumentApplyResult> completion) {
+        if (completion == null) {
+            return false;
+        }
+        long lifecycle = collaborationLifecycle;
+        return tabDraft.runMutation(() -> {
+            if (document == null) {
+                throw new IllegalArgumentException("Collaboration Document Is Required");
+            }
+            if (tab == null) {
+                throw new IllegalStateException("Tab Is Unavailable");
+            }
+            if (ReSyncCollaborationDocuments.to(document, TabDefinition.class) == null) {
+                throw new IllegalArgumentException("Collaboration Document Is Invalid");
+            }
+            applyCollaborationDocument(document, patches);
+        }, result ->
+            completion.accept(new CollaborationDocumentApplyResult(this, lifecycle, result.beforeEditVersion(),
+                result.afterEditVersion(), result.successful(), result.failure())));
+    }
+
+    @Override
     public void applyCollaborationDocument(JsonObject document, List<WorkspacePatch<JsonElement>> patches) {
+        if (tabDraft.defer(() -> applyCollaborationDocument(document, patches))) {
+            return;
+        }
+        tabDraft.markMutation();
         applyingCollaboration = true;
         try {
             restoreCollaborationDocument(document);
@@ -94,15 +183,18 @@ public class TabDesignerScreen extends StudioScreen implements DesktopWindowBeha
         if (patches == null || patches.isEmpty()) {
             return;
         }
-        history.rebase(snapshot -> {
-            JsonObject rebased = snapshot.deepCopy();
-            FlowWorkspaceDocument.apply(rebased, patches);
-            return rebased;
+        historyRebase.request(patches, copiedPatches -> snapshot -> {
+            JsonObject rebased = gson.fromJson(gson.toJson(snapshot), JsonObject.class);
+            if (rebased == null) {
+                rebased = new JsonObject();
+            }
+            FlowWorkspaceDocument.apply(rebased, copiedPatches);
+            return gson.fromJson(gson.toJson(rebased), JsonObject.class);
         });
     }
 
     private void restoreCollaborationDocument(JsonObject document) {
-        TabDefinition incoming = ReSyncCollaborationDocuments.toTab(document);
+        TabDefinition incoming = ReSyncCollaborationDocuments.to(document, TabDefinition.class);
         ReSyncCollaborationDocuments.copy(tab, incoming);
         buildInspectorPanel();
         refreshPreviewText();
@@ -110,6 +202,7 @@ public class TabDesignerScreen extends StudioScreen implements DesktopWindowBeha
 
     private void captureHistory() {
         if (!applyingCollaboration) {
+            tabDraft.markMutation();
             history.capture();
         }
     }
@@ -134,6 +227,11 @@ public class TabDesignerScreen extends StudioScreen implements DesktopWindowBeha
         this.animateTopHeader = animateTopHeader;
         this.autoResizeContainers = false;
         ensureDefaults();
+        this.tabDraft = new VersionedEditorDraft<>(this.tab, FlowSerializer::serializeTab, FlowSerializer::deserializeTab,
+            this::rebindTab, this::failSnapshot, () -> new Notification("Editor Busy", "Try Again", Notification.Type.WARN));
+        this.historyRebase = new HistoryRebaseCoordinator<>(history,
+            () -> serverId + ":" + (tab != null ? tab.getId() : ""), () -> collaborationLifecycle,
+            () -> new Notification("Editor Busy", "Try Again", Notification.Type.WARN));
     }
 
     public String getDesktopAppId() {
@@ -222,6 +320,9 @@ public class TabDesignerScreen extends StudioScreen implements DesktopWindowBeha
             return;
         }
         closeCompleted = true;
+        collaborationLifecycle++;
+        historyRebase.close();
+        tabDraft.close();
         if (studioCloseHandler != null) {
             if (!studioCloseNotified) {
                 studioCloseNotified = true;
@@ -231,8 +332,8 @@ public class TabDesignerScreen extends StudioScreen implements DesktopWindowBeha
         }
         super.close();
         if (parent != null) {
-            if (ApplicationHostRegistry.current() != null) {
-                ApplicationHostRegistry.current().openParentScreen(this, parent);
+            if (RemotelyClient.INSTANCE != null && RemotelyClient.INSTANCE.getHost() != null) {
+                RemotelyClient.INSTANCE.getHost().openParentScreen(this, parent);
             } else if (parent instanceof Screen screen) {
                 ScreenManager.getInstance().setScreen(screen);
             }
@@ -240,9 +341,17 @@ public class TabDesignerScreen extends StudioScreen implements DesktopWindowBeha
     }
 
     @Override
+    public void removed() {
+        collaborationLifecycle++;
+        historyRebase.close();
+        tabDraft.close();
+        super.removed();
+    }
+
+    @Override
     public void renderHandler(IDrawContext context, int mouseX, int mouseY, float delta) {
         super.renderHandler(context, mouseX, mouseY, delta);
-        if (inspectorStudioPanel != null && inspectorPanel != null && inspectorPanel.isVisible()) {
+        if (inspectorStudioPanel != null && inspectorPanel != null && (inspectorPanel.isVisible() || inspectorPanel.getAnimatedWidth() > 1f)) {
             renderStudioPanel(inspectorStudioPanel, context, mouseX, mouseY, delta);
         }
     }
@@ -253,7 +362,14 @@ public class TabDesignerScreen extends StudioScreen implements DesktopWindowBeha
     }
 
     @Override
+    public boolean isStudioCloseAnimationFinished() {
+        return closeCompleted;
+    }
+
+    @Override
     public void render(IDrawContext context, int mouseX, int mouseY, float delta) {
+        historyRebase.drain();
+        tabDraft.drain();
         updateTopHeaderAnimation();
         updateLayout();
         updateCloseAnimation();
@@ -306,6 +422,9 @@ public class TabDesignerScreen extends StudioScreen implements DesktopWindowBeha
 
     @Override
     public boolean keyPressed(ReKeyEvent event) {
+        if (handleStudioSaveShortcut(event)) {
+            return true;
+        }
         if (inspectorPanel != null && inspectorPanel.keyPressed(event.retarget(inspectorPanel))) {
             return true;
         }
@@ -330,15 +449,20 @@ public class TabDesignerScreen extends StudioScreen implements DesktopWindowBeha
 
     private void buildHeader() {
         header().reset();
-        header().addRight("close.png", this::close, "Back");
+        if (shouldShowBackButton()) {
+            header().addRight("close.png", this::close, "Back");
+        }
         header().addRight("save.png", this::saveTab, "Save Tab");
         header().build();
+    }
+
+    private boolean shouldShowBackButton() {
+        return !desktopMode || shouldForceSuperScreen();
     }
 
     private void buildInspectorPanel() {
         if (inspectorPanel == null) {
             inspectorStudioPanel = rightStudioPanel("tab_inspector")
-                .collapsible("Tab Inspector")
                 .show();
             inspectorPanel = inspectorStudioPanel.sidePanel();
         }
@@ -360,15 +484,7 @@ public class TabDesignerScreen extends StudioScreen implements DesktopWindowBeha
 
         headerInput = new CodeEditorWidget(0, 0, rowWidth, 100);
         headerInput.setText(tab.getHeader());
-        headerInput.onChange = (t) -> {
-            String value = headerInput.getText();
-            if (Objects.equals(tab.getHeader(), value)) {
-                return;
-            }
-            captureHistory();
-            tab.setHeader(value);
-            refreshPreviewText();
-        };
+        headerInput.onChange = t -> updateHeader(headerInput.getText());
         container.addWidget(panelState.codeRow("Header", headerInput, rowWidth, 118, tabPanelDescription("Header")));
 
         entryFormatInput = new TextInputWidget.Builder()
@@ -383,15 +499,7 @@ public class TabDesignerScreen extends StudioScreen implements DesktopWindowBeha
 
         footerInput = new CodeEditorWidget(0, 0, rowWidth, 100);
         footerInput.setText(tab.getFooter());
-        footerInput.onChange = (t) -> {
-            String value = footerInput.getText();
-            if (Objects.equals(tab.getFooter(), value)) {
-                return;
-            }
-            captureHistory();
-            tab.setFooter(value);
-            refreshPreviewText();
-        };
+        footerInput.onChange = t -> updateFooter(footerInput.getText());
         container.addWidget(panelState.codeRow("Footer", footerInput, rowWidth, 118, tabPanelDescription("Footer")));
     }
 
@@ -489,6 +597,7 @@ public class TabDesignerScreen extends StudioScreen implements DesktopWindowBeha
     }
 
     private void refreshPreviewText() {
+        int requestRevision = ++previewRequestRevision;
         previewHeader = formatPreviewText(tab.getHeader());
         previewEntry = formatPreviewText(tab.getEntryFormat() != null ? tab.getEntryFormat() : "%player%");
         previewFooter = formatPreviewText(tab.getFooter());
@@ -496,13 +605,29 @@ public class TabDesignerScreen extends StudioScreen implements DesktopWindowBeha
         if (flowManager == null || serverId == null) {
             return;
         }
-        flowManager.resolvePlaceholderPreview(serverId, tab.getHeader(), rendered -> previewHeader = formatPreviewText(rendered));
-        flowManager.resolvePlaceholderPreview(serverId, tab.getEntryFormat(), rendered -> previewEntry = formatPreviewText(rendered));
-        flowManager.resolvePlaceholderPreview(serverId, tab.getFooter(), rendered -> previewFooter = formatPreviewText(rendered));
+        flowManager.resolvePlaceholderPreview(serverId, tab.getHeader(), rendered -> {
+            if (requestRevision == previewRequestRevision && rendered != null) {
+                previewHeader = formatPreviewText(rendered);
+            }
+        });
+        flowManager.resolvePlaceholderPreview(serverId, tab.getEntryFormat(), rendered -> {
+            if (requestRevision == previewRequestRevision && rendered != null) {
+                previewEntry = formatPreviewText(rendered);
+            }
+        });
+        flowManager.resolvePlaceholderPreview(serverId, tab.getFooter(), rendered -> {
+            if (requestRevision == previewRequestRevision && rendered != null) {
+                previewFooter = formatPreviewText(rendered);
+            }
+        });
     }
 
     private void updateEntryFormat(String value) {
-        String format = value != null && !value.isEmpty() ? value : "%player%";
+        String source = value != null ? value : "";
+        if (tabDraft.defer(() -> updateEntryFormat(source))) {
+            return;
+        }
+        String format = !source.isEmpty() ? source : "%player%";
         if (!format.contains("%player%")) {
             format = format + " %player%";
         }
@@ -549,8 +674,10 @@ public class TabDesignerScreen extends StudioScreen implements DesktopWindowBeha
 
     private int textWidth(String text) {
         String clean = stripSectionCodes(text);
-        ITextRenderer textRenderer = ScreenManager.getInstance().runtime().textRenderer();
-        return textRenderer == null ? clean.length() * 6 : textRenderer.getWidth(clean);
+        if (RemotelyClient.tr != null) {
+            return RemotelyClient.tr.getWidth(clean);
+        }
+        return clean.length() * 6;
     }
 
     private String stripSectionCodes(String text) {
@@ -642,12 +769,99 @@ public class TabDesignerScreen extends StudioScreen implements DesktopWindowBeha
 
     private void saveTab() {
         FlowManager flowManager = FlowManager.getInstance();
-        DesignerSaveNotifications.start(serverId, ReSyncResourceType.TAB, tab.getId(), tab.getId());
+        DesignerSaveNotifications.SaveTicket ticket = DesignerSaveNotifications.startExact(serverId, ReSyncResourceType.TAB,
+            tab.getId(), tab.getId());
+        observeSave(ticket);
         if (flowManager != null && serverId != null) {
-            flowManager.saveTab(serverId, tab);
+            String id = tab.getId();
+            if (!tabDraft.capture(ReSyncResourceType.TAB.typeId(), id, ticket,
+                snapshot -> flowManager.saveTab(serverId, snapshot.serialize(FlowSerializer::deserializeTab), ticket))) {
+                DesignerSaveNotifications.failExact(ticket, "Save Snapshot Rejected");
+            }
         } else {
-            DesignerSaveNotifications.failResource(serverId, ReSyncResourceType.TAB, tab.getId(), "ReSync Offline");
+            DesignerSaveNotifications.failExact(ticket, "ReSync Offline");
         }
+    }
+
+    private void updateHeader(String value) {
+        String next = value != null ? value : "";
+        if (tabDraft.defer(() -> updateHeader(next))) {
+            return;
+        }
+        if (Objects.equals(tab.getHeader(), next)) {
+            return;
+        }
+        captureHistory();
+        tab.setHeader(next);
+        refreshPreviewText();
+    }
+
+    private void updateFooter(String value) {
+        String next = value != null ? value : "";
+        if (tabDraft.defer(() -> updateFooter(next))) {
+            return;
+        }
+        if (Objects.equals(tab.getFooter(), next)) {
+            return;
+        }
+        captureHistory();
+        tab.setFooter(next);
+        refreshPreviewText();
+    }
+
+    @Override
+    public boolean requestStudioSave() {
+        saveTab();
+        return true;
+    }
+
+    private void rebindTab(TabDefinition previous, TabDefinition replacement) {
+        TabDefinition currentTab = tab;
+        String currentPreviewHeader = previewHeader;
+        String currentPreviewEntry = previewEntry;
+        String currentPreviewFooter = previewFooter;
+        int currentPreviewRequestRevision = previewRequestRevision;
+        try {
+            tab = replacement;
+            buildInspectorPanel();
+            refreshPreviewText();
+        } catch (RuntimeException | Error exception) {
+            tab = currentTab;
+            previewHeader = currentPreviewHeader;
+            previewEntry = currentPreviewEntry;
+            previewFooter = currentPreviewFooter;
+            previewRequestRevision = currentPreviewRequestRevision >= Integer.MAX_VALUE - 2
+                ? 0 : currentPreviewRequestRevision + 2;
+            throw exception;
+        }
+    }
+
+    private void failSnapshot(VersionedEditorDraft.Failure failure) {
+        if (failure.stage() == VersionedEditorDraft.Stage.REBASE) {
+            new Notification("Save Refresh Failed", "Save Paused", Notification.Type.ERROR);
+            return;
+        }
+        if (failure.request() instanceof DesignerSaveNotifications.SaveTicket ticket) {
+            DesignerSaveNotifications.failExact(ticket, "Save Snapshot Failed");
+        }
+    }
+
+    private void observeSave(DesignerSaveNotifications.SaveTicket ticket) {
+        if (ticket == null) {
+            return;
+        }
+        ticket.whenFinished((saved, current) -> ScreenManager.getInstance().execute(() -> {
+            if (!saved || !current) {
+                tabDraft.discard(ticket);
+                return;
+            }
+            FlowManager manager = FlowManager.getInstance();
+            FlowManager.ResourceReadLease lease = manager != null
+                ? manager.snapshotResource(serverId, ReSyncResourceType.TAB.typeId(), ticket.id()) : null;
+            if (lease == null || !tabDraft.acknowledge(ticket, lease::materialize)) {
+                tabDraft.discard(ticket);
+            }
+        }));
     }
 
     private void ensureDefaults() {

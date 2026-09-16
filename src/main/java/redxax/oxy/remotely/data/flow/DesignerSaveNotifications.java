@@ -1,48 +1,59 @@
 package redxax.oxy.remotely.data.flow;
 
-import redxax.oxy.remotely.util.BrowserSafeState;
-import restudio.rescreen.platform.Async;
-import restudio.rescreen.platform.Clock;
-import restudio.rescreen.platform.TaskScheduler;
-
 import java.time.Duration;
-import java.util.Comparator;
+import redxax.oxy.remotely.util.BrowserWork;
 import java.util.Deque;
+import restudio.rescreen.platform.Async;
+import redxax.oxy.remotely.util.BrowserSafeState;
+import redxax.oxy.remotely.flow.ui.GraphEditorScreen;
+import restudio.rescreen.ui.core.ScreenManager;
+import restudio.rescreen.util.Notification;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.Map;
+import java.util.function.BiConsumer;
 import java.util.function.Supplier;
+import java.util.UUID;
 
 public final class DesignerSaveNotifications {
+    private static final Object pendingLock = new Object();
     private static final Map<String, PendingSave> pendingByKey = BrowserSafeState.map();
     private static final Map<String, Deque<String>> pendingKeysByResource = BrowserSafeState.map();
     private static final Map<String, String> pendingKeyByRequest = BrowserSafeState.map();
+    private static final Map<String, String> pendingKeyByMutation = BrowserSafeState.map();
     private static final Map<String, Long> recentlyHandledErrors = BrowserSafeState.map();
-    private static final Map<String, TimedOutSave> recentlyTimedOut = BrowserSafeState.map();
     private static final Set<String> suppressedRequestIds = BrowserSafeState.set();
-    private static final Object automaticNotificationMonitor = new Object();
-    private static int automaticNotificationSuppression;
+    private static final ThreadLocal<Integer> automaticNotificationSuppression = ThreadLocal.withInitial(() -> 0);
     private static final BrowserSafeState.LongValue pendingSequence = new BrowserSafeState.LongValue();
     private static final long ERROR_DEDUPLICATION_MS = 3000L;
-    private static final Duration SAVE_TIMEOUT = Duration.ofSeconds(30L);
-    private static volatile TaskScheduler scheduler = TaskScheduler.unavailable();
-    private static volatile Clock clock = Clock.system();
-    private static volatile ReSyncConnectionNotificationSink notificationSink = ReSyncConnectionNotificationSink.noop();
-    private static volatile DocumentStateSink documentStateSink = DocumentStateSink.noop();
+    private static final long SAVE_TIMEOUT_SECONDS = 30L;
 
     private DesignerSaveNotifications() {
     }
 
-    public static void configure(TaskScheduler taskScheduler, Clock saveClock,
-                                 ReSyncConnectionNotificationSink saveNotificationSink,
-                                 DocumentStateSink saveDocumentStateSink) {
-        scheduler = taskScheduler == null ? TaskScheduler.unavailable() : taskScheduler;
-        clock = saveClock == null ? Clock.system() : saveClock;
-        notificationSink = saveNotificationSink == null ? ReSyncConnectionNotificationSink.noop() : saveNotificationSink;
-        documentStateSink = saveDocumentStateSink == null ? DocumentStateSink.noop() : saveDocumentStateSink;
-    }
-
     public static void start(String serverId, ReSyncResourceType type, String id, String name) {
         begin(serverId, type, id, name);
+    }
+
+    public static SaveTicket startExact(String serverId, ReSyncResourceType type, String id, String name) {
+        PendingSave pending = beginPending(serverId, type, id, name, false, null, null);
+        return pending == null ? null : new SaveTicket(pending);
+    }
+
+    public static SaveTicket startResumableExact(String serverId, ReSyncResourceType type, String id, String name,
+                                                 UUID requestId, UUID mutationId) {
+        PendingSave pending = beginPending(serverId, type, id, name, true, requestId, mutationId, true);
+        return pending == null ? null : new SaveTicket(pending);
+    }
+
+    public static SaveTicket startSilentResumableExact(String serverId, ReSyncResourceType type, String id, String name,
+                                                       UUID requestId, UUID mutationId) {
+        PendingSave pending = beginPending(serverId, type, id, name, true, requestId, mutationId, false);
+        return pending == null ? null : new SaveTicket(pending);
     }
 
     public static Async<Boolean> track(String serverId, ReSyncResourceType type, String id, String name) {
@@ -50,13 +61,13 @@ public final class DesignerSaveNotifications {
     }
 
     public static <T> T withoutAutomaticNotifications(Supplier<T> action) {
-        synchronized (automaticNotificationMonitor) {
-            automaticNotificationSuppression++;
-            try {
-                return action.get();
-            } finally {
-                automaticNotificationSuppression--;
-            }
+        automaticNotificationSuppression.set(automaticNotificationSuppression.get() + 1);
+        try {
+            return action.get();
+        } finally {
+            int depth = automaticNotificationSuppression.get() - 1;
+            if (depth == 0) automaticNotificationSuppression.remove();
+            else automaticNotificationSuppression.set(depth);
         }
     }
 
@@ -65,100 +76,390 @@ public final class DesignerSaveNotifications {
     }
 
     private static Async<Boolean> begin(String serverId, ReSyncResourceType type, String id, String name) {
+        PendingSave pending = beginPending(serverId, type, id, name, false, null, null);
+        return pending == null ? Async.completed(false) : pending.completion;
+    }
+
+    private static PendingSave beginPending(String serverId, ReSyncResourceType type, String id, String name,
+                                            boolean resumable, UUID requestId, UUID mutationId) {
+        return beginPending(serverId, type, id, name, resumable, requestId, mutationId, true);
+    }
+
+    private static PendingSave beginPending(String serverId, ReSyncResourceType type, String id, String name,
+                                            boolean resumable, UUID requestId, UUID mutationId, boolean visible) {
         if (!shouldTrack(serverId, type, id)) {
-            return Async.completed(false);
+            return null;
         }
         String resourceKey = key(serverId, type, id);
         long sequence = pendingSequence.incrementAndGet();
         String pendingKey = pendingKey(resourceKey, sequence);
-        PendingSave pending = new PendingSave(serverId, type, id, resourceKey, sequence);
-        pendingByKey.put(pendingKey, pending);
-        pendingKeysByResource.computeIfAbsent(resourceKey, ignored -> BrowserSafeState.deque()).add(pendingKey);
+        PendingSave pending = new PendingSave(serverId, type, id, resourceKey, sequence, visible);
+        synchronized (pendingLock) {
+            pendingByKey.put(pendingKey, pending);
+            pendingKeysByResource.computeIfAbsent(resourceKey, ignored -> BrowserSafeState.deque()).add(pendingKey);
+            if (requestId != null) {
+                String requestKey = requestId.toString();
+                if (pendingKeyByRequest.putIfAbsent(requestKey, pendingKey) != null) {
+                    pendingByKey.remove(pendingKey);
+                    removePendingKey(pendingKey, resourceKey);
+                    return null;
+                }
+                pending.requestId = requestKey;
+            }
+            if (mutationId != null) {
+                String mutationKey = mutationKey(serverId, type, id, mutationId.toString());
+                if (pendingKeyByMutation.putIfAbsent(mutationKey, pendingKey) != null) {
+                    pendingByKey.remove(pendingKey);
+                    removePendingKey(pendingKey, resourceKey);
+                    if (requestId != null) {
+                        pendingKeyByRequest.remove(requestId.toString(), pendingKey);
+                    }
+                    return null;
+                }
+                pending.mutationId = mutationId.toString();
+            }
+        }
+        pending.resumable = resumable;
         pending.name = cleanName(name, id);
-        documentStateSink.markSaving(serverId, type.typeId(), id, sequence);
+        GraphEditorScreen studioScreen = GraphEditorScreen.getStudioScreen(serverId);
+        if (studioScreen != null) {
+            studioScreen.markStudioDocumentSaving(type.typeId(), id, sequence);
+        }
         long timeoutToken = pending.nextTimeoutToken();
-        schedule(() -> timeout(pendingKey, timeoutToken), SAVE_TIMEOUT);
-        pending.showSaving();
-        return pending.completion;
+        BrowserWork.schedule(Duration.ofSeconds(SAVE_TIMEOUT_SECONDS), () -> timeout(pendingKey, timeoutToken));
+        trace(pending, "notification_started", "pending");
+        ScreenManager.getInstance().execute(pending::showSaving);
+        return pending;
     }
 
     public static void attachRequestId(String serverId, ReSyncResourceType type, String id, String requestId) {
         if (!shouldTrack(serverId, type, id) || requestId == null || requestId.isBlank()) {
             return;
         }
-        boolean suppress;
-        synchronized (automaticNotificationMonitor) {
-            suppress = automaticNotificationSuppression > 0;
+        if (automaticNotificationSuppression.get() > 0 && suppressedRequestIds.add(requestId)) {
+            BrowserWork.schedule(Duration.ofSeconds(SAVE_TIMEOUT_SECONDS), () -> suppressedRequestIds.remove(requestId));
         }
-        if (suppress && suppressedRequestIds.add(requestId)) {
-            schedule(() -> suppressedRequestIds.remove(requestId), SAVE_TIMEOUT);
-        }
-        if (pendingKeyByRequest.containsKey(requestId)) {
-            return;
-        }
-        String resourceKey = key(serverId, type, id);
-        String pendingKey = findUnboundPendingKey(resourceKey);
-        if (pendingKey == null) {
-            pendingKey = resourceKey;
-        } else {
-            PendingSave pending = pendingByKey.get(pendingKey);
-            if (pending != null) {
-                pending.requestId = requestId;
+        synchronized (pendingLock) {
+            if (pendingKeyByRequest.containsKey(requestId)) {
+                return;
             }
+            String resourceKey = key(serverId, type, id);
+            String pendingKey = findUnboundPendingKey(resourceKey);
+            if (pendingKey == null) {
+                return;
+            }
+            PendingSave pending = pendingByKey.get(pendingKey);
+            if (pending == null || pending.finished) {
+                return;
+            }
+            pending.requestId = requestId;
+            pendingKeyByRequest.put(requestId, pendingKey);
         }
-        pendingKeyByRequest.put(requestId, pendingKey);
     }
 
-    public static SaveTarget complete(String serverId, ReSyncResourceType type, String id) {
-        return complete(serverId, type, id, null);
+    public static boolean attachRequestId(SaveTicket ticket, String requestId) {
+        if (ticket == null || requestId == null || requestId.isBlank()) {
+            return false;
+        }
+        boolean suppress = automaticNotificationSuppression.get() > 0;
+        synchronized (pendingLock) {
+            if (pendingKeyByRequest.containsKey(requestId)) {
+                return false;
+            }
+            String exactKey = pendingKey(key(ticket.serverId(), ticket.type(), ticket.id()), ticket.sequence());
+            PendingSave pending = pendingByKey.get(exactKey);
+            if (pending == null || pending.finished || pending.requestId != null && !pending.requestId.isBlank()) {
+                return false;
+            }
+            pending.requestId = requestId;
+            pendingKeyByRequest.put(requestId, exactKey);
+            if (suppress && suppressedRequestIds.add(requestId)) {
+                BrowserWork.schedule(Duration.ofSeconds(SAVE_TIMEOUT_SECONDS), () -> suppressedRequestIds.remove(requestId));
+            }
+            trace(pending, "notification_request_attached", "pending");
+            return true;
+        }
+    }
+
+    public static void attachMutationId(String serverId, ReSyncResourceType type, String id, String mutationId) {
+        if (!shouldTrack(serverId, type, id) || mutationId == null || mutationId.isBlank()) {
+            return;
+        }
+        synchronized (pendingLock) {
+            String mutationKey = mutationKey(serverId, type, id, mutationId);
+            String resourceKey = key(serverId, type, id);
+            String pendingKey = findUnboundPendingKey(resourceKey);
+            if (pendingKey == null) {
+                return;
+            }
+            PendingSave pending = pendingByKey.get(pendingKey);
+            if (pending == null || pending.finished) {
+                return;
+            }
+            if (pending.mutationId != null && !mutationId.equals(pending.mutationId)) {
+                return;
+            }
+            String previous = pendingKeyByMutation.putIfAbsent(mutationKey, pendingKey);
+            if (previous != null && !previous.equals(pendingKey)) {
+                return;
+            }
+            pending.mutationId = mutationId;
+        }
+    }
+
+    public static boolean attachMutationId(SaveTicket ticket, String mutationId) {
+        if (ticket == null || mutationId == null || mutationId.isBlank()) {
+            return false;
+        }
+        synchronized (pendingLock) {
+            String exactKey = pendingKey(key(ticket.serverId(), ticket.type(), ticket.id()), ticket.sequence());
+            PendingSave pending = pendingByKey.get(exactKey);
+            if (pending == null || pending.finished || pending.mutationId != null && !pending.mutationId.isBlank()) {
+                return false;
+            }
+            String mutationKey = mutationKey(ticket.serverId(), ticket.type(), ticket.id(), mutationId);
+            String previous = pendingKeyByMutation.putIfAbsent(mutationKey, exactKey);
+            if (previous != null && !previous.equals(exactKey)) {
+                return false;
+            }
+            pending.mutationId = mutationId;
+            trace(pending, "notification_mutation_attached", "pending");
+            return true;
+        }
+    }
+
+    public static boolean isTrackedRequest(String serverId, ReSyncResourceType type, String id, String requestId) {
+        if (!shouldTrack(serverId, type, id) || requestId == null || requestId.isBlank()) {
+            return false;
+        }
+        synchronized (pendingLock) {
+            String pendingKey = pendingKeyByRequest.get(requestId);
+            PendingSave pending = pendingKey == null ? null : pendingByKey.get(pendingKey);
+            return pending != null && !pending.finished && requestId.equals(pending.requestId)
+                && serverId.equals(pending.serverId) && type == pending.type && id.equals(pending.id);
+        }
+    }
+
+    public static boolean isResumableRequest(String serverId, String requestId) {
+        if (serverId == null || serverId.isBlank() || requestId == null || requestId.isBlank()) {
+            return false;
+        }
+        synchronized (pendingLock) {
+            String pendingKey = pendingKeyByRequest.get(requestId);
+            PendingSave pending = pendingKey == null ? null : pendingByKey.get(pendingKey);
+            return pending != null && !pending.finished && pending.resumable && serverId.equals(pending.serverId)
+                && requestId.equals(pending.requestId);
+        }
+    }
+
+    public static boolean isCurrentSequence(String serverId, ReSyncResourceType type, String id, long sequence) {
+        if (!shouldTrack(serverId, type, id) || sequence < 1L) {
+            return false;
+        }
+        synchronized (pendingLock) {
+            return !hasNewerPending(key(serverId, type, id), sequence);
+        }
     }
 
     public static SaveTarget complete(String serverId, ReSyncResourceType type, String id, String requestId) {
-        String key = key(serverId, type, id);
-        SaveTarget target;
-        if (requestId == null || requestId.isBlank()) {
-            target = finish(key, type.displayName() + " Saved", "ID: " + id, ReSyncNotificationLevel.SUCCESS, null);
-        } else {
-            String pendingKey = pendingKeyByRequest.remove(requestId);
-            if (pendingKey != null && pendingByKey.containsKey(pendingKey)) {
-                target = finish(pendingKey, type.displayName() + " Saved", "ID: " + id, ReSyncNotificationLevel.SUCCESS, null);
-            } else if (hasPending(key)) {
-                return new SaveTarget(type, id, false, 0L);
-            } else {
-                target = null;
+        synchronized (pendingLock) {
+            if (!isTrackedRequest(serverId, type, id, requestId)) {
+                return null;
             }
+            String pendingKey = pendingKeyByRequest.get(requestId);
+            return pendingKey == null ? null
+                : finishExact(pendingKey, type.displayName() + " Saved", "ID: " + id, Notification.Type.SUCCESS, null);
         }
-        if (target != null) {
-            return target;
+    }
+
+    public static SaveTarget complete(String serverId, ReSyncResourceType type, String id, String requestId,
+                                      boolean currentAtFinish) {
+        synchronized (pendingLock) {
+            if (!isTrackedRequest(serverId, type, id, requestId)) {
+                return null;
+            }
+            String pendingKey = pendingKeyByRequest.get(requestId);
+            return pendingKey == null ? null
+                : finishExact(pendingKey, type.displayName() + " Saved", "ID: " + id, Notification.Type.SUCCESS, null,
+                    currentAtFinish);
         }
-        TimedOutSave timedOut = recentlyTimedOut.remove(key);
-        if (timedOut != null && clock.millis() - timedOut.timedOutAt() <= SAVE_TIMEOUT.toMillis()) {
-            return new SaveTarget(type, id, true, timedOut.sequence());
+    }
+
+    public static SaveTarget completeMutation(String serverId, ReSyncResourceType type, String id, String mutationId) {
+        synchronized (pendingLock) {
+            PendingSave pending = pendingForMutation(serverId, type, id, mutationId);
+            String pendingKey = pendingKeyByMutation.get(mutationKey(serverId, type, id, mutationId));
+            if (pending == null || pendingKey == null) {
+                return null;
+            }
+            return finishExact(pendingKey,
+                type.displayName() + " Saved", "ID: " + id, Notification.Type.SUCCESS, null);
         }
-        return null;
     }
 
     public static SaveTarget failResource(String serverId, ReSyncResourceType type, String id, String message) {
-        return finish(key(serverId, type, id), type.displayName() + " Save Failed", cleanMessage(message), ReSyncNotificationLevel.ERROR, cleanMessage(message));
+        synchronized (pendingLock) {
+            String resourceKey = key(serverId, type, id);
+            String pendingKey = firstPendingKey(resourceKey);
+            return finishExact(pendingKey, type.displayName() + " Save Failed", cleanMessage(message),
+                Notification.Type.ERROR, cleanMessage(message));
+        }
+    }
+
+    public static SaveTarget failExact(SaveTicket ticket, String message) {
+        if (ticket == null) {
+            return null;
+        }
+        synchronized (pendingLock) {
+            String resourceKey = key(ticket.serverId(), ticket.type(), ticket.id());
+            String exactKey = pendingKey(resourceKey, ticket.sequence());
+            PendingSave pending = pendingByKey.get(exactKey);
+            if (pending == null || pending.finished || !ticket.serverId().equals(pending.serverId)
+                || ticket.type() != pending.type || !ticket.id().equals(pending.id)
+                || ticket.sequence() != pending.sequence) {
+                return null;
+            }
+            return finishExact(exactKey, ticket.type().displayName() + " Save Failed", cleanMessage(message),
+                Notification.Type.ERROR, cleanMessage(message));
+        }
+    }
+
+    public static boolean detachResumable(SaveTicket ticket) {
+        if (ticket == null) {
+            return false;
+        }
+        synchronized (pendingLock) {
+            String resourceKey = key(ticket.serverId(), ticket.type(), ticket.id());
+            String exactKey = pendingKey(resourceKey, ticket.sequence());
+            PendingSave pending = pendingByKey.get(exactKey);
+            if (pending == null || pending.finished || !pending.resumable || !ticket.serverId().equals(pending.serverId)
+                || ticket.type() != pending.type || !ticket.id().equals(pending.id)
+                || ticket.sequence() != pending.sequence) {
+                return false;
+            }
+            pendingByKey.remove(exactKey, pending);
+            removePendingKey(exactKey, pending.resourceKey);
+            pendingKeyByRequest.values().removeIf(exactKey::equals);
+            pendingKeyByMutation.values().removeIf(exactKey::equals);
+            pending.finished = true;
+            return true;
+        }
+    }
+
+    public static String detachResumableMutation(String serverId, ReSyncResourceType type, String id,
+                                                 String mutationId) {
+        if (!shouldTrack(serverId, type, id) || mutationId == null || mutationId.isBlank()) {
+            return null;
+        }
+        synchronized (pendingLock) {
+            PendingSave pending = pendingForMutation(serverId, type, id, mutationId);
+            String mutationKey = mutationKey(serverId, type, id, mutationId);
+            String exactKey = pendingKeyByMutation.get(mutationKey);
+            if (pending == null || exactKey == null || pending.finished || !pending.resumable
+                || pending.requestId == null || pending.requestId.isBlank()) {
+                return null;
+            }
+            pendingByKey.remove(exactKey, pending);
+            removePendingKey(exactKey, pending.resourceKey);
+            pendingKeyByRequest.values().removeIf(exactKey::equals);
+            pendingKeyByMutation.values().removeIf(exactKey::equals);
+            pending.finished = true;
+            return pending.requestId;
+        }
+    }
+
+    public static boolean isPending(SaveTicket ticket) {
+        if (ticket == null) {
+            return false;
+        }
+        synchronized (pendingLock) {
+            String exactKey = pendingKey(key(ticket.serverId(), ticket.type(), ticket.id()), ticket.sequence());
+            PendingSave pending = pendingByKey.get(exactKey);
+            return pending != null && !pending.finished && ticket.serverId().equals(pending.serverId)
+                && ticket.type() == pending.type && ticket.id().equals(pending.id)
+                && ticket.sequence() == pending.sequence;
+        }
+    }
+
+    public static boolean isResumable(SaveTicket ticket) {
+        if (ticket == null) {
+            return false;
+        }
+        synchronized (pendingLock) {
+            String exactKey = pendingKey(key(ticket.serverId(), ticket.type(), ticket.id()), ticket.sequence());
+            PendingSave pending = pendingByKey.get(exactKey);
+            return pending != null && !pending.finished && pending.resumable;
+        }
     }
 
     public static SaveTarget failRequest(String serverId, String requestId, String message) {
-        if (requestId == null || requestId.isBlank()) {
+        if (serverId == null || serverId.isBlank() || requestId == null || requestId.isBlank()) {
             return null;
         }
-        String key = pendingKeyByRequest.remove(requestId);
-        if (key == null) {
-            key = keyFromRequest(serverId, requestId);
+        synchronized (pendingLock) {
+            String key = pendingKeyByRequest.get(requestId);
+            if (key == null) {
+                return null;
+            }
+            PendingSave pending = pendingByKey.get(key);
+            if (pending == null || pending.finished || !requestId.equals(pending.requestId)
+                || !serverId.equals(pending.serverId)) {
+                return null;
+            }
+            String title = pending.type.displayName() + " Save Failed";
+            return finishExact(key, title, cleanMessage(message), Notification.Type.ERROR, cleanMessage(message));
         }
-        if (key == null) {
-            return null;
+    }
+
+    public static SaveTarget failMutation(String serverId, ReSyncResourceType type, String id, String mutationId,
+                                          String message) {
+        synchronized (pendingLock) {
+            PendingSave pending = pendingForMutation(serverId, type, id, mutationId);
+            if (pending == null) {
+                return null;
+            }
+            String pendingKey = pendingKeyByMutation.get(mutationKey(serverId, type, id, mutationId));
+            if (pendingKey == null) {
+                return null;
+            }
+            return finishExact(pendingKey, type.displayName() + " Save Failed", cleanMessage(message), Notification.Type.ERROR,
+                cleanMessage(message));
         }
-        PendingSave pending = pendingByKey.get(key);
-        if (pending == null) {
-            pending = pendingByKey.get(firstPendingKey(key));
+    }
+
+    public static List<String> pendingRequestIdsForServer(String serverId) {
+        if (serverId == null || serverId.isBlank()) {
+            return List.of();
         }
-        String title = pending != null ? pending.type.displayName() + " Save Failed" : "Save Failed";
-        return finish(key, title, cleanMessage(message), ReSyncNotificationLevel.ERROR, cleanMessage(message));
+        synchronized (pendingLock) {
+            return pendingByKey.values().stream()
+                .filter(pending -> pending != null && !pending.finished && serverId.equals(pending.serverId)
+                    && pending.requestId != null && !pending.requestId.isBlank())
+                .map(pending -> pending.requestId)
+                .distinct()
+                .toList();
+        }
+    }
+
+    public static List<SaveTarget> failTrackedForServer(String serverId, String message) {
+        if (serverId == null || serverId.isBlank()) {
+            return List.of();
+        }
+        List<String> requestIds = pendingKeyByRequest.entrySet().stream()
+            .filter(entry -> {
+                PendingSave pending = pendingByKey.get(entry.getValue());
+                return pending != null && !pending.finished && serverId.equals(pending.serverId);
+            })
+            .map(Map.Entry::getKey)
+            .toList();
+        List<SaveTarget> failed = new ArrayList<>();
+        for (String requestId : requestIds) {
+            SaveTarget target = failRequest(serverId, requestId, message);
+            if (target != null) {
+                failed.add(target);
+            }
+        }
+        return List.copyOf(failed);
     }
 
     public static SaveTarget failAnyForServer(String serverId, String message) {
@@ -178,49 +479,121 @@ public final class DesignerSaveNotifications {
         }
         PendingSave value = pending.getValue();
         String notificationTitle = title != null && !title.isBlank() ? title : value.type.displayName() + " Save Failed";
-        return finish(pending.getKey(), notificationTitle, cleanMessage(message), ReSyncNotificationLevel.ERROR, cleanMessage(message));
+        return finishExact(pending.getKey(), notificationTitle, cleanMessage(message), Notification.Type.ERROR,
+            cleanMessage(message));
+    }
+
+    public static List<SaveTarget> failAllForServer(String serverId, String message) {
+        return failAllForServer(serverId, "", message);
+    }
+
+    public static List<SaveTarget> failAllForServer(String serverId, String title, String message) {
+        return failAllForServer(serverId, title, message, true);
+    }
+
+    public static List<SaveTarget> failNonResumableForServer(String serverId, String message) {
+        return failAllForServer(serverId, "", message, false);
+    }
+
+    private static List<SaveTarget> failAllForServer(String serverId, String title, String message,
+                                                     boolean includeResumable) {
+        if (serverId == null || serverId.isBlank()) {
+            return List.of();
+        }
+        List<SaveTarget> failed = new ArrayList<>();
+        while (true) {
+            List<Map.Entry<String, PendingSave>> pending = pendingByKey.entrySet().stream()
+                .filter(entry -> entry.getValue() != null && serverId.equals(entry.getValue().serverId)
+                    && !entry.getValue().finished && (includeResumable || !entry.getValue().resumable))
+                .sorted(Comparator.comparingLong(entry -> entry.getValue().sequence))
+                .toList();
+            if (pending.isEmpty()) {
+                return List.copyOf(failed);
+            }
+            boolean finished = false;
+            for (Map.Entry<String, PendingSave> entry : pending) {
+                PendingSave value = pendingByKey.get(entry.getKey());
+                if (value == null || value.finished || !serverId.equals(value.serverId)) {
+                    continue;
+                }
+                String notificationTitle = title != null && !title.isBlank()
+                    ? title : value.type.displayName() + " Save Failed";
+                SaveTarget target = finishExact(entry.getKey(), notificationTitle, cleanMessage(message),
+                    Notification.Type.ERROR, cleanMessage(message));
+                if (target != null) {
+                    failed.add(target);
+                    finished = true;
+                }
+            }
+            if (!finished) {
+                return List.copyOf(failed);
+            }
+        }
     }
 
     public static boolean consumeRecentError(String serverId, String message) {
         String key = errorKey(serverId, message);
         Long handledAt = recentlyHandledErrors.remove(key);
-        return handledAt != null && clock.millis() - handledAt <= ERROR_DEDUPLICATION_MS;
+        return handledAt != null && System.currentTimeMillis() - handledAt <= ERROR_DEDUPLICATION_MS;
     }
 
-    private static SaveTarget finish(String key, String title, String description, ReSyncNotificationLevel type, String handledError) {
+    private static SaveTarget finishExact(String key, String title, String description, Notification.Type type,
+                                          String handledError) {
+        return finishExact(key, title, description, type, handledError, null);
+    }
+
+    private static SaveTarget finishExact(String key, String title, String description, Notification.Type type,
+                                          String handledError, Boolean currentAtFinishOverride) {
         if (key == null || key.isBlank()) {
             return null;
         }
-        PendingSave pending = pendingByKey.remove(key);
-        if (pending == null) {
-            String pendingKey = firstPendingKey(key);
-            pending = pendingKey == null ? null : pendingByKey.remove(pendingKey);
-            key = pendingKey;
+        synchronized (pendingLock) {
+            PendingSave pending = pendingByKey.remove(key);
+            if (pending == null) {
+                return null;
+            }
+            boolean shouldUpdateResourceState = currentAtFinishOverride == null
+                ? !hasNewerPending(pending.resourceKey, pending.sequence)
+                : currentAtFinishOverride && !hasNewerPending(pending.resourceKey, pending.sequence);
+            pending.shouldUpdateResourceState = shouldUpdateResourceState;
+            removePendingKey(key, pending.resourceKey);
+            String finishedKey = key;
+            pendingKeyByRequest.values().removeIf(finishedKey::equals);
+            pendingKeyByMutation.values().removeIf(finishedKey::equals);
+            pending.finished = true;
+            pending.finalTitle = title;
+            pending.finalDescription = description;
+            pending.finalType = type;
+            pending.completion.complete(type == Notification.Type.SUCCESS);
+            if (handledError != null && !handledError.isBlank()) {
+                recentlyHandledErrors.put(errorKey(pending.serverId, handledError), System.currentTimeMillis());
+            }
+            trace(pending, "notification_settled", type == Notification.Type.SUCCESS ? "saved" : "failed");
+            ScreenManager.getInstance().execute(pending::showFinished);
+            return new SaveTarget(pending.type, pending.id, shouldUpdateResourceState, pending.sequence);
         }
-        if (pending == null) {
-            return null;
-        }
-        boolean shouldUpdateResourceState = !hasNewerPending(pending.resourceKey, pending.sequence);
-        removePendingKey(key, pending.resourceKey);
-        String finishedKey = key;
-        pendingKeyByRequest.values().removeIf(finishedKey::equals);
-        pending.finished = true;
-        pending.finalTitle = title;
-        pending.finalDescription = description;
-        pending.finalType = type;
-        pending.completion.complete(type == ReSyncNotificationLevel.SUCCESS);
-        if (handledError != null && !handledError.isBlank()) {
-            recentlyHandledErrors.put(errorKey(pending.serverId, handledError), clock.millis());
-        }
-        pending.showFinished();
-        return new SaveTarget(pending.type, pending.id, shouldUpdateResourceState, pending.sequence);
     }
 
     private static void timeout(String key, long timeoutToken) {
         PendingSave pending = pendingByKey.get(key);
+        if (pending != null && !pending.finished && pending.timeoutToken == timeoutToken && pending.resumable) {
+            long nextTimeoutToken;
+            synchronized (pendingLock) {
+                if (pending.finished || pending.timeoutToken != timeoutToken) {
+                    return;
+                }
+                nextTimeoutToken = pending.nextTimeoutToken();
+                if (!pending.timeoutLogged) {
+                    pending.timeoutLogged = true;
+                    trace(pending, "notification_timeout_deferred", "resumable");
+                }
+            }
+            BrowserWork.schedule(Duration.ofSeconds(SAVE_TIMEOUT_SECONDS), () -> timeout(key, nextTimeoutToken));
+            return;
+        }
         if (pending != null && !pending.finished && pending.timeoutToken == timeoutToken) {
-            SaveTarget target = finish(key, pending.type.displayName() + " Save Failed", "Save Timed Out", ReSyncNotificationLevel.ERROR, "Save Timed Out");
-            recentlyTimedOut.put(pending.resourceKey, new TimedOutSave(clock.millis(), target != null ? target.sequence() : 0L));
+            SaveTarget target = finishExact(key, pending.type.displayName() + " Save Failed", "Save Timed Out",
+                Notification.Type.ERROR, "Save Timed Out");
             FlowManager manager = FlowManager.getInstance();
             if (target != null && target.shouldUpdateResourceState() && manager != null) {
                 manager.markResourceSaveFailed(pending.serverId, target.type(), target.id());
@@ -228,37 +601,30 @@ public final class DesignerSaveNotifications {
         }
     }
 
-    private static String keyFromRequest(String serverId, String requestId) {
-        String[] parts = requestId.split(":", 4);
-        if (parts.length < 4 || !parts[0].startsWith("remotely-")) {
-            return null;
-        }
-        ReSyncResourceType type = typeByDisplayName(parts[1]);
-        if (!shouldTrack(serverId, type, parts[2])) {
-            return null;
-        }
-        return key(serverId, type, parts[2]);
-    }
-
-    private static ReSyncResourceType typeByDisplayName(String displayName) {
-        for (ReSyncResourceType type : ReSyncResourceType.values()) {
-            if (type.displayName().equals(displayName)) {
-                return type;
-            }
-        }
-        return null;
-    }
-
     private static boolean shouldTrack(String serverId, ReSyncResourceType type, String id) {
         return serverId != null && !serverId.isBlank()
             && type != null
-            && type != ReSyncResourceType.PROJECT_METADATA
             && id != null
             && !id.isBlank();
     }
 
     private static String key(String serverId, ReSyncResourceType type, String id) {
         return serverId + ":" + type.typeId() + ":" + id;
+    }
+
+    private static String mutationKey(String serverId, ReSyncResourceType type, String id, String mutationId) {
+        return key(serverId, type, id) + "\n" + mutationId;
+    }
+
+    private static PendingSave pendingForMutation(String serverId, ReSyncResourceType type, String id,
+                                                  String mutationId) {
+        if (!shouldTrack(serverId, type, id) || mutationId == null || mutationId.isBlank()) {
+            return null;
+        }
+        String pendingKey = pendingKeyByMutation.get(mutationKey(serverId, type, id, mutationId));
+        PendingSave pending = pendingKey == null ? null : pendingByKey.get(pendingKey);
+        return pending != null && !pending.finished && mutationId.equals(pending.mutationId)
+            && serverId.equals(pending.serverId) && type == pending.type && id.equals(pending.id) ? pending : null;
     }
 
     private static String pendingKey(String resourceKey, long sequence) {
@@ -270,13 +636,20 @@ public final class DesignerSaveNotifications {
         if (keys == null) {
             return null;
         }
+        String candidate = null;
+        long candidateSequence = Long.MAX_VALUE;
         for (String key : keys) {
             PendingSave pending = pendingByKey.get(key);
-            if (pending != null && !pending.finished && (pending.requestId == null || pending.requestId.isBlank())) {
-                return key;
+            if (pending != null && !pending.finished
+                && (pending.requestId == null || pending.requestId.isBlank())
+                && (pending.mutationId == null || pending.mutationId.isBlank())) {
+                if (pending.sequence < candidateSequence) {
+                    candidate = key;
+                    candidateSequence = pending.sequence;
+                }
             }
         }
-        return null;
+        return candidate;
     }
 
     private static String firstPendingKey(String resourceKey) {
@@ -323,20 +696,6 @@ public final class DesignerSaveNotifications {
         return false;
     }
 
-    private static boolean hasPending(String resourceKey) {
-        Deque<String> keys = pendingKeysByResource.get(resourceKey);
-        if (keys == null) {
-            return false;
-        }
-        for (String key : keys) {
-            PendingSave pending = pendingByKey.get(key);
-            if (pending != null && !pending.finished) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     private static String errorKey(String serverId, String message) {
         return (serverId == null ? "" : serverId) + "\n" + cleanMessage(message);
     }
@@ -351,17 +710,67 @@ public final class DesignerSaveNotifications {
         return value.isBlank() ? "Failed" : value;
     }
 
+    private static void trace(PendingSave pending, String stage, String outcome) {
+        if (pending == null) {
+            return;
+        }
+        ReSyncFlowClient.traceLifecycle(pending.serverId, stage,
+            "serverId", pending.serverId,
+            "type", pending.type.typeId(),
+            "id", bounded(pending.id),
+            "requestId", bounded(pending.requestId),
+            "mutationId", bounded(pending.mutationId),
+            "sequence", pending.sequence,
+            "outcome", outcome,
+            "elapsedMs", BrowserSafeState.nanosToMillis(Math.max(0L, System.nanoTime() - pending.startedAtNanos)));
+    }
+
+    private static String bounded(String value) {
+        if (value == null || value.isBlank()) {
+            return "none";
+        }
+        return value.length() <= 128 ? value : value.substring(0, 128);
+    }
+
     public record SaveTarget(ReSyncResourceType type, String id, boolean shouldUpdateResourceState, long sequence) {
     }
 
-    private static void schedule(Runnable action, Duration delay) {
-        try {
-            scheduler.schedule(action, delay);
-        } catch (RuntimeException ignored) {
-        }
-    }
+    public static final class SaveTicket {
+        private final PendingSave pending;
 
-    private record TimedOutSave(long timedOutAt, long sequence) {
+        private SaveTicket(PendingSave pending) {
+            this.pending = pending;
+        }
+
+        public String serverId() {
+            return pending.serverId;
+        }
+
+        public ReSyncResourceType type() {
+            return pending.type;
+        }
+
+        public String id() {
+            return pending.id;
+        }
+
+        public long sequence() {
+            return pending.sequence;
+        }
+
+        public String requestId() {
+            return pending.requestId;
+        }
+
+        public String mutationId() {
+            return pending.mutationId;
+        }
+
+        public void whenFinished(BiConsumer<Boolean, Boolean> handler) {
+            if (handler != null) {
+                pending.completion.thenAccept(saved -> handler.accept(saved, pending.shouldUpdateResourceState));
+            }
+        }
     }
 
     private static final class PendingSave {
@@ -370,52 +779,79 @@ public final class DesignerSaveNotifications {
         private final String id;
         private final String resourceKey;
         private final long sequence;
+        private final boolean visible;
+        private final long startedAtNanos = System.nanoTime();
         private final Async<Boolean> completion = Async.pending();
-        private final ReSyncConnectionNotificationSink notificationSink = DesignerSaveNotifications.notificationSink;
-        private long updatedAt = clock.millis();
+        private long updatedAt = System.currentTimeMillis();
         private long timeoutToken;
         private String requestId;
+        private String mutationId;
         private String name;
+        private Notification notification;
         private boolean finished;
+        private boolean resumable;
+        private boolean timeoutLogged;
         private String finalTitle;
         private String finalDescription;
-        private ReSyncNotificationLevel finalType;
+        private Notification.Type finalType;
+        private boolean shouldUpdateResourceState;
 
-        private PendingSave(String serverId, ReSyncResourceType type, String id, String resourceKey, long sequence) {
+        private PendingSave(String serverId, ReSyncResourceType type, String id, String resourceKey, long sequence,
+                            boolean visible) {
             this.serverId = serverId;
             this.type = type;
             this.id = id;
             this.resourceKey = resourceKey;
             this.sequence = sequence;
+            this.visible = visible;
             this.name = id;
         }
 
         private long nextTimeoutToken() {
-            updatedAt = clock.millis();
+            updatedAt = System.currentTimeMillis();
             return ++timeoutToken;
         }
 
         private void showSaving() {
+            if (!visible) {
+                return;
+            }
             if (finished) {
                 showFinished();
                 return;
             }
             String description = name == null || name.isBlank() ? id : name;
-            notificationSink.show("Saving " + type.displayName(), description, ReSyncNotificationLevel.INFO);
+            if (notification == null) {
+                notification = new Notification.Builder()
+                    .message("Saving " + type.displayName())
+                    .description(description)
+                    .type(Notification.Type.INFO)
+                    .loading(true)
+                    .autoSlideOut(false)
+                    .build();
+                return;
+            }
+            notification.update()
+                .message("Saving " + type.displayName())
+                .description(description)
+                .type(Notification.Type.INFO)
+                .loading(true)
+                .autoSlideOut(false);
         }
 
         private void showFinished() {
-            notificationSink.show(finalTitle, finalDescription, finalType);
-        }
-    }
-
-    @FunctionalInterface
-    public interface DocumentStateSink {
-        void markSaving(String serverId, String resourceType, String resourceId, long sequence);
-
-        static DocumentStateSink noop() {
-            return (serverId, resourceType, resourceId, sequence) -> {
-            };
+            if (!visible) {
+                return;
+            }
+            if (notification == null) {
+                notification = new Notification.Builder()
+                    .message(finalTitle)
+                    .description(finalDescription)
+                    .type(finalType)
+                    .build();
+                return;
+            }
+            notification.change(finalTitle, finalDescription, finalType, null);
         }
     }
 }

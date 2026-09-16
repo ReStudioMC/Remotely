@@ -22,12 +22,17 @@ class FlowNodeWidgetTypeRefTest {
         graph.getFunctionInputs().add(input);
         graph.getFunctionOutputs().add(output);
 
-        FlowNode start = new FlowNode("function.start", 0, 0, Map.of());
-        FlowNode end = new FlowNode("function.end", 0, 0, Map.of());
+        FlowNode start = new FlowNode("catalog.function.entry", 0, 0, Map.of());
+        FlowNode end = new FlowNode("catalog.function.exit", 0, 0, Map.of());
+        FlowNodeWidget.FunctionBoundaryCatalog catalog = FlowNodeWidget.FunctionBoundaryCatalog.of(
+            new FlowNodeWidget.FunctionBoundaryIntent(FlowNodeWidget.FunctionBoundaryRole.INPUTS, "catalog.function.entry", "next"),
+            new FlowNodeWidget.FunctionBoundaryIntent(FlowNodeWidget.FunctionBoundaryRole.OUTPUTS, "catalog.function.exit", "previous")
+        );
 
-        assertEquals(FlowTypeRef.parse("list<permission>"), FlowNodeWidget.resolveFunctionParameterType(start, graph, "permissions", false));
-        assertEquals(FlowTypeRef.parse("map<string,resource_reference<gui>>"), FlowNodeWidget.resolveFunctionParameterType(end, graph, "lookup", true));
-        assertNull(FlowNodeWidget.resolveFunctionParameterType(start, graph, "permissions", true));
-        assertNull(FlowNodeWidget.resolveFunctionParameterType(end, graph, "flow", true));
+        assertEquals(FlowTypeRef.parse("list<permission>"), FlowNodeWidget.resolveFunctionParameterType(start, graph, "permissions", false, catalog));
+        assertEquals(FlowTypeRef.parse("map<string,resource_reference<gui>>"), FlowNodeWidget.resolveFunctionParameterType(end, graph, "lookup", true, catalog));
+        assertNull(FlowNodeWidget.resolveFunctionParameterType(start, graph, "permissions", true, catalog));
+        assertNull(FlowNodeWidget.resolveFunctionParameterType(end, graph, "flow", true, catalog));
+        assertNull(FlowNodeWidget.resolveFunctionParameterType(start, graph, "permissions", false));
     }
 }
