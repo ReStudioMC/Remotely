@@ -1,8 +1,10 @@
 import org.gradle.api.tasks.Sync
 import org.teavm.gradle.api.SourceFilePolicy
 
+import java.io.File
 import java.security.MessageDigest
 import java.util.ArrayDeque
+import java.util.function.BiFunction
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 
@@ -114,7 +116,7 @@ dependencies {
 dependencies {
     implementation(files(
         "../../ReScreen/build/libs/ReScreen-1.0-browser.jar",
-        "../../RebaseBuild/build/libs/Rebase-1.0-SNAPSHOT-browser.jar",
+        "../../Rebase/build/libs/Rebase-1.0-SNAPSHOT-browser.jar",
         "../../ReSync/ReSyncCore/build/libs/ReSyncCore-1.3.0-browser.jar"
     ))
 }
@@ -128,6 +130,15 @@ java {
 application {
     mainClass.set("redxax.oxy.remotely.web.RemotelyBrowserMain")
 }
+
+extra["iconAtlasIconsDirectory"] = file("../../ReScreen/src/main/resources/assets/restudio/textures/icons")
+extra["iconAtlasOutputDirectory"] = layout.buildDirectory.dir("generated/icon-atlas").get().asFile
+extra["iconAtlasCatalogSource"] = file("../../ReScreen/src/main/java/restudio/rescreen/util/IconCatalog.java")
+extra["iconAtlasSourceRoots"] = listOf(
+    file("src/main/java"),
+    file("../../ReScreen/src/main/java")
+)
+apply(from = file("../../ReScreen/gradle/icon-atlas.gradle.kts"))
 
 val canonicalBrowserClasses = linkedSetOf(
     "redxax.oxy.remotely.ui.server.ServerManagerScreen",
@@ -351,7 +362,8 @@ teavm {
 
 tasks.register<Sync>("browserDist") {
     val distribution = layout.buildDirectory.dir("generated/teavm/remotely")
-    dependsOn(tasks.named("generateJavaScript"), verifyBrowserGraph)
+    val atlasDirectory = layout.buildDirectory.dir("generated/icon-atlas")
+    dependsOn(tasks.named("generateJavaScript"), verifyBrowserGraph, tasks.named("verifyIconAtlas"))
     from(layout.projectDirectory.dir("src/main/resources"))
     from(layout.buildDirectory.dir("generated/teavm/js")) {
         into("js")
@@ -374,6 +386,9 @@ tasks.register<Sync>("browserDist") {
     from(layout.projectDirectory.dir("../../Rebase/src/main/resources/assets")) {
         into("assets")
     }
+    from(atlasDirectory) {
+        into("assets/restudio/textures/icons")
+    }
     into(distribution)
     doLast {
         val root = distribution.get().asFile
@@ -386,8 +401,18 @@ tasks.register<Sync>("browserDist") {
         val markerPattern = Regex("""(<meta\s+name="remotely-build-id"\s+content=")[^"]*(">)""")
         val indexHtml = index.readText()
         require(markerPattern.containsMatchIn(indexHtml)) { "Remotely Web build marker meta tag is missing: $index" }
+        val manifests = atlasDirectory.get().asFile.listFiles { candidate -> candidate.isFile && candidate.name.matches(Regex("atlas-[0-9a-f]{64}\\.json")) }.orEmpty()
+        require(manifests.size == 1) { "Remotely Web Distribution Requires Exactly One Content-Versioned Icon Atlas" }
+        require(indexHtml.contains("__RESCREEN_ICON_ATLAS_MANIFEST__")) { "Remotely Web Index Icon Atlas Placeholder Is Missing" }
+        val identity = manifests.single().name.removePrefix("atlas-").removeSuffix(".json")
+        @Suppress("UNCHECKED_CAST")
+        val versionRescreenWebFonts = extra["versionRescreenWebFonts"] as BiFunction<String, File, String>
 
         root.resolve("remotely-web-build-id.txt").writeText("$buildId\n")
-        index.writeText(markerPattern.replace(indexHtml) { match -> "${match.groupValues[1]}$buildId${match.groupValues[2]}" })
+        index.writeText(versionRescreenWebFonts.apply(
+                markerPattern.replace(indexHtml) { match -> "${match.groupValues[1]}$buildId${match.groupValues[2]}" }
+                        .replace("__RESCREEN_ICON_ATLAS_MANIFEST__", manifests.single().name)
+                        .replace("__RESCREEN_ICON_ATLAS_IMAGE__", "atlas-$identity.png"),
+                root))
     }
 }

@@ -31,160 +31,31 @@
             canonical.pathname += "/";
             window.location.replace(canonical.toString());
         }
-
-        window.__remotelyUpdate = (() => {
-            const buildMeta = document.querySelector('meta[name="remotely-build-id"]');
-            const localBuildId = buildMeta && buildMeta.content ? buildMeta.content.trim().toLowerCase() : "";
-            const markerUrl = new URL("remotely-web-build-id.txt", document.baseURI);
-            const reloadKey = "remotely.update.reload";
-            const buildPattern = /^[0-9a-f]{64}$/;
-            let timer = 0;
-            let nonce = 0;
-            let inFlight = null;
-            let runtimeStarted = false;
-            let pendingBuildId = "";
-
-            const guardedReload = () => {
-                try {
-                    const value = JSON.parse(window.sessionStorage.getItem(reloadKey) || "null");
-                    const buildId = value && typeof value.buildId === "string" ? value.buildId.toLowerCase() : "";
-                    const attempts = value && Number.isInteger(value.attempts) ? value.attempts : 0;
-                    return buildPattern.test(buildId) ? {buildId, attempts: Math.max(0, Math.min(2, attempts))} : {buildId: "", attempts: 0};
-                } catch (error) {
-                    return {buildId: "", attempts: 0};
-                }
-            };
-            const guard = (buildId, attempts) => {
-                try {
-                    window.sessionStorage.setItem(reloadKey, JSON.stringify({buildId, attempts}));
-                } catch (error) {
-                }
-            };
-            const clearGuard = () => {
-                try {
-                    window.sessionStorage.removeItem(reloadKey);
-                } catch (error) {
-                }
-            };
-            const clearUpdateQuery = () => {
-                try {
-                    const target = new URL(window.location.href);
-                    if (!target.searchParams.has("_remotelyBuild") && !target.searchParams.has("_remotelyAttempt")) return;
-                    target.searchParams.delete("_remotelyBuild");
-                    target.searchParams.delete("_remotelyAttempt");
-                    window.history.replaceState(window.history.state, "", target.toString());
-                } catch (error) {
-                }
-            };
-            const failUpdate = () => {
-                if (typeof window.__remotelySetStatus === "function") window.__remotelySetStatus("Remotely Web Update Could Not Load");
-            };
-            const canApplyRuntimeUpdate = () => {
-                if (!runtimeStarted) return true;
-                if (typeof window.__remotelyCanApplyUpdate !== "function") return false;
-                try {
-                    return window.__remotelyCanApplyUpdate() === true;
-                } catch (error) {
-                    return false;
-                }
-            };
-            const readMarker = () => {
-                const target = new URL(markerUrl);
-                target.searchParams.set("_remotelyNonce", String(Date.now()) + "-" + String(++nonce));
-                const controller = typeof AbortController === "function" ? new AbortController() : null;
-                const timeout = window.setTimeout(() => {
-                    if (controller) controller.abort();
-                }, 5000);
-                const options = {cache: "no-store", credentials: "same-origin"};
-                if (controller) options.signal = controller.signal;
-                return fetch(target.toString(), options).then(response => {
-                    if (!response.ok) return "";
-                    return response.text();
-                }).then(value => {
-                    const remoteBuildId = String(value || "").trim().toLowerCase();
-                    return buildPattern.test(remoteBuildId) ? remoteBuildId : "";
-                }).catch(() => "").finally(() => window.clearTimeout(timeout));
-            };
-            const replace = expectedBuildId => {
-                const target = new URL(window.location.href);
-                const requestedValue = String(target.searchParams.get("_remotelyBuild") || "").toLowerCase();
-                const requestedBuildId = buildPattern.test(requestedValue) ? requestedValue : "";
-                const requestedAttemptValue = Number.parseInt(target.searchParams.get("_remotelyAttempt") || "0", 10);
-                const requestedAttempts = Number.isInteger(requestedAttemptValue) ? Math.max(0, Math.min(2, requestedAttemptValue)) : 0;
-                const guarded = guardedReload();
-                const guardedAttempts = requestedBuildId === expectedBuildId && guarded.buildId === expectedBuildId ? guarded.attempts : 0;
-                const urlAttempts = requestedBuildId === expectedBuildId ? requestedAttempts : 0;
-                const attempts = Math.max(guardedAttempts, urlAttempts);
-                if (attempts >= 2) {
-                    failUpdate();
-                    return false;
-                }
-                const nextAttempt = attempts + 1;
-                guard(expectedBuildId, nextAttempt);
-                target.searchParams.set("_remotelyBuild", expectedBuildId);
-                target.searchParams.set("_remotelyAttempt", String(nextAttempt));
-                window.location.replace(target.toString());
-                return false;
-            };
-            const activate = remoteBuildId => {
-                const target = new URL(window.location.href);
-                const requestedValue = String(target.searchParams.get("_remotelyBuild") || "").toLowerCase();
-                const requestedBuildId = buildPattern.test(requestedValue) ? requestedValue : "";
-                const expectedBuildId = remoteBuildId || requestedBuildId;
-                if (!expectedBuildId) return true;
-                if (expectedBuildId === localBuildId) {
-                    pendingBuildId = "";
-                    clearGuard();
-                    clearUpdateQuery();
-                    return true;
-                }
-                if (!canApplyRuntimeUpdate()) {
-                    pendingBuildId = expectedBuildId;
-                    return true;
-                }
-                pendingBuildId = "";
-                return replace(expectedBuildId);
-            };
-            const check = () => {
-                if (inFlight) return inFlight;
-                inFlight = readMarker().then(activate).finally(() => {
-                    inFlight = null;
-                });
-                return inFlight;
-            };
-            const schedule = () => {
-                if (timer) window.clearTimeout(timer);
-                timer = window.setTimeout(() => check().then(keepRunning => {
-                    if (keepRunning) schedule();
-                }), 30000);
-            };
-            const checkAndSchedule = () => check().then(keepRunning => {
-                if (keepRunning) schedule();
-                return keepRunning;
-            });
-
-            window.addEventListener("pageshow", checkAndSchedule);
-            window.addEventListener("pagehide", () => {
-                if (timer) window.clearTimeout(timer);
-                timer = 0;
-            });
-            window.addEventListener("visibilitychange", () => {
-                checkAndSchedule();
-            });
-            window.addEventListener("online", checkAndSchedule);
-
-            return {
-                preflight: checkAndSchedule,
-                started: () => {
-                    runtimeStarted = true;
-                },
-                localBuildId
-            };
-        })();
     </script>
     <title>Remotely</title>
     <link rel="icon" type="image/png" href="assets/remotely/Reemotely.png">
     <link rel="stylesheet" href="assets/restudio/web/rescreen-boot.css">
+    <link rel="preload" as="image" href="assets/restudio/textures/icons/__RESCREEN_ICON_ATLAS_IMAGE__">
+    <link rel="preload" as="font" type="font/ttf" href="assets/restudio/fonts/web/MinecraftDefault-Regular.ttf" crossorigin>
+    <script>window.__RESCREEN_FONT_CACHE__ = "__RESCREEN_FONT_CACHE__";</script>
+    <script src="assets/restudio/web/rescreen-web.js"></script>
+    <script>
+        window.__remotelyUpdate = ReScreenWeb.createUpdateMonitor({
+            appTitle: "Remotely",
+            buildMeta: 'meta[name="remotely-build-id"]',
+            markerUrl: "remotely-web-build-id.txt",
+            storageKey: "remotely.update.reload",
+            buildQuery: "_remotelyBuild",
+            attemptQuery: "_remotelyAttempt",
+            nonceQuery: "_remotelyNonce",
+            failMessage: "Remotely Web Update Could Not Load",
+            fail: message => {
+                if (typeof window.__remotelySetStatus === "function") {
+                    window.__remotelySetStatus(message);
+                }
+            }
+        });
+    </script>
     <style>
         @font-face {
             font-family: "Monocraft";
@@ -246,7 +117,12 @@
         remotelyBundle.onerror = () => window.__remotelySetStatus("Remotely Web Bundle Did Not Load");
         document.body.appendChild(remotelyBundle);
     };
-    window.__remotelyUpdate.preflight().then(shouldStart => {
+    Promise.all([
+        window.__remotelyUpdate.preflight(),
+        ReScreenWeb.installIconAtlas({manifestName: "__RESCREEN_ICON_ATLAS_MANIFEST__"}).catch(error => {
+            console.warn("ReScreen icon atlas unavailable", error);
+        })
+    ]).then(([shouldStart]) => {
         if (shouldStart) startRemotely();
     }, () => window.__remotelySetStatus("Remotely Web Update Could Not Load"));
 </script>

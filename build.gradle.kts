@@ -265,7 +265,7 @@ dependencies {
     add(browser.implementationConfigurationName, "com.google.code.gson:gson:2.10.1")
     add(browser.implementationConfigurationName, files(
         "../ReScreen/build/libs/ReScreen-1.0-browser.jar",
-        "../RebaseBuild/build/libs/Rebase-1.0-SNAPSHOT-browser.jar",
+        "../Rebase/build/libs/Rebase-1.0-SNAPSHOT-browser.jar",
         "../ReSync/ReSyncCore/build/libs/ReSyncCore-1.3.0-browser.jar"
     ))
 }

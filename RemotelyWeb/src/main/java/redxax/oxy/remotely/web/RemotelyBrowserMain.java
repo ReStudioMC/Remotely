@@ -24,7 +24,6 @@ public final class RemotelyBrowserMain {
                 }
                 try {
                     runtime = RemotelyBrowserComposition.start("remotely-canvas", metadata);
-                    installUpdateSafetySignal();
                     startupInFlight = false;
                     if (!loopStarted) {
                         loopStarted = true;
@@ -54,17 +53,8 @@ public final class RemotelyBrowserMain {
         setStatus(message == null ? "Remotely web launch failed" : message);
     }
 
-    private static boolean canApplyUpdate() {
-        RemotelyBrowserComposition.Runtime active = runtime;
-        return active != null && active.host() != null && active.root() != null
-            && active.host().getCurrentScreen() == active.root();
-    }
-
     @JSBody(params = {"message"}, script = "const value = String(message || 'Remotely Web Could Not Start').slice(0, 240); if (typeof window.__remotelySetStatus === 'function') { window.__remotelySetStatus(value); } else { document.title = 'Remotely'; }")
     private static native void setStatus(String message);
-
-    @JSBody(script = "window.__remotelyCanApplyUpdate = function() { return !!javaMethods.get('redxax.oxy.remotely.web.RemotelyBrowserMain.canApplyUpdate()Z').invoke(); };")
-    private static native void installUpdateSafetySignal();
 
     @JSBody(script = """
             function loop(timestamp) {
