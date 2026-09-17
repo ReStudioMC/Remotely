@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/subtle"
 	"errors"
 	"io"
@@ -23,6 +24,8 @@ const (
 	maxQueuedFrames  = 16
 	maxBufferedBytes = 256 * 1024
 	maxDiagnostics   = 32
+	outputBatchBytes = 16 * 1024
+	outputBatchDelay = 8 * time.Millisecond
 )
 
 var (
@@ -71,8 +74,15 @@ type socketAddress string
 type deadlineError struct{}
 
 type terminalWriter struct {
-	mu   sync.Mutex
-	tail []byte
+	mu     sync.Mutex
+	tail   []byte
+	events chan terminalOutputEvent
+	closed bool
+}
+
+type terminalOutputEvent struct {
+	text  string
+	close chan struct{}
 }
 
 type dimensions struct {
@@ -210,7 +220,7 @@ func (current *operation) run(request openRequest) {
 		stdin.Close()
 		return
 	}
-	writer := &terminalWriter{}
+	writer := newTerminalWriter()
 	session.Stdout = writer
 	session.Stderr = writer
 	modes := ssh.TerminalModes{
@@ -233,6 +243,7 @@ func (current *operation) run(request openRequest) {
 	go current.pumpResize(session)
 	emit("ready", "", "")
 	err = session.Wait()
+	writer.Close()
 	explicit := current.close(false)
 	if !explicit {
 		if err == nil || errors.Is(err, io.EOF) {
@@ -657,6 +668,9 @@ func (connection *webSocketConn) writeDeadlineValue() time.Time {
 func (writer *terminalWriter) Write(bytes []byte) (int, error) {
 	writer.mu.Lock()
 	defer writer.mu.Unlock()
+	if writer.closed {
+		return 0, io.ErrClosedPipe
+	}
 	data := append(writer.tail, bytes...)
 	writer.tail = nil
 	var output strings.Builder
@@ -670,9 +684,57 @@ func (writer *terminalWriter) Write(bytes []byte) (int, error) {
 		data = data[size:]
 	}
 	if output.Len() > 0 {
-		emitOutput(output.String())
+		writer.events <- terminalOutputEvent{text: output.String()}
 	}
 	return len(bytes), nil
+}
+
+func newTerminalWriter() *terminalWriter {
+	writer := &terminalWriter{events: make(chan terminalOutputEvent, maxQueuedFrames)}
+	go writer.emitBatches()
+	return writer
+}
+
+func (writer *terminalWriter) Close() {
+	writer.mu.Lock()
+	if writer.closed {
+		writer.mu.Unlock()
+		return
+	}
+	writer.closed = true
+	completed := make(chan struct{})
+	writer.events <- terminalOutputEvent{close: completed}
+	writer.mu.Unlock()
+	<-completed
+}
+
+func (writer *terminalWriter) emitBatches() {
+	ticker := time.NewTicker(outputBatchDelay)
+	defer ticker.Stop()
+	var output bytes.Buffer
+	flush := func() {
+		if output.Len() == 0 {
+			return
+		}
+		emitOutput(output.String())
+		output.Reset()
+	}
+	for {
+		select {
+		case event := <-writer.events:
+			if event.close != nil {
+				flush()
+				close(event.close)
+				return
+			}
+			output.WriteString(event.text)
+			if output.Len() >= outputBatchBytes {
+				flush()
+			}
+		case <-ticker.C:
+			flush()
+		}
+	}
 }
 
 func emitOutput(message string) {
