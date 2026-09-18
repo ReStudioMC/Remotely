@@ -2406,7 +2406,6 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
             TerminalSession info = context == null ? null : contextInfos.get(context);
             if (context instanceof ServerTabStatusContext statusContext
                     && (newState == ServerScreenHost.ServerState.STOPPED
-                    || newState == ServerScreenHost.ServerState.STOPPING
                     || newState == ServerScreenHost.ServerState.CRASHED)) {
                 clearStatusMetrics(context, statusContext);
             }
@@ -2469,7 +2468,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
                         ctx.metrics = metrics;
                         statusCtx.update(metrics);
                         updateActivityMetrics(ctx, metrics);
-                    } else {
+                    } else if (isInactiveMetricsState(ctx.instance)) {
                         clearStatusMetrics(ctx, statusCtx);
                     }
                     if (isLocalInstance(ctx.instance)) {
@@ -2494,7 +2493,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
 
     private boolean isInactiveMetricsState(Object target) {
         return switch (stateOf(target)) {
-            case STOPPED, STOPPING, CRASHED -> true;
+            case STOPPED, CRASHED -> true;
             default -> false;
         };
     }

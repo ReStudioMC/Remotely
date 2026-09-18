@@ -313,7 +313,7 @@ public class ServerTerminal extends TerminalWidget implements ServerTerminalLife
         boolean stopping = "stopping".equals(state);
         boolean stopped = !crashed && !stopping && ("stopped".equals(state) || "offline".equals(state)
                 || desiredPower == DesiredPower.STOPPED || forceStoppedView || explicitDisconnect);
-        if (stopped && (!hasContent || forceStoppedView || explicitDisconnect)) {
+        if (stopped && (!hasContent || forceStoppedView)) {
             renderCentered(stoppedMessage, context, mouseX, mouseY);
             return;
         }
@@ -357,8 +357,8 @@ public class ServerTerminal extends TerminalWidget implements ServerTerminalLife
         desiredPower = DesiredPower.STOPPED;
         lastStopRequested = System.currentTimeMillis();
         lastStartRequested = 0;
-        explicitDisconnect = true;
-        forceStoppedView = true;
+        explicitDisconnect = false;
+        forceStoppedView = false;
         reconnecting = false;
         broadcastNotice("Stop Requested...");
         broadcastNotice("Waiting For Shutdown...");
@@ -424,7 +424,7 @@ public class ServerTerminal extends TerminalWidget implements ServerTerminalLife
             }
             if (!isTerminalReady() && !reconnecting && System.currentTimeMillis() - lastConnectAttempt >= CONNECT_ATTEMPT_COOLDOWN_MS) {
                 lastConnectAttempt = System.currentTimeMillis();
-                if ("running".equals(state)) {
+                if ("running".equals(state) || "starting".equals(state)) {
                     if (shouldStartServerProcess()) startServerProcess();
                     else start();
                 }
@@ -433,8 +433,6 @@ public class ServerTerminal extends TerminalWidget implements ServerTerminalLife
         }
         if ("stopping".equals(state)) {
             desiredPower = DesiredPower.STOPPED;
-            explicitDisconnect = true;
-            forceStoppedView = true;
             reconnecting = false;
             setObservedState(ServerScreenHost.ServerState.STOPPING);
             return;
@@ -519,8 +517,6 @@ public class ServerTerminal extends TerminalWidget implements ServerTerminalLife
         }
         if ("stopping".equals(normalized)) {
             desiredPower = DesiredPower.STOPPED;
-            explicitDisconnect = true;
-            forceStoppedView = true;
             reconnecting = false;
             return;
         }

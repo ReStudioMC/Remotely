@@ -127,6 +127,7 @@ import java.util.function.Supplier;
 
 public final class BrowserServerScreenHost implements ServerScreenHost {
     private static final int MAX_CACHED_SERVER_STATES = 128;
+    private static final long POWER_TRANSITION_GRACE_MS = 25_000;
 
     private final BrowserApplicationHost application;
     private final RemotelyServerApi serverApi;
@@ -147,6 +148,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     private final Map<String, HostContext> developerBindingRequests = new LinkedHashMap<>();
     private final Map<String, List<Consumer<DeveloperCapabilityProvider.Workspace.Binding>>> developerBindingWaiters = new LinkedHashMap<>();
     private final Map<String, ServerState> serverStates = new LinkedHashMap<>();
+    private final Map<String, Long> powerTransitions = new LinkedHashMap<>();
     private final Map<String, List<Consumer<ServerState>>> stateListeners = new LinkedHashMap<>();
     private final Set<String> stateRequests = new HashSet<>();
     private final Map<String, ServerModels.ReProxySummary> reProxyStates = new LinkedHashMap<>();
@@ -1103,7 +1105,15 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         String capability = "kill".equalsIgnoreCase(signal) ? "server.kill" : "server.lifecycle";
         return capabilityOperation(server, capability, () -> serverApi.setServerPower(serverId(server), signal)
                 .thenApply(ignored -> {
-                    if (isCurrent(context)) updateServerState(server, requestedState(signal));
+                    if (isCurrent(context)) {
+                        String id = serverId(server);
+                        ServerState targetState = requestedState(signal);
+                        if (!id.isBlank()) {
+                            if (targetState == ServerState.STOPPED) powerTransitions.remove(id);
+                            else powerTransitions.put(id, System.currentTimeMillis());
+                        }
+                        updateServerState(server, targetState);
+                    }
                     return null;
                 }));
     }
@@ -1123,7 +1133,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         }
         return observeSessionFailure(serverApi.getServerStatus(serverId(server)).thenApply(status -> {
             if (status != null && isCurrent(context)) {
-                updateServerState(server, status.installing ? ServerState.INSTALLING : ServerState.parse(status.currentState));
+                applyPolledServerState(server, status.installing ? ServerState.INSTALLING : ServerState.parse(status.currentState));
             }
             return status;
         }), context);
@@ -2552,7 +2562,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
                 ServerModels.ServerStatus status = snapshot.statuses().get(serverId(server));
                 if (status == null) continue;
                 ServerState state = status.installing ? ServerState.INSTALLING : ServerState.parse(status.currentState);
-                if (state != ServerState.UNKNOWN) updateServerState(server, state);
+                if (state != ServerState.UNKNOWN) applyPolledServerState(server, state);
             }
             notifyBrowserListeners(instanceChangeListeners);
         });
@@ -2599,6 +2609,29 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
                 if (isCurrentGeneration(generation)) listener.accept(state);
             });
         }
+    }
+
+    private void applyPolledServerState(ServerModels.ClientServerView server, ServerState polledState) {
+        if (server == null || polledState == null || polledState == ServerState.UNKNOWN) return;
+        String id = serverId(server);
+        if (!id.isBlank()) {
+            Long transitionTime = powerTransitions.get(id);
+            if (transitionTime != null) {
+                if (System.currentTimeMillis() - transitionTime < POWER_TRANSITION_GRACE_MS) {
+                    ServerState currentState = serverStates.get(id);
+                    if (currentState == ServerState.STOPPING && (polledState == ServerState.RUNNING || polledState == ServerState.STARTING)) {
+                        return;
+                    }
+                    if (currentState == ServerState.STARTING && polledState == ServerState.STOPPED) {
+                        return;
+                    }
+                    powerTransitions.remove(id);
+                } else {
+                    powerTransitions.remove(id);
+                }
+            }
+        }
+        updateServerState(server, polledState);
     }
 
     private void requestInitialState(ServerModels.ClientServerView server) {
@@ -2652,6 +2685,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
             String removable = serverStates.keySet().stream().filter(id -> !stateListeners.containsKey(id)).findFirst().orElse(null);
             if (removable == null) return;
             serverStates.remove(removable);
+            powerTransitions.remove(removable);
         }
     }
 
