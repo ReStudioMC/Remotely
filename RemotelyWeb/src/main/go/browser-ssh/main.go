@@ -19,13 +19,15 @@ import (
 )
 
 const (
-	carrierProtocol  = "restudio.ssh.v1"
-	maxFrameBytes    = 32 * 1024
-	maxQueuedFrames  = 16
-	maxBufferedBytes = 256 * 1024
-	maxDiagnostics   = 32
-	outputBatchBytes = 16 * 1024
-	outputBatchDelay = 8 * time.Millisecond
+	carrierProtocol   = "restudio.ssh.v1"
+	maxFrameBytes     = 32 * 1024
+	maxQueuedFrames   = 256
+	maxBufferedBytes  = 256 * 1024
+	maxDiagnostics    = 32
+	outputBatchBytes  = 16 * 1024
+	outputBatchDelay  = 8 * time.Millisecond
+	keepaliveInterval = 15 * time.Second
+	keepaliveTimeout  = 10 * time.Second
 )
 
 var (
@@ -241,12 +243,14 @@ func (current *operation) run(request openRequest) {
 	}
 	go current.pumpInput(stdin)
 	go current.pumpResize(session)
+	go current.pumpKeepalive(client)
 	emit("ready", "", "")
 	err = session.Wait()
 	writer.Close()
 	explicit := current.close(false)
 	if !explicit {
-		if err == nil || errors.Is(err, io.EOF) {
+		var exitErr *ssh.ExitError
+		if err == nil || errors.Is(err, io.EOF) || errors.As(err, &exitErr) {
 			emit("closed", "connection_closed", "Browser SSH Connection Closed")
 		} else {
 			emit("error", "connection_lost", "Browser SSH Connection Was Lost")
@@ -341,6 +345,37 @@ func (current *operation) pumpResize(session *ssh.Session) {
 			}
 		case <-current.closed:
 			return
+		}
+	}
+}
+
+func (current *operation) pumpKeepalive(client *ssh.Client) {
+	ticker := time.NewTicker(keepaliveInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-current.closed:
+			return
+		case <-ticker.C:
+			done := make(chan error, 1)
+			go func() {
+				_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
+				done <- err
+			}()
+			select {
+			case <-current.closed:
+				return
+			case err := <-done:
+				if err != nil && !current.isClosed() {
+					current.fail("connection_lost", "Browser SSH Connection Was Lost")
+					return
+				}
+			case <-time.After(keepaliveTimeout):
+				if !current.isClosed() {
+					current.fail("connection_lost", "Browser SSH Connection Was Lost")
+				}
+				return
+			}
 		}
 	}
 }
