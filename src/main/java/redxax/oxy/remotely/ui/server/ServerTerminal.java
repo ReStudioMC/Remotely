@@ -300,12 +300,12 @@ public class ServerTerminal extends TerminalWidget implements ServerTerminalLife
             renderCentered(operationMessage, context, mouseX, mouseY);
             return;
         }
-        if (reconnecting) {
+        boolean hasContent = getHistoryLinesCount() > 0 || getCursorY() > 4;
+        if (reconnecting && !hasContent) {
             renderCentered(reconnectingMessage, context, mouseX, mouseY);
             return;
         }
-        boolean hasContent = getHistoryLinesCount() > 0 || getCursorY() > 4;
-        if (!isTerminalReady() && !explicitDisconnect && !forceStoppedView && !hasContent && shouldStartServerProcess()) {
+        if (!isTerminalReady() && !explicitDisconnect && !forceStoppedView && !hasContent) {
             renderCentered(connectingMessage, context, mouseX, mouseY);
             return;
         }
@@ -344,10 +344,16 @@ public class ServerTerminal extends TerminalWidget implements ServerTerminalLife
         lastStopRequested = 0;
         explicitDisconnect = false;
         forceStoppedView = false;
+        reconnecting = false;
+        reconnectDelaySeconds = 1;
         state = "starting";
         clearLog();
-        host.recordTerminalNotice(api, server, "Start Requested...");
+        broadcastNotice("Start Requested...");
         platform.startRequested(this);
+        stopProcess();
+        lastConnectAttempt = System.currentTimeMillis();
+        if (shouldStartServerProcess()) startServerProcess();
+        else start();
     }
 
     @Override
@@ -443,6 +449,11 @@ public class ServerTerminal extends TerminalWidget implements ServerTerminalLife
             if (withinStartGrace) {
                 state = "starting";
                 setObservedState(ServerScreenHost.ServerState.STARTING);
+                if (!isTerminalReady() && !reconnecting && System.currentTimeMillis() - lastConnectAttempt >= CONNECT_ATTEMPT_COOLDOWN_MS) {
+                    lastConnectAttempt = System.currentTimeMillis();
+                    if (shouldStartServerProcess()) startServerProcess();
+                    else start();
+                }
                 return;
             }
             desiredPower = host.terminalRestartsOnCrash(api, server) && "crashed".equals(state)
@@ -477,6 +488,9 @@ public class ServerTerminal extends TerminalWidget implements ServerTerminalLife
         if (reconnecting || desiredPower == DesiredPower.STOPPED) return;
         reconnecting = true;
         reconnectReason = reason;
+        if ("starting".equals(state)) {
+            reconnectDelaySeconds = 1;
+        }
         reconnectCountdown = Math.max(1, reconnectDelaySeconds);
         reconnectDelaySeconds = Math.min(MAX_RECONNECT_DELAY_SECONDS, reconnectDelaySeconds * 2);
         lastTick = System.currentTimeMillis();
@@ -484,7 +498,7 @@ public class ServerTerminal extends TerminalWidget implements ServerTerminalLife
     }
 
     private boolean operationActive() {
-        return desiredPower == DesiredPower.RUNNING && ("starting".equals(state) || "installing".equals(state)) && !isTerminalReady();
+        return desiredPower == DesiredPower.RUNNING && "installing".equals(state) && !isTerminalReady();
     }
 
     private boolean shouldShowOperationOverlay() {
@@ -513,6 +527,11 @@ public class ServerTerminal extends TerminalWidget implements ServerTerminalLife
             explicitDisconnect = false;
             forceStoppedView = false;
             if ("running".equals(normalized)) lastStartRequested = 0;
+            if (!isTerminalReady() && !reconnecting && System.currentTimeMillis() - lastConnectAttempt >= CONNECT_ATTEMPT_COOLDOWN_MS) {
+                lastConnectAttempt = System.currentTimeMillis();
+                if (shouldStartServerProcess()) startServerProcess();
+                else start();
+            }
             return;
         }
         if ("stopping".equals(normalized)) {
