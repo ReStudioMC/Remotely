@@ -1,13 +1,11 @@
 package redxax.oxy.remotely.ui.widgets;
 
-import restudio.rebase.resource.provider.OnlineResourceVersion;
 import restudio.rebase.ui.screens.resources.ResourceContainerItem;
 import restudio.rebase.ui.screens.resources.ResourceContainerProvider;
+import restudio.rebase.ui.screens.resources.ResourceUpdatePopup;
 import restudio.rebase.ui.widgets.resources.ResourceWidget;
 import restudio.rescreen.ui.core.ScreenManager;
 import restudio.rescreen.ui.rescreen.ReScreen;
-import restudio.rescreen.ui.widgets.PopupWidget;
-import restudio.rescreen.ui.widgets.SquareButtonWidget;
 import restudio.rescreen.ui.widgets.ToggleWidget;
 import restudio.rescreen.util.Notification;
 import restudio.rescreen.util.Sound;
@@ -19,7 +17,6 @@ public class InstanceResourceWidget extends ResourceWidget<ResourceContainerItem
     private final ResourceContainerProvider provider;
     private final Runnable refreshCallback;
     private final ReScreen parentScreen;
-    private boolean updateBackup = true;
     private volatile boolean iconLoading = false;
 
     public InstanceResourceWidget(ReScreen parentScreen, ResourceContainerProvider provider, ResourceContainerItem resource, Runnable refreshCallback) {
@@ -49,7 +46,7 @@ public class InstanceResourceWidget extends ResourceWidget<ResourceContainerItem
 
     private void showUpdateDialog() {
         if (resource.getProjectId() == null || resource.getProviderName() == null) {
-            new Notification("Cannot Check Update", "Resource has no project ID", Notification.Type.WARN);
+            new Notification("Cannot Check Update", "Resource Has No Project ID", Notification.Type.WARN);
             return;
         }
         provider.checkUpdate(resource).whenComplete((update, failure) -> ScreenManager.getInstance().execute(() -> {
@@ -64,45 +61,8 @@ public class InstanceResourceWidget extends ResourceWidget<ResourceContainerItem
             }
             resource.availableUpdate = update;
             refresh();
-            showUpdatePopup(update);
+            ResourceUpdatePopup.showOne(parentScreen, provider, resource, update, null, refreshCallback);
         }));
-    }
-
-    private void showUpdatePopup(OnlineResourceVersion newVersion) {
-        PopupWidget.Builder builder = new PopupWidget.Builder("Update " + resource.getName()).size(400, 300).setResizable(true);
-        builder.addMarkdown("Version Info", String.format("Current: %s\nNew: %s", resource.getVersion(), newVersion.versionNumber));
-        builder.addMarkdown("Changelog", newVersion.changelog != null ? newVersion.changelog : "No changelog provided.");
-        ToggleWidget backupToggle = new ToggleWidget.Builder().toggled(updateBackup).onChange(() -> updateBackup = !updateBackup).build();
-        var backupCapability = provider.capability(ResourceContainerProvider.CAPABILITY_BACKUP);
-        backupToggle.setActive(backupCapability.available());
-        backupToggle.setHint(backupCapability.available() ? "Backup Resource" : backupCapability.detail());
-        SquareButtonWidget updateBtn = new SquareButtonWidget.Builder().imagePath("download.png").onClick(() -> {
-            Notification progressNotification = new Notification.Builder()
-                    .message("Updating " + resource.getName())
-                    .description("Starting Download")
-                    .type(Notification.Type.INFO)
-                    .loading(true)
-                    .autoSlideOut(false)
-                    .progress(0, 100)
-                    .build();
-            builder.getWidget().setVisible(false);
-            provider.update(resource, newVersion, (current, total) -> {
-                if (total > 0) {
-                    int percentage = (int) (current * 100 / total);
-                    ScreenManager.getInstance().execute(() -> progressNotification.updateProgress(String.format("%d/%d KB", current / 1024, total / 1024), percentage, 100));
-                }
-            }, refreshCallback, updateBackup).thenRun(() -> ScreenManager.getInstance().execute(() -> {
-                progressNotification.update().message("Update Complete").description(resource.getName() + " Updated").type(Notification.Type.SUCCESS).loading(false).autoSlideOut(true).progress(100, 100).commit();
-            })).exceptionally(e -> {
-                ScreenManager.getInstance().execute(() -> progressNotification.update().message("Update Failed").description(e.getCause() != null ? e.getCause().getMessage() : e.getMessage()).type(Notification.Type.ERROR).loading(false).autoSlideOut(true).commit());
-                return null;
-            });
-        }).build();
-        builder.addRow(new PopupWidget.PopupRow.Builder("Backup?", backupToggle).contentWidth().build());
-        builder.addTitleAction("Update", () -> updateBtn.onClick(0, 0, 0), PopupWidget.TitleActionRole.PRIMARY);
-        PopupWidget popup = builder.build();
-        ScreenManager.getInstance().getCurrentScreen().addDrawableChild(popup);
-        popup.show();
     }
 
     private void open(int button) {
@@ -115,6 +75,9 @@ public class InstanceResourceWidget extends ResourceWidget<ResourceContainerItem
     @Override
     protected void refreshFromResource() {
         super.refreshFromResource();
+        if (getRenderingMode() == RenderingMode.UPDATE) {
+            return;
+        }
         var toggleCapability = provider.capability(ResourceContainerProvider.CAPABILITY_TOGGLE);
         toggleButton.setActive(toggleCapability.available());
         toggleButton.setHint(toggleCapability.available() ? "Toggle Resource" : toggleCapability.detail());
@@ -169,7 +132,7 @@ public class InstanceResourceWidget extends ResourceWidget<ResourceContainerItem
 
         @Override
         public void toggle(ResourceContainerItem resource, ToggleWidget toggle, RenderingMode renderingMode) {
-            if (renderingMode == RenderingMode.COMPACT_UPDATE || resource.isModpack()) {
+            if (renderingMode == RenderingMode.UPDATE || resource.isModpack()) {
                 return;
             }
             boolean originalState = resource.isEnabled();
