@@ -718,7 +718,7 @@ public class ReSyncMarketplaceScreen extends ReScreen {
             };
         }
         return switch (type) {
-            case ReSyncResourceDragPayload.FUNCTION -> "snippets.png";
+            case ReSyncResourceDragPayload.FUNCTION -> "json.png";
             case ReSyncResourceDragPayload.COMMAND -> "terminal.png";
             case ReSyncResourceDragPayload.GUI -> "fullPanel.png";
             case ReSyncResourceDragPayload.SCOREBOARD -> "panel.png";

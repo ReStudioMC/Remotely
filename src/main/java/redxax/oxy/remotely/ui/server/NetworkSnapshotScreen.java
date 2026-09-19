@@ -103,7 +103,7 @@ public class NetworkSnapshotScreen extends ReScreen {
         for (NetworkSnapshotMetadata snapshot : snapshots) {
             String label = TIME.format(Instant.ofEpochMilli(snapshot.createdAt())) + " • " + titleCase(snapshot.family().substring(snapshot.family().indexOf('/') + 1));
             String hint = snapshot.originNodeId() + " • Fence " + snapshot.fenceEpoch() + " • " + formatBytes(snapshot.payloadBytes()) + " • " + (snapshot.pinned() ? "Pinned" : "Retained");
-            container.addWidget(new IconButton.Builder().size(Math.max(220, width - 44), 30).label(label).hint(hint).imagePath(snapshot.pinned() ? "pin.png" : "history.png").accentType(ThemeManager.getAccent(snapshot.pinned() ? "nice" : "calm")).onClick(() -> inspect(snapshot)).build());
+            container.addWidget(new IconButton.Builder().size(Math.max(220, width - 44), 30).label(label).hint(hint).imagePath(snapshot.pinned() ? "favorite.png" : "history.png").accentType(ThemeManager.getAccent(snapshot.pinned() ? "love" : "calm")).onClick(() -> inspect(snapshot)).build());
         }
         if (hasMore) {
             container.addWidget(new IconButton.Builder().size(Math.max(220, width - 44), 24).label("Load More").hint("Older Snapshot History").imagePath("add.png").accentType(ThemeManager.getAccent("calm")).onClick(() -> loadPage(playerId, snapshots.size(), snapshots)).build());
