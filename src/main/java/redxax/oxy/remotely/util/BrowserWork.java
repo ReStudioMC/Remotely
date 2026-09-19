@@ -8,7 +8,6 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicInteger;
 
 public final class BrowserWork {
     private BrowserWork() {
@@ -63,8 +62,8 @@ public final class BrowserWork {
     public static final class Executor {
         private final boolean serial;
         private final String namePrefix;
-        private final AtomicInteger counter = new AtomicInteger();
         private final Deque<Runnable> pending = new ArrayDeque<>();
+        private int counter;
         private boolean running;
         private boolean shutdown;
         private int active;
@@ -80,13 +79,18 @@ public final class BrowserWork {
             }
             return () -> {
                 String original = TaskIdentities.access.name();
-                TaskIdentities.access.setName(namePrefix + counter.incrementAndGet());
+                TaskIdentities.access.setName(namePrefix + nextCounter());
                 try {
                     task.run();
                 } finally {
                     TaskIdentities.access.setName(original);
                 }
             };
+        }
+
+        private synchronized int nextCounter() {
+            counter++;
+            return counter;
         }
 
         public void execute(Runnable task) {
