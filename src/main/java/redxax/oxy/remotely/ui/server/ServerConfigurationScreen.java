@@ -1,9 +1,5 @@
 package redxax.oxy.remotely.ui.server;
 
-import redxax.oxy.remotely.util.TaskSchedulers;
-
-import redxax.oxy.remotely.util.AsyncTools;
-
 import redxax.oxy.remotely.util.BrowserSafeState;
 
 import restudio.rescreen.logging.LogSource;
@@ -28,7 +24,6 @@ import restudio.rescreen.ui.screens.DesktopWindowsOverlay;
 import restudio.rescreen.ui.settings.Setting;
 import restudio.rescreen.ui.settings.SettingsScreen;
 import restudio.rescreen.ui.widgets.ScreenWindowWidget;
-import restudio.rescreen.ui.widgets.LoadingAnimationWidget;
 import restudio.rescreen.util.Identifier;
 import restudio.rescreen.util.Notification;
 import restudio.rescreen.util.Sound;
@@ -44,8 +39,6 @@ import static restudio.rescreen.util.SoundUtils.playSound;
 
 @SuppressWarnings("unchecked")
 public class ServerConfigurationScreen extends ReScreen {
-    private record InitialConfigLoad(List<String> extraFiles, ServerSettingsDataController settingsController) {}
-
     private ServerScreenHost screenHost() {
         return remotelyClient == null ? ServerScreenHost.of(null) : remotelyClient.getHost().serverScreenHost(remotelyClient);
     }
@@ -65,8 +58,10 @@ public class ServerConfigurationScreen extends ReScreen {
     private final Consumer<Object> creationInitializer;
     private final Consumer<Object> creationCallback;
 
-    private final Map<String, String> remoteVariables = new HashMap<>();
-    private final Map<String, String> originalRemoteVariables = new HashMap<>();
+    private final Map<String, String> remoteVariables = Collections.synchronizedMap(new LinkedHashMap<>());
+    private final Map<String, String> originalRemoteVariables = Collections.synchronizedMap(new LinkedHashMap<>());
+    private final List<String> extraFiles = new ArrayList<>();
+    private final Set<String> pendingPublishedTabs = new LinkedHashSet<>();
     private String remoteStartupRevision = "";
     private final boolean isReStudioBackend;
     private String serverIdentifier;
@@ -76,6 +71,7 @@ public class ServerConfigurationScreen extends ReScreen {
     private ServerScreenHost.ConfigurationUi configurationUi;
     private Consumer<ServerSettingsSnapshot> settingsRegistryListener;
     private final BrowserSafeState.LongValue settingsReloadRevision = new BrowserSafeState.LongValue();
+    private final BrowserSafeState.LongValue configurationLoadRevision = new BrowserSafeState.LongValue();
     private ServerSettingsDataController pendingSettingsController;
     private Runnable settingsCleanup = () -> {};
     private boolean settingsHandoff;
@@ -169,29 +165,13 @@ public class ServerConfigurationScreen extends ReScreen {
             DiscordRpcBridge.setServerCreationActive();
         }
 
-        LoadingAnimationWidget loadingWidget = new LoadingAnimationWidget(0, 0, width, height);
-        addDrawableChild(loadingWidget);
-
-        screenHost().configurationLoad("Server Configuration", loadInitialConfig(),
-                () -> new InitialConfigLoad(List.of(), ServerSettingsDataController.unavailable()))
-        .thenAccept(load -> ScreenManager.getInstance().execute(() -> {
-            if (screenClosed) {
-                return;
-            }
-            if (!isEditMode && creationInitializer != null) {
-                creationInitializer.accept(tempInstance.raw());
-            }
-            setupSettingsUI(load.extraFiles(), load.settingsController());
-        })).exceptionally(e -> {
-            ScreenManager.getInstance().execute(() -> {
-                if (screenClosed) {
-                    return;
-                }
-                new Notification("Error", "Could not load server configuration: " + configurationFailureMessage(e), Notification.Type.ERROR);
-                close();
-            });
-            return null;
-        });
+        if (!isEditMode && creationInitializer != null) {
+            creationInitializer.accept(tempInstance.raw());
+        }
+        ServerSettingsDataController controller = screenHost().createServerSettingsController(tempInstance.raw(),
+                ServerSettingsRegistry.getInstance().snapshot(tempInstance.raw()));
+        setupSettingsUI(extraFiles, controller);
+        startInitialConfigLoad();
     }
 
     private static String configurationFailureMessage(Throwable failure) {
@@ -207,63 +187,87 @@ public class ServerConfigurationScreen extends ReScreen {
         return message == null ? "Configuration Is Unavailable" : message;
     }
 
-    private Async<InitialConfigLoad> loadInitialConfig() {
-        return AsyncTools.run(TaskSchedulers.current(), () -> {
-        }).thenCompose(v -> {
-            Async<Void> propertiesFuture;
-            Async<Void> settingsFuture;
-            Async<List<String>> filesFuture;
-            Async<Void> remoteConfigFuture;
-            Async<Void> modpackFuture;
+    private void startInitialConfigLoad() {
+        long revision = configurationLoadRevision.incrementAndGet();
+        ServerScreenHost host = screenHost();
+        boolean remote = tempInstance.remote();
+        if (isReStudioCreation) {
+            remoteVariables.put("SOFTWARE", "PAPER");
+            remoteVariables.put("VERSION", "latest");
+            remoteVariables.put("BUILD", "latest");
+        }
 
-            boolean isRemote = tempInstance.remote();
-            ServerScreenHost host = screenHost();
+        observeConfigurationLoad(revision, "Server Properties",
+                host.configurationLoad("Server Properties", host.loadInstanceProperties(tempInstance.raw(), isEditMode && remote), () -> null),
+                fixedSettingsSuppliers.keySet());
+        if (!isEditMode) return;
 
-            if (isEditMode) {
-                propertiesFuture = host.configurationLoad("Server Properties", host.loadInstanceProperties(tempInstance.raw(), isRemote), () -> null);
-                settingsFuture = host.configurationLoad("Server Settings", host.reloadInstanceSettings(tempInstance.raw(), isRemote), () -> null);
-                modpackFuture = host.configurationLoad("Modpack Settings", host.loadInstanceModpack(tempInstance.raw()), () -> null);
-                filesFuture = host.configurationLoad("Server Files", host.listInstanceFiles(tempInstance.raw()), () -> List.of());
+        observeConfigurationLoad(revision, "Server Settings",
+                host.configurationLoad("Server Settings", host.reloadInstanceSettings(tempInstance.raw(), remote), () -> null),
+                fixedSettingsSuppliers.keySet());
+        observeConfigurationLoad(revision, "Modpack Settings",
+                host.configurationLoad("Modpack Settings", host.loadInstanceModpack(tempInstance.raw()), () -> null),
+                Set.of("Server Software", "General"));
+        host.configurationLoad("Server Files", host.listInstanceFiles(tempInstance.raw()), List::of)
+                .whenComplete((files, failure) -> ScreenManager.getInstance().execute(() -> {
+                    if (!acceptConfigurationLoad(revision, "Server Files", failure)) return;
+                    extraFiles.clear();
+                    if (files != null) extraFiles.addAll(files);
+                    refreshConfigurationCategories(Set.of("Extra Files"));
+                }));
 
-                if (isReStudioBackend) {
-                    RemotelyServerApi api = serverApi();
-                    remoteConfigFuture = host.configurationLoad("Startup Configuration", api == null ? Async.completed(null) : api.getServerStartupConfig(serverIdentifier).thenAccept(data -> {
-                        if (data == null || data.revision().isBlank()) throw new IllegalStateException("Startup Settings Revision Is Unavailable");
-                        remoteStartupRevision = data.revision();
-                        remoteVariables.putAll(data.values());
-                        originalRemoteVariables.putAll(data.values());
-                    }).exceptionally(e -> {
-                        ReLog.logger(LogTypes.CONFIGURATION).source(LogSource.application("Remotely")).component(ServerConfigurationScreen.class).operation("Load Startup Configuration").error("Could not load startup configuration", e);
-                        return null;
-                    }), () -> null);
-                } else {
-                    remoteConfigFuture = Async.completed(null);
-                }
+        if (isReStudioBackend) {
+            RemotelyServerApi api = serverApi();
+            Async<Void> startup = api == null ? Async.completed(null) : api.getServerStartupConfig(serverIdentifier).thenAccept(data -> {
+                if (data == null || data.revision().isBlank()) throw new IllegalStateException("Startup Settings Revision Is Unavailable");
+                remoteStartupRevision = data.revision();
+                originalRemoteVariables.putAll(data.values());
+                data.values().forEach(remoteVariables::putIfAbsent);
+            });
+            observeConfigurationLoad(revision, "Startup Configuration",
+                    host.configurationLoad("Startup Configuration", startup, () -> null),
+                    Set.of("Server Software", "Software Settings", "Java"));
+        }
 
-            } else {
-                propertiesFuture = host.configurationLoad("Server Properties", host.loadInstanceProperties(tempInstance.raw(), false), () -> null);
-                settingsFuture = Async.completed(null);
-                modpackFuture = Async.completed(null);
-                filesFuture = Async.completed(new ArrayList<>());
+        settingsController.load().whenComplete((ignored, failure) -> ScreenManager.getInstance().execute(() -> {
+            if (!acceptConfigurationLoad(revision, "Server Settings", failure)) return;
+            refreshConfigurationCategories(Set.of("Extra Files"));
+        }));
+    }
 
-                if (isReStudioCreation) {
-                    remoteVariables.put("SOFTWARE", "PAPER");
-                    remoteVariables.put("VERSION", "latest");
-                    remoteVariables.put("BUILD", "latest");
-                }
+    private void observeConfigurationLoad(long revision, String operation, Async<?> load, Collection<String> categories) {
+        load.whenComplete((ignored, failure) -> ScreenManager.getInstance().execute(() -> {
+            if (!acceptConfigurationLoad(revision, operation, failure)) return;
+            refreshConfigurationCategories(categories);
+        }));
+    }
 
-                remoteConfigFuture = Async.completed(null);
+    private boolean acceptConfigurationLoad(long revision, String operation, Throwable failure) {
+        if (screenClosed || revision != configurationLoadRevision.get()) return false;
+        if (failure == null) return true;
+        ReLog.logger(LogTypes.CONFIGURATION).source(LogSource.instance(tempInstance.id(), tempInstance.name()))
+                .component(ServerConfigurationScreen.class).operation("Load " + operation)
+                .error("Could not load " + operation.toLowerCase(Locale.ROOT), failure);
+        new Notification("Server Configuration Partially Unavailable",
+                operation + " Could Not Be Loaded. Available Settings Remain Open.", Notification.Type.WARN);
+        return false;
+    }
+
+    private void refreshConfigurationCategories(Collection<String> categories) {
+        if (settingsScreen == null) return;
+        for (String category : categories) {
+            if (category == null) continue;
+            if (settingsScreen.hasPendingChanges(category)) {
+                pendingPublishedTabs.add(category);
+                continue;
             }
-
-            return Async.allOf(propertiesFuture, settingsFuture, remoteConfigFuture, modpackFuture)
-                    .thenCompose(ignored -> filesFuture)
-                    .thenCompose(files -> {
-                        ServerSettingsDataController controller = screenHost().createServerSettingsController(tempInstance.raw(),
-                                ServerSettingsRegistry.getInstance().snapshot(tempInstance.raw()));
-                        return host.configurationLoad("Server Settings", controller.load(), () -> null)
-                                .thenApply(loaded -> new InitialConfigLoad(new ArrayList<>(files), controller));
-                    });
-        });
+            Supplier<List<Setting>> fixed = fixedSettingsSuppliers.get(category);
+            boolean dataDriven = settingsController != null && settingsController.tabNames().contains(category);
+            if (fixed != null || dataDriven) {
+                settingsScreen.registerCategory(category, dataDriven
+                        ? combinedSupplier(fixed, () -> settingsController.settings(category)) : fixed);
+            }
+        }
     }
 
     private void setupSettingsUI(List<String> extraFiles, ServerSettingsDataController settingsController) {
@@ -283,6 +287,7 @@ public class ServerConfigurationScreen extends ReScreen {
         settingsRegistryListener = ignored -> reloadDataDrivenSettings();
         ServerSettingsRegistry.getInstance().addListener(settingsRegistryListener);
         cleanupActions.add(() -> {
+            configurationLoadRevision.incrementAndGet();
             settingsReloadRevision.incrementAndGet();
             ServerSettingsRegistry.getInstance().removeListener(settingsRegistryListener);
             if (configurationUi != null) {
@@ -306,6 +311,18 @@ public class ServerConfigurationScreen extends ReScreen {
                 super.removed();
             }
         };
+        ServerSettingsDataController publishedController = settingsController;
+        Runnable publicationCleanup = publishedController.onTabsPublished(tabs -> ScreenManager.getInstance().execute(() -> {
+            if (screenClosed || this.settingsController != publishedController) return;
+            for (String tab : tabs) {
+                if (settingsScreen.hasPendingChanges(tab)) {
+                    pendingPublishedTabs.add(tab);
+                } else {
+                    refreshConfigurationCategories(Set.of(tab));
+                }
+            }
+        }));
+        cleanupActions.add(publicationCleanup);
         if (Config.desktopMode) {
             DesktopWindowsOverlay overlay = ScreenManager.getInstance().getDesktopWindowsOverlay();
             if (overlay != null) {
@@ -325,7 +342,7 @@ public class ServerConfigurationScreen extends ReScreen {
 
     private void mergeDataDrivenTabs(Map<String, Supplier<List<Setting>>> settingsByTab) {
         Supplier<List<Setting>> extraFiles = settingsByTab.remove("Extra Files");
-        for (String tab : settingsController.tabNames()) {
+        for (String tab : settingsController.plannedTabNames()) {
             Supplier<List<Setting>> fixed = settingsByTab.get(tab);
             settingsByTab.put(tab, combinedSupplier(fixed, () -> settingsController.settings(tab)));
         }
@@ -414,6 +431,11 @@ public class ServerConfigurationScreen extends ReScreen {
     }
 
     private void applyPendingDataDrivenReload() {
+        if (!pendingPublishedTabs.isEmpty()) {
+            Set<String> tabs = Set.copyOf(pendingPublishedTabs);
+            pendingPublishedTabs.clear();
+            refreshConfigurationCategories(tabs);
+        }
         ServerSettingsDataController pending = pendingSettingsController;
         if (pending == null) {
             return;

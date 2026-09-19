@@ -28,6 +28,7 @@ import restudio.rescreen.render.TextRenderer;
 import restudio.rescreen.theme.ThemeManager;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -544,6 +545,77 @@ class ServerSettingsDataControllerTest {
     }
 
     @Test
+    void publishesIndependentDocumentTabsAndFencesClosedLoads() {
+        ServerSettingsField fastField = new ServerSettingsField("fast", "fast", ServerSettingsFieldType.TEXT,
+                "Fast", "Fast", "Fast Value", "Fast value", "ready", null, null, List.of());
+        ServerSettingsField slowField = new ServerSettingsField("slow", "slow", ServerSettingsFieldType.TEXT,
+                "Slow", "Slow", "Slow Value", "Slow value", "later", null, null, List.of());
+        ServerSettingsPack pack = new ServerSettingsPack("progressive", "Progressive", "Progressive", 0, List.of("paper"), List.of(
+                new ServerSettingsDocument("fast.properties", ServerSettingsFormat.PROPERTIES, true, false, List.of(fastField)),
+                new ServerSettingsDocument("slow.properties", ServerSettingsFormat.PROPERTIES, true, false, List.of(slowField))));
+        Async<Document> fastRead = Async.pending();
+        Async<Document> slowRead = Async.pending();
+        ServerSettingsDocumentStore store = new ServerSettingsDocumentStore() {
+            @Override
+            public Async<Document> read(String relativePath) {
+                return relativePath.equals("fast.properties") ? fastRead : slowRead;
+            }
+
+            @Override
+            public Async<Void> write(String relativePath, String content) {
+                return Async.completed(null);
+            }
+
+            @Override
+            public Async<List<Entry>> list(String relativePath) {
+                return Async.completed(List.of());
+            }
+        };
+        ServerSettingsDocumentTarget target = new ServerSettingsDocumentTarget() {
+            @Override
+            public Collection<String> softwareTokens() {
+                return List.of("paper");
+            }
+
+            @Override
+            public String property(String key) {
+                return "world";
+            }
+
+            @Override
+            public void property(String key, String value) {
+            }
+
+            @Override
+            public void removeProperty(String key) {
+            }
+
+            @Override
+            public void replaceProperties(Map<String, String> properties) {
+            }
+        };
+        ServerSettingsDataController controller = new ServerSettingsDocumentDataController(target,
+                new ServerSettingsSnapshot(List.of(pack)), store);
+        List<String> publications = new ArrayList<>();
+        controller.onTabsPublished(publications::addAll);
+
+        assertEquals(List.of("Fast", "Slow"), controller.plannedTabNames());
+        assertTrue(controller.tabNames().isEmpty());
+        assertTrue(controller.settings("Fast").isEmpty());
+        fastRead.complete(new Document(true, "fast=ready\n"));
+
+        assertEquals(List.of("Fast"), publications);
+        assertEquals(List.of("Fast"), controller.tabNames());
+        assertFalse(controller.settings("Fast").isEmpty());
+        assertTrue(controller.settings("Slow").isEmpty());
+        assertFalse(controller.ready().isDone());
+
+        controller.close();
+        assertTrue(slowRead.isCancelled());
+        assertEquals(List.of("Fast"), publications);
+    }
+
+    @Test
     void routesBiomeFieldToItemSelectorWithDisplayName() {
         Path root = Path.of("settings-source-" + UUID.randomUUID()).toAbsolutePath();
         MemoryFiles files = new MemoryFiles();
@@ -748,6 +820,71 @@ class ServerSettingsDataControllerTest {
     }
 
     @Test
+    void singleBiomePresetUsesBiomeSelectorAndHidesRawGeneratorJson() {
+        Path root = Path.of("settings-source-" + UUID.randomUUID()).toAbsolutePath();
+        MemoryFiles files = new MemoryFiles();
+        Path propertiesPath = root.resolve("server.properties");
+        files.put(propertiesPath, "generator-settings={\"biome\"\\:\"minecraft\\:desert\"}\n"
+                + "level-type=minecraft\\:single_biome_surface\n");
+        Map<String, String> properties = new LinkedHashMap<>();
+        properties.put("generator-settings", "{\"biome\":\"minecraft:desert\"}");
+        properties.put("level-type", "minecraft:single_biome_surface");
+        ServerSettingsDocumentTarget target = new ServerSettingsDocumentTarget() {
+            @Override
+            public Collection<String> softwareTokens() {
+                return List.of("paper");
+            }
+
+            @Override
+            public String property(String key) {
+                return properties.get(key);
+            }
+
+            @Override
+            public void property(String key, String value) {
+                properties.put(key, value);
+            }
+
+            @Override
+            public void removeProperty(String key) {
+                properties.remove(key);
+            }
+
+            @Override
+            public void replaceProperties(Map<String, String> replacement) {
+                properties.clear();
+                properties.putAll(replacement);
+            }
+        };
+        ServerSettingsField generator = new ServerSettingsField("generator-settings", "generator-settings", ServerSettingsFieldType.TEXT,
+                "Server", "World Generation", "Generator Settings", "Generator JSON", "{}", null, null, List.of());
+        ServerSettingsField levelType = new ServerSettingsField("level-type", "level-type", ServerSettingsFieldType.TEXT,
+                "Server", "World Generation", "Level Type", "World preset", "minecraft:normal", null, null, List.of());
+        ServerSettingsDocument document = new ServerSettingsDocument("server.properties", ServerSettingsFormat.PROPERTIES,
+                true, false, List.of(generator, levelType));
+        ServerSettingsPack pack = new ServerSettingsPack("server", "Server", "Server", 0, List.of("paper"), List.of(document));
+        ServerSettingsDataController controller = new ServerSettingsDocumentDataController(target,
+                new ServerSettingsSnapshot(List.of(pack)), memoryStore(root, files));
+        controller.load().join();
+
+        ConfigOption<String> biome = namedOption(controller, "Server", "Biome");
+        ConfigOption<String> raw = namedOption(controller, "Server", "Flat World Settings");
+        ConfigOption<String> preset = namedOption(controller, "Server", "Level Type");
+        assertEquals("minecraft:desert", biome.get());
+        assertTrue(biome.isVisible());
+        assertFalse(raw.isVisible());
+
+        preset.set("minecraft:flat");
+        assertFalse(biome.isVisible());
+        assertTrue(raw.isVisible());
+
+        preset.set("minecraft:single_biome_surface");
+        biome.set("minecraft:jungle");
+        biome.apply();
+        assertEquals("{\"biome\":\"minecraft:jungle\"}", properties.get("generator-settings"));
+    }
+
+    @Test
     void routesStructureSeedFieldToSeedOptionWithoutSlider() {
         Path root = Path.of("settings-source-" + UUID.randomUUID()).toAbsolutePath();
         MemoryFiles files = new MemoryFiles();
@@ -938,6 +1075,18 @@ class ServerSettingsDataControllerTest {
         Setting setting = controller.settings(tab).getFirst();
         Widget widget = setting.getRows().getFirst().getWidgets().getFirst();
         return (ConfigOption<String>) ((SettingEntryWidget) widget).getOption();
+    }
+
+    @SuppressWarnings("unchecked")
+    private <T> ConfigOption<T> namedOption(ServerSettingsDataController controller, String tab, String name) {
+        return (ConfigOption<T>) controller.settings(tab).stream()
+                .flatMap(setting -> setting.getRows().stream())
+                .flatMap(row -> row.getWidgets().stream())
+                .filter(SettingEntryWidget.class::isInstance)
+                .map(SettingEntryWidget.class::cast)
+                .map(SettingEntryWidget::getOption)
+                .filter(option -> option.getName().equals(name))
+                .findFirst().orElseThrow();
     }
 
     private ConfigOption<Boolean> booleanOption(ServerSettingsDataController controller, String tab, int settingIndex) {

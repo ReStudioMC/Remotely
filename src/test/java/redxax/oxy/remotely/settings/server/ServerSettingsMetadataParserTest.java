@@ -272,8 +272,12 @@ class ServerSettingsMetadataParserTest {
                               mode: fixed-map
                               ordered: true
                               unique: true
+                              presentation:
+                                itemName: Category
+                                itemsName: Categories
+                                detailsLabel: Category Settings
                               keys:
-                                - {value: ambient, label: Ambient}
+                                - {value: ambient, label: Ambient, description: Passive ambient creatures.}
                               value:
                                 type: integer
                                 min: 0
@@ -334,6 +338,10 @@ class ServerSettingsMetadataParserTest {
         assertTrue(sequence.value().allowCustom());
         ServerSettingsField.CollectionSchema fixed = fields.get(1).collection();
         assertEquals("ambient", fixed.keys().getFirst().value());
+        assertEquals("Passive ambient creatures.", fixed.keys().getFirst().description());
+        assertEquals("Category", fixed.presentation().itemName());
+        assertEquals("Categories", fixed.presentation().itemsName());
+        assertEquals("Category Settings", fixed.presentation().detailsLabel());
         assertNull(fields.get(1).disabledValue());
         assertEquals(ServerSettingsField.SentinelRole.INHERIT, fixed.value().sentinels().getFirst().role());
         assertEquals(-1, fixed.value().sentinels().getFirst().value());

@@ -256,6 +256,13 @@ packs:
               mode: dynamic-map
               ordered: true
               unique: true
+              presentation:
+                itemName: World
+                itemsName: Worlds
+                addLabel: Add World
+                emptyLabel: No World Overrides
+                emptyDescription: Add a world only when it needs a custom generator or biome provider.
+                detailsLabel: World Settings
               key:
                 type: text
                 catalog: {source: 'server:minecraft:world'}

@@ -208,7 +208,7 @@ public final class ServerSettingsMetadataParser {
     private static ServerSettingsField.CollectionSchema parseCollection(Object raw, String location) {
         if (raw == null) return null;
         Map<String, Object> values = stringMap(raw, location);
-        requireOnly(values, location, "mode", "ordered", "unique", "keys", "key", "value");
+        requireOnly(values, location, "mode", "ordered", "unique", "keys", "key", "value", "presentation");
         ServerSettingsField.CollectionMode mode = ServerSettingsField.CollectionMode.parse(
                 requiredString(values, location + ".mode", "mode"));
         boolean ordered = booleanValue(values.get("ordered"), false, location + ".ordered");
@@ -216,7 +216,24 @@ public final class ServerSettingsMetadataParser {
         List<ServerSettingsField.FixedKey> keys = parseFixedKeys(values.get("keys"), location + ".keys");
         ServerSettingsField.ValueSpec key = parseValueSpec(values.get("key"), location + ".key");
         ServerSettingsField.ValueSpec value = parseValueSpec(values.get("value"), location + ".value");
-        return new ServerSettingsField.CollectionSchema(mode, ordered, unique, keys, key, value);
+        ServerSettingsField.CollectionPresentation presentation = parseCollectionPresentation(
+                values.get("presentation"), location + ".presentation");
+        return new ServerSettingsField.CollectionSchema(mode, ordered, unique, keys, key, value, presentation);
+    }
+
+    private static ServerSettingsField.CollectionPresentation parseCollectionPresentation(Object raw, String location) {
+        if (raw == null) return null;
+        Map<String, Object> values = stringMap(raw, location);
+        requireOnly(values, location, "itemName", "itemsName", "addLabel", "emptyLabel", "emptyDescription",
+                "identityField", "detailsLabel");
+        return new ServerSettingsField.CollectionPresentation(
+                firstString(values, null, "itemName"),
+                firstString(values, null, "itemsName"),
+                firstString(values, null, "addLabel"),
+                firstString(values, null, "emptyLabel"),
+                firstString(values, null, "emptyDescription"),
+                firstString(values, null, "identityField"),
+                firstString(values, null, "detailsLabel"));
     }
 
     private static List<ServerSettingsField.FixedKey> parseFixedKeys(Object raw, String location) {
@@ -226,10 +243,11 @@ public final class ServerSettingsMetadataParser {
         for (int index = 0; index < values.size(); index++) {
             String itemLocation = location + "[" + index + "]";
             Map<String, Object> item = stringMap(values.get(index), itemLocation);
-            requireOnly(item, itemLocation, "value", "label");
+            requireOnly(item, itemLocation, "value", "label", "description");
             result.add(new ServerSettingsField.FixedKey(
                     requiredString(item, itemLocation + ".value", "value"),
-                    requiredString(item, itemLocation + ".label", "label")));
+                    requiredString(item, itemLocation + ".label", "label"),
+                    firstString(item, "", "description")));
         }
         return List.copyOf(result);
     }

@@ -5,6 +5,7 @@ import restudio.rescreen.ui.settings.Setting;
 
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 public interface ServerSettingsDataController extends AutoCloseable {
     Async<Void> load();
@@ -12,6 +13,15 @@ public interface ServerSettingsDataController extends AutoCloseable {
     Async<Void> ready();
 
     List<String> tabNames();
+
+    default List<String> plannedTabNames() {
+        return tabNames();
+    }
+
+    default Runnable onTabsPublished(Consumer<List<String>> listener) {
+        listener.accept(tabNames());
+        return () -> {};
+    }
 
     default List<String> getTabNames() {
         return tabNames();

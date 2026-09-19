@@ -34,6 +34,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 public class ServerSettingsDocumentDataController implements ServerSettingsDataController {
@@ -52,9 +53,16 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
     private final LinkedHashMap<String, List<FieldBinding>> fieldsByTab = new LinkedHashMap<>();
     private final LinkedHashMap<String, List<Setting>> settingsByTab = new LinkedHashMap<>();
     private final LinkedHashMap<FieldBinding, ConfigOption<?>> collectionOptions = new LinkedHashMap<>();
+    private final LinkedHashMap<FieldBinding, ConfigOption<?>> fieldOptions = new LinkedHashMap<>();
     private final LinkedHashSet<String> documentPaths = new LinkedHashSet<>();
     private final LinkedHashSet<String> availableDocumentPaths = new LinkedHashSet<>();
     private final LinkedHashSet<String> unavailableDocumentPaths = new LinkedHashSet<>();
+    private final LinkedHashSet<String> declaredTabs = new LinkedHashSet<>();
+    private final LinkedHashSet<String> publishedTabs = new LinkedHashSet<>();
+    private final LinkedHashSet<String> completedDocuments = new LinkedHashSet<>();
+    private final List<Consumer<List<String>>> publicationListeners = new ArrayList<>();
+    private List<DocumentDefinition> documentDefinitions = List.of();
+    private List<Async<Void>> documentLoads = List.of();
     private List<String> worldCatalog = List.of();
     private Async<List<String>> worldDiscovery;
     private long loadGeneration = 1;
@@ -93,8 +101,37 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
 
     public List<String> tabNames() {
         synchronized (stateLock) {
-            return List.copyOf(fieldsByTab.keySet());
+            return List.copyOf(publishedTabs);
         }
+    }
+
+    @Override
+    public List<String> plannedTabNames() {
+        synchronized (stateLock) {
+            return List.copyOf(declaredTabs);
+        }
+    }
+
+    @Override
+    public Runnable onTabsPublished(Consumer<List<String>> listener) {
+        Objects.requireNonNull(listener, "listener");
+        List<String> current;
+        synchronized (stateLock) {
+            if (closed) return () -> {};
+            publicationListeners.add(listener);
+            current = List.copyOf(publishedTabs);
+        }
+        if (!current.isEmpty()) {
+            try {
+                listener.accept(current);
+            } catch (RuntimeException ignored) {
+            }
+        }
+        return () -> {
+            synchronized (stateLock) {
+                publicationListeners.remove(listener);
+            }
+        };
     }
 
     public List<String> getTabNames() {
@@ -184,9 +221,15 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
             documents.clear();
             fieldsByTab.clear();
             settingsByTab.clear();
+            declaredTabs.clear();
+            publishedTabs.clear();
+            completedDocuments.clear();
+            publicationListeners.clear();
             documentPaths.clear();
             availableDocumentPaths.clear();
             unavailableDocumentPaths.clear();
+            documentLoads.forEach(Async::cancel);
+            documentLoads = List.of();
         }
         if (discovery != null) discovery.cancel();
     }
@@ -198,32 +241,107 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
         }
         List<DocumentDefinition> definitions = definitions();
         synchronized (stateLock) {
+            documentDefinitions = definitions;
+            worldCatalog = initialWorlds();
             definitions.forEach(definition -> documentPaths.add(definition.relativePath()));
+            definitions.stream().flatMap(definition -> definition.fields().stream()).map(ServerSettingsField::tab).forEach(declaredTabs::add);
         }
-        List<Async<LoadedDocument>> loads = definitions.stream().map(this::loadDocument).toList();
+        List<Async<Void>> loads = definitions.stream()
+                .map(definition -> loadDocument(definition).thenAccept(loaded -> acceptLoadedDocument(generation, loaded)))
+                .toList();
+        synchronized (stateLock) {
+            if (closed || generation != loadGeneration) {
+                loads.forEach(Async::cancel);
+                return Async.completed(null);
+            }
+            documentLoads = loads;
+        }
         if (loads.isEmpty()) {
-            publishSettings(generation, initialWorlds(), false);
             discoverWorlds(generation);
             return Async.completed(null);
         }
-        return Async.allOf(loads.toArray(Async[]::new)).thenAccept(ignored -> {
-            synchronized (stateLock) {
-                if (closed || generation != loadGeneration) return;
-                for (Async<LoadedDocument> load : loads) {
-                    LoadedDocument loaded = load.join();
-                    if (loaded.available()) {
-                        DocumentState state = new DocumentState(loaded.definition(), loaded.content(), loaded.exists(), adapters.get(adapterFormat(loaded.definition().format())));
-                        initializeDocument(state);
-                        documents.put(state.definition.relativePath(), state);
-                        availableDocumentPaths.add(state.definition.relativePath());
-                    } else if (loaded.definition().required() && !loaded.definition().createIfMissing()) {
-                        unavailableDocumentPaths.add(loaded.definition().relativePath());
-                    }
+        return Async.allOf(loads.toArray(Async[]::new)).thenRun(() -> discoverWorlds(generation));
+    }
+
+    private void acceptLoadedDocument(long generation, LoadedDocument loaded) {
+        List<String> published;
+        List<Consumer<List<String>>> listeners;
+        synchronized (stateLock) {
+            if (closed || generation != loadGeneration) return;
+            DocumentDefinition definition = loaded.definition();
+            if (loaded.available()) {
+                DocumentState state = new DocumentState(definition, loaded.content(), loaded.exists(), adapters.get(adapterFormat(definition.format())));
+                initializeDocument(state);
+                documents.put(definition.relativePath(), state);
+                availableDocumentPaths.add(definition.relativePath());
+            } else if (definition.required() && !definition.createIfMissing()) {
+                unavailableDocumentPaths.add(definition.relativePath());
+            }
+            completedDocuments.add(definition.relativePath());
+            published = publishReadyTabs();
+            listeners = published.isEmpty() ? List.of() : List.copyOf(publicationListeners);
+        }
+        if (!published.isEmpty()) {
+            for (Consumer<List<String>> listener : listeners) {
+                try {
+                    listener.accept(published);
+                } catch (RuntimeException ignored) {
                 }
             }
-            publishSettings(generation, initialWorlds(), false);
-            discoverWorlds(generation);
-        });
+        }
+    }
+
+    private List<String> publishReadyTabs() {
+        List<String> ready = new ArrayList<>();
+        for (String tab : declaredTabs) {
+            if (publishedTabs.contains(tab) || !tabReady(tab)) continue;
+            List<FieldBinding> fields = new ArrayList<>();
+            for (DocumentDefinition definition : documentDefinitions) {
+                DocumentState document = documents.get(definition.relativePath());
+                if (document == null) continue;
+                document.bindings.stream().filter(binding -> binding.field.tab().equals(tab)).forEach(fields::add);
+            }
+            fieldsByTab.put(tab, fields);
+            preloadCollectionCatalogs();
+            settingsByTab.put(tab, buildSettings(fields));
+            publishedTabs.add(tab);
+            ready.add(tab);
+        }
+        return List.copyOf(ready);
+    }
+
+    private boolean tabReady(String tab) {
+        LinkedHashSet<String> required = new LinkedHashSet<>();
+        for (DocumentDefinition definition : documentDefinitions) {
+            for (ServerSettingsField field : definition.fields()) {
+                if (!field.tab().equals(tab)) continue;
+                required.add(definition.relativePath());
+                collectRequiredDocuments(field.collection(), required);
+            }
+        }
+        return completedDocuments.containsAll(required);
+    }
+
+    private void collectRequiredDocuments(ServerSettingsField.CollectionSchema schema, LinkedHashSet<String> required) {
+        if (schema == null) return;
+        collectRequiredDocuments(schema.key(), required);
+        collectRequiredDocuments(schema.value(), required);
+    }
+
+    private void collectRequiredDocuments(ServerSettingsField.ValueSpec spec, LinkedHashSet<String> required) {
+        if (spec == null) return;
+        if (spec.catalog() != null && spec.catalog().field() != null) addFieldOwner(spec.catalog().field(), required);
+        if (spec.fieldsFrom() != null) addFieldOwner(spec.fieldsFrom(), required);
+        spec.fields().forEach(field -> collectRequiredDocuments(field.value(), required));
+        collectRequiredDocuments(spec.collection(), required);
+    }
+
+    private void addFieldOwner(String reference, LinkedHashSet<String> required) {
+        for (DocumentDefinition definition : documentDefinitions) {
+            if (definition.fields().stream().anyMatch(field -> field.id().equals(reference) || field.key().equals(reference))) {
+                required.add(definition.relativePath());
+            }
+        }
     }
 
     private void publishSettings(long generation, List<String> worlds, boolean discovered) {
@@ -231,7 +349,7 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
             if (closed || generation != loadGeneration) return;
             worldCatalog = worlds == null ? List.of() : List.copyOf(worlds);
             if (discovered && settingsExposed) return;
-            rebuildSettings();
+            rebuildPublishedSettings();
         }
     }
 
@@ -379,15 +497,10 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
         }
     }
 
-    private void rebuildSettings() {
-        fieldsByTab.clear();
+    private void rebuildPublishedSettings() {
         settingsByTab.clear();
         collectionOptions.clear();
-        for (DocumentState document : documents.values()) {
-            for (FieldBinding binding : document.bindings) {
-                fieldsByTab.computeIfAbsent(binding.field.tab(), ignored -> new ArrayList<>()).add(binding);
-            }
-        }
+        fieldOptions.clear();
         preloadCollectionCatalogs();
         fieldsByTab.forEach((tab, fields) -> settingsByTab.put(tab, buildSettings(fields)));
     }
@@ -396,9 +509,79 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
         LinkedHashMap<String, Setting.Builder> grouped = new LinkedHashMap<>();
         for (FieldBinding binding : bindings) {
             Setting.Builder builder = grouped.computeIfAbsent(binding.field.group(), Setting.Builder::new);
-            builder.addOption(option(binding));
+            if (isGeneratorSettingsField(binding.field)) {
+                builder.addOption(singleBiomeGeneratorOption(binding));
+                builder.addOption(rawGeneratorOption(binding));
+            } else {
+                ConfigOption<?> option = option(binding);
+                fieldOptions.put(binding, option);
+                builder.addOption(option);
+            }
         }
         return grouped.values().stream().map(Setting.Builder::build).toList();
+    }
+
+    private boolean isGeneratorSettingsField(ServerSettingsField field) {
+        String key = field.key().toLowerCase(Locale.ROOT);
+        String id = field.id().toLowerCase(Locale.ROOT);
+        return key.equals("generator-settings") || id.equals("generator-settings") || key.endsWith(".generator-settings");
+    }
+
+    private ConfigOption<String> singleBiomeGeneratorOption(FieldBinding binding) {
+        String current = generatorBiome(readValue(binding));
+        List<String> biomes = new ArrayList<>(MinecraftBiomeCatalog.biomeIds());
+        if (!biomes.contains(current)) biomes.add(0, current);
+        return ConfigOption.<String>builder("Biome")
+                .description("Chooses the biome used by the Single Biome Surface world preset.")
+                .bind(() -> generatorBiome(readValue(binding)), value -> writeValue(binding, "{\"biome\":\"" + value + "\"}"))
+                .defaultValue(generatorBiome(binding.defaultValue))
+                .options(biomes)
+                .display(MinecraftBiomeCatalog::displayName)
+                .itemSelector(true)
+                .visibleWhen(() -> levelTypeValue().equals("minecraft:single_biome_surface"))
+                .build();
+    }
+
+    private ConfigOption<String> rawGeneratorOption(FieldBinding binding) {
+        return ConfigOption.<String>builder("Flat World Settings")
+                .description("Sets the generator JSON used by flat or custom world presets.")
+                .bind(() -> String.valueOf(readValue(binding)), value -> writeValue(binding, value))
+                .defaultValue(String.valueOf(binding.defaultValue))
+                .visibleWhen(this::rawGeneratorVisible)
+                .build();
+    }
+
+    private String generatorBiome(Object raw) {
+        if (raw != null) {
+            try {
+                Object parsed = structuredParser.parse(raw.toString());
+                if (parsed instanceof Map<?, ?> map && map.get("biome") != null) {
+                    String biome = String.valueOf(map.get("biome")).trim();
+                    if (!biome.isBlank()) return biome;
+                }
+            } catch (RuntimeException ignored) {
+            }
+        }
+        return "minecraft:plains";
+    }
+
+    private boolean rawGeneratorVisible() {
+        String levelType = levelTypeValue();
+        return levelType.equals("minecraft:flat") || !levelType.equals("minecraft:normal")
+                && !levelType.equals("minecraft:large_biomes") && !levelType.equals("minecraft:amplified")
+                && !levelType.equals("minecraft:single_biome_surface");
+    }
+
+    private String levelTypeValue() {
+        for (DocumentState document : documents.values()) {
+            for (FieldBinding binding : document.bindings) {
+                if (!isLevelTypeField(binding.field)) continue;
+                ConfigOption<?> option = fieldOptions.get(binding);
+                Object value = option == null ? readValue(binding) : option.get();
+                return value == null ? "minecraft:normal" : value.toString().toLowerCase(Locale.ROOT);
+            }
+        }
+        return "minecraft:normal";
     }
 
     private ConfigOption<?> option(FieldBinding binding) {
@@ -530,7 +713,7 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
         if (schema == null) {
             return textOption(binding);
         }
-        OptionEditor<Object> editor = (OptionEditor<Object>) collectionEditor(schema);
+        OptionEditor<Object> editor = (OptionEditor<Object>) collectionEditor(schema, field.name());
         Object fallback = normalizeCollection(schema, structuredValue(binding.defaultValue, map), map);
         ConfigOption<Object> option = ConfigOption.builder(field.name())
                 .description(field.description())
@@ -544,15 +727,20 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
     }
 
     private OptionEditor<?> collectionEditor(ServerSettingsField.CollectionSchema schema) {
+        return collectionEditor(schema, null);
+    }
+
+    private OptionEditor<?> collectionEditor(ServerSettingsField.CollectionSchema schema, String settingName) {
         OptionEditor.Value<Object> value = valueEditor(schema.value());
+        OptionEditor.CollectionPresentation presentation = collectionPresentation(schema.presentation(), settingName);
         if (schema.mode() == ServerSettingsField.CollectionMode.SEQUENCE) {
             boolean custom = schema.value().catalog() == null || schema.value().allowCustom();
-            return new OptionEditor.Sequence<>(value, schema.ordered(), schema.unique(), custom);
+            return new OptionEditor.Sequence<>(value, schema.ordered(), schema.unique(), custom, presentation);
         }
         OptionEditor.KeyPolicy<Object> keys;
         if (schema.mode() == ServerSettingsField.CollectionMode.FIXED_MAP) {
             List<OptionEditor.Choice<Object>> choices = schema.keys().stream()
-                    .map(key -> new OptionEditor.Choice<>((Object) key.value(), key.label()))
+                    .map(key -> new OptionEditor.Choice<>((Object) key.value(), key.label(), key.description()))
                     .toList();
             keys = OptionEditor.KeyPolicy.fixed(choices);
         } else {
@@ -563,7 +751,28 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
                 keys = OptionEditor.KeyPolicy.catalog(key.catalog(), schema.key().allowCustom() ? key : null);
             }
         }
-        return new OptionEditor.MapEntries<>(keys, value);
+        return new OptionEditor.MapEntries<>(keys, value, presentation);
+    }
+
+    private OptionEditor.CollectionPresentation collectionPresentation(ServerSettingsField.CollectionPresentation source,
+                                                                       String settingName) {
+        String items = source != null && source.itemsName() != null ? source.itemsName()
+                : settingName == null || settingName.isBlank() ? "Entries" : settingName;
+        String item = source != null && source.itemName() != null ? source.itemName() : singular(items);
+        return new OptionEditor.CollectionPresentation(
+                item,
+                items,
+                source == null ? null : source.addLabel(),
+                source == null ? null : source.emptyLabel(),
+                source == null ? null : source.emptyDescription(),
+                source == null ? null : source.identityField(),
+                source == null ? null : source.detailsLabel());
+    }
+
+    private String singular(String value) {
+        if (value.endsWith("ies") && value.length() > 3) return value.substring(0, value.length() - 3) + "y";
+        if (value.endsWith("s") && !value.endsWith("ss") && value.length() > 1) return value.substring(0, value.length() - 1);
+        return value;
     }
 
     @SuppressWarnings("unchecked")

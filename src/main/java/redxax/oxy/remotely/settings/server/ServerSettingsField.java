@@ -54,10 +54,28 @@ public final class ServerSettingsField {
         }
     }
 
-    public record FixedKey(String value, String label) {
+    public record FixedKey(String value, String label, String description) {
         public FixedKey {
             value = required(value, "fixed key value");
             label = required(label, "fixed key label");
+            description = description == null ? "" : description.trim();
+        }
+
+        public FixedKey(String value, String label) {
+            this(value, label, "");
+        }
+    }
+
+    public record CollectionPresentation(String itemName, String itemsName, String addLabel, String emptyLabel,
+                                         String emptyDescription, String identityField, String detailsLabel) {
+        public CollectionPresentation {
+            itemName = optional(itemName);
+            itemsName = optional(itemsName);
+            addLabel = optional(addLabel);
+            emptyLabel = optional(emptyLabel);
+            emptyDescription = optional(emptyDescription);
+            identityField = optional(identityField);
+            detailsLabel = optional(detailsLabel);
         }
     }
 
@@ -165,7 +183,7 @@ public final class ServerSettingsField {
     }
 
     public record CollectionSchema(CollectionMode mode, boolean ordered, boolean unique, List<FixedKey> keys,
-                                   ValueSpec key, ValueSpec value) {
+                                   ValueSpec key, ValueSpec value, CollectionPresentation presentation) {
         public CollectionSchema {
             Objects.requireNonNull(mode, "collection mode");
             keys = keys == null ? List.of() : List.copyOf(keys);
@@ -190,6 +208,11 @@ public final class ServerSettingsField {
                     }
                 }
             }
+        }
+
+        public CollectionSchema(CollectionMode mode, boolean ordered, boolean unique, List<FixedKey> keys,
+                                ValueSpec key, ValueSpec value) {
+            this(mode, ordered, unique, keys, key, value, null);
         }
     }
 
