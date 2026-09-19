@@ -82,6 +82,7 @@ public class ServerConfigurationScreen extends ReScreen {
     private boolean settingsControllerRetained;
     private boolean settingsControllerClosePending;
     private volatile boolean screenClosed;
+    private volatile boolean creationInFlight;
 
     private static final Set<String> REINSTALL_TRIGGERING_VARS = Set.of(
         "VERSION", "SOFTWARE", "BUILD"
@@ -427,6 +428,10 @@ public class ServerConfigurationScreen extends ReScreen {
         } else if (isEditMode) {
             editServer();
         } else {
+            if (creationInFlight) {
+                return;
+            }
+            creationInFlight = true;
             if (remoteHostContext != null) {
                 createNewRemoteServer();
             } else {
@@ -482,7 +487,6 @@ public class ServerConfigurationScreen extends ReScreen {
         retainSettingsController();
         settingsCleanup.run();
         closeCreationWindowForDesktop();
-        tempInstance.state("INSTALLING");
         screenHost().application().setScreen(details);
         details.addInstanceTab(tempInstance.raw());
         Async<Object> creation;
@@ -503,6 +507,7 @@ public class ServerConfigurationScreen extends ReScreen {
             }
         })).exceptionally(ex -> {
             ScreenManager.getInstance().execute(() -> {
+                creationInFlight = false;
                 Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
                 String message = cause.getMessage() == null || cause.getMessage().isBlank() ? "Instance Creation Failed" : cause.getMessage();
                 tempInstance.log("Creation Failed: " + message);
@@ -517,7 +522,6 @@ public class ServerConfigurationScreen extends ReScreen {
         retainSettingsController();
         settingsCleanup.run();
         closeCreationWindowForDesktop();
-        tempInstance.state("INSTALLING");
         screenHost().application().setScreen(details);
         details.addInstanceTab(tempInstance.raw());
         Notification notification = new Notification.Builder()
@@ -554,6 +558,7 @@ public class ServerConfigurationScreen extends ReScreen {
                 notification.update().message("Remote Server Created").description(screenHost().configurationTarget(newInstance).name()).type(Notification.Type.SUCCESS).loading(false).image(null).autoSlideOut(true);
             })).exceptionally(ex -> {
                 ScreenManager.getInstance().execute(() -> {
+                    creationInFlight = false;
                     Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
                     String message = cause.getMessage() == null || cause.getMessage().isBlank() ? "Remote Instance Creation Failed" : cause.getMessage();
                     tempInstance.log("Remote Creation Failed: " + message);

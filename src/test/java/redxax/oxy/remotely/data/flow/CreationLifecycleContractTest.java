@@ -215,6 +215,19 @@ final class CreationLifecycleContractTest {
     }
 
     @Test
+    void duplicateCoreGraphsUseServerDuplicateInsteadOfRejectingAuthority() throws IOException {
+        String source = Files.readString(FLOW_MANAGER).replace("\r\n", "\n");
+        String duplicate = methodBody(source, "public boolean duplicateResource(");
+        String helper = methodBody(source, "private boolean duplicateCoreGraphResource(");
+        int authority = duplicate.indexOf("coreGraphUiProjection.authoritative(serverId, graphType, sourceId)");
+        int reject = duplicate.indexOf("yield false;", authority);
+        int protocol = duplicate.indexOf("duplicateCoreGraphResource(serverId, graphType, sourceId, targetId)");
+        assertTrue(authority >= 0 && protocol > authority);
+        assertTrue(reject < 0 || protocol < reject);
+        assertTrue(helper.contains("sendCoreGraphDuplicate(type, sourceId, targetId)"));
+    }
+
+    @Test
     void coreTemplateRolloverRetryIsBoundedAndDeduplicatedByResource() throws IOException {
         String source = Files.readString(FLOW_MANAGER);
         String defer = methodBody(source, "private boolean deferCoreTemplateIntent(");
