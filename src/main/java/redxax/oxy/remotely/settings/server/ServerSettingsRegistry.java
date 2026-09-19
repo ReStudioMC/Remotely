@@ -21,6 +21,7 @@ public final class ServerSettingsRegistry implements AutoCloseable {
     private final List<Consumer<ServerSettingsSnapshot>> listeners = BrowserSafeState.list();
     private volatile ServerSettingsSnapshot currentSnapshot = new ServerSettingsSnapshot(List.of());
     private ServerSettingsRegistryStorage storage;
+    private Object hostedOwner;
 
     public ServerSettingsRegistry() {
         this(ServerSettingsRegistryStorage.unavailable());
@@ -105,6 +106,55 @@ public final class ServerSettingsRegistry implements AutoCloseable {
 
     public void registerExternal(String sourceKey, ServerSettingsMetadata metadata) {
         registerLoaded(sourceKey, metadata, ProviderSource.EXTERNAL);
+    }
+
+    void replaceHosted(Object owner, Map<String, ServerSettingsMetadata> sources) {
+        Objects.requireNonNull(owner, "Hosted settings owner is required");
+        Objects.requireNonNull(sources, "Hosted settings sources are required");
+        List<ProviderRegistration> registrations = new ArrayList<>(sources.size());
+        sources.forEach((sourceId, metadata) -> {
+            Objects.requireNonNull(metadata, "Hosted settings metadata is required");
+            if (sourceId == null || sourceId.isBlank()) {
+                throw new IllegalArgumentException("A hosted settings source ID is required");
+            }
+            registrations.add(new ProviderRegistration(
+                    requiredProvider(metadata.providerId()),
+                    metadata.priority(),
+                    validatePacks(metadata.packs()),
+                    ProviderSource.HOSTED,
+                    "hosted:" + sourceId.trim()
+            ));
+        });
+        if (registrations.isEmpty()) {
+            throw new IllegalArgumentException("Hosted settings need at least one source");
+        }
+        synchronized (this) {
+            claimHostedOwner(owner);
+            providers.entrySet().removeIf(entry -> entry.getValue().source() == ProviderSource.HOSTED);
+            for (ProviderRegistration registration : registrations) {
+                providers.put(registration.sourceKey(), registration);
+            }
+            rebuildLocked();
+        }
+        notifyListeners();
+    }
+
+    void clearHosted(Object owner) {
+        Objects.requireNonNull(owner, "Hosted settings owner is required");
+        boolean changed;
+        synchronized (this) {
+            if (hostedOwner != owner) {
+                return;
+            }
+            hostedOwner = null;
+            changed = providers.entrySet().removeIf(entry -> entry.getValue().source() == ProviderSource.HOSTED);
+            if (changed) {
+                rebuildLocked();
+            }
+        }
+        if (changed) {
+            notifyListeners();
+        }
     }
 
     public void clearExternal() {
@@ -207,6 +257,7 @@ public final class ServerSettingsRegistry implements AutoCloseable {
             previous = storage;
             storage = ServerSettingsRegistryStorage.unavailable();
             providers.clear();
+            hostedOwner = null;
             currentSnapshot = new ServerSettingsSnapshot(List.of());
             listeners.clear();
         }
@@ -268,7 +319,11 @@ public final class ServerSettingsRegistry implements AutoCloseable {
 
     private static Comparator<PackCandidate> packComparator() {
         return (left, right) -> {
-            int comparison = Integer.compare(right.provider().priority(), left.provider().priority());
+            int comparison = Integer.compare(right.provider().source().rank(), left.provider().source().rank());
+            if (comparison != 0) {
+                return comparison;
+            }
+            comparison = Integer.compare(right.provider().priority(), left.provider().priority());
             if (comparison != 0) {
                 return comparison;
             }
@@ -276,12 +331,15 @@ public final class ServerSettingsRegistry implements AutoCloseable {
             if (comparison != 0) {
                 return comparison;
             }
-            comparison = Integer.compare(right.provider().source().rank(), left.provider().source().rank());
-            if (comparison != 0) {
-                return comparison;
-            }
             return String.CASE_INSENSITIVE_ORDER.compare(left.provider().sourceKey(), right.provider().sourceKey());
         };
+    }
+
+    private void claimHostedOwner(Object owner) {
+        if (hostedOwner != null && hostedOwner != owner) {
+            throw new IllegalStateException("Hosted server settings already have an owner");
+        }
+        hostedOwner = owner;
     }
 
     private static List<ServerSettingsPack> validatePacks(Collection<ServerSettingsPack> packs) {
@@ -355,7 +413,8 @@ public final class ServerSettingsRegistry implements AutoCloseable {
     private enum ProviderSource {
         BUILTIN(0),
         PROGRAMMATIC(1),
-        EXTERNAL(2);
+        HOSTED(2),
+        EXTERNAL(3);
 
         private final int rank;
 
