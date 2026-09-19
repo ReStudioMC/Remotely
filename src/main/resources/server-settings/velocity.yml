@@ -130,6 +130,12 @@ packs:
               mode: dynamic-map
               ordered: true
               unique: true
+              presentation:
+                itemName: Server
+                itemsName: Servers
+                addLabel: Add Server
+                emptyLabel: No Backend Servers
+                emptyDescription: Add a named backend server and its connection address.
               key: {type: text}
               value: {type: text}
           - id: forced-hosts.*
@@ -144,6 +150,12 @@ packs:
               mode: dynamic-map
               ordered: true
               unique: true
+              presentation:
+                itemName: Host
+                itemsName: Hosts
+                addLabel: Add Host
+                emptyLabel: No Forced Hosts
+                emptyDescription: Add a host name that should route players to an ordered server list.
               key: {type: text}
               value:
                 type: list
@@ -151,6 +163,12 @@ packs:
                   mode: sequence
                   ordered: true
                   unique: true
+                  presentation:
+                    itemName: Server
+                    itemsName: Servers
+                    addLabel: Add Server
+                    emptyLabel: No Routed Servers
+                    emptyDescription: Add backend servers in the order this host should try them.
                   value:
                     type: text
                     catalog: {field: 'servers.*'}

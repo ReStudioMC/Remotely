@@ -24,6 +24,12 @@ packs:
               mode: sequence
               ordered: true
               unique: true
+              presentation:
+                itemName: Component
+                itemsName: Components
+                addLabel: Add Component
+                emptyLabel: No Additional Hidden Components
+                emptyDescription: Add item data components that should also be hidden from other players.
               value:
                 type: text
                 catalog: {source: 'server:minecraft:data_component_type'}
@@ -40,6 +46,12 @@ packs:
               mode: sequence
               ordered: true
               unique: true
+              presentation:
+                itemName: Component
+                itemsName: Components
+                addLabel: Add Component
+                emptyLabel: No Visible Components
+                emptyDescription: Add item data components that should remain visible when obfuscation is active.
               value:
                 type: text
                 catalog: {source: 'server:minecraft:data_component_type'}
@@ -76,6 +88,13 @@ packs:
               mode: dynamic-map
               ordered: true
               unique: true
+              presentation:
+                itemName: Item Model
+                itemsName: Item Models
+                addLabel: Add Item Model
+                emptyLabel: No Item Model Overrides
+                emptyDescription: Add an item model only when it needs different obfuscation rules.
+                detailsLabel: Obfuscation Rules
               key:
                 type: text
                 catalog: {source: 'server:minecraft:item_model'}
@@ -91,6 +110,12 @@ packs:
                       mode: sequence
                       ordered: true
                       unique: true
+                      presentation:
+                        itemName: Component
+                        itemsName: Components
+                        addLabel: Add Component
+                        emptyLabel: No Additional Hidden Components
+                        emptyDescription: Add components that should also be hidden for this item model.
                       value:
                         type: text
                         catalog: {source: 'server:minecraft:data_component_type'}
@@ -103,6 +128,12 @@ packs:
                       mode: sequence
                       ordered: true
                       unique: true
+                      presentation:
+                        itemName: Component
+                        itemsName: Components
+                        addLabel: Add Component
+                        emptyLabel: No Visible Components
+                        emptyDescription: Add components that should remain visible for this item model.
                       value:
                         type: text
                         catalog: {source: 'server:minecraft:data_component_type'}
@@ -563,6 +594,13 @@ packs:
               mode: dynamic-map
               ordered: true
               unique: true
+              presentation:
+                itemName: Packet
+                itemsName: Packets
+                addLabel: Add Packet
+                emptyLabel: No Packet Limit Overrides
+                emptyDescription: Add a serverbound packet only when it needs a custom rate limit.
+                detailsLabel: Packet Limit
               key:
                 type: text
                 catalog: {source: 'server:minecraft:serverbound_packet'}
@@ -765,6 +803,12 @@ packs:
               mode: sequence
               ordered: true
               unique: true
+              presentation:
+                itemName: Component
+                itemsName: Components
+                addLabel: Add Component
+                emptyLabel: No Exempt Components
+                emptyDescription: Add item data components that should not be sanitized when oversized.
               value:
                 type: text
                 catalog: {source: 'server:minecraft:data_component_type'}

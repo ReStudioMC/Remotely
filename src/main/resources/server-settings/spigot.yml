@@ -204,6 +204,12 @@ packs:
               mode: sequence
               ordered: true
               unique: true
+              presentation:
+                itemName: Advancement
+                itemsName: Advancements
+                addLabel: Add Advancement
+                emptyLabel: No Disabled Advancements
+                emptyDescription: Add advancements or namespaces that players should not be able to earn.
               value:
                 type: text
                 catalog: {source: 'server:minecraft:advancement'}
@@ -1156,6 +1162,12 @@ packs:
               mode: dynamic-map
               ordered: true
               unique: true
+              presentation:
+                itemName: Statistic
+                itemsName: Statistics
+                addLabel: Add Statistic
+                emptyLabel: No Forced Statistics
+                emptyDescription: Add a statistic only when players should be forced to a specific value.
               key:
                 type: text
                 catalog: {source: 'server:minecraft:statistic'}
@@ -1198,6 +1210,12 @@ packs:
               mode: sequence
               ordered: true
               unique: true
+              presentation:
+                itemName: Command
+                itemsName: Commands
+                addLabel: Add Command
+                emptyLabel: No Vanilla Command Replacements
+                emptyDescription: Add Vanilla commands that should take priority over plugin commands.
               value:
                 type: text
                 catalog: {source: 'server:minecraft:command'}
@@ -1214,6 +1232,12 @@ packs:
               mode: sequence
               ordered: true
               unique: true
+              presentation:
+                itemName: Prefix
+                itemsName: Prefixes
+                addLabel: Add Prefix
+                emptyLabel: No Spam Exclusions
+                emptyDescription: Add command or chat prefixes that should bypass the spam rate check.
               value: {type: text}
           - id: commands.silent-commandblock-console
             key: commands.silent-commandblock-console
@@ -1424,6 +1448,13 @@ packs:
               mode: dynamic-map
               ordered: true
               unique: true
+              presentation:
+                itemName: World
+                itemsName: Worlds
+                addLabel: Add World
+                emptyLabel: No World Overrides
+                emptyDescription: Add a world only when it needs Spigot settings that differ from the defaults.
+                detailsLabel: World Settings
               key:
                 type: text
                 catalog: {source: 'server:minecraft:world'}
