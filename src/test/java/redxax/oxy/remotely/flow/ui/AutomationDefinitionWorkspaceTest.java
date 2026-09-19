@@ -73,6 +73,27 @@ class AutomationDefinitionWorkspaceTest {
         assertFalse(AutomationDefinitionDesignerScreen.completeType(incomplete, AutomationDefinitionDraft.TIMER));
         assertEquals(List.of("select_target"), AutomationDefinitionDesignerScreen.targetIds(
             incomplete, true, "function", ""));
+        assertEquals(List.of("select_target"), AutomationDefinitionDesignerScreen.runTargets(
+            incomplete, true, "function", ""));
+    }
+
+    @Test
+    void scheduleRunTargetsCombineReusableFunctionsFlowsAndCommands() {
+        FlowManager.TypedResourceMembershipSnapshot membership = new FlowManager.TypedResourceMembershipSnapshot(
+            "server", 1L, List.of(
+                new FlowManager.ProjectResource("function", "shared_function", "Shared", "", 0),
+                new FlowManager.ProjectResource("flow", "shared_flow", "Shared", "", 1),
+                new FlowManager.ProjectResource("command", "shared_command", "Shared", "", 2)),
+            Set.of("function", "flow", "command"));
+
+        assertEquals(List.of("select_target", "command:shared_command", "flow:shared_flow", "function:shared_function"),
+            AutomationDefinitionDesignerScreen.runTargets(membership, true, "function", ""));
+        assertEquals(List.of("select_target", "function:missing_function"),
+            AutomationDefinitionDesignerScreen.runTargets(membership, false, "function", "missing_function"));
+        assertEquals("Skip This Run", AutomationDefinitionDesignerScreen.optionLabel("overlapPolicy", "skip"));
+        assertEquals("Run Without The Player", AutomationDefinitionDesignerScreen.optionLabel("offlinePolicy", "run_without_player"));
+        assertEquals("Catch Up Once", AutomationDefinitionDesignerScreen.optionLabel("missedRunPolicy", "run_once"));
+        assertEquals("function:shared_function", AutomationDefinitionDesignerScreen.runTargetKey("function", "shared_function"));
     }
 
     @Test

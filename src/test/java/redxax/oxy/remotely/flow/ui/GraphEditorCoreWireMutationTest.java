@@ -55,6 +55,28 @@ class GraphEditorCoreWireMutationTest {
     }
 
     @Test
+    void corePassthroughKeepsStableWidgetsAndRebuildsPins() throws IOException {
+        String source = Files.readString(SOURCE);
+        assertFalse(source.contains("if (!topologyChanged && canRefreshStableCoreWidgets(projected))"));
+        assertTrue(source.contains("if (canRefreshStableCoreWidgets(projected))"));
+        assertTrue(source.contains("editorPassthroughPinsByNode"));
+        assertTrue(source.contains("passthroughPinsChanged(previousPassthroughs, nextPassthroughs, nodeId)"));
+        String refresh = source.substring(source.indexOf("private void refreshStableCoreWidgets"));
+        refresh = refresh.substring(0, refresh.indexOf("private void rejectCoreProjection"));
+        assertTrue(refresh.contains("widget.refreshInputWidgets()"));
+        assertTrue(source.contains("current.togglePassthrough(identity, pinId)"));
+        assertTrue(source.contains("applyEditorPassthroughToggle(nodeId, inputPin, widget)"));
+        assertTrue(source.contains("graph.setEditorPassthroughs(copyEditorPassthroughs(result.graph().getEditorPassthroughs()))"));
+        assertTrue(source.contains("corePassthroughChangedNodes(before.passthroughs(), after.passthroughs())"));
+        assertTrue(source.contains("affectedTargets.addAll(passthroughChangedNodes)"));
+        assertFalse(source.contains("&& Objects.equals(current.getEditorPassthroughs(), projected.getEditorPassthroughs())"));
+        String toggle = source.substring(source.indexOf("private void toggleInputPassthrough"));
+        toggle = toggle.substring(0, toggle.indexOf("private void applyEditorPassthroughToggle"));
+        assertTrue(toggle.contains("applyEditorPassthroughToggle(nodeId, inputPin, widget)"));
+        assertFalse(toggle.contains("widget.refreshInputWidgets();"));
+    }
+
+    @Test
     void incompatibleDirectPinDropDoesNotFallThroughToAnotherPin() throws IOException {
         String source = Files.readString(SOURCE);
         int start = source.indexOf("private void tryCompleteWire");

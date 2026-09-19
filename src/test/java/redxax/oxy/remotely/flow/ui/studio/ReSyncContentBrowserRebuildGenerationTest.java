@@ -230,6 +230,12 @@ class ReSyncContentBrowserRebuildGenerationTest {
         assertFalse(gate.update(0, 38, 190, 640));
         assertFalse(gate.drain());
 
+        assertTrue(gate.updatePanel(0, 38, 72, 640));
+        assertTrue(gate.drain());
+        assertFalse(gate.updatePanel(0, 38, 72, 640));
+        assertFalse(gate.drain());
+        assertTrue(gate.updatePanel(0, 38, 190, 640));
+
         assertTrue(gate.update(0, 38, 210, 640));
         assertTrue(gate.update(0, 38, 210, 720));
         gate.invalidate();
@@ -265,12 +271,17 @@ class ReSyncContentBrowserRebuildGenerationTest {
 
         int capture = publication.indexOf("retainSelection(captureSelection(), prepared.provider(), projectRoot)");
         int provider = publication.indexOf("treeProvider = prepared.provider();");
-        int workspace = publication.indexOf("browser.setWorkspace(projectRoot, treeProvider, prepared.expandAll(), expandedTreePaths);");
+        int workspace = publication.indexOf("mountPreparedTree(prepared.provider(), prepared.expandAll(), revealPath);");
         int scroll = publication.indexOf("treeContainer.setScrollOffset(selection.scrollOffset());");
         assertTrue(capture >= 0);
         assertTrue(provider > capture);
         assertTrue(workspace > provider);
         assertTrue(scroll > workspace);
+        String mount = source.substring(source.indexOf("private void mountPreparedTree"),
+            source.indexOf("private BrowserSelectionState captureSelection"));
+        assertTrue(mount.contains("if (treeInitialized)"));
+        assertTrue(mount.contains("browser.replaceProvider(provider, revealPath);"));
+        assertTrue(mount.contains("browser.setWorkspace(projectRoot, provider, expandAll, expandedTreePaths);"));
     }
 
     @Test

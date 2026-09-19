@@ -16,16 +16,24 @@ import restudio.resync.flow.cache.CatalogAuthoringPublication;
 import restudio.resync.flow.cache.CatalogAuthoringPublicationCodec;
 import restudio.resync.flow.cache.CatalogCachePublication;
 import restudio.resync.flow.cache.CatalogCachePublicationCodec;
+import restudio.resync.flow.graph.GraphConnection;
 import restudio.resync.flow.graph.GraphDocument;
 import restudio.resync.flow.graph.GraphDocumentCodec;
+import restudio.resync.flow.graph.GraphEndpoint;
+import restudio.resync.flow.graph.GraphNode;
+import restudio.resync.flow.graph.PinValue;
 import restudio.resync.flow.identity.CapabilityId;
 import restudio.resync.flow.identity.ContractRef;
 import restudio.resync.flow.identity.NodeId;
+import restudio.resync.flow.identity.NodeInstanceId;
+import restudio.resync.flow.identity.PinId;
 import restudio.resync.flow.identity.ServerResourceLocator;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -57,16 +65,19 @@ public final class CustomContentCoreEditor {
             if (!document.resource().equals(resource) || document.revision() > revision) {
                 throw new IllegalArgumentException("Custom content graph authority does not match its aggregate");
             }
+            EmbeddedMigration migrated = migrateEmbeddedDocument(document, entries);
+            document = migrated.document();
+            requireCatalogVersions(document, entries);
             if (!document.catalogBinding().equals(publication.binding())) {
                 if (document.catalogBinding().generation() >= publication.binding().generation()
-                    || !Objects.equals(document.unknown().get(CATALOG_COMPATIBILITY), compatibility(document, publication, entries))) {
+                    || (!migrated.migrated()
+                    && !Objects.equals(document.unknown().get(CATALOG_COMPATIBILITY), compatibility(document, publication, entries)))) {
                     throw new IllegalArgumentException("Content Requires Server Catalog Migration");
                 }
             }
             document = new GraphDocument(document.schemaVersion(), document.resource(), revision, publication.binding(),
                 document.requiredCapabilities(), document.nodes(), document.connections(), document.passthroughs(), document.variables(),
                 document.functions(), document.unknown());
-            requireCatalogVersions(document, entries);
         } else {
             FlowGraph graph = FlowSerializer.deserialize(FlowSerializer.serialize(stored));
             graph.setId(resource.id());
@@ -191,6 +202,120 @@ public final class CustomContentCoreEditor {
             "authoringHash", CanonicalHash.sha256("content-authoring", CanonicalCodec.decodePermissive(authoring.toString())));
     }
 
+    private static EmbeddedMigration migrateEmbeddedDocument(GraphDocument document,
+                                                              Collection<CatalogCachePublication.Entry> entries) {
+        Map<ContractRef<NodeId>, JsonObject> descriptors = new LinkedHashMap<>();
+        for (CatalogCachePublication.Entry entry : entries) {
+            if (!entry.tombstone() && !entry.opaque() && entry.data() != null) {
+                descriptors.put(entry.definitionKey(), JsonParser.parseString(entry.data().canonicalText()).getAsJsonObject());
+            }
+        }
+        Map<NodeInstanceId, Map<String, String>> inputPins = new LinkedHashMap<>();
+        Map<NodeInstanceId, Map<String, String>> outputPins = new LinkedHashMap<>();
+        List<GraphNode> nodes = new ArrayList<>();
+        boolean migrated = false;
+        for (GraphNode node : document.nodes()) {
+            JsonObject descriptor = descriptors.get(node.definition());
+            if (descriptor == null) {
+                throw new IllegalArgumentException("Content Node Is Unavailable: " + node.definition().canonicalText());
+            }
+            int targetVersion = descriptor.get("schemaVersion").getAsInt();
+            if (node.definitionVersion() == targetVersion) {
+                nodes.add(node);
+                continue;
+            }
+            PinMaps maps = pinMaps(descriptor, node.definitionVersion(), targetVersion, node.definition().canonicalText());
+            inputPins.put(node.instanceId(), maps.inputs());
+            outputPins.put(node.instanceId(), maps.outputs());
+            nodes.add(new GraphNode(node.instanceId(), node.definition(), targetVersion, node.modeId(),
+                remapPinValues(node.values(), maps.inputs()), remapInspector(node, maps.inputs()), node.branches(),
+                node.repeatables(), node.inspectorState(), node.x(), node.y(), node.unknown()));
+            migrated = true;
+        }
+        if (!migrated) {
+            return new EmbeddedMigration(document, false);
+        }
+        List<GraphConnection> connections = new ArrayList<>();
+        for (GraphConnection connection : document.connections()) {
+            connections.add(new GraphConnection(connection.connectionId(),
+                remapEndpoint(connection.source(), outputPins.get(connection.source().nodeId())),
+                remapEndpoint(connection.target(), inputPins.get(connection.target().nodeId())),
+                connection.unknown()));
+        }
+        return new EmbeddedMigration(new GraphDocument(document.schemaVersion(), document.resource(), document.revision(),
+            document.catalogBinding(), document.requiredCapabilities(), nodes, connections, document.passthroughs(),
+            document.variables(), document.functions(), document.unknown()), true);
+    }
+
+    private static PinMaps pinMaps(JsonObject descriptor, int sourceVersion, int targetVersion, String identity) {
+        JsonObject metadata = descriptor.has("metadata") && descriptor.get("metadata").isJsonObject()
+            ? descriptor.getAsJsonObject("metadata") : new JsonObject();
+        JsonObject authored = metadata.has("authoredSource") && metadata.get("authoredSource").isJsonObject()
+            ? metadata.getAsJsonObject("authoredSource") : descriptor;
+        JsonObject mapping = authored.has("migrationMapping") && authored.get("migrationMapping").isJsonObject()
+            ? authored.getAsJsonObject("migrationMapping") : descriptor.has("migrationMapping")
+                && descriptor.get("migrationMapping").isJsonObject() ? descriptor.getAsJsonObject("migrationMapping") : null;
+        if (mapping == null || !mapping.has("complete") || !mapping.get("complete").getAsBoolean()
+            || mapping.get("sourceSchemaVersion").getAsInt() != sourceVersion
+            || mapping.get("targetSchemaVersion").getAsInt() != targetVersion) {
+            throw new IllegalArgumentException("Custom content requires a declared node migration: " + identity);
+        }
+        Map<String, String> inputs = new LinkedHashMap<>();
+        Map<String, String> outputs = new LinkedHashMap<>();
+        JsonArray pins = mapping.getAsJsonArray("pins");
+        for (JsonElement value : pins) {
+            JsonObject pin = value.getAsJsonObject();
+            Map<String, String> direction = "input".equals(pin.get("direction").getAsString()) ? inputs : outputs;
+            if (direction.putIfAbsent(pin.get("source").getAsString(), pin.get("target").getAsString()) != null) {
+                throw new IllegalArgumentException("Custom content migration has ambiguous pins");
+            }
+        }
+        return new PinMaps(inputs, outputs);
+    }
+
+    private static Map<PinId, PinValue> remapPinValues(Map<PinId, PinValue> values, Map<String, String> pins) {
+        Map<PinId, PinValue> remapped = new LinkedHashMap<>();
+        values.forEach((pin, value) -> {
+            PinId target = mappedPin(pin, pins, true);
+            remapped.put(target, new PinValue(target, value.value(), value.unknown()));
+        });
+        return remapped;
+    }
+
+    private static Map<Object, Object> remapInspector(GraphNode node, Map<String, String> pins) {
+        Map<Object, Object> inspector = new LinkedHashMap<>();
+        node.inspector().forEach((pin, value) -> {
+            PinId target = mappedPin(pin, pins, true);
+            inspector.put(target, new PinValue(target, value.value(), value.unknown()));
+        });
+        inspector.putAll(node.inspectorFields());
+        return inspector;
+    }
+
+    private static GraphEndpoint remapEndpoint(GraphEndpoint endpoint, Map<String, String> pins) {
+        if (pins == null) {
+            return endpoint;
+        }
+        PinId target = mappedPin(endpoint.pinId(), pins, false);
+        return new GraphEndpoint(endpoint.nodeId(), target, endpoint.elementId(), endpoint.branchId(), endpoint.unknown());
+    }
+
+    private static PinId mappedPin(PinId pin, Map<String, String> pins, boolean allowIdentityFallback) {
+        String source = pin.canonicalText();
+        String target = pins.get(source);
+        if (target == null && pins.containsValue(source)) {
+            target = source;
+        }
+        if (target == null && allowIdentityFallback
+            && (CustomContentGraphAdapter.FLOW_BRANCHES_KEY.equals(source) || "armor_slot".equals(source))) {
+            target = source;
+        }
+        if (target == null) {
+            throw new IllegalArgumentException("Custom content migration cannot preserve pin " + source);
+        }
+        return PinId.of(target);
+    }
+
     private static void requireCatalogVersions(GraphDocument document, Collection<CatalogCachePublication.Entry> entries) {
         Map<ContractRef<NodeId>, Integer> versions = new LinkedHashMap<>();
         for (CatalogCachePublication.Entry entry : entries) {
@@ -251,6 +376,7 @@ public final class CustomContentCoreEditor {
             Map<String, Object> values = new LinkedHashMap<>();
             node.getInputValues().forEach((pin, value) -> {
                 String target = inputPins.get(pin);
+                if (target == null && inputPins.containsValue(pin)) target = pin;
                 if (target == null && (CustomContentGraphAdapter.FLOW_BRANCHES_KEY.equals(pin) || "armor_slot".equals(pin))) target = pin;
                 if (target == null || values.containsKey(target)) {
                     throw new IllegalArgumentException("Custom content migration cannot preserve pin " + pin);
@@ -261,16 +387,31 @@ public final class CustomContentCoreEditor {
             for (FlowConnection connection : graph.getConnections()) {
                 if (entry.getKey().equals(connection.getSourceNodeId())) {
                     String pin = outputPins.get(connection.getSourcePinId());
+                    if (pin == null && outputPins.containsValue(connection.getSourcePinId())) pin = connection.getSourcePinId();
                     if (pin == null) throw new IllegalArgumentException("Custom content migration cannot preserve an output connection");
                     connection.setSourcePinId(pin);
                 }
                 if (entry.getKey().equals(connection.getTargetNodeId())) {
                     String pin = inputPins.get(connection.getTargetPinId());
+                    if (pin == null && inputPins.containsValue(connection.getTargetPinId())) pin = connection.getTargetPinId();
                     if (pin == null) throw new IllegalArgumentException("Custom content migration cannot preserve an input connection");
                     connection.setTargetPinId(pin);
                 }
             }
             node.setVersion(targetVersion);
+        }
+    }
+
+    private record EmbeddedMigration(GraphDocument document, boolean migrated) {
+        private EmbeddedMigration {
+            document = Objects.requireNonNull(document, "Migrated custom content graph is required");
+        }
+    }
+
+    private record PinMaps(Map<String, String> inputs, Map<String, String> outputs) {
+        private PinMaps {
+            inputs = Map.copyOf(inputs);
+            outputs = Map.copyOf(outputs);
         }
     }
 }

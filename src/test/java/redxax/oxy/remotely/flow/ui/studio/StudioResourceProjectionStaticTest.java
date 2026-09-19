@@ -57,8 +57,8 @@ class StudioResourceProjectionStaticTest {
         assertTrue(schedule.contains("scheduledProjectMetadataStamp == metadataStamp && scheduledDecorationRevision == collaborationRevision"));
         assertTrue(schedule.contains("rebuildDrain.submit(new BrowserRebuildRequest(generation, metadataStamp, collaborationRevision, revealPath,"));
         assertTrue(preparation.contains("List<ReSyncProjectMetadata.ResourceEntry> projectedResources = screen.studioAllResources().stream()"));
-        assertTrue(preparation.contains(".filter(resource -> !AutomationDefinitionDraft.supports(resource.getType())).toList();"));
-        assertTrue(preparation.contains("List<BrowserFolder> folders = browserFolders(screen.studioAllFolders());"));
+        assertTrue(preparation.contains(".filter(resource -> !AutomationDefinitionDraft.supports(resource.getType()))"));
+        assertTrue(preparation.contains("List<BrowserFolder> folders = browserFolders(screen.studioAllFolders()).stream()"));
         assertTrue(preparation.contains("AssetBrowserSnapshot snapshot = assetBrowserSnapshot(folders, resources, request.decorationRevision());"));
         assertTrue(preparation.contains("ReSyncProjectTreeProvider provider = prepareTreeProvider(projectRoot, folders, resources);"));
         assertTrue(preparation.indexOf("prepareTreeProvider(projectRoot, folders, resources)")
@@ -71,7 +71,7 @@ class StudioResourceProjectionStaticTest {
         assertTrue(application.contains("rebuildPublicationGate.publish(prepared.generation()"));
         assertTrue(publication.contains("resourceIconPaths = prepared.iconPaths();"));
         assertTrue(publication.contains("treeProvider = prepared.provider();"));
-        assertTrue(publication.contains("browser.setWorkspace(projectRoot, treeProvider, prepared.expandAll(), expandedTreePaths);"));
+        assertTrue(publication.contains("mountPreparedTree(prepared.provider(), prepared.expandAll(), revealPath);"));
         assertFalse(publication.contains("for ("));
         assertFalse(publication.contains("getExpandedDirectories"));
         assertFalse(publication.contains("putAll("));

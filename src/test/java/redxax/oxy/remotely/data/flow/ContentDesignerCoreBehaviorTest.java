@@ -327,7 +327,7 @@ class ContentDesignerCoreBehaviorTest {
         private volatile CustomContentDefinition saved;
 
         private ContentManager(ReSyncFlowClient client, Path directory) {
-            super(null, null, id -> new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(directory.resolve("manager-catalog.json"))), directory);
+            super(null, null, id -> new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(directory.resolve("manager-catalog.json"))), DesktopReSyncStorage.fromKey(directory));
             this.client = client;
         }
 

@@ -3428,7 +3428,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
     private boolean isGraphDropArea(double mouseX, double mouseY) {
         int left = studioContentBrowser != null ? studioContentBrowser.visibleLayoutWidth() : 0;
-        int right = paletteSidePanel != null && paletteSidePanel.isVisible() ? paletteSidePanel.getDesiredWidth() : 0;
+        int right = paletteSidePanel != null ? paletteSidePanel.layoutWidth(0) : 0;
         return mouseX > left && mouseX < width - right && mouseY > 30 && mouseY < height;
     }
 
@@ -4955,6 +4955,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         }
         Map<String, FlowNode> previousNodes = graph.getNodes();
         List<FlowConnection> previousConnections = graph.getConnections();
+        List<FlowGraph.EditorPassthrough> previousPassthroughs = copyEditorPassthroughs(graph.getEditorPassthroughs());
         long previousResourceRevision = graph.getResourceRevision();
         String previousResourceHash = graph.getResourceHash();
         String previousResourceMutationId = graph.getResourceMutationId();
@@ -4965,6 +4966,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         try {
             graph.setNodes(new LinkedHashMap<>(delta.nodes()));
             graph.setConnections(copyCoreStructureConnections(delta.connections()));
+            graph.setEditorPassthroughs(copyEditorPassthroughs(result.graph().getEditorPassthroughs()));
             graph.setResourceRevision(result.graph().getResourceRevision());
             graph.setResourceHash(result.graph().getResourceHash());
             graph.setResourceMutationId(result.graph().getResourceMutationId());
@@ -5027,6 +5029,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             restoreCoreStructureNodes(previousNodes, result.graph().getNodes());
             graph.setNodes(previousNodes);
             graph.setConnections(previousConnections);
+            graph.setEditorPassthroughs(previousPassthroughs);
             graph.setResourceRevision(previousResourceRevision);
             graph.setResourceHash(previousResourceHash);
             graph.setResourceMutationId(previousResourceMutationId);
@@ -5163,7 +5166,9 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             if (history && addedConnections.size() + removedConnections.size() > 256) {
                 return rejectCoreStructureDelta("history_connection_limit");
             }
-            if (addedNodeIds.isEmpty() && removedNodeIds.isEmpty() && addedConnections.isEmpty() && removedConnections.isEmpty()) {
+            Set<String> passthroughChangedNodes = corePassthroughChangedNodes(before.passthroughs(), after.passthroughs());
+            if (addedNodeIds.isEmpty() && removedNodeIds.isEmpty() && addedConnections.isEmpty() && removedConnections.isEmpty()
+                && passthroughChangedNodes.isEmpty()) {
                 return rejectCoreStructureDelta("no_structure_change");
             }
             for (ConnectionId connectionId : beforeConnections.keySet()) {
@@ -5216,11 +5221,47 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                     }
                 }
             }
+            affectedTargets.addAll(passthroughChangedNodes);
             return new CoreStructureDelta(mergedNodes, result.graph().getConnections(), afterConnections, addedNodeIds,
                 removedNodeIds, affectedTargets);
         } catch (RuntimeException failure) {
             return rejectCoreStructureDelta("delta_failed:" + TaskIdentities.failureName(failure));
         }
+    }
+
+    private static Set<String> corePassthroughChangedNodes(List<GraphPassthrough> previous,
+                                                           List<GraphPassthrough> next) {
+        Map<String, GraphPassthrough> before = new LinkedHashMap<>();
+        if (previous != null) {
+            for (GraphPassthrough passthrough : previous) {
+                if (passthrough != null) {
+                    before.put(passthrough.nodeId().canonicalText() + "\u0000" + passthrough.inputPin().canonicalText(),
+                        passthrough);
+                }
+            }
+        }
+        Map<String, GraphPassthrough> after = new LinkedHashMap<>();
+        if (next != null) {
+            for (GraphPassthrough passthrough : next) {
+                if (passthrough != null) {
+                    after.put(passthrough.nodeId().canonicalText() + "\u0000" + passthrough.inputPin().canonicalText(),
+                        passthrough);
+                }
+            }
+        }
+        Set<String> changed = new LinkedHashSet<>();
+        for (Map.Entry<String, GraphPassthrough> entry : after.entrySet()) {
+            GraphPassthrough current = before.get(entry.getKey());
+            if (!Objects.equals(current, entry.getValue())) {
+                changed.add(entry.getValue().nodeId().canonicalText());
+            }
+        }
+        for (Map.Entry<String, GraphPassthrough> entry : before.entrySet()) {
+            if (!after.containsKey(entry.getKey())) {
+                changed.add(entry.getValue().nodeId().canonicalText());
+            }
+        }
+        return changed;
     }
 
     private CoreStructureDelta rejectCoreStructureDelta(String reason) {
@@ -5552,7 +5593,6 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             && Objects.equals(current.getFunctionDescription(), projected.getFunctionDescription())
             && sameCoreFunctionParameters(current.getFunctionInputs(), projected.getFunctionInputs())
             && sameCoreFunctionParameters(current.getFunctionOutputs(), projected.getFunctionOutputs())
-            && Objects.equals(current.getEditorPassthroughs(), projected.getEditorPassthroughs())
             && Objects.deepEquals(current.getContentProperties(), projected.getContentProperties())
             && Objects.equals(current.getResourceType(), projected.getResourceType())
             && current.getOpaqueProperties().equals(projected.getOpaqueProperties());
@@ -5678,7 +5718,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         coreTopologyChecksum = result.topologyChecksum();
         coreProjectionFailureChecksum = "";
         FlowGraph projected = result.graph();
-        if (!topologyChanged && canRefreshStableCoreWidgets(projected)) {
+        if (canRefreshStableCoreWidgets(projected)) {
             refreshStableCoreWidgets(projected);
             result = new CoreGraphUiProjection.ProjectionResult(graph, result.sourceNodeCount(), result.projectedNodeCount(),
                 result.droppedNodeIdentities(), result.sourceConnectionCount(), result.projectedConnectionCount(),
@@ -5750,7 +5790,9 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         graph.setFunctionDescription(projected.getFunctionDescription());
         graph.setFunctionInputs(new ArrayList<>(projected.getFunctionInputs()));
         graph.setFunctionOutputs(new ArrayList<>(projected.getFunctionOutputs()));
+        Map<String, Set<String>> previousPassthroughs = editorPassthroughPinsByNode(graph.getEditorPassthroughs());
         graph.setEditorPassthroughs(new ArrayList<>(projected.getEditorPassthroughs()));
+        Map<String, Set<String>> nextPassthroughs = editorPassthroughPinsByNode(graph.getEditorPassthroughs());
         graph.setContentProperties(new LinkedHashMap<>(projected.getContentProperties()));
         graph.setResourceType(projected.getResourceType());
         graph.setResourceRevision(projected.getResourceRevision());
@@ -5783,7 +5825,8 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                 }
                 widget.updateInspectorProjection(inspectorProjection.projectInspector(session, identity).orElse(null));
             }
-            if (valuesChanged && !repeatablesChanged) {
+            if (passthroughPinsChanged(previousPassthroughs, nextPassthroughs, nodeId)
+                || valuesChanged && !repeatablesChanged) {
                 widget.refreshInputWidgets();
             }
             if (!queuedMoveNodes.contains(nodeId) && (!movingSelectedNodes || !selectedNodeIds.contains(nodeId))) {
@@ -5802,6 +5845,29 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         normalizePassthroughConnections();
         invalidateGraphRenderTopology();
         scheduleGraphRenderIndexBuild();
+    }
+
+    private static Map<String, Set<String>> editorPassthroughPinsByNode(List<FlowGraph.EditorPassthrough> passthroughs) {
+        Map<String, Set<String>> pins = new LinkedHashMap<>();
+        if (passthroughs == null) {
+            return pins;
+        }
+        for (FlowGraph.EditorPassthrough passthrough : passthroughs) {
+            if (passthrough == null || passthrough.getNodeId() == null || passthrough.getNodeId().isBlank()) {
+                continue;
+            }
+            String pin = passthrough.getInputPinId();
+            if (pin == null || pin.isBlank()) {
+                continue;
+            }
+            pins.computeIfAbsent(passthrough.getNodeId(), ignored -> new LinkedHashSet<>()).add(pin);
+        }
+        return pins;
+    }
+
+    private static boolean passthroughPinsChanged(Map<String, Set<String>> previous, Map<String, Set<String>> next,
+                                                  String nodeId) {
+        return !Objects.equals(previous.getOrDefault(nodeId, Set.of()), next.getOrDefault(nodeId, Set.of()));
     }
 
     private void rejectCoreProjection(CoreGraphEditorSession session, String checksum, String reason, String detail) {
@@ -7512,22 +7578,22 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
     protected int viewportFitLeft() {
         int left = studioMode ? studioContentBrowserWidth() : 0;
-        if (paletteSidePanel != null && paletteSidePanel.isVisible() && paletteSidePanel.isLeftAnchored()) {
-            left += paletteSidePanel.getDesiredWidth() + 8;
+        if (paletteSidePanel != null && paletteSidePanel.isLeftAnchored()) {
+            left += paletteSidePanel.layoutWidth(8);
         }
-        if (studioResourcePanel != null && studioResourcePanel.isVisible() && studioResourcePanel.isLeftAnchored()) {
-            left += studioResourcePanel.getDesiredWidth() + 8;
+        if (studioResourcePanel != null && studioResourcePanel.isLeftAnchored()) {
+            left += studioResourcePanel.layoutWidth(8);
         }
         return left;
     }
 
     protected int viewportFitWidth() {
         int right = 0;
-        if (paletteSidePanel != null && paletteSidePanel.isVisible() && !paletteSidePanel.isLeftAnchored()) {
-            right += paletteSidePanel.getDesiredWidth() + 8;
+        if (paletteSidePanel != null && !paletteSidePanel.isLeftAnchored()) {
+            right += paletteSidePanel.layoutWidth(8);
         }
-        if (studioResourcePanel != null && studioResourcePanel.isVisible() && !studioResourcePanel.isLeftAnchored()) {
-            right += studioResourcePanel.getDesiredWidth() + 8;
+        if (studioResourcePanel != null && !studioResourcePanel.isLeftAnchored()) {
+            right += studioResourcePanel.layoutWidth(8);
         }
         return Math.max(1, width - viewportFitLeft() - right);
     }
@@ -8767,6 +8833,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
     private void createPaletteSidePanel() {
         paletteStudioPanel = rightStudioPanel("palettePanel")
+            .collapsible("Node Palette")
             .show();
         paletteSidePanel = paletteStudioPanel.sidePanel();
         paletteStudioPanel.padding(studioPanelState.padding());
@@ -9058,7 +9125,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                 refreshCoreProjection();
                 resetGraphEditorState(false);
             }
-            pendingStudioTabDiscards.remove(document.key());
+            clearStudioDiscardPrompt(document.key());
             syncStudioDocumentTabs();
             updateStudioTabStates();
             return;
@@ -9099,14 +9166,14 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             if (document == activeStudioDocument) {
                 refreshCoreProjectionIfChanged();
             }
-            pendingStudioTabDiscards.remove(key);
+            clearStudioDiscardPrompt(key);
             syncStudioDocumentTabs();
             updateStudioTabStates();
             return;
         }
         if (document != null && document.view() == null && document.graph() != null) {
             graphHistory(document).markSaved(sequence);
-            pendingStudioTabDiscards.remove(key);
+            clearStudioDiscardPrompt(key);
             syncStudioDocumentTabs();
             updateStudioTabStates();
             return;
@@ -9125,7 +9192,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             if (document == activeStudioDocument) {
                 refreshCoreProjectionIfChanged();
             }
-            pendingStudioTabDiscards.remove(document.key());
+            clearStudioDiscardPrompt(document.key());
             syncStudioDocumentTabs();
             updateStudioTabStates();
             return;
@@ -16032,6 +16099,9 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (studioMode && handleStudioWorkspaceMouseDragged(event)) {
             return true;
         }
+        if (dispatchSidePanelMouseDragged(event)) {
+            return true;
+        }
         try {
         double mouseX = event.x();
         double mouseY = event.y();
@@ -16043,10 +16113,6 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             updateConnectionDragMouse(undistortedCoords[0], undistortedCoords[1]);
             return true;
         }
-        if (paletteSidePanel != null && paletteSidePanel.mouseDragged(event.retarget(paletteSidePanel, mouseX, mouseY, deltaX, deltaY))) {
-            return true;
-        }
-
         dragMouseX = undistortedCoords[0];
         dragMouseY = undistortedCoords[1];
         double[] worldMouse = screenToWorld(dragMouseX, dragMouseY);
@@ -16428,11 +16494,11 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (studioMode && handleStudioWorkspaceMouseClicked(event)) {
             return true;
         }
-        try {
-        int button = mouseButtonCode(event);
-        if (paletteSidePanel != null && paletteSidePanel.mouseClicked(event.retarget(paletteSidePanel, mouseX, mouseY))) {
+        if (dispatchSidePanelMouseClicked(event)) {
             return true;
         }
+        try {
+        int button = mouseButtonCode(event);
         cancelInitialViewportFit();
 
         double[] worldMouse = screenToWorld(headerCoords[0], headerCoords[1]);
@@ -16644,10 +16710,13 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                 refreshCoreProjection();
                 return;
             }
-            commitCoreStructuralMutation("Passthrough", current -> {
+            if (!commitCoreStructuralMutation("Passthrough", current -> {
                 current.togglePassthrough(identity, pinId);
                 return true;
-            }, nodeId);
+            }, nodeId)) {
+                return;
+            }
+            applyEditorPassthroughToggle(nodeId, inputPin, widget);
             return;
         }
         if (deferWorkspaceMutation(() -> toggleInputPassthrough(widget, inputPin))) {
@@ -16658,6 +16727,13 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             return;
         }
         captureSnapshot();
+        applyEditorPassthroughToggle(nodeId, inputPin, widget);
+    }
+
+    private void applyEditorPassthroughToggle(String nodeId, String inputPin, FlowNodeWidget widget) {
+        if (graph.getEditorPassthroughs() == null) {
+            graph.setEditorPassthroughs(new ArrayList<>());
+        }
         boolean removed = graph.getEditorPassthroughs().removeIf(passthrough ->
             nodeId.equals(passthrough.getNodeId()) && inputPin.equals(passthrough.getInputPin()));
         if (!removed) {
@@ -16695,6 +16771,9 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (studioMode && handleStudioWorkspaceMouseReleased(event)) {
             return true;
         }
+        if (dispatchSidePanelMouseReleased(event)) {
+            return true;
+        }
         try {
         double mouseX = event.x();
         double mouseY = event.y();
@@ -16710,10 +16789,6 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             dragState.sourceIsInput = false;
             return true;
         }
-        if (paletteSidePanel != null && paletteSidePanel.mouseReleased(event.retarget(paletteSidePanel, mouseX, mouseY))) {
-            return true;
-        }
-
         double[] worldMouse = screenToWorld(undistortedCoords[0], undistortedCoords[1]);
         int wx = (int) worldMouse[0];
         int wy = (int) worldMouse[1];

@@ -247,6 +247,35 @@ class CustomContentCoreEditorTest {
     }
 
     @Test
+    void declaredNodeSchemaMigrationReopensEmbeddedGraphOnAForwardCatalog() {
+        CustomContentDefinition content = content();
+        CoreGraphEditorSession session = open(content, 4);
+        CustomContentDefinition saved = CustomContentCoreEditor.materialize(session, content, publication(), entries());
+        CatalogAuthoringPublication current = publication();
+        CatalogBinding binding = new CatalogBinding(2, "c".repeat(64), "d".repeat(64));
+        CatalogAuthoringPublication changed = new CatalogAuthoringPublication(binding, current.contractVersion(),
+            current.projectionVersion(), current.sections(), current.advertisedEditCapabilities());
+        List<Map<String, Object>> mapping = List.of(
+            Map.of("direction", "input", "source", "value", "target", "value"),
+            Map.of("direction", "input", "source", "execute", "target", "execute"));
+        Map<String, Object> migration = Map.of("sourceSchemaVersion", 1, "targetSchemaVersion", 2, "complete", true, "pins", mapping);
+        List<CatalogCachePublication.Entry> changedEntries = new ArrayList<>(entries());
+        changedEntries.set(1, entry("action", 2, List.of(
+            pin("value", "input", "string"), pin("execute", "input", "execution"), pin("player", "input", "player")),
+            Map.of("authoredSource", Map.of("migrationMapping", migration))));
+
+        CoreGraphEditorSession reopened = CustomContentCoreEditor.prepare(saved, RESOURCE, 5, changed, changedEntries);
+        GraphNode action = reopened.graphDocument().nodes().stream().filter(node -> node.instanceId().equals(ACTION)).findFirst().orElseThrow();
+        assertEquals(2, action.definitionVersion());
+        assertEquals(binding, reopened.catalogBinding());
+        CustomContentDefinition resaved = CustomContentCoreEditor.materialize(reopened, saved, changed, changedEntries);
+        CoreGraphEditorSession next = CustomContentCoreEditor.prepare(resaved, RESOURCE, 6, changed, changedEntries);
+        assertEquals(2, next.graphDocument().nodes().stream().filter(node -> node.instanceId().equals(ACTION)).findFirst().orElseThrow()
+            .definitionVersion());
+        assertEquals(binding, next.catalogBinding());
+    }
+
+    @Test
     void changedBindingWithoutEvidenceAndSameGenerationHashChangesAreRejected() {
         CustomContentDefinition content = content();
         CoreGraphEditorSession session = open(content, 4);

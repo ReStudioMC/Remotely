@@ -156,7 +156,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     private List<Map<String, Object>> attributeValidationErrors = List.of();
     private static final String ATTRIBUTE_SCHEMA_SOURCE = "server:minecraft:item_attribute_schema";
     private static final OptionCatalogLoader.Profile CONTENT_CATALOGS = OptionCatalogLoader.profile(
-        "server:minecraft:material", "server:minecraft:world", "server:custom_content:provider");
+        "server:minecraft:material", "server:minecraft:world", "server:custom_content:provider",
+        "server:minecraft:block");
     private static final Set<String> CONTENT_PANEL_CATALOG_SOURCES = Set.of(
         "server:minecraft:attribute", "server:minecraft:material", "server:minecraft:world",
         "server:custom_content:asset", "server:custom_content:provider");
@@ -510,6 +511,10 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         CatalogAuthoringPublication publication = client != null ? client.activeCatalogAuthoringPublication().orElse(null) : null;
         ReSyncCatalogPublicationProjection.Snapshot catalog = client != null ? client.catalogPublicationProjection().active().orElse(null) : null;
         if (publication == null || catalog == null) {
+            if (client != null && (client.catalogAuthority() == ReSyncFlowClient.CatalogAuthority.TYPED_RECONCILIATION
+                || client.catalogAuthority() == ReSyncFlowClient.CatalogAuthority.UNAVAILABLE)) {
+                contentCoreIssue = "Catalog Is Still Loading";
+            }
             return;
         }
         long cacheGeneration = quickEditMode ? 0L : flowManager.getCustomContentRevision(serverId, contentId);
@@ -1317,13 +1322,20 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     }
 
     private void buildContentPanel() {
-        contentStudioPanel = leftStudioPanel("contentPanel")
+        contentStudioPanel = rightStudioPanel("contentPanel")
+            .collapsible("Content Inspector")
             .show();
         contentPanel = contentStudioPanel.sidePanel();
         contentStudioPanel.padding(panelState.padding());
         attributeDesignerPanel = leftStudioPanel("attributeDesignerPanel")
+            .dismissible("Item Attributes")
             .hide();
         attributePanel = attributeDesignerPanel.sidePanel();
+        attributePanel.onUserVisibilityChanged(visible -> {
+            if (!visible) {
+                hideAttributeDesigner();
+            }
+        });
         attributePanel.minWidth(360).width(420);
         attributeDesignerPanel.padding(panelState.padding());
     }
@@ -1742,14 +1754,14 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         if (contentPanel == null) {
             return Math.max(ReSyncStudioPanelState.MIN_ROW_WIDTH, ReSyncStudioPanelState.DEFAULT_WIDTH - panelState.padding() * 2);
         }
-        return contentStudioPanel != null ? contentStudioPanel.rowWidth() : Math.max(ReSyncStudioPanelState.MIN_ROW_WIDTH, contentPanel.getDesiredWidth() - panelState.padding() * 2);
+        return contentStudioPanel != null ? contentStudioPanel.rowWidth() : Math.max(ReSyncStudioPanelState.MIN_ROW_WIDTH, contentPanel.getConfiguredWidth() - panelState.padding() * 2);
     }
 
     private int attributeRowWidth() {
         if (attributePanel == null) {
             return 400;
         }
-        int desired = attributePanel.getDesiredWidth();
+        int desired = attributePanel.getConfiguredWidth();
         if (desired <= 0) {
             desired = 420;
         }
@@ -1759,8 +1771,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     @Override
     protected int viewportFitLeft() {
         int left = super.viewportFitLeft();
-        if (attributePanel != null && attributePanel.isVisible() && attributePanel.isLeftAnchored()) {
-            left += attributePanel.getDesiredWidth() + 8;
+        if (attributePanel != null && attributePanel.isLeftAnchored()) {
+            left += attributePanel.layoutWidth(8);
         }
         return left;
     }
@@ -1768,11 +1780,11 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     @Override
     protected int viewportFitWidth() {
         int fitWidth = super.viewportFitWidth();
-        if (attributePanel != null && attributePanel.isVisible() && attributePanel.isLeftAnchored()) {
-            fitWidth -= attributePanel.getDesiredWidth() + 8;
+        if (attributePanel != null && attributePanel.isLeftAnchored()) {
+            fitWidth -= attributePanel.layoutWidth(8);
         }
-        if (contentPanel != null && contentPanel.isVisible()) {
-            fitWidth -= contentPanel.getDesiredWidth() + 8;
+        if (contentPanel != null) {
+            fitWidth -= contentPanel.layoutWidth(8);
         }
         return Math.max(1, fitWidth);
     }

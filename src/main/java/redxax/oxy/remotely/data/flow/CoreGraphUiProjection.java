@@ -439,7 +439,16 @@ public final class CoreGraphUiProjection {
             "sourcePinId", connection.source().pinId().canonicalText(),
             "targetNodeId", connection.target().nodeId().canonicalText(),
             "targetPinId", connection.target().pinId().canonicalText())).toList();
-        Map<String, Object> topology = Map.of("nodes", sourceIdentities, "connections", topologyConnections);
+        List<Map<String, Object>> topologyPassthroughs = document.passthroughs().stream().map(passthrough -> {
+            Map<String, Object> value = new LinkedHashMap<>();
+            value.put("nodeId", passthrough.nodeId().canonicalText());
+            value.put("inputPin", passthrough.inputPin().canonicalText());
+            value.put("connectionIds", passthrough.connectionIds().stream()
+                .map(connectionId -> connectionId.canonicalText()).toList());
+            return value;
+        }).toList();
+        Map<String, Object> topology = Map.of("nodes", sourceIdentities, "connections", topologyConnections,
+            "passthroughs", topologyPassthroughs);
         String topologyChecksum = CanonicalJson.sha256Canonical("remotely.core.ui.topology.v1",
             JsonValue.fromJava(topology).canonicalBytes());
         return new ProjectionResult(graph, sourceIdentities.size(), projectedIdentities.size(), droppedIdentities,

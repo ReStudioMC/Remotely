@@ -61,7 +61,8 @@ class GraphEditorCoreInteractionInvariantTest {
         String nodeWidget = Files.readString(Path.of("src/main/java/redxax/oxy/remotely/flow/ui/NodeWidget.java"));
 
         assertTrue(flowWidget.contains("if (isEditorReadOnly())"));
-        assertTrue(flowWidget.contains("mouseClickedCloseButton(event);"));
+        assertTrue(flowWidget.contains("mouseClickedCloseButton(event)"));
+        assertTrue(flowWidget.contains("if (isEditorReadOnly()) {\n            return false;"));
         assertTrue(nodeWidget.contains("protected final boolean mouseClickedCloseButton(ReMouseEvent event)"));
     }
 }

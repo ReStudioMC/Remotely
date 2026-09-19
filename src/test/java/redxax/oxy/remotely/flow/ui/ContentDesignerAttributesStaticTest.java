@@ -43,6 +43,8 @@ class ContentDesignerAttributesStaticTest {
         assertTrue(browserSource.contains("if (temporarilyHidden)"));
         assertTrue(browserSource.contains("screen.clearStudioFocus();"));
         assertTrue(browserSource.contains("sidePanel.hideImmediately();"));
+        assertTrue(browserSource.contains("return sidePanel.layoutWidth(8);"));
+        assertTrue(browserSource.contains("sidePanel.getConfiguredWidth()"));
         assertTrue(Files.readString(Path.of("src/main/java/redxax/oxy/remotely/flow/ui/studio/StudioPanel.java")).contains("if (!sidePanel.isVisible())"));
         String mountableSource = Files.readString(reScreenSource("src/main/java/restudio/rescreen/ui/widgets/MountableButtonWidget.java"));
         String popupSource = Files.readString(reScreenSource("src/main/java/restudio/rescreen/ui/widgets/PopupWidget.java"));
@@ -442,8 +444,12 @@ class ContentDesignerAttributesStaticTest {
         assertFalse(source.contains("Boolean.TRUE.equals(metadata.get(\"advanced\"))"));
         assertTrue(source.contains("attributePanel.keyPressed"));
         assertTrue(source.contains("attributePanel.textInput"));
-        assertTrue(source.contains("attributePanel.isVisible() && attributePanel.isLeftAnchored()"));
-        assertTrue(source.contains("fitWidth -= attributePanel.getDesiredWidth() + 8"));
+        assertTrue(source.contains("rightStudioPanel(\"contentPanel\")"));
+        assertTrue(source.contains(".collapsible(\"Content Inspector\")"));
+        assertTrue(source.contains(".dismissible(\"Item Attributes\")"));
+        assertTrue(source.contains("attributePanel.isLeftAnchored()"));
+        assertTrue(source.contains("fitWidth -= attributePanel.layoutWidth(8)"));
+        assertTrue(source.contains("fitWidth -= contentPanel.layoutWidth(8)"));
         assertTrue(source.contains("container.getScrollOffset()"));
         assertTrue(source.contains("container.setTargetScrollOffset(previousScroll)"));
         assertTrue(source.contains("private AnimatedWidget selectedAttributeRowWidget;"));

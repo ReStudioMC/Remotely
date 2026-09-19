@@ -306,7 +306,6 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
     private static final int CLOSE_BUTTON_WIDTH = TITLE_STYLE.controlWidth();
     private static final int CLOSE_BUTTON_HEIGHT = TITLE_STYLE.controlHeight();
     private static final String FLOW_BRANCHES_KEY = "__flow_branches";
-    private static final String PASSTHROUGH_OUTPUT_PREFIX = "__passthrough:";
     private static final String REPEATABLE_COUNT_PREFIX = "__repeatable_count:";
     private static final String LEGACY_PERMISSION_COUNT_KEY = "__permission_count";
     private static final String REMOVED_OPTIONAL_INPUTS_KEY = "__removed_optional_inputs";
@@ -385,8 +384,8 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
         private int height;
     }
 
-    private static String pinId(NodeDefinition.PinDefinition pin) {
-        return pin != null && pin.getId() != null ? pin.getId().value() : "";
+    static String pinId(NodeDefinition.PinDefinition pin) {
+        return EditorPassthroughPins.pinId(pin);
     }
 
     private static String pinDisplayName(NodeDefinition.PinDefinition pin) {
@@ -3491,18 +3490,15 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
     }
 
     public static boolean isPassthroughOutputPin(String pinName) {
-        return pinName != null && pinName.startsWith(PASSTHROUGH_OUTPUT_PREFIX);
+        return EditorPassthroughPins.isOutputPin(pinName);
     }
 
     public static String passthroughOutputPin(String inputPin) {
-        return PASSTHROUGH_OUTPUT_PREFIX + inputPin;
+        return EditorPassthroughPins.outputPin(inputPin);
     }
 
     public static String passthroughInputPin(String outputPin) {
-        if (!isPassthroughOutputPin(outputPin)) {
-            return outputPin;
-        }
-        return outputPin.substring(PASSTHROUGH_OUTPUT_PREFIX.length());
+        return EditorPassthroughPins.inputPin(outputPin);
     }
 
     @Override
@@ -5149,8 +5145,7 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
                 }
             }
             if (!exists) {
-                visibleOutputs.add(new NodeDefinition.PinDefinition(PinId.of(outputName), pinDisplayName(input),
-                    NodeDefinition.PinType.DATA, NodeDefinition.PinDirection.OUTPUT, input.getDataType(), input.getTypeRef()));
+                visibleOutputs.add(EditorPassthroughPins.outputDefinition(input));
             }
         }
     }

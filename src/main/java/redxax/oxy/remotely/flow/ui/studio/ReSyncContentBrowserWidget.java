@@ -272,6 +272,10 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         private int y = Integer.MIN_VALUE;
         private int width = Integer.MIN_VALUE;
         private int height = Integer.MIN_VALUE;
+        private int panelX = Integer.MIN_VALUE;
+        private int panelY = Integer.MIN_VALUE;
+        private int panelWidth = Integer.MIN_VALUE;
+        private int panelHeight = Integer.MIN_VALUE;
         private boolean dirty;
 
         boolean update(int x, int y, int width, int height) {
@@ -282,6 +286,18 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             this.y = y;
             this.width = width;
             this.height = height;
+            dirty = true;
+            return true;
+        }
+
+        boolean updatePanel(int x, int y, int width, int height) {
+            if (panelX == x && panelY == y && panelWidth == width && panelHeight == height) {
+                return false;
+            }
+            panelX = x;
+            panelY = y;
+            panelWidth = width;
+            panelHeight = height;
             dirty = true;
             return true;
         }
@@ -625,9 +641,11 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             createButton
         );
         sidePanel = browser.sidePanel();
+        sidePanel.collapsible("Content Browser");
         searchInput = browser.searchInput();
         treeContainer = browser.treeContainer();
         treeExplorer = browser.treeExplorer();
+        treeExplorer.setNailingEnabled(false);
         treeExplorer.setToggleDirectoriesOnActivation(false);
         treeExplorer.setOnNodeActivated(this::activateTreeNode);
         treeExplorer.setOnNodeOpened(this::openTreeNode);
@@ -661,14 +679,10 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
     }
 
     public int visibleLayoutWidth() {
-        if (temporarilyHidden || sidePanel == null || !sidePanel.isVisible()) {
+        if (temporarilyHidden || sidePanel == null) {
             return 0;
         }
-        int renderedWidth = Math.max(sidePanel.getDesiredWidth(), (int) Math.ceil(sidePanel.getAnimatedWidth()));
-        if (sidePanel.container() != null) {
-            renderedWidth = Math.max(renderedWidth, sidePanel.container().getWidth());
-        }
-        return renderedWidth + 8;
+        return sidePanel.layoutWidth(8);
     }
 
     public void updateShortcutFocus(ReMouseEvent event) {
@@ -1433,13 +1447,24 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         treeProvider = prepared.provider();
         pendingSelectionRestore = selection;
         applySelection(selection);
-        browser.setWorkspace(projectRoot, treeProvider, prepared.expandAll(), expandedTreePaths);
+        mountPreparedTree(prepared.provider(), prepared.expandAll(), revealPath);
         treeContainer.setScrollOffset(selection.scrollOffset());
         treeContainer.setTargetScrollOffset(selection.scrollOffset());
         layoutGate.invalidate();
         layoutContainersIfDirty();
         treeInitialized = true;
         publishVisibleCreatedResources(treeProvider, prepared.generation(), prepared.metadataStamp());
+    }
+
+    private void mountPreparedTree(ReSyncProjectTreeProvider provider, boolean expandAll, RemotePath revealPath) {
+        if (treeInitialized) {
+            browser.replaceProvider(provider, revealPath);
+            return;
+        }
+        browser.setWorkspace(projectRoot, provider, expandAll, expandedTreePaths);
+        if (revealPath != null) {
+            treeExplorer.expandToPath(revealPath);
+        }
     }
 
     private BrowserSelectionState captureSelection() {
@@ -1998,7 +2023,7 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         return builder
             .addItem("New Folder", "folder.png", "Create Folder", "folder directory", () -> showCreateResourcePopup(ReSyncResourceDragPayload.FOLDER, targetFolder))
             .addItem("New Flow", "graph.png", "Create Flow", "flow graph", () -> showCreateResourcePopup(ReSyncResourceDragPayload.FLOW, targetFolder))
-            .addItem("New Function", "snippets.png", "Create Function", "function mcfunction", () -> showCreateResourcePopup(ReSyncResourceDragPayload.FUNCTION, targetFolder))
+            .addItem("New Function", "json.png", "Create Function", "function mcfunction", () -> showCreateResourcePopup(ReSyncResourceDragPayload.FUNCTION, targetFolder))
             .addItem("New Command", "terminal.png", "Create Command", "command terminal", () -> showCreateResourcePopup(ReSyncResourceDragPayload.COMMAND, targetFolder))
             .addItem("New Content", "resources.png", "Create Content", "content item block armor", () -> showCreateResourcePopup(ReSyncResourceDragPayload.CUSTOM_CONTENT, targetFolder))
             .addItem("New GUI", "fullPanel.png", "Create GUI", "gui interface inventory", () -> showCreateResourcePopup(ReSyncResourceDragPayload.GUI, targetFolder))
@@ -3374,7 +3399,12 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
     }
 
     private void layoutContainersIfDirty() {
-        if (browser == null || !layoutGate.drain()) {
+        if (browser == null) {
+            return;
+        }
+        Container panel = sidePanel.container();
+        layoutGate.updatePanel(panel.getX(), panel.getY(), panel.getWidth(), panel.getHeight());
+        if (!layoutGate.drain()) {
             return;
         }
         browser.layout();
@@ -3453,7 +3483,7 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
 
     public void layoutInScreen() {
         applyBounds(0, STUDIO_CONTENT_BROWSER_TOP,
-            sidePanel != null ? sidePanel.getDesiredWidth() : STUDIO_CONTENT_BROWSER_DEFAULT_WIDTH, defaultHeight());
+            sidePanel != null ? sidePanel.getConfiguredWidth() : STUDIO_CONTENT_BROWSER_DEFAULT_WIDTH, defaultHeight());
         layoutContainersIfDirty();
     }
 

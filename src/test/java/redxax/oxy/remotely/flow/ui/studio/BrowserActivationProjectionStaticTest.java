@@ -88,7 +88,7 @@ class BrowserActivationProjectionStaticTest {
         assertTrue(disposal.contains("rebuildPublicationGate.invalidate()"));
         assertTrue(publication.contains("resourceIconPaths = prepared.iconPaths()"));
         assertTrue(publication.contains("treeProvider = prepared.provider()"));
-        assertTrue(publication.contains("browser.setWorkspace(projectRoot, treeProvider, prepared.expandAll(), expandedTreePaths)"));
+        assertTrue(publication.contains("mountPreparedTree(prepared.provider(), prepared.expandAll(), revealPath)"));
         assertFalse(assetSnapshot.contains("isResourceEnabled"));
         assertFalse(providerPreparation.contains("isResourceEnabled"));
         assertFalse(publication.contains("for ("));

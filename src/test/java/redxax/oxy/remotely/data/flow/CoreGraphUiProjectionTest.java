@@ -44,6 +44,7 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -145,6 +146,24 @@ class CoreGraphUiProjectionTest {
         assertEquals(nodeCount, result.graph().getNodes().size());
         assertEquals(nodeCount - 1, result.graph().getConnections().size());
         assertEquals(64, result.topologyChecksum().length());
+    }
+
+    @Test
+    void editorProjectionChecksumChangesWhenPassthroughsChange() {
+        ServerResourceLocator resource = resource("flow", "passthrough-topology");
+        GraphDocument document = populatedGraph(resource);
+        CoreGraphEditorSession session = new CoreGraphEditorSession(document);
+        CoreGraphUiProjection.ProjectionResult before = new CoreGraphUiProjection().projectEditorSession(session);
+
+        session.togglePassthrough(document.nodes().getFirst().instanceId(), PinId.of("in"));
+        CoreGraphUiProjection.ProjectionResult after = new CoreGraphUiProjection().projectEditorSession(session);
+
+        assertTrue(after.complete());
+        assertNotEquals(before.topologyChecksum(), after.topologyChecksum());
+        assertEquals(1, after.graph().getEditorPassthroughs().size());
+        assertEquals(document.nodes().getFirst().instanceId().canonicalText(),
+            after.graph().getEditorPassthroughs().getFirst().getNodeId());
+        assertEquals("in", after.graph().getEditorPassthroughs().getFirst().getInputPinId());
     }
 
     @Test

@@ -131,24 +131,33 @@ public class FlowNodeWidget extends NodeWidget {
             if (mouseClickedCloseButton(event) || mouseClickedInspectorButton(event)) {
                 return true;
             }
-            return true;
+            return false;
         }
         return super.mouseClicked(event);
     }
 
     @Override
     public boolean mouseDragged(ReMouseEvent event) {
-        return isEditorReadOnly() || super.mouseDragged(event);
+        if (isEditorReadOnly()) {
+            return false;
+        }
+        return super.mouseDragged(event);
     }
 
     @Override
     public boolean mouseReleased(ReMouseEvent event) {
-        return isEditorReadOnly() || super.mouseReleased(event);
+        if (isEditorReadOnly()) {
+            return false;
+        }
+        return super.mouseReleased(event);
     }
 
     @Override
     public boolean mouseScrolled(ReScrollEvent event) {
-        return isEditorReadOnly() || super.mouseScrolled(event);
+        if (isEditorReadOnly()) {
+            return false;
+        }
+        return super.mouseScrolled(event);
     }
 
     @Override

@@ -263,7 +263,7 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
 
     private void buildDesignerChrome() {
         buildHeader();
-        navigation = createSidePanel("automation-definition-navigation").left().animation(false)
+        navigation = createSidePanel("automation-definition-navigation").collapsible("Automation Definitions").left().animation(false)
             .y(HEADER_HEIGHT).height(Math.max(100, height - HEADER_HEIGHT - 5)).minWidth(210).maxWidth(380)
             .maxWidthRatio(45).width(NAVIGATION_WIDTH).padding(3).gap(2).scrolling(true).show();
         navigationSearch = new TextInputWidget.Builder().placeholder("Search Subresources")
@@ -544,19 +544,21 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
         switch (type) {
             case AutomationDefinitionDraft.VARIABLE -> {
                 addSection("Value", List.of("valueType", "defaultValue"));
-                addSection("Lifetime", List.of("scope", "persistent"));
+                addSection("Who This Belongs To", List.of("scope", "persistent"));
             }
             case AutomationDefinitionDraft.TIMER -> {
                 addSection("Timer", List.of("defaultDuration", "defaultUnit", "tickInterval"));
-                addSection("Lifetime", List.of("scope", "persistent"));
+                addSection("Who This Belongs To", List.of("scope", "persistent"));
             }
             case AutomationDefinitionDraft.SCHEDULE -> {
-                addSection("Target", List.of("targetType", "targetId"));
+                addSection("When It Fires", List.of("targetId"));
                 addSection("Timing", List.of("timingMode", "duration", "unit", "initialDelay", "dateTime",
                     "timeZone", "cron"));
-                addSection("Policies", List.of("overlapPolicy", "existingTaskPolicy", "failurePolicy",
-                    "offlinePolicy", "missedRunPolicy"));
-                addSection("Lifetime", List.of("scope", "persistent"));
+                addSection("If A Run Is Already Active", List.of("overlapPolicy", "existingTaskPolicy"));
+                addSection("If A Run Fails", List.of("failurePolicy"));
+                addSection("If The Player Is Offline", List.of("offlinePolicy"));
+                addSection("If The Server Missed A Run", List.of("missedRunPolicy"));
+                addSection("Who This Belongs To", List.of("scope", "persistent"));
             }
             default -> {
             }
@@ -613,11 +615,12 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
             return valueTypeBrowse;
         }
         if ("targetId".equals(field)) {
-            List<String> values = targetIds(membership, currentMembership(), raw("targetType"), raw(field));
-            targetIdInput = new DropDownWidget.Builder<>(values).displayFunction(this::targetLabel)
-                .selectedItem(values.contains(raw(field)) ? raw(field) : values.getFirst())
+            List<String> values = runTargets(membership, currentMembership(), raw("targetType"), raw("targetId"));
+            String selected = runTargetKey(raw("targetType"), raw("targetId"));
+            targetIdInput = new DropDownWidget.Builder<>(values).displayFunction(this::runTargetLabel)
+                .selectedItem(values.contains(selected) ? selected : values.getFirst())
                 .maxVisibleItems(7)
-                .onSelectionChanged(value -> updateField(field, value)).build();
+                .onSelectionChanged(this::updateRunTarget).build();
             targetIdInput.setWidth(CONTROL_WIDTH);
             formControls.add(targetIdInput);
             return targetIdInput;
@@ -631,7 +634,7 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
             }
             String selected = values.contains(current) ? current : values.getFirst();
             DropDownWidget<String> dropdown = new DropDownWidget.Builder<>(values)
-                .displayFunction(AutomationDefinitionDesignerScreen::optionLabel).selectedItem(selected)
+                .displayFunction(value -> optionLabel(field, value)).selectedItem(selected)
                 .maxVisibleItems(7)
                 .onSelectionChanged(value -> updateField(field, value)).build();
             dropdown.setWidth(CONTROL_WIDTH);
@@ -653,7 +656,8 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
                 DropDownWidget<String> dropdown = (DropDownWidget<String>) rawDropdown;
                 List<String> values;
                 if ("targetId".equals(field)) {
-                    values = targetIds(membership, currentMembership(), raw("targetType"), current);
+                    values = runTargets(membership, currentMembership(), raw("targetType"), current);
+                    current = runTargetKey(raw("targetType"), current);
                 } else {
                     values = new ArrayList<>(AutomationDefinitionDraft.options(type, field));
                     if (!current.isBlank() && !values.contains(current)) {
@@ -708,6 +712,38 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
         updateActionState();
     }
 
+    private void updateRunTarget(String value) {
+        if (document == null || savePending || creationPending || deletePending) {
+            return;
+        }
+        String type = "function";
+        String id = "";
+        if (value != null && !value.isBlank() && !"select_target".equals(value)) {
+            int split = value.indexOf(':');
+            if (split > 0) {
+                type = value.substring(0, split);
+                id = value.substring(split + 1);
+            }
+        }
+        rawValues.put("targetType", type);
+        rawValues.put("targetId", id);
+        String selectedType = type;
+        String selectedId = id;
+        Runnable mutation = () -> {
+            try {
+                AutomationDefinitionDraft.put(this.type, document, "targetType", selectedType);
+                AutomationDefinitionDraft.put(this.type, document, "targetId", selectedId);
+            } catch (RuntimeException ignored) {
+            }
+            draft.markMutation();
+        };
+        if (!draft.defer(mutation)) {
+            mutation.run();
+        }
+        syncTargetChoices();
+        updateActionState();
+    }
+
     private void updateConditionalRows() {
         if (!AutomationDefinitionDraft.SCHEDULE.equals(type)) {
             return;
@@ -734,8 +770,9 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
         if (targetIdInput == null) {
             return;
         }
-        List<String> values = targetIds(membership, currentMembership(), raw("targetType"), raw("targetId"));
-        targetIdInput.setItems(values, values.contains(raw("targetId")) ? raw("targetId") : values.getFirst());
+        List<String> values = runTargets(membership, currentMembership(), raw("targetType"), raw("targetId"));
+        String selected = runTargetKey(raw("targetType"), raw("targetId"));
+        targetIdInput.setItems(values, values.contains(selected) ? selected : values.getFirst());
     }
 
     private void updateActionState() {
@@ -1405,7 +1442,7 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
     }
 
     private int navigationWidth() {
-        return navigation == null ? NAVIGATION_WIDTH + 8 : navigation.getConfiguredWidth() + 8;
+        return navigation == null ? NAVIGATION_WIDTH + 8 : navigation.layoutWidth(8);
     }
 
     @Override
@@ -1893,6 +1930,35 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
         return List.copyOf(values);
     }
 
+    static List<String> runTargets(FlowManager.TypedResourceMembershipSnapshot membership, boolean current,
+                                   String targetType, String selectedId) {
+        LinkedHashSet<String> values = new LinkedHashSet<>();
+        values.add("select_target");
+        if (current && membership != null) {
+            List<String> keys = new ArrayList<>();
+            for (FlowManager.ProjectResource resource : membership.resources()) {
+                if (TARGET_TYPES.contains(resource.type()) && completeType(membership, resource.type())) {
+                    keys.add(runTargetKey(resource.type(), resource.id()));
+                }
+            }
+            keys.sort(String.CASE_INSENSITIVE_ORDER);
+            values.addAll(keys);
+        }
+        String selected = runTargetKey(targetType, selectedId);
+        if (!selected.isBlank() && !"select_target".equals(selected)) {
+            values.add(selected);
+        }
+        return List.copyOf(values);
+    }
+
+    static String runTargetKey(String targetType, String selectedId) {
+        if (selectedId == null || selectedId.isBlank() || "select_target".equals(selectedId)) {
+            return "select_target";
+        }
+        String type = targetType == null || targetType.isBlank() ? "function" : targetType;
+        return type + ":" + selectedId;
+    }
+
     static boolean completeType(FlowManager.TypedResourceMembershipSnapshot membership, String type) {
         return membership != null && type != null && membership.completeTypes().contains(type);
     }
@@ -1901,8 +1967,15 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
         return AutomationDefinitionDraft.VARIABLE.equals(type);
     }
 
-    private String targetLabel(String value) {
-        return "select_target".equals(value) ? "Select Target" : value;
+    private String runTargetLabel(String value) {
+        if (value == null || value.isBlank() || "select_target".equals(value)) {
+            return "Select What To Run";
+        }
+        int split = value.indexOf(':');
+        if (split <= 0 || split == value.length() - 1) {
+            return value;
+        }
+        return optionLabel("targetType", value.substring(0, split)) + " · " + value.substring(split + 1);
     }
 
     private Map<String, String> rawValues(JsonObject source, boolean includeId) {
@@ -1974,9 +2047,9 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
 
     private static String typeDescription(String type) {
         return switch (type) {
-            case AutomationDefinitionDraft.VARIABLE -> "Reusable Typed Values";
-            case AutomationDefinitionDraft.TIMER -> "Reusable Countdown State";
-            case AutomationDefinitionDraft.SCHEDULE -> "Timed Automation Tasks";
+            case AutomationDefinitionDraft.VARIABLE -> "Reusable values that flows can get and set.";
+            case AutomationDefinitionDraft.TIMER -> "Named countdowns you start, pause, and check. Use these for minigames, cooldowns, and timed states.";
+            case AutomationDefinitionDraft.SCHEDULE -> "Reusable timed jobs that run a Function, Flow, or Command after a delay, at a time, on a repeat, or on a cron pattern.";
             default -> "Automation Definitions";
         };
     }
@@ -2016,10 +2089,49 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
         };
     }
 
-    private static String optionLabel(String value) {
+    static String optionLabel(String value) {
+        return optionLabel("", value);
+    }
+
+    static String optionLabel(String field, String value) {
         if (value == null || value.isBlank()) {
             return "";
         }
+        String key = (field == null ? "" : field) + ":" + value;
+        return switch (key) {
+            case "overlapPolicy:skip" -> "Skip This Run";
+            case "overlapPolicy:queue" -> "Wait In Line";
+            case "overlapPolicy:parallel" -> "Run At The Same Time";
+            case "overlapPolicy:replace" -> "Stop The Current Run";
+            case "existingTaskPolicy:replace" -> "Restart The Active Task";
+            case "existingTaskPolicy:keep" -> "Keep The Active Task";
+            case "existingTaskPolicy:fail" -> "Refuse A Duplicate Start";
+            case "failurePolicy:continue" -> "Keep Repeating";
+            case "failurePolicy:stop" -> "Stop After Failure";
+            case "offlinePolicy:wait" -> "Wait For The Player";
+            case "offlinePolicy:skip" -> "Skip While Offline";
+            case "offlinePolicy:run_without_player" -> "Run Without The Player";
+            case "offlinePolicy:cancel" -> "Cancel The Task";
+            case "missedRunPolicy:run_once" -> "Catch Up Once";
+            case "missedRunPolicy:skip" -> "Skip Missed Runs";
+            case "missedRunPolicy:cancel" -> "Cancel After A Miss";
+            case "scope:flow" -> "This Flow";
+            case "scope:server" -> "Whole Server";
+            case "scope:player" -> "Each Player";
+            case "scope:entity" -> "Each Entity";
+            case "scope:network" -> "Whole Network";
+            case "targetType:flow" -> "Flow";
+            case "targetType:function" -> "Function";
+            case "targetType:command" -> "Command";
+            case "timingMode:after_delay" -> "After A Delay";
+            case "timingMode:at_time" -> "At A Date And Time";
+            case "timingMode:repeating" -> "Repeating";
+            case "timingMode:cron" -> "Cron Pattern";
+            default -> titleCase(value);
+        };
+    }
+
+    private static String titleCase(String value) {
         String[] words = value.split("_", -1);
         for (String word : words) {
             if (word.isEmpty()) {
@@ -2053,47 +2165,46 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
             case "defaultDuration" -> "Default Duration";
             case "defaultUnit" -> "Default Unit";
             case "tickInterval" -> "Tick Interval";
-            case "targetType" -> "Target Type";
-            case "targetId" -> "Target";
+            case "targetId" -> "Run This";
             case "timingMode" -> "Timing Mode";
             case "initialDelay" -> "Initial Delay";
             case "dateTime" -> "Date And Time";
             case "timeZone" -> "Time Zone";
-            case "overlapPolicy" -> "Overlap Policy";
-            case "existingTaskPolicy" -> "Existing Task Policy";
-            case "failurePolicy" -> "Failure Policy";
-            case "offlinePolicy" -> "Offline Policy";
-            case "missedRunPolicy" -> "Missed Run Policy";
+            case "overlapPolicy" -> "This Run";
+            case "existingTaskPolicy" -> "This Task";
+            case "failurePolicy" -> "After Failure";
+            case "offlinePolicy" -> "While Offline";
+            case "missedRunPolicy" -> "Missed Run";
+            case "scope" -> "Scope";
             default -> optionLabel(field);
         };
     }
 
     private static String fieldDescription(String field) {
         return switch (field) {
-            case "id" -> "Stable Identity Used By Automation Nodes";
-            case "name" -> "Name Shown Throughout Studio";
-            case "description" -> "Short Explanation Of This Definition";
-            case "valueType" -> "Type Accepted By Get, Set, Events, And Numeric Operations";
-            case "defaultValue" -> "Value Returned Before This Variable Is Set";
-            case "defaultDuration" -> "Duration Used When Timer Start Does Not Provide One";
-            case "defaultUnit" -> "Unit For The Default Duration And Tick Interval";
-            case "tickInterval" -> "Heartbeat Interval, With Zero Disabling Tick Events";
-            case "targetType" -> "Kind Of Resource Invoked When This Schedule Fires";
-            case "targetId" -> "Flow, Function, Or Command Invoked By This Schedule";
-            case "timingMode" -> "Controls Which Timing Values Apply";
-            case "duration" -> "Delay Or Repeating Interval";
-            case "unit" -> "Unit For The Duration And Initial Delay";
-            case "initialDelay" -> "Delay Before The First Repeating Run";
-            case "dateTime" -> "Date And Time For A One-Time Run";
-            case "timeZone" -> "Time Zone Used For Dates And Cron Patterns";
-            case "cron" -> "Cron Pattern That Determines Run Times";
-            case "scope" -> "Owner Of Each Runtime Instance";
-            case "persistent" -> "Restore Runtime State After A Server Restart";
-            case "overlapPolicy" -> "Behavior While The Previous Run Is Still Active";
-            case "existingTaskPolicy" -> "Behavior When The Same Schedule Is Already Active";
-            case "failurePolicy" -> "Behavior After A Repeating Run Fails";
-            case "offlinePolicy" -> "Behavior When A Player Owner Is Offline";
-            case "missedRunPolicy" -> "Behavior After The Server Misses A Run";
+            case "id" -> "The name other nodes use to start or check this definition.";
+            case "name" -> "The name shown in Studio.";
+            case "description" -> "A short note about what this is for.";
+            case "valueType" -> "The type of value this variable stores.";
+            case "defaultValue" -> "Returned before anything has set this variable.";
+            case "defaultDuration" -> "How long the timer runs when Start does not pass a duration.";
+            case "defaultUnit" -> "Unit for the default duration and tick interval.";
+            case "tickInterval" -> "Optional heartbeat. Zero means no tick events.";
+            case "targetId" -> "Choose the Function, Flow, or Command this schedule runs. Create that resource once and reuse it from any schedule.";
+            case "timingMode" -> "Choose when this schedule should fire.";
+            case "duration" -> "How long to wait, or how often a repeating schedule runs.";
+            case "unit" -> "Unit for the wait or repeat interval.";
+            case "initialDelay" -> "Optional wait before the first repeating run.";
+            case "dateTime" -> "The date and time of a one-time run.";
+            case "timeZone" -> "Time zone used for calendar times and cron patterns.";
+            case "cron" -> "Cron pattern that chooses run times.";
+            case "scope" -> "Who owns each live instance. Server is one shared timer. Player is one per player.";
+            case "persistent" -> "Keep the live state after a server restart.";
+            case "overlapPolicy" -> "What to do if this schedule wants to fire while a previous run is still going.";
+            case "existingTaskPolicy" -> "What to do if this schedule is started again while it is already active.";
+            case "failurePolicy" -> "What to do after a repeating run fails.";
+            case "offlinePolicy" -> "What to do when the owning player is offline.";
+            case "missedRunPolicy" -> "What to do if the server was down or paused through a planned run.";
             default -> "";
         };
     }
