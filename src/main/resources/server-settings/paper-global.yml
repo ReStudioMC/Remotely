@@ -18,16 +18,32 @@ packs:
             tab: Software Settings
             group: Anti-Cheat
             name: Additional Hidden Components
-            description: Hides these item data components from other players.
+            description: Hides the selected item data components from other players.
             default: []
+            collection:
+              mode: sequence
+              ordered: true
+              unique: true
+              value:
+                type: text
+                catalog: {source: 'server:minecraft:data_component_type'}
+                allowCustom: true
           - id: item-obfuscation-dont-obfuscate
             key: anticheat.obfuscation.items.all-models.dont-obfuscate
             type: list
             tab: Software Settings
             group: Anti-Cheat
             name: Visible Item Components
-            description: Keeps these item data components visible to other players.
+            description: Keeps the selected item data components visible to other players even when item obfuscation is active.
             default: [minecraft:lodestone_tracker]
+            collection:
+              mode: sequence
+              ordered: true
+              unique: true
+              value:
+                type: text
+                catalog: {source: 'server:minecraft:data_component_type'}
+                allowCustom: true
           - id: item-obfuscation-sanitize-count
             key: anticheat.obfuscation.items.all-models.sanitize-count
             type: boolean
@@ -56,6 +72,45 @@ packs:
                 also-obfuscate: []
                 dont-obfuscate: [minecraft:damage]
                 sanitize-count: true
+            collection:
+              mode: dynamic-map
+              ordered: true
+              unique: true
+              key:
+                type: text
+                catalog: {source: 'server:minecraft:item_model'}
+                allowCustom: true
+              value:
+                type: object
+                fields:
+                  - key: also-obfuscate
+                    name: Additional Hidden Components
+                    description: Hides these components for items using this model.
+                    type: list
+                    collection:
+                      mode: sequence
+                      ordered: true
+                      unique: true
+                      value:
+                        type: text
+                        catalog: {source: 'server:minecraft:data_component_type'}
+                        allowCustom: true
+                  - key: dont-obfuscate
+                    name: Visible Components
+                    description: Keeps these components visible for items using this model.
+                    type: list
+                    collection:
+                      mode: sequence
+                      ordered: true
+                      unique: true
+                      value:
+                        type: text
+                        catalog: {source: 'server:minecraft:data_component_type'}
+                        allowCustom: true
+                  - key: sanitize-count
+                    name: Hide Item Count
+                    description: Hides the stack count for items using this model.
+                    type: boolean
           - id: disable-chorus-plant-updates
             key: block-updates.disable-chorus-plant-updates
             type: boolean
@@ -504,6 +559,32 @@ packs:
                 action: DROP
                 interval: 4.0
                 max-packet-rate: 5.0
+            collection:
+              mode: dynamic-map
+              ordered: true
+              unique: true
+              key:
+                type: text
+                catalog: {source: 'server:minecraft:serverbound_packet'}
+                allowCustom: true
+              value:
+                type: object
+                fields:
+                  - key: action
+                    name: Action
+                    description: Chooses whether excess packets are dropped or the player is kicked.
+                    type: select
+                    options: [DROP, KICK]
+                  - key: interval
+                    name: Interval
+                    description: Sets the measurement interval in seconds.
+                    type: decimal
+                    min: 0
+                  - key: max-packet-rate
+                    name: Maximum Packet Rate
+                    description: Sets the packets allowed during the interval.
+                    type: decimal
+                    min: 0
           - id: player-save-max-per-tick
             key: player-auto-save.max-per-tick
             type: integer
@@ -678,8 +759,16 @@ packs:
             tab: Software Settings
             group: Unsupported Settings
             name: Exempt Oversized Item Components
-            description: Exempts listed components from oversized item sanitization and may re-enable exploits.
+            description: Keeps the selected components unchanged when oversized item data is sanitized. Exemptions may re-enable exploits.
             default: []
+            collection:
+              mode: sequence
+              ordered: true
+              unique: true
+              value:
+                type: text
+                catalog: {source: 'server:minecraft:data_component_type'}
+                allowCustom: true
           - id: perform-username-validation
             key: unsupported-settings.perform-username-validation
             type: boolean

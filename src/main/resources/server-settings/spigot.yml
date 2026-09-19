@@ -198,8 +198,18 @@ packs:
             tab: Software Settings
             group: Advancements
             name: Disabled Advancements
-            description: Lists advancement keys or namespaces that players cannot earn; use '*' to disable all.
+            description: Prevents players from earning the selected advancements or namespaces. Disable All blocks every advancement.
             default: []
+            collection:
+              mode: sequence
+              ordered: true
+              unique: true
+              value:
+                type: text
+                catalog: {source: 'server:minecraft:advancement'}
+                allowCustom: true
+                sentinels:
+                  - {value: '*', label: Disable All, role: all}
           - id: messages.whitelist
             key: messages.whitelist
             type: text
@@ -1142,6 +1152,15 @@ packs:
             name: Forced Statistics
             description: Maps statistic resource locations to integer values that are forced for players.
             default: {}
+            collection:
+              mode: dynamic-map
+              ordered: true
+              unique: true
+              key:
+                type: text
+                catalog: {source: 'server:minecraft:statistic'}
+                allowCustom: true
+              value: {type: integer}
           - id: commands.tab-complete
             key: commands.tab-complete
             type: integer
@@ -1173,16 +1192,29 @@ packs:
             tab: Software Settings
             group: Commands
             name: Vanilla Command Replacements
-            description: Lists vanilla commands that replace plugin command implementations.
+            description: Gives the selected Vanilla commands priority over plugin commands with the same name.
             default: [setblock, summon, testforblock]
+            collection:
+              mode: sequence
+              ordered: true
+              unique: true
+              value:
+                type: text
+                catalog: {source: 'server:minecraft:command'}
+                allowCustom: true
           - id: commands.spam-exclusions
             key: commands.spam-exclusions
             type: list
             tab: Software Settings
             group: Commands
             name: Spam Exclusions
-            description: Lists command or chat prefixes excluded from the built-in spam filter.
+            description: Lets messages and commands beginning with these prefixes bypass Spigot's spam rate check.
             default: [/skill]
+            collection:
+              mode: sequence
+              ordered: true
+              unique: true
+              value: {type: text}
           - id: commands.silent-commandblock-console
             key: commands.silent-commandblock-console
             type: boolean
@@ -1386,5 +1418,14 @@ packs:
             tab: Software Settings
             group: Dynamic World Overrides
             name: Named World Settings
-            description: Stores arbitrary per-world overrides keyed by each world folder name; use the same setting shapes as world-settings.default.
+            description: Applies per-world Spigot overrides using the same setting shapes as the default world section.
             default: {}
+            collection:
+              mode: dynamic-map
+              ordered: true
+              unique: true
+              key:
+                type: text
+                catalog: {source: 'server:minecraft:world'}
+                allowCustom: true
+              value: {type: raw}

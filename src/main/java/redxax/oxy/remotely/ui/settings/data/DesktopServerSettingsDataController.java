@@ -1,15 +1,17 @@
 package redxax.oxy.remotely.ui.settings.data;
 
-import redxax.oxy.remotely.settings.server.ServerSettingsSnapshot;
 import redxax.oxy.remotely.network.config.DesktopStructuredDocumentParser;
+import redxax.oxy.remotely.settings.server.ServerSettingsSnapshot;
 import restudio.rebase.api.RebaseAPI;
 import restudio.rebase.api.RebaseApiFactory;
 import restudio.rebase.instance.Instance;
-import restudio.rescreen.platform.Async;
 import restudio.rebase.platform.jvm.JvmAsyncBridge;
+import restudio.rescreen.platform.Async;
 
 import java.nio.file.Path;
+import java.util.Collection;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
@@ -42,7 +44,13 @@ public class DesktopServerSettingsDataController extends ServerSettingsDocumentD
         Objects.requireNonNull(instance, "instance");
         return new ServerSettingsDocumentTarget() {
             @Override
-            public java.util.Collection<String> softwareTokens() {
+            public String catalogServerId() {
+                String instanceId = instance.getInstanceId();
+                return instanceId == null ? "" : instanceId.trim();
+            }
+
+            @Override
+            public Collection<String> softwareTokens() {
                 return DesktopServerSettingsPackMatcher.softwareTokens(instance);
             }
 
@@ -67,6 +75,7 @@ public class DesktopServerSettingsDataController extends ServerSettingsDocumentD
                 properties.clear();
                 properties.putAll(values);
             }
+
         };
     }
 
@@ -76,6 +85,9 @@ public class DesktopServerSettingsDataController extends ServerSettingsDocumentD
             @Override
             public Async<Document> read(String relativePath) {
                 Path path = resolve(instance, relativePath);
+                if (path == null) {
+                    return Async.completed(Document.missing());
+                }
                 return JvmAsyncBridge.fromFuture(api.fileExists(path)).thenCompose(exists -> Boolean.TRUE.equals(exists)
                         ? JvmAsyncBridge.fromFuture(api.readFile(path)).thenApply(content -> new Document(true, content))
                         : Async.completed(Document.missing()));
@@ -83,12 +95,28 @@ public class DesktopServerSettingsDataController extends ServerSettingsDocumentD
 
             @Override
             public Async<Void> write(String relativePath, String content) {
-                return JvmAsyncBridge.fromFuture(api.writeFile(resolve(instance, relativePath), content));
+                Path path = resolve(instance, relativePath);
+                if (path == null) {
+                    return Async.failed(new IllegalArgumentException("Configuration path is required"));
+                }
+                return JvmAsyncBridge.fromFuture(api.writeFile(path, content));
+            }
+
+            @Override
+            public Async<List<Entry>> list(String relativePath) {
+                Path path = resolve(instance, relativePath == null || relativePath.isBlank() ? "." : relativePath);
+                if (path == null) return Async.completed(List.of());
+                return JvmAsyncBridge.fromFuture(api.listDirectory(path)).thenApply(entries -> entries == null ? List.of()
+                        : entries.stream().filter(Objects::nonNull)
+                        .map(entry -> new Entry(entry.displayName != null ? entry.displayName
+                                : entry.path != null && entry.path.getFileName() != null ? entry.path.getFileName().toString() : "", entry.isDirectory))
+                        .filter(entry -> !entry.name().isBlank()).toList());
             }
         };
     }
 
     private static Path resolve(Instance instance, String relativePath) {
+        if (relativePath == null || relativePath.isBlank()) return null;
         String root = instance.getPath();
         if (root == null || root.isBlank()) return Path.of(relativePath);
         Path base = Path.of(root).toAbsolutePath().normalize();

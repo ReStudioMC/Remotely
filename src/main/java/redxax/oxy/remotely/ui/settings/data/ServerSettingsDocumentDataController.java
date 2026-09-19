@@ -1,18 +1,24 @@
 package redxax.oxy.remotely.ui.settings.data;
 
+import redxax.oxy.remotely.data.flow.OptionCatalogItem;
+import redxax.oxy.remotely.data.flow.OptionCatalogLoader;
 import redxax.oxy.remotely.network.ConfigurationFormat;
 import redxax.oxy.remotely.network.config.NetworkConfigurationAdapter;
 import redxax.oxy.remotely.network.config.NetworkConfigurationAdapters;
 import redxax.oxy.remotely.network.config.StructuredDocumentParser;
+import redxax.oxy.remotely.settings.server.BrowserSafeYaml;
 import redxax.oxy.remotely.settings.server.ServerSettingsDocument;
 import redxax.oxy.remotely.settings.server.ServerSettingsField;
 import redxax.oxy.remotely.settings.server.ServerSettingsFieldType;
 import redxax.oxy.remotely.settings.server.ServerSettingsFormat;
 import redxax.oxy.remotely.settings.server.ServerSettingsPack;
 import redxax.oxy.remotely.settings.server.ServerSettingsSnapshot;
-import redxax.oxy.remotely.settings.server.BrowserSafeYaml;
+import restudio.rebase.minecraft.MinecraftBiomeCatalog;
+import restudio.rescreen.platform.Async;
 import restudio.rescreen.ui.settings.Setting;
+import restudio.rescreen.ui.settings.SettingWidgetFactory;
 import restudio.rescreen.ui.settings.options.ConfigOption;
+import restudio.rescreen.ui.settings.options.OptionEditor;
 
 import java.io.IOException;
 import java.io.StringReader;
@@ -24,10 +30,10 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
-import restudio.rescreen.platform.Async;
 import java.util.stream.Collectors;
 
 public class ServerSettingsDocumentDataController implements ServerSettingsDataController {
@@ -44,9 +50,16 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
     private final Async<Void> loadFuture;
     private final LinkedHashMap<String, DocumentState> documents = new LinkedHashMap<>();
     private final LinkedHashMap<String, List<FieldBinding>> fieldsByTab = new LinkedHashMap<>();
+    private final LinkedHashMap<String, List<Setting>> settingsByTab = new LinkedHashMap<>();
+    private final LinkedHashMap<FieldBinding, ConfigOption<?>> collectionOptions = new LinkedHashMap<>();
     private final LinkedHashSet<String> documentPaths = new LinkedHashSet<>();
     private final LinkedHashSet<String> availableDocumentPaths = new LinkedHashSet<>();
     private final LinkedHashSet<String> unavailableDocumentPaths = new LinkedHashSet<>();
+    private List<String> worldCatalog = List.of();
+    private Async<List<String>> worldDiscovery;
+    private long loadGeneration = 1;
+    private boolean closed;
+    private boolean settingsExposed;
 
     public ServerSettingsDocumentDataController(ServerSettingsDocumentTarget source, ServerSettingsSnapshot snapshot,
                                                  ServerSettingsDocumentStore store) {
@@ -90,7 +103,8 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
 
     public List<Setting> settings(String tab) {
         synchronized (stateLock) {
-            return buildSettings(fieldsByTab.getOrDefault(tab, List.of()));
+            settingsExposed = true;
+            return settingsByTab.getOrDefault(tab, List.of());
         }
     }
 
@@ -104,9 +118,8 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
 
     public Map<String, List<Setting>> settingsByTab() {
         synchronized (stateLock) {
-            LinkedHashMap<String, List<Setting>> copy = new LinkedHashMap<>();
-            fieldsByTab.forEach((tab, fields) -> copy.put(tab, buildSettings(fields)));
-            return Collections.unmodifiableMap(copy);
+            settingsExposed = true;
+            return Collections.unmodifiableMap(new LinkedHashMap<>(settingsByTab));
         }
     }
 
@@ -162,29 +175,40 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
 
     @Override
     public void close() {
+        Async<List<String>> discovery;
         synchronized (stateLock) {
+            closed = true;
+            loadGeneration++;
+            discovery = worldDiscovery;
+            worldDiscovery = null;
             documents.clear();
             fieldsByTab.clear();
+            settingsByTab.clear();
             documentPaths.clear();
             availableDocumentPaths.clear();
             unavailableDocumentPaths.clear();
         }
+        if (discovery != null) discovery.cancel();
     }
 
     private Async<Void> loadDocuments() {
+        long generation;
+        synchronized (stateLock) {
+            generation = loadGeneration;
+        }
         List<DocumentDefinition> definitions = definitions();
         synchronized (stateLock) {
             definitions.forEach(definition -> documentPaths.add(definition.relativePath()));
         }
         List<Async<LoadedDocument>> loads = definitions.stream().map(this::loadDocument).toList();
         if (loads.isEmpty()) {
-            synchronized (stateLock) {
-                rebuildSettings();
-            }
+            publishSettings(generation, initialWorlds(), false);
+            discoverWorlds(generation);
             return Async.completed(null);
         }
-        return Async.allOf(loads.toArray(Async[]::new)).thenRun(() -> {
+        return Async.allOf(loads.toArray(Async[]::new)).thenAccept(ignored -> {
             synchronized (stateLock) {
+                if (closed || generation != loadGeneration) return;
                 for (Async<LoadedDocument> load : loads) {
                     LoadedDocument loaded = load.join();
                     if (loaded.available()) {
@@ -196,9 +220,105 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
                         unavailableDocumentPaths.add(loaded.definition().relativePath());
                     }
                 }
-                rebuildSettings();
+            }
+            publishSettings(generation, initialWorlds(), false);
+            discoverWorlds(generation);
+        });
+    }
+
+    private void publishSettings(long generation, List<String> worlds, boolean discovered) {
+        synchronized (stateLock) {
+            if (closed || generation != loadGeneration) return;
+            worldCatalog = worlds == null ? List.of() : List.copyOf(worlds);
+            if (discovered && settingsExposed) return;
+            rebuildSettings();
+        }
+    }
+
+    private List<String> initialWorlds() {
+        String current = source.property("level-name");
+        return List.of(current == null || current.isBlank() ? "world" : current.trim());
+    }
+
+    private void discoverWorlds(long generation) {
+        Async<List<String>> discovery = discoverWorlds();
+        synchronized (stateLock) {
+            if (closed || generation != loadGeneration) {
+                discovery.cancel();
+                return;
+            }
+            worldDiscovery = discovery;
+        }
+        discovery.thenAccept(worlds -> publishSettings(generation, worlds, true)).exceptionally(error -> null);
+        discovery.whenComplete((worlds, error) -> {
+            synchronized (stateLock) {
+                if (worldDiscovery == discovery) worldDiscovery = null;
             }
         });
+    }
+
+    private Async<List<String>> discoverWorlds() {
+        String container;
+        synchronized (stateLock) {
+            container = worldContainer();
+        }
+        LinkedHashSet<String> initial = new LinkedHashSet<>(initialWorlds());
+        return safeList(container).thenCompose(entries -> {
+            Async<LinkedHashSet<String>> discovery = Async.completed(initial);
+            List<ServerSettingsDocumentStore.Entry> directories = entries.stream()
+                    .filter(entry -> entry.directory() && !entry.name().isBlank()).toList();
+            for (int offset = 0; offset < directories.size(); offset += 4) {
+                List<ServerSettingsDocumentStore.Entry> batch = directories.subList(offset, Math.min(offset + 4, directories.size()));
+                discovery = discovery.thenCompose(worlds -> {
+                    List<Async<String>> checks = batch.stream().map(entry -> safeList(joinPath(container, entry.name())).thenApply(children ->
+                            children.stream().anyMatch(child -> !child.directory() && child.name().equalsIgnoreCase("level.dat")) ? entry.name() : "")).toList();
+                    return Async.allOf(checks.toArray(Async[]::new)).thenApply(ignored -> {
+                        checks.stream().map(Async::join).filter(name -> !name.isBlank()).forEach(worlds::add);
+                        return worlds;
+                    });
+                });
+            }
+            return discovery.thenApply(worlds -> worlds.stream().sorted(String.CASE_INSENSITIVE_ORDER).toList());
+        });
+    }
+
+    private Async<List<ServerSettingsDocumentStore.Entry>> safeList(String path) {
+        try {
+            Async<List<ServerSettingsDocumentStore.Entry>> listed = store.list(path);
+            if (listed == null) return Async.completed(List.of());
+            return listed.handle((entries, error) -> error == null && entries != null ? entries : List.of());
+        } catch (RuntimeException ignored) {
+            return Async.completed(List.of());
+        }
+    }
+
+    private String worldContainer() {
+        DocumentState bukkit = documents.get("bukkit.yml");
+        if (bukkit == null || bukkit.baselineContent.isBlank()) return ".";
+        try {
+            Object root = structuredParser.parse(bukkit.baselineContent);
+            if (root instanceof Map<?, ?> map && map.get("settings") instanceof Map<?, ?> settings) {
+                Object value = settings.get("world-container");
+                return safeRelativePath(value == null ? "." : value.toString());
+            }
+        } catch (RuntimeException ignored) {
+        }
+        return ".";
+    }
+
+    private String safeRelativePath(String value) {
+        String normalized = value == null ? "." : value.trim().replace('\\', '/');
+        if (normalized.isBlank() || normalized.equals(".")) return ".";
+        if (normalized.startsWith("/") || normalized.matches("^[A-Za-z]:/.*")) return ".";
+        for (String segment : normalized.split("/")) {
+            if (segment.equals("..")) return ".";
+        }
+        while (normalized.startsWith("./")) normalized = normalized.substring(2);
+        return normalized.isBlank() ? "." : normalized;
+    }
+
+    private String joinPath(String parent, String child) {
+        return parent == null || parent.isBlank() || parent.equals(".") ? child : parent + "/" + child;
     }
 
     private Async<LoadedDocument> loadDocument(DocumentDefinition definition) {
@@ -261,11 +381,15 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
 
     private void rebuildSettings() {
         fieldsByTab.clear();
+        settingsByTab.clear();
+        collectionOptions.clear();
         for (DocumentState document : documents.values()) {
             for (FieldBinding binding : document.bindings) {
                 fieldsByTab.computeIfAbsent(binding.field.tab(), ignored -> new ArrayList<>()).add(binding);
             }
         }
+        preloadCollectionCatalogs();
+        fieldsByTab.forEach((tab, fields) -> settingsByTab.put(tab, buildSettings(fields)));
     }
 
     private List<Setting> buildSettings(List<FieldBinding> bindings) {
@@ -279,11 +403,485 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
 
     private ConfigOption<?> option(FieldBinding binding) {
         ServerSettingsField field = binding.field;
+        if (isWorldField(field)) {
+            return worldOption(binding);
+        }
+        if (isBiomeField(field)) {
+            return biomeOption(binding);
+        }
+        if (isLevelTypeField(field)) {
+            return levelTypeOption(binding);
+        }
         return switch (field.type()) {
             case BOOLEAN -> booleanOption(binding);
-            case INTEGER, DECIMAL -> textOption(binding);
-            case TEXT, SELECT, DURATION, DURATION_OR_DISABLED, LIST, MAP, BOOLEAN_OR_DEFAULT, BOOLEAN_OR_DISABLED, INTEGER_OR_DEFAULT, INTEGER_OR_DISABLED, DECIMAL_OR_DEFAULT, DECIMAL_OR_DISABLED -> textOption(binding);
+            case INTEGER, INTEGER_OR_DISABLED, INTEGER_OR_DEFAULT -> numberOption(binding, ConfigOption.Editor.INTEGER);
+            case DECIMAL, DECIMAL_OR_DISABLED, DECIMAL_OR_DEFAULT -> numberOption(binding, ConfigOption.Editor.DECIMAL);
+            case LIST -> listOption(binding);
+            case MAP -> mapOption(binding);
+            case BOOLEAN_OR_DEFAULT, BOOLEAN_OR_DISABLED -> booleanUnionOption(binding);
+            case TEXT, SELECT, DURATION, DURATION_OR_DISABLED -> textOption(binding);
         };
+    }
+
+    private boolean isWorldField(ServerSettingsField field) {
+        String key = field.key().toLowerCase(Locale.ROOT);
+        String id = field.id().toLowerCase(Locale.ROOT);
+        return key.equals("level-name") || key.endsWith(".level-name") || id.equals("level-name") || id.endsWith(".level-name")
+                || key.equals("world-name") || id.equals("world-name");
+    }
+
+    private ConfigOption<String> worldOption(FieldBinding binding) {
+        ServerSettingsField field = binding.field;
+        List<String> worlds = new ArrayList<>(worldCatalog);
+        String current = binding.value == null ? null : binding.value.toString();
+        if (current != null && !current.isBlank() && !worlds.contains(current)) {
+            worlds.add(0, current);
+        }
+        if (worlds.isEmpty()) {
+            worlds.add("world");
+        }
+        ConfigOption.Builder<String> builder = ConfigOption.<String>builder(field.name())
+                .description(field.description())
+                .bind(() -> (String) readValue(binding), value -> writeValue(binding, value))
+                .defaultValue((String) binding.defaultValue);
+        if (worlds.size() > 1) {
+            builder.options(worlds);
+        }
+        if (worlds.size() > 10) {
+            builder.itemSelector(true);
+        }
+        return builder.build();
+    }
+
+    private boolean isBiomeField(ServerSettingsField field) {
+        if (field.type() != ServerSettingsFieldType.TEXT && field.type() != ServerSettingsFieldType.SELECT) {
+            return false;
+        }
+        String key = field.key().toLowerCase(Locale.ROOT);
+        String id = field.id().toLowerCase(Locale.ROOT);
+        return (key.endsWith("biome") || id.endsWith("biome") || key.contains("biome-") || id.contains("biome-"))
+                && !key.contains("minimum") && !key.contains("maximum") && !key.contains("height") && !key.contains("provider");
+    }
+
+    private ConfigOption<String> biomeOption(FieldBinding binding) {
+        ServerSettingsField field = binding.field;
+        List<String> biomes = new ArrayList<>(MinecraftBiomeCatalog.biomeIds());
+        String current = binding.value == null ? null : binding.value.toString();
+        if (current != null && !current.isBlank() && !biomes.contains(current)) {
+            biomes.add(0, current);
+        }
+        return ConfigOption.<String>builder(field.name())
+                .description(field.description())
+                .bind(() -> (String) readValue(binding), value -> writeValue(binding, value))
+                .defaultValue((String) binding.defaultValue)
+                .options(biomes)
+                .display(MinecraftBiomeCatalog::displayName)
+                .itemSelector(true)
+                .build();
+    }
+
+    private ConfigOption<?> listOption(FieldBinding binding) {
+        return collectionOption(binding, false);
+    }
+
+    private boolean isLevelTypeField(ServerSettingsField field) {
+        String key = field.key().toLowerCase(Locale.ROOT);
+        String id = field.id().toLowerCase(Locale.ROOT);
+        return key.equals("level-type") || id.equals("level-type") || key.endsWith(".level-type");
+    }
+
+    private ConfigOption<String> levelTypeOption(FieldBinding binding) {
+        ServerSettingsField field = binding.field;
+        List<String> presets = new ArrayList<>(List.of(
+                "minecraft:normal",
+                "minecraft:flat",
+                "minecraft:large_biomes",
+                "minecraft:amplified",
+                "minecraft:single_biome_surface"
+        ));
+        String current = binding.value == null ? null : binding.value.toString();
+        if (current != null && !current.isBlank() && !presets.contains(current)) {
+            presets.add(current);
+        }
+        return ConfigOption.<String>builder(field.name())
+                .description(field.description())
+                .bind(() -> (String) readValue(binding), value -> writeValue(binding, value))
+                .defaultValue((String) binding.defaultValue)
+                .options(presets)
+                .display(SettingWidgetFactory::formatFriendlyDisplayName)
+                .build();
+    }
+
+    private boolean isSeedField(ServerSettingsField field) {
+        String key = field.key().toLowerCase(Locale.ROOT);
+        String id = field.id().toLowerCase(Locale.ROOT);
+        String name = field.name().toLowerCase(Locale.ROOT);
+        return key.contains("seed") || id.contains("seed") || name.contains("seed");
+    }
+
+    private ConfigOption<?> mapOption(FieldBinding binding) {
+        return collectionOption(binding, true);
+    }
+
+    @SuppressWarnings("unchecked")
+    private ConfigOption<?> collectionOption(FieldBinding binding, boolean map) {
+        ServerSettingsField field = binding.field;
+        ServerSettingsField.CollectionSchema schema = field.collection();
+        if (schema == null) {
+            return textOption(binding);
+        }
+        OptionEditor<Object> editor = (OptionEditor<Object>) collectionEditor(schema);
+        Object fallback = normalizeCollection(schema, structuredValue(binding.defaultValue, map), map);
+        ConfigOption<Object> option = ConfigOption.builder(field.name())
+                .description(field.description())
+                .bind(() -> normalizeCollection(schema, structuredValue(readValue(binding), map), map),
+                        value -> writeValue(binding, formatFlow(value)))
+                .defaultValue(fallback)
+                .editor(editor)
+                .build();
+        collectionOptions.put(binding, option);
+        return option;
+    }
+
+    private OptionEditor<?> collectionEditor(ServerSettingsField.CollectionSchema schema) {
+        OptionEditor.Value<Object> value = valueEditor(schema.value());
+        if (schema.mode() == ServerSettingsField.CollectionMode.SEQUENCE) {
+            boolean custom = schema.value().catalog() == null || schema.value().allowCustom();
+            return new OptionEditor.Sequence<>(value, schema.ordered(), schema.unique(), custom);
+        }
+        OptionEditor.KeyPolicy<Object> keys;
+        if (schema.mode() == ServerSettingsField.CollectionMode.FIXED_MAP) {
+            List<OptionEditor.Choice<Object>> choices = schema.keys().stream()
+                    .map(key -> new OptionEditor.Choice<>((Object) key.value(), key.label()))
+                    .toList();
+            keys = OptionEditor.KeyPolicy.fixed(choices);
+        } else {
+            OptionEditor.ScalarValue<Object> key = scalarEditor(schema.key());
+            if (schema.key().catalog() == null) {
+                keys = OptionEditor.KeyPolicy.custom(key);
+            } else {
+                keys = OptionEditor.KeyPolicy.catalog(key.catalog(), schema.key().allowCustom() ? key : null);
+            }
+        }
+        return new OptionEditor.MapEntries<>(keys, value);
+    }
+
+    @SuppressWarnings("unchecked")
+    private OptionEditor.Value<Object> valueEditor(ServerSettingsField.ValueSpec spec) {
+        if (spec.type() == ServerSettingsField.ValueType.OBJECT) {
+            List<OptionEditor.Member<?>> members = new ArrayList<>();
+            for (ServerSettingsField.ObjectField field : objectFields(spec)) {
+                members.add(new OptionEditor.Member<>(field.key(), field.name(), field.description(), valueEditor(field.value())));
+            }
+            return (OptionEditor.Value<Object>) (OptionEditor.Value<?>) new OptionEditor.ObjectValue(members);
+        }
+        if (spec.type() == ServerSettingsField.ValueType.LIST || spec.type() == ServerSettingsField.ValueType.MAP) {
+            OptionEditor<Object> nested = (OptionEditor<Object>) collectionEditor(spec.collection());
+            Object fallback = spec.type() == ServerSettingsField.ValueType.LIST ? List.of() : Map.of();
+            return new OptionEditor.CollectionValue<>(nested, fallback);
+        }
+        return scalarEditor(spec);
+    }
+
+    private List<ServerSettingsField.ObjectField> objectFields(ServerSettingsField.ValueSpec spec) {
+        if (!spec.fields().isEmpty() || spec.fieldsFrom() == null) {
+            return spec.fields();
+        }
+        return dependentCatalog(spec.fieldsFrom()).stream()
+                .map(choice -> new ServerSettingsField.ObjectField(String.valueOf(choice.value()), choice.label(), choice.description(),
+                        new ServerSettingsField.ValueSpec(ServerSettingsField.ValueType.TEXT, null, null, List.of(), null,
+                                false, List.of(), List.of(), null, null)))
+                .toList();
+    }
+
+    private OptionEditor.ScalarValue<Object> scalarEditor(ServerSettingsField.ValueSpec spec) {
+        Object fallback = scalarDefault(spec);
+        return new OptionEditor.ScalarValue<>(scalarKind(spec.type()), fallback,
+                value -> parseScalar(spec, value), value -> scalarText(spec, value), () -> catalog(spec), sentinels(spec));
+    }
+
+    private OptionEditor.ScalarKind scalarKind(ServerSettingsField.ValueType type) {
+        return switch (type) {
+            case BOOLEAN -> OptionEditor.ScalarKind.BOOLEAN;
+            case INTEGER -> OptionEditor.ScalarKind.INTEGER;
+            case DECIMAL -> OptionEditor.ScalarKind.DECIMAL;
+            case SELECT -> OptionEditor.ScalarKind.SELECT;
+            case TEXT, DURATION, RAW, LIST, MAP, OBJECT -> OptionEditor.ScalarKind.TEXT;
+        };
+    }
+
+    private Object scalarDefault(ServerSettingsField.ValueSpec spec) {
+        if (!spec.sentinels().isEmpty()) {
+            return normalizeSentinel(spec, spec.sentinels().getFirst().value());
+        }
+        return switch (spec.type()) {
+            case BOOLEAN -> false;
+            case INTEGER -> spec.min() != null ? spec.min().toBigIntegerExact() : BigInteger.ZERO;
+            case DECIMAL -> spec.min() != null ? spec.min() : BigDecimal.ZERO;
+            case SELECT -> spec.options().getFirst();
+            case TEXT, DURATION, RAW -> "";
+            case LIST -> List.of();
+            case MAP, OBJECT -> Map.of();
+        };
+    }
+
+    private Object parseScalar(ServerSettingsField.ValueSpec spec, String value) {
+        String text = value == null ? "" : value.trim();
+        for (ServerSettingsField.Sentinel sentinel : spec.sentinels()) {
+            if (String.valueOf(sentinel.value()).equalsIgnoreCase(text)) {
+                return normalizeSentinel(spec, sentinel.value());
+            }
+        }
+        return switch (spec.type()) {
+            case BOOLEAN -> {
+                if (!text.equalsIgnoreCase("true") && !text.equalsIgnoreCase("false")) {
+                    throw new IllegalArgumentException("Expected true or false");
+                }
+                yield Boolean.parseBoolean(text);
+            }
+            case INTEGER -> checkedNumber(spec, new BigDecimal(new BigInteger(text))).toBigIntegerExact();
+            case DECIMAL -> checkedNumber(spec, new BigDecimal(text));
+            case DURATION -> {
+                if (!validDuration(text)) throw new IllegalArgumentException("Invalid duration");
+                yield text;
+            }
+            case RAW -> {
+                try {
+                    yield structuredParser.parse(text);
+                } catch (RuntimeException exception) {
+                    yield text;
+                }
+            }
+            case TEXT, SELECT -> text;
+            case LIST, MAP, OBJECT -> throw new IllegalArgumentException("Expected a scalar value");
+        };
+    }
+
+    private BigDecimal checkedNumber(ServerSettingsField.ValueSpec spec, BigDecimal value) {
+        if (spec.min() != null && value.compareTo(spec.min()) < 0 || spec.max() != null && value.compareTo(spec.max()) > 0) {
+            throw new IllegalArgumentException("Value is outside the allowed range");
+        }
+        return value;
+    }
+
+    private Object normalizeCollection(ServerSettingsField.CollectionSchema schema, Object value, boolean map) {
+        if (schema.mode() == ServerSettingsField.CollectionMode.SEQUENCE) {
+            if (!(value instanceof List<?> values)) return List.of();
+            List<Object> result = new ArrayList<>();
+            for (Object item : values) {
+                Object normalized = normalizeValue(schema.value(), item);
+                if (!schema.unique() || !result.contains(normalized)) result.add(normalized);
+            }
+            return List.copyOf(result);
+        }
+        if (!(value instanceof Map<?, ?> values)) return Map.of();
+        LinkedHashMap<Object, Object> result = new LinkedHashMap<>();
+        values.forEach((key, nested) -> result.put(normalizeScalar(schema.mode() == ServerSettingsField.CollectionMode.FIXED_MAP
+                ? textSpec() : schema.key(), key), normalizeValue(schema.value(), nested)));
+        return Collections.unmodifiableMap(result);
+    }
+
+    private Object normalizeValue(ServerSettingsField.ValueSpec spec, Object value) {
+        if (spec.type() == ServerSettingsField.ValueType.OBJECT) {
+            LinkedHashMap<String, Object> result = new LinkedHashMap<>();
+            if (value instanceof Map<?, ?> map) map.forEach((key, nested) -> result.put(String.valueOf(key), nested));
+            for (ServerSettingsField.ObjectField field : objectFields(spec)) {
+                Object current = result.getOrDefault(field.key(), scalarDefault(field.value()));
+                result.put(field.key(), normalizeValue(field.value(), current));
+            }
+            return Collections.unmodifiableMap(result);
+        }
+        if (spec.type() == ServerSettingsField.ValueType.LIST || spec.type() == ServerSettingsField.ValueType.MAP) {
+            return normalizeCollection(spec.collection(), value, spec.type() == ServerSettingsField.ValueType.MAP);
+        }
+        return normalizeScalar(spec, value);
+    }
+
+    private Object normalizeScalar(ServerSettingsField.ValueSpec spec, Object value) {
+        if (value == null) return scalarDefault(spec);
+        for (ServerSettingsField.Sentinel sentinel : spec.sentinels()) {
+            if (String.valueOf(sentinel.value()).equalsIgnoreCase(String.valueOf(value))) {
+                return normalizeSentinel(spec, sentinel.value());
+            }
+        }
+        try {
+            return switch (spec.type()) {
+                case BOOLEAN -> value instanceof Boolean bool ? bool : Boolean.parseBoolean(String.valueOf(value));
+                case INTEGER -> value instanceof BigInteger integer ? integer : new BigInteger(String.valueOf(value));
+                case DECIMAL -> value instanceof BigDecimal decimal ? decimal : new BigDecimal(String.valueOf(value));
+                case TEXT, DURATION, SELECT -> String.valueOf(value);
+                case RAW -> immutableStructuredValue(value);
+                case LIST, MAP, OBJECT -> value;
+            };
+        } catch (RuntimeException exception) {
+            return scalarDefault(spec);
+        }
+    }
+
+    private Object normalizeSentinel(ServerSettingsField.ValueSpec spec, Object value) {
+        try {
+            return switch (spec.type()) {
+                case BOOLEAN -> value instanceof Boolean bool ? bool : Boolean.parseBoolean(String.valueOf(value));
+                case INTEGER -> value instanceof BigInteger integer ? integer : new BigInteger(String.valueOf(value));
+                case DECIMAL -> value instanceof BigDecimal decimal ? decimal : new BigDecimal(String.valueOf(value));
+                case TEXT, DURATION, SELECT, RAW -> String.valueOf(value);
+                case LIST, MAP, OBJECT -> value;
+            };
+        } catch (RuntimeException exception) {
+            return String.valueOf(value);
+        }
+    }
+
+    private Object immutableStructuredValue(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            LinkedHashMap<Object, Object> copy = new LinkedHashMap<>();
+            map.forEach((key, nested) -> copy.put(key, immutableStructuredValue(nested)));
+            return Collections.unmodifiableMap(copy);
+        }
+        if (value instanceof List<?> list) return list.stream().map(this::immutableStructuredValue).toList();
+        return value;
+    }
+
+    private Object structuredValue(Object raw, boolean map) {
+        if (raw instanceof Map<?, ?> || raw instanceof List<?>) return raw;
+        if (raw == null) return map ? Map.of() : List.of();
+        try {
+            Object parsed = structuredParser.parse(raw.toString());
+            if (map && parsed instanceof Map<?, ?> || !map && parsed instanceof List<?>) return parsed;
+        } catch (RuntimeException ignored) {
+        }
+        return map ? Map.of() : List.of();
+    }
+
+    private String scalarText(ServerSettingsField.ValueSpec spec, Object value) {
+        if (value == null) return "";
+        return spec.type() == ServerSettingsField.ValueType.RAW ? formatFlow(value) : String.valueOf(value);
+    }
+
+    private List<OptionEditor.Sentinel<Object>> sentinels(ServerSettingsField.ValueSpec spec) {
+        return spec.sentinels().stream().map(sentinel -> new OptionEditor.Sentinel<>(
+                normalizeSentinel(spec, sentinel.value()), sentinel.label(), sentinel.role().name())).toList();
+    }
+
+    private OptionEditor.Catalog<Object> catalog(ServerSettingsField.ValueSpec spec) {
+        LinkedHashMap<Object, OptionEditor.Choice<Object>> choices = new LinkedHashMap<>();
+        for (String option : spec.options()) {
+            choices.put(option, new OptionEditor.Choice<>(option, SettingWidgetFactory.formatFriendlyDisplayName(option)));
+        }
+        Object stamp = List.copyOf(spec.options());
+        if (spec.catalog() != null) {
+            List<OptionEditor.Choice<Object>> catalog = spec.catalog().field() != null
+                    ? dependentCatalog(spec.catalog().field()) : sourceCatalog(spec.catalog().source());
+            catalog.forEach(choice -> choices.putIfAbsent(choice.value(), choice));
+            stamp = List.of(stamp, catalog);
+        }
+        return new OptionEditor.Catalog<>(stamp, List.copyOf(choices.values()));
+    }
+
+    private List<OptionEditor.Choice<Object>> dependentCatalog(String fieldReference) {
+        for (DocumentState document : documents.values()) {
+            for (FieldBinding binding : document.bindings) {
+                if (!binding.field.id().equals(fieldReference) && !binding.field.key().equals(fieldReference)) continue;
+                ConfigOption<?> resident = collectionOptions.get(binding);
+                Object value = resident != null ? resident.get()
+                        : structuredValue(readValue(binding), binding.field.type() == ServerSettingsFieldType.MAP);
+                if (value instanceof Map<?, ?> map) {
+                    return map.keySet().stream().map(key -> choice(String.valueOf(key), "")).toList();
+                }
+                if (value instanceof List<?> list) {
+                    return list.stream().map(item -> choice(String.valueOf(item), "")).toList();
+                }
+            }
+        }
+        return List.of();
+    }
+
+    private List<OptionEditor.Choice<Object>> sourceCatalog(String sourceId) {
+        LinkedHashMap<String, OptionEditor.Choice<Object>> choices = new LinkedHashMap<>();
+        if ("server:minecraft:world".equals(sourceId)) {
+            worldCatalog.forEach(value -> choices.put(value, choice(value, "")));
+        }
+        String serverId = source.catalogServerId();
+        OptionCatalogLoader.Snapshot snapshot = OptionCatalogLoader.snapshot(serverId, sourceId);
+        for (OptionCatalogItem item : snapshot.items()) {
+            if (item.getValue() != null && item.isAvailable()) {
+                choices.put(item.getValue(), new OptionEditor.Choice<>(item.getValue(), item.getLabel(), item.getDescription()));
+            }
+        }
+        for (String value : snapshot.values()) choices.putIfAbsent(value, choice(value, ""));
+        return List.copyOf(choices.values());
+    }
+
+    private OptionEditor.Choice<Object> choice(String value, String description) {
+        return new OptionEditor.Choice<>(value, SettingWidgetFactory.formatFriendlyDisplayName(value), description);
+    }
+
+    private ServerSettingsField.ValueSpec textSpec() {
+        return new ServerSettingsField.ValueSpec(ServerSettingsField.ValueType.TEXT, null, null, List.of(), null,
+                false, List.of(), List.of(), null, null);
+    }
+
+    private void preloadCollectionCatalogs() {
+        String serverId = source.catalogServerId();
+        if (serverId == null || serverId.isBlank()) return;
+        LinkedHashSet<String> sources = new LinkedHashSet<>();
+        for (DocumentState document : documents.values()) {
+            for (FieldBinding binding : document.bindings) collectCatalogs(binding.field.collection(), sources);
+        }
+        if (!sources.isEmpty()) {
+            OptionCatalogLoader.preload(serverId, sources.stream().map(OptionCatalogLoader::request).toList());
+        }
+    }
+
+    private void collectCatalogs(ServerSettingsField.CollectionSchema schema, LinkedHashSet<String> sources) {
+        if (schema == null) return;
+        collectCatalogs(schema.key(), sources);
+        collectCatalogs(schema.value(), sources);
+    }
+
+    private void collectCatalogs(ServerSettingsField.ValueSpec spec, LinkedHashSet<String> sources) {
+        if (spec == null) return;
+        if (spec.catalog() != null && spec.catalog().source() != null) sources.add(spec.catalog().source());
+        for (ServerSettingsField.ObjectField field : spec.fields()) collectCatalogs(field.value(), sources);
+        collectCatalogs(spec.collection(), sources);
+    }
+
+    private ConfigOption<String> numberOption(FieldBinding binding, ConfigOption.Editor editor) {
+        ServerSettingsField field = binding.field;
+        ConfigOption.Builder<String> builder = ConfigOption.<String>builder(field.name())
+                .description(field.description())
+                .bind(() -> (String) readValue(binding), value -> writeValue(binding, value))
+                .defaultValue((String) binding.defaultValue)
+                .editor(isSeedField(field) ? ConfigOption.Editor.SEED : editor);
+
+        if (field.min() != null && field.max() != null) {
+            builder.range(field.min().toPlainString(), field.max().toPlainString());
+        }
+        String sentinel = switch (field.type()) {
+            case INTEGER_OR_DEFAULT, DECIMAL_OR_DEFAULT -> "default";
+            case INTEGER_OR_DISABLED, DECIMAL_OR_DISABLED -> field.disabledValue() != null ? field.disabledValue() : "disabled";
+            default -> field.disabledValue();
+        };
+        if (sentinel != null) {
+            builder.disabledValue(sentinel);
+        }
+        return builder.build();
+    }
+
+    private ConfigOption<String> booleanUnionOption(FieldBinding binding) {
+        ServerSettingsField field = binding.field;
+        String sentinel = field.type() == ServerSettingsFieldType.BOOLEAN_OR_DEFAULT ? "default"
+                : field.disabledValue() != null ? field.disabledValue() : "disabled";
+        List<String> options = new ArrayList<>(List.of(sentinel, "true", "false"));
+        String current = String.valueOf(readValue(binding));
+        if (!options.contains(current)) options.add(current);
+        return ConfigOption.<String>builder(field.name())
+                .description(field.description())
+                .bind(() -> (String) readValue(binding), value -> writeValue(binding, value))
+                .defaultValue((String) binding.defaultValue)
+                .options(options)
+                .display(SettingWidgetFactory::formatFriendlyDisplayName)
+                .build();
     }
 
     private ConfigOption<Boolean> booleanOption(FieldBinding binding) {
@@ -300,7 +898,13 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
         ConfigOption.Builder<String> builder = ConfigOption.<String>builder(field.name())
                 .description(field.description())
                 .bind(() -> (String) readValue(binding), value -> writeValue(binding, value))
-                .defaultValue((String) binding.defaultValue);
+                .defaultValue((String) defaultValue(field));
+        if (isSeedField(field)) {
+            builder.seed(true);
+        }
+        if (field.disabledValue() != null) {
+            builder.disabledValue(field.disabledValue());
+        }
         if (field.type() == ServerSettingsFieldType.SELECT) {
             List<String> options = new ArrayList<>(field.options());
             String current = binding.value == null ? null : binding.value.toString();
@@ -609,7 +1213,7 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
             return switch (field.type()) {
                 case BOOLEAN -> value.equalsIgnoreCase("true") ? true : value.equalsIgnoreCase("false") ? false : fallback;
                 case BOOLEAN_OR_DEFAULT -> booleanUnionValue(value, "default", fallback);
-                case BOOLEAN_OR_DISABLED -> booleanUnionValue(value, "disabled", fallback);
+                case BOOLEAN_OR_DISABLED -> booleanUnionValue(value, field.disabledValue() != null ? field.disabledValue() : "disabled", fallback);
                 case INTEGER -> validateInteger(value, field) ? value : fallback;
                 case DECIMAL -> validateDecimal(value, field) ? value : fallback;
                 case INTEGER_OR_DEFAULT -> unionIntegerValue(value, "default", fallback, field);
@@ -618,7 +1222,7 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
                 case DECIMAL_OR_DISABLED -> unionDecimalValue(value, "disabled", fallback, field);
                 case TEXT -> raw;
                 case DURATION -> validDuration(value) ? raw : fallback;
-                case DURATION_OR_DISABLED -> value.equalsIgnoreCase("disabled") || validDuration(value) ? raw : fallback;
+                case DURATION_OR_DISABLED -> value.equalsIgnoreCase(field.disabledValue() != null ? field.disabledValue() : "disabled") || validDuration(value) ? raw : fallback;
                 case SELECT -> raw;
                 case LIST -> structuredValue(field, raw, '[', ']') ? raw : fallback;
                 case MAP -> structuredValue(field, raw, '{', '}') ? raw : fallback;
@@ -719,17 +1323,17 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
         return switch (field.type()) {
             case BOOLEAN -> false;
             case BOOLEAN_OR_DEFAULT -> "default";
-            case BOOLEAN_OR_DISABLED -> "disabled";
+            case BOOLEAN_OR_DISABLED -> field.disabledValue() != null ? field.disabledValue() : "disabled";
             case INTEGER -> "0";
             case DECIMAL -> "0.0";
             case INTEGER_OR_DEFAULT -> "default";
-            case INTEGER_OR_DISABLED -> "disabled";
+            case INTEGER_OR_DISABLED -> field.disabledValue() != null ? field.disabledValue() : "disabled";
             case DECIMAL_OR_DEFAULT -> "default";
-            case DECIMAL_OR_DISABLED -> "disabled";
+            case DECIMAL_OR_DISABLED -> field.disabledValue() != null ? field.disabledValue() : "disabled";
             case TEXT -> "";
             case SELECT -> field.options().getFirst();
             case DURATION -> "";
-            case DURATION_OR_DISABLED -> "disabled";
+            case DURATION_OR_DISABLED -> field.disabledValue() != null ? field.disabledValue() : "disabled";
             case LIST -> "[]";
             case MAP -> "{}";
         };
@@ -750,7 +1354,7 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
     }
 
     private String unionIntegerValue(String value, String sentinel, Object fallback, ServerSettingsField field) {
-        if (value.equalsIgnoreCase(sentinel)) {
+        if (value.equalsIgnoreCase(sentinel) || (field.disabledValue() != null && value.equalsIgnoreCase(field.disabledValue()))) {
             return value;
         }
         try {
@@ -766,7 +1370,7 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
     }
 
     private String unionDecimalValue(String value, String sentinel, Object fallback, ServerSettingsField field) {
-        if (value.equalsIgnoreCase(sentinel)) {
+        if (value.equalsIgnoreCase(sentinel) || (field.disabledValue() != null && value.equalsIgnoreCase(field.disabledValue()))) {
             return value;
         }
         try {
@@ -781,6 +1385,9 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
     }
 
     private boolean validateInteger(String value, ServerSettingsField field) {
+        if (field.disabledValue() != null && field.disabledValue().equalsIgnoreCase(value)) {
+            return true;
+        }
         try {
             BigInteger parsed = new BigInteger(value);
             BigDecimal decimal = new BigDecimal(parsed);
@@ -792,6 +1399,9 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
     }
 
     private boolean validateDecimal(String value, ServerSettingsField field) {
+        if (field.disabledValue() != null && field.disabledValue().equalsIgnoreCase(value)) {
+            return true;
+        }
         try {
             BigDecimal parsed = new BigDecimal(value);
             return (field.min() == null || parsed.compareTo(field.min()) >= 0)

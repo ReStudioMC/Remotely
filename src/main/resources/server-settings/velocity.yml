@@ -124,16 +124,36 @@ packs:
             tab: Software Settings
             group: Backend Servers
             name: Backend Servers
-            description: Maps backend names to addresses and defines fallback order.
+            description: Defines the address used to connect to each named backend server.
             default: {}
+            collection:
+              mode: dynamic-map
+              ordered: true
+              unique: true
+              key: {type: text}
+              value: {type: text}
           - id: forced-hosts.*
             key: forced-hosts.*
             type: map
             tab: Software Settings
             group: Forced Hosts
             name: Forced Hosts
-            description: Maps host names to their backend server order.
+            description: Chooses the ordered backend server list used when a player connects through each host name.
             default: {}
+            collection:
+              mode: dynamic-map
+              ordered: true
+              unique: true
+              key: {type: text}
+              value:
+                type: list
+                collection:
+                  mode: sequence
+                  ordered: true
+                  unique: true
+                  value:
+                    type: text
+                    catalog: {field: 'servers.*'}
           - id: advanced.compression-threshold
             key: advanced.compression-threshold
             type: integer

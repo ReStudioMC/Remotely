@@ -21,11 +21,14 @@ import restudio.rebase.instance.Instance;
 import restudio.rescreen.ui.core.Widget;
 import restudio.rescreen.ui.settings.Setting;
 import restudio.rescreen.ui.settings.SettingEntryWidget;
+import restudio.rescreen.ui.settings.CollectionSettingWidget;
 import restudio.rescreen.ui.settings.options.ConfigOption;
+import restudio.rescreen.ui.settings.options.OptionEditor;
 import restudio.rescreen.render.TextRenderer;
 import restudio.rescreen.theme.ThemeManager;
 
 import java.nio.file.Path;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -35,10 +38,20 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.Collection;
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import redxax.oxy.remotely.ui.settings.data.ServerSettingsDocumentStore.Document;
+import restudio.rescreen.ui.settings.CompoundToggleSettingWidget;
+import restudio.rescreen.ui.settings.SeedSettingWidget;
+import restudio.rescreen.ui.widgets.DropDownWidget;
+import restudio.rescreen.ui.widgets.IconButton;
+import restudio.rescreen.ui.widgets.DoubleSliderWidget;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -358,6 +371,551 @@ class ServerSettingsDataControllerTest {
 
         controller.save(instance).join();
         assertTrue(files.read(secondPath).join().contains("managed=new"));
+    }
+
+    @Test
+    void routesWorldFieldToDropdownWhenFewWorlds() {
+        Path root = Path.of("settings-source-" + UUID.randomUUID()).toAbsolutePath();
+        MemoryFiles files = new MemoryFiles();
+        Path propertiesPath = root.resolve("server.properties");
+        files.put(propertiesPath, "level-name=world\n");
+        Instance instance = velocity(root);
+        instance.getServerProperties().setProperty("level-name", "world");
+
+        ServerSettingsField field = new ServerSettingsField("level-name", "level-name", ServerSettingsFieldType.TEXT,
+                "Server", "World", "Level Name", "World folder name", "world", null, null, List.of());
+        ServerSettingsDocument document = new ServerSettingsDocument("server.properties", ServerSettingsFormat.PROPERTIES, true, false, List.of(field));
+        ServerSettingsPack pack = new ServerSettingsPack("server", "Server", "Server", 0, List.of("velocity"), List.of(document));
+
+        ServerSettingsDocumentTarget target = new ServerSettingsDocumentTarget() {
+            @Override
+            public Collection<String> softwareTokens() {
+                return List.of("velocity");
+            }
+            @Override
+            public String property(String key) {
+                return instance.getServerProperties().getProperty(key);
+            }
+            @Override
+            public void property(String key, String value) {
+                instance.getServerProperties().setProperty(key, value);
+            }
+            @Override
+            public void removeProperty(String key) {
+                instance.getServerProperties().remove(key);
+            }
+            @Override
+            public void replaceProperties(Map<String, String> properties) {
+                instance.getServerProperties().clear();
+                instance.getServerProperties().putAll(properties);
+            }
+        };
+
+        ServerSettingsDataController controller = new ServerSettingsDocumentDataController(target, new ServerSettingsSnapshot(List.of(pack)),
+                worldStore(root, files, List.of("world", "world_nether", "world_the_end")));
+        controller.load().join();
+
+        ConfigOption<String> option = textOption(controller, "Server");
+        assertNotNull(option.getOptions());
+        assertEquals(3, option.getOptions().size());
+        assertFalse(option.isItemSelector());
+        assertEquals("world", option.get());
+
+        SettingEntryWidget entry = entryWidget(controller, "Server");
+        assertInstanceOf(DropDownWidget.class, entry.mountedWidgets.getLast());
+
+        option.set("world_nether");
+        option.apply();
+        controller.save(instance).join();
+
+        String updated = files.read(propertiesPath).join();
+        assertTrue(updated.contains("level-name=world_nether"));
+    }
+
+    @Test
+    void routesWorldFieldToItemSelectorWhenManyWorlds() {
+        Path root = Path.of("settings-source-" + UUID.randomUUID()).toAbsolutePath();
+        MemoryFiles files = new MemoryFiles();
+        Path propertiesPath = root.resolve("server.properties");
+        files.put(propertiesPath, "level-name=world1\n");
+        Instance instance = velocity(root);
+
+        ServerSettingsField field = new ServerSettingsField("level-name", "level-name", ServerSettingsFieldType.TEXT,
+                "Server", "World", "Level Name", "World folder name", "world1", null, null, List.of());
+        ServerSettingsDocument document = new ServerSettingsDocument("server.properties", ServerSettingsFormat.PROPERTIES, true, false, List.of(field));
+        ServerSettingsPack pack = new ServerSettingsPack("server", "Server", "Server", 0, List.of("velocity"), List.of(document));
+
+        List<String> manyWorlds = List.of("world1", "world2", "world3", "world4", "world5", "world6", "world7", "world8", "world9", "world10", "world11", "world12");
+        ServerSettingsDocumentTarget target = new ServerSettingsDocumentTarget() {
+            @Override
+            public Collection<String> softwareTokens() {
+                return List.of("velocity");
+            }
+            @Override
+            public String property(String key) {
+                return "world1";
+            }
+            @Override
+            public void property(String key, String value) {}
+            @Override
+            public void removeProperty(String key) {}
+            @Override
+            public void replaceProperties(Map<String, String> properties) {}
+        };
+
+        ServerSettingsDataController controller = new ServerSettingsDocumentDataController(target, new ServerSettingsSnapshot(List.of(pack)),
+                worldStore(root, files, manyWorlds));
+        controller.load().join();
+
+        ConfigOption<String> option = textOption(controller, "Server");
+        assertTrue(option.isItemSelector());
+        assertEquals(12, option.getOptions().size());
+
+        SettingEntryWidget entry = entryWidget(controller, "Server");
+        assertInstanceOf(IconButton.class, entry.mountedWidgets.getLast());
+    }
+
+    @Test
+    void worldDiscoveryDoesNotBlockSettingsOrReplaceExposedOptions() {
+        Path root = Path.of("settings-source-" + UUID.randomUUID()).toAbsolutePath();
+        MemoryFiles files = new MemoryFiles();
+        Path propertiesPath = root.resolve("server.properties");
+        files.put(propertiesPath, "level-name=world\n");
+        Instance instance = velocity(root);
+        instance.getServerProperties().setProperty("level-name", "world");
+        ServerSettingsField field = new ServerSettingsField("level-name", "level-name", ServerSettingsFieldType.TEXT,
+                "Server", "World", "Level Name", "World folder name", "world", null, null, List.of());
+        ServerSettingsDocument document = new ServerSettingsDocument("server.properties", ServerSettingsFormat.PROPERTIES, true, false, List.of(field));
+        ServerSettingsPack pack = new ServerSettingsPack("server", "Server", "Server", 0, List.of("velocity"), List.of(document));
+        Async<List<ServerSettingsDocumentStore.Entry>> stalledDiscovery = Async.pending();
+        ServerSettingsDocumentStore filesStore = memoryStore(root, files);
+        ServerSettingsDocumentStore store = new ServerSettingsDocumentStore() {
+            @Override
+            public Async<Document> read(String relativePath) {
+                return filesStore.read(relativePath);
+            }
+
+            @Override
+            public Async<Void> write(String relativePath, String content) {
+                return filesStore.write(relativePath, content);
+            }
+
+            @Override
+            public Async<List<Entry>> list(String relativePath) {
+                return stalledDiscovery;
+            }
+        };
+        ServerSettingsDocumentTarget target = new ServerSettingsDocumentTarget() {
+            @Override
+            public Collection<String> softwareTokens() {
+                return List.of("velocity");
+            }
+
+            @Override
+            public String property(String key) {
+                return instance.getServerProperties().getProperty(key);
+            }
+
+            @Override
+            public void property(String key, String value) {
+                instance.getServerProperties().setProperty(key, value);
+            }
+
+            @Override
+            public void removeProperty(String key) {
+                instance.getServerProperties().remove(key);
+            }
+
+            @Override
+            public void replaceProperties(Map<String, String> properties) {
+                instance.getServerProperties().clear();
+                instance.getServerProperties().putAll(properties);
+            }
+        };
+        ServerSettingsDataController controller = new ServerSettingsDocumentDataController(target, new ServerSettingsSnapshot(List.of(pack)), store);
+
+        controller.load().join();
+        ConfigOption<String> option = textOption(controller, "Server");
+        assertEquals("world", option.get());
+        assertNull(option.getOptions());
+
+        stalledDiscovery.complete(List.of(new ServerSettingsDocumentStore.Entry("world", true)));
+        assertEquals(option, textOption(controller, "Server"));
+    }
+
+    @Test
+    void routesBiomeFieldToItemSelectorWithDisplayName() {
+        Path root = Path.of("settings-source-" + UUID.randomUUID()).toAbsolutePath();
+        MemoryFiles files = new MemoryFiles();
+        Path configPath = root.resolve("paper-world.yml");
+        files.put(configPath, "default-biome: 'minecraft:plains'\n");
+        Instance instance = velocity(root);
+
+        ServerSettingsField field = new ServerSettingsField("default-biome", "default-biome", ServerSettingsFieldType.TEXT,
+                "World", "Generation", "Default Biome", "Sets default biome", "minecraft:plains", null, null, List.of());
+        ServerSettingsDocument document = new ServerSettingsDocument("paper-world.yml", ServerSettingsFormat.YAML, true, false, List.of(field));
+        ServerSettingsPack pack = new ServerSettingsPack("paper", "Paper", "Paper", 0, List.of("velocity"), List.of(document));
+
+        ServerSettingsDataController controller = new DesktopServerSettingsDataController(instance, new ServerSettingsSnapshot(List.of(pack)), new MemoryApi(files));
+        controller.load().join();
+
+        ConfigOption<String> option = textOption(controller, "World");
+        assertTrue(option.isItemSelector());
+        assertNotNull(option.getDisplayFunction());
+        assertEquals("Cherry Grove", option.getDisplayFunction().apply("minecraft:cherry_grove"));
+        assertTrue(option.getOptions().contains("minecraft:cherry_grove"));
+        assertEquals("minecraft:plains", option.get());
+
+        option.set("minecraft:cherry_grove");
+        option.apply();
+        controller.save(instance).join();
+
+        String updated = files.read(configPath).join();
+        assertTrue(updated.contains("default-biome: 'minecraft:cherry_grove'"));
+    }
+
+    @Test
+    void routesIntegerWithDisabledSentinelToCompoundToggle() {
+        Path root = Path.of("settings-source-" + UUID.randomUUID()).toAbsolutePath();
+        MemoryFiles files = new MemoryFiles();
+        Path configPath = root.resolve("spigot.yml");
+        files.put(configPath, "view-distance: 10\n");
+        Instance instance = velocity(root);
+
+        ServerSettingsField field = new ServerSettingsField("view-distance", "view-distance", ServerSettingsFieldType.INTEGER,
+                "Settings", "World", "View Distance", "View distance. Set to -1 to disable", 8,
+                new BigDecimal("2"), new BigDecimal("32"), List.of(), false, true, "-1");
+        ServerSettingsDocument document = new ServerSettingsDocument("spigot.yml", ServerSettingsFormat.YAML, true, false, List.of(field));
+        ServerSettingsPack pack = new ServerSettingsPack("spigot", "Spigot", "Spigot", 0, List.of("velocity"), List.of(document));
+
+        ServerSettingsDataController controller = new DesktopServerSettingsDataController(instance, new ServerSettingsSnapshot(List.of(pack)), new MemoryApi(files));
+        controller.load().join();
+
+        ConfigOption<String> option = typedOption(controller, "Settings");
+        assertTrue(option.hasDisabledValue());
+        assertEquals("-1", option.getDisabledValue());
+        assertEquals("10", option.get());
+
+        SettingEntryWidget entry = entryWidget(controller, "Settings");
+        assertInstanceOf(CompoundToggleSettingWidget.class, entry.mountedWidgets.getLast());
+
+        CompoundToggleSettingWidget<String> compound = (CompoundToggleSettingWidget<String>) entry.mountedWidgets.getLast();
+        assertTrue(compound.getToggleWidget().getValue());
+
+        compound.getToggleWidget().setValue(false);
+        compound.getToggleWidget().onChange.run();
+        assertEquals("-1", option.get());
+
+        compound.getToggleWidget().setValue(true);
+        compound.getToggleWidget().onChange.run();
+        assertEquals("10", option.get());
+
+        compound.getToggleWidget().setValue(false);
+        compound.getToggleWidget().onChange.run();
+
+        option.apply();
+        controller.save(instance).join();
+
+        String updated = files.read(configPath).join();
+        assertTrue(updated.contains("view-distance: -1"));
+    }
+
+    @Test
+    void routesIntegerOrDisabledFieldToDisabledSentinelString() {
+        Path root = Path.of("settings-source-" + UUID.randomUUID()).toAbsolutePath();
+        MemoryFiles files = new MemoryFiles();
+        Path configPath = root.resolve("paper.yml");
+        files.put(configPath, "despawn-range: disabled\n");
+        Instance instance = velocity(root);
+
+        ServerSettingsField field = new ServerSettingsField("despawn-range", "despawn-range", ServerSettingsFieldType.INTEGER_OR_DISABLED,
+                "Settings", "Entities", "Despawn Range", "Despawn range in blocks", "disabled",
+                new BigDecimal("0"), new BigDecimal("128"), List.of());
+        ServerSettingsDocument document = new ServerSettingsDocument("paper.yml", ServerSettingsFormat.YAML, true, false, List.of(field));
+        ServerSettingsPack pack = new ServerSettingsPack("paper", "Paper", "Paper", 0, List.of("velocity"), List.of(document));
+
+        ServerSettingsDataController controller = new DesktopServerSettingsDataController(instance, new ServerSettingsSnapshot(List.of(pack)), new MemoryApi(files));
+        controller.load().join();
+
+        ConfigOption<String> option = typedOption(controller, "Settings");
+        assertTrue(option.hasDisabledValue());
+        assertEquals("disabled", option.getDisabledValue());
+        assertEquals("disabled", option.get());
+
+        option.set("64");
+        option.apply();
+        controller.save(instance).join();
+
+        String updated = files.read(configPath).join();
+        assertTrue(updated.contains("despawn-range: 64"));
+
+        option.set("disabled");
+        option.apply();
+        controller.save(instance).join();
+
+        String reDisabled = files.read(configPath).join();
+        assertTrue(reDisabled.contains("despawn-range: 'disabled'") || reDisabled.contains("despawn-range: disabled"));
+    }
+
+    @Test
+    void routesListFieldToTypedCollectionEditor() {
+        Path root = Path.of("settings-source-" + UUID.randomUUID()).toAbsolutePath();
+        MemoryFiles files = new MemoryFiles();
+        Path documentPath = root.resolve("paper.yml");
+        files.put(documentPath, "warn-on-overload: [warn, log]\n");
+        Instance instance = velocity(root);
+        ServerSettingsField.ValueSpec value = new ServerSettingsField.ValueSpec(ServerSettingsField.ValueType.SELECT,
+                null, null, List.of("warn", "log", "restart"), null, false, List.of(), List.of(), null, null);
+        ServerSettingsField.CollectionSchema collection = new ServerSettingsField.CollectionSchema(
+                ServerSettingsField.CollectionMode.SEQUENCE, true, true, List.of(), null, value);
+        ServerSettingsField field = new ServerSettingsField("warn-on-overload", "warn-on-overload", ServerSettingsFieldType.LIST,
+                "Settings", "Watchdog", "Warn On Overload", "Actions on server overload", List.of("warn", "log"),
+                null, null, List.of(), false, true, null, collection);
+        ServerSettingsDocument document = new ServerSettingsDocument("paper.yml", ServerSettingsFormat.YAML, true, false, List.of(field));
+        ServerSettingsPack pack = new ServerSettingsPack("paper", "Paper", "Paper", 0, List.of("velocity"), List.of(document));
+        ServerSettingsDataController controller = new DesktopServerSettingsDataController(instance, new ServerSettingsSnapshot(List.of(pack)), new MemoryApi(files));
+        controller.load().join();
+
+        ConfigOption<List<String>> option = typedOption(controller, "Settings");
+        assertInstanceOf(OptionEditor.Sequence.class, option.getOptionEditor());
+        assertEquals(List.of("warn", "log"), option.get());
+        SettingEntryWidget entry = entryWidget(controller, "Settings");
+        assertInstanceOf(CollectionSettingWidget.class, entry);
+
+        option.set(List.of("warn", "restart"));
+        option.apply();
+        controller.save(instance).join();
+        assertTrue(files.read(documentPath).join().contains("restart"));
+    }
+
+    @Test
+    void routesLevelTypeFieldToPresetsDropdown() {
+        Path root = Path.of("settings-source-" + UUID.randomUUID()).toAbsolutePath();
+        MemoryFiles files = new MemoryFiles();
+        Path propertiesPath = root.resolve("server.properties");
+        files.put(propertiesPath, "level-type=minecraft\\:normal\n");
+        Instance instance = velocity(root);
+        instance.getServerProperties().setProperty("level-type", "minecraft:normal");
+
+        ServerSettingsField field = new ServerSettingsField("level-type", "level-type", ServerSettingsFieldType.TEXT,
+                "Server", "World", "Level Type", "World generation preset", "minecraft:normal", null, null, List.of());
+        ServerSettingsDocument document = new ServerSettingsDocument("server.properties", ServerSettingsFormat.PROPERTIES, true, false, List.of(field));
+        ServerSettingsPack pack = new ServerSettingsPack("server", "Server", "Server", 0, List.of("velocity"), List.of(document));
+
+        ServerSettingsDocumentTarget target = new ServerSettingsDocumentTarget() {
+            @Override
+            public Collection<String> softwareTokens() {
+                return List.of("velocity");
+            }
+            @Override
+            public String property(String key) {
+                return instance.getServerProperties().getProperty(key);
+            }
+            @Override
+            public void property(String key, String value) {
+                instance.getServerProperties().setProperty(key, value);
+            }
+            @Override
+            public void removeProperty(String key) {
+                instance.getServerProperties().remove(key);
+            }
+            @Override
+            public void replaceProperties(Map<String, String> properties) {
+                instance.getServerProperties().clear();
+                instance.getServerProperties().putAll(properties);
+            }
+        };
+
+        ServerSettingsDataController controller = new ServerSettingsDocumentDataController(target, new ServerSettingsSnapshot(List.of(pack)), memoryStore(root, files));
+        controller.load().join();
+
+        ConfigOption<String> option = textOption(controller, "Server");
+        assertNotNull(option.getOptions());
+        assertTrue(option.getOptions().contains("minecraft:flat"));
+        assertTrue(option.getOptions().contains("minecraft:large_biomes"));
+        assertEquals("minecraft:normal", option.get());
+        assertEquals("Large Biomes", option.getDisplayFunction().apply("minecraft:large_biomes"));
+
+        SettingEntryWidget entry = entryWidget(controller, "Server");
+        assertInstanceOf(DropDownWidget.class, entry.mountedWidgets.getLast());
+
+        option.set("minecraft:flat");
+        option.apply();
+        controller.save(target).join();
+
+        String updated = files.read(propertiesPath).join();
+        assertTrue(updated.contains("level-type=minecraft\\:flat"));
+    }
+
+    @Test
+    void routesStructureSeedFieldToSeedOptionWithoutSlider() {
+        Path root = Path.of("settings-source-" + UUID.randomUUID()).toAbsolutePath();
+        MemoryFiles files = new MemoryFiles();
+        Path configPath = root.resolve("spigot.yml");
+        files.put(configPath, "world-settings:\n  default:\n    seed-village: 10387312\n");
+        Instance instance = velocity(root);
+
+        ServerSettingsField field = new ServerSettingsField("seed-village", "world-settings.default.seed-village", ServerSettingsFieldType.INTEGER,
+                "Settings", "World", "Village Seed", "Seed for village generation", 10387312,
+                new BigDecimal("-9223372036854775808"), new BigDecimal("9223372036854775807"), List.of());
+        ServerSettingsDocument document = new ServerSettingsDocument("spigot.yml", ServerSettingsFormat.YAML, true, false, List.of(field));
+        ServerSettingsPack pack = new ServerSettingsPack("spigot", "Spigot", "Spigot", 0, List.of("velocity"), List.of(document));
+
+        ServerSettingsDataController controller = new DesktopServerSettingsDataController(instance, new ServerSettingsSnapshot(List.of(pack)), new MemoryApi(files));
+        controller.load().join();
+
+        ConfigOption<String> option = typedOption(controller, "Settings");
+        assertTrue(option.isSeed());
+        assertEquals("-9223372036854775808", option.getMin());
+        assertEquals("9223372036854775807", option.getMax());
+        assertEquals("10387312", option.get());
+
+        SettingEntryWidget entry = entryWidget(controller, "Settings");
+        assertInstanceOf(SeedSettingWidget.class, entry.mountedWidgets.getLast());
+
+        option.set("9223372036854775807");
+        option.apply();
+        controller.save(instance).join();
+        assertTrue(files.read(configPath).join().contains("seed-village: 9223372036854775807"));
+    }
+
+    @Test
+    void routesMapFieldToTypedFixedCollection() {
+        Path root = Path.of("settings-source-" + UUID.randomUUID()).toAbsolutePath();
+        MemoryFiles files = new MemoryFiles();
+        Path configPath = root.resolve("bukkit.yml");
+        files.put(configPath, "spawn-limits:\n  monsters: 70\n  animals: 10\n  water-ambient: -1\n");
+        Instance instance = velocity(root);
+
+        Map<String, Object> defaultMap = Map.of("monsters", 70, "animals", 10, "water-ambient", -1);
+        ServerSettingsField.ValueSpec value = new ServerSettingsField.ValueSpec(ServerSettingsField.ValueType.INTEGER,
+                BigDecimal.ZERO, null, List.of(), null, false,
+                List.of(new ServerSettingsField.Sentinel(-1, "Use Bukkit Settings", ServerSettingsField.SentinelRole.INHERIT)),
+                List.of(), null, null);
+        ServerSettingsField.CollectionSchema collection = new ServerSettingsField.CollectionSchema(
+                ServerSettingsField.CollectionMode.FIXED_MAP, true, true,
+                List.of(new ServerSettingsField.FixedKey("monsters", "Monsters"),
+                        new ServerSettingsField.FixedKey("animals", "Animals"),
+                        new ServerSettingsField.FixedKey("water-ambient", "Water Ambient")), null, value);
+        ServerSettingsField field = new ServerSettingsField("spawn-limits", "spawn-limits", ServerSettingsFieldType.MAP,
+                "Settings", "Spawning", "Spawn Limits", "Mob category spawn limits", defaultMap, null, null, List.of(),
+                false, true, null, collection);
+        ServerSettingsDocument document = new ServerSettingsDocument("bukkit.yml", ServerSettingsFormat.YAML, true, false, List.of(field));
+        ServerSettingsPack pack = new ServerSettingsPack("bukkit", "Bukkit", "Bukkit", 0, List.of("velocity"), List.of(document));
+
+        ServerSettingsDataController controller = new DesktopServerSettingsDataController(instance, new ServerSettingsSnapshot(List.of(pack)), new MemoryApi(files));
+        controller.load().join();
+
+        ConfigOption<Map<String, Object>> option = typedOption(controller, "Settings");
+        OptionEditor.MapEntries<?, ?> editor = assertInstanceOf(OptionEditor.MapEntries.class, option.getOptionEditor());
+        assertEquals(OptionEditor.KeyMode.FIXED, editor.keys().mode());
+        assertEquals(new BigInteger("70"), option.get().get("monsters"));
+        assertEquals(new BigInteger("-1"), option.get().get("water-ambient"));
+        OptionEditor.ScalarValue<?> scalar = assertInstanceOf(OptionEditor.ScalarValue.class, editor.value());
+        assertEquals("Use Bukkit Settings", scalar.sentinels().getFirst().label());
+
+        SettingEntryWidget entry = entryWidget(controller, "Settings");
+        assertInstanceOf(CollectionSettingWidget.class, entry);
+
+        LinkedHashMap<String, Object> changed = new LinkedHashMap<>(option.get());
+        changed.put("monsters", new BigInteger("85"));
+        option.set(changed);
+        option.apply();
+        controller.save(instance).join();
+
+        String updated = files.read(configPath).join();
+        assertTrue(updated.contains("monsters: 85") || updated.contains("monsters: '85'"));
+    }
+
+    @Test
+    void preservesNestedTypedCollectionsThroughApplyAndSave() {
+        Path root = Path.of("settings-source-" + UUID.randomUUID()).toAbsolutePath();
+        MemoryFiles files = new MemoryFiles();
+        Path configPath = root.resolve("velocity.yml");
+        files.put(configPath, "forced-hosts:\n  play.example.net: [lobby, survival]\n");
+        Instance instance = velocity(root);
+
+        ServerSettingsField.ValueSpec text = new ServerSettingsField.ValueSpec(ServerSettingsField.ValueType.TEXT,
+                null, null, List.of(), null, false, List.of(), List.of(), null, null);
+        ServerSettingsField.CollectionSchema servers = new ServerSettingsField.CollectionSchema(
+                ServerSettingsField.CollectionMode.SEQUENCE, true, true, List.of(), null, text);
+        ServerSettingsField.ValueSpec serverList = new ServerSettingsField.ValueSpec(ServerSettingsField.ValueType.LIST,
+                null, null, List.of(), null, false, List.of(), List.of(), servers, null);
+        ServerSettingsField.CollectionSchema hosts = new ServerSettingsField.CollectionSchema(
+                ServerSettingsField.CollectionMode.DYNAMIC_MAP, true, true, List.of(), text, serverList);
+        ServerSettingsField field = new ServerSettingsField("forced-hosts", "forced-hosts", ServerSettingsFieldType.MAP,
+                "Settings", "Routing", "Forced Hosts", "Sets the ordered backend list for each host name.", Map.of(),
+                null, null, List.of(), false, true, null, hosts);
+        ServerSettingsDocument document = new ServerSettingsDocument("velocity.yml", ServerSettingsFormat.YAML, true, false, List.of(field));
+        ServerSettingsPack pack = new ServerSettingsPack("velocity", "Velocity", "Velocity", 0, List.of("velocity"), List.of(document));
+        ServerSettingsDataController controller = new DesktopServerSettingsDataController(instance,
+                new ServerSettingsSnapshot(List.of(pack)), new MemoryApi(files));
+        controller.load().join();
+
+        ConfigOption<Map<String, Object>> option = typedOption(controller, "Settings");
+        assertEquals(List.of("lobby", "survival"), option.get().get("play.example.net"));
+        LinkedHashMap<String, Object> changed = new LinkedHashMap<>(option.get());
+        changed.put("play.example.net", List.of("lobby", "minigames"));
+        option.set(changed);
+        option.apply();
+        controller.save(instance).join();
+
+        String updated = files.read(configPath).join();
+        assertTrue(updated.contains("minigames"));
+        assertFalse(updated.contains("survival"));
+    }
+
+    private static ServerSettingsDocumentStore memoryStore(Path root, MemoryFiles files) {
+        return new ServerSettingsDocumentStore() {
+            @Override
+            public Async<Document> read(String relativePath) {
+                Path path = root.resolve(relativePath);
+                return JvmAsyncBridge.fromFuture(files.exists(path))
+                        .thenCompose(exists -> Boolean.TRUE.equals(exists)
+                                ? JvmAsyncBridge.fromFuture(files.read(path)).thenApply(content -> new Document(true, content))
+                                : Async.completed(Document.missing()));
+            }
+
+            @Override
+            public Async<Void> write(String relativePath, String content) {
+                return JvmAsyncBridge.fromFuture(files.write(root.resolve(relativePath), content));
+            }
+        };
+    }
+
+    private static ServerSettingsDocumentStore worldStore(Path root, MemoryFiles files, List<String> worlds) {
+        ServerSettingsDocumentStore filesStore = memoryStore(root, files);
+        return new ServerSettingsDocumentStore() {
+            @Override
+            public Async<Document> read(String relativePath) {
+                return filesStore.read(relativePath);
+            }
+
+            @Override
+            public Async<Void> write(String relativePath, String content) {
+                return filesStore.write(relativePath, content);
+            }
+
+            @Override
+            public Async<List<Entry>> list(String relativePath) {
+                String path = relativePath == null || relativePath.isBlank() ? "." : relativePath;
+                if (path.equals(".")) return Async.completed(worlds.stream().map(name -> new Entry(name, true)).toList());
+                return Async.completed(worlds.contains(path) ? List.of(new Entry("level.dat", false)) : List.of());
+            }
+        };
+    }
+
+    @SuppressWarnings("unchecked")
+    private <T> ConfigOption<T> typedOption(ServerSettingsDataController controller, String tab) {
+        Setting setting = controller.settings(tab).getFirst();
+        Widget widget = setting.getRows().getFirst().getWidgets().getFirst();
+        return (ConfigOption<T>) ((SettingEntryWidget) widget).getOption();
+    }
+
+    private SettingEntryWidget entryWidget(ServerSettingsDataController controller, String tab) {
+        Setting setting = controller.settings(tab).getFirst();
+        Widget widget = setting.getRows().getFirst().getWidgets().getFirst();
+        return (SettingEntryWidget) widget;
     }
 
     private ServerSettingsDataController controller(Instance instance, MemoryFiles files, ServerSettingsFormat format,

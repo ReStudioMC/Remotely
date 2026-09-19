@@ -100,6 +100,11 @@ public final class BrowserServerConfigurationTarget implements ServerConfigurati
     }
 
     @Override
+    public String catalogServerId() {
+        return id();
+    }
+
+    @Override
     public String name() {
         return name;
     }

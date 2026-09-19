@@ -189,10 +189,126 @@ public final class ServerSettingsMetadataParser {
             ensureIntegral(min, location + ".min");
             ensureIntegral(max, location + ".max");
         }
+        Object disabledRaw = first(values, "disabledValue", "disabled", "disabledSentinel");
+        String disabledValue = disabledRaw != null ? String.valueOf(disabledRaw) : null;
+        ServerSettingsField.CollectionSchema collection;
         try {
-            return new ServerSettingsField(id, key, type, tab, group, name, description, defaultValue, min, max, options, nullable, defaultSpecified);
+            collection = parseCollection(values.get("collection"), location + ".collection");
+        } catch (IllegalArgumentException exception) {
+            throw invalid(location + ".collection", exception.getMessage(), exception);
+        }
+        try {
+            return new ServerSettingsField(id, key, type, tab, group, name, description, defaultValue, min, max, options,
+                    nullable, defaultSpecified, disabledValue, collection);
         } catch (IllegalArgumentException exception) {
             throw invalid(location, exception.getMessage(), exception);
+        }
+    }
+
+    private static ServerSettingsField.CollectionSchema parseCollection(Object raw, String location) {
+        if (raw == null) return null;
+        Map<String, Object> values = stringMap(raw, location);
+        requireOnly(values, location, "mode", "ordered", "unique", "keys", "key", "value");
+        ServerSettingsField.CollectionMode mode = ServerSettingsField.CollectionMode.parse(
+                requiredString(values, location + ".mode", "mode"));
+        boolean ordered = booleanValue(values.get("ordered"), false, location + ".ordered");
+        boolean unique = booleanValue(values.get("unique"), false, location + ".unique");
+        List<ServerSettingsField.FixedKey> keys = parseFixedKeys(values.get("keys"), location + ".keys");
+        ServerSettingsField.ValueSpec key = parseValueSpec(values.get("key"), location + ".key");
+        ServerSettingsField.ValueSpec value = parseValueSpec(values.get("value"), location + ".value");
+        return new ServerSettingsField.CollectionSchema(mode, ordered, unique, keys, key, value);
+    }
+
+    private static List<ServerSettingsField.FixedKey> parseFixedKeys(Object raw, String location) {
+        if (raw == null) return List.of();
+        List<?> values = list(raw, location);
+        List<ServerSettingsField.FixedKey> result = new ArrayList<>();
+        for (int index = 0; index < values.size(); index++) {
+            String itemLocation = location + "[" + index + "]";
+            Map<String, Object> item = stringMap(values.get(index), itemLocation);
+            requireOnly(item, itemLocation, "value", "label");
+            result.add(new ServerSettingsField.FixedKey(
+                    requiredString(item, itemLocation + ".value", "value"),
+                    requiredString(item, itemLocation + ".label", "label")));
+        }
+        return List.copyOf(result);
+    }
+
+    private static ServerSettingsField.ValueSpec parseValueSpec(Object raw, String location) {
+        return parseValueSpec(raw, location, false);
+    }
+
+    private static ServerSettingsField.ValueSpec parseValueSpec(Object raw, String location, boolean objectField) {
+        if (raw == null) return null;
+        Map<String, Object> values = stringMap(raw, location);
+        if (objectField) {
+            requireOnly(values, location, "key", "name", "description", "type", "min", "max", "options", "catalog",
+                    "allowCustom", "sentinels", "fields", "collection", "fieldsFrom");
+        } else {
+            requireOnly(values, location, "type", "min", "max", "options", "catalog", "allowCustom", "sentinels",
+                    "fields", "collection", "fieldsFrom");
+        }
+        ServerSettingsField.ValueType type = ServerSettingsField.ValueType.parse(
+                requiredString(values, location + ".type", "type"));
+        BigDecimal min = decimal(values.get("min"), location + ".min");
+        BigDecimal max = decimal(values.get("max"), location + ".max");
+        List<String> options = parseOptions(values.get("options"), location + ".options");
+        ServerSettingsField.Catalog catalog = parseCatalog(values.get("catalog"), location + ".catalog");
+        boolean allowCustom = booleanValue(values.get("allowCustom"), false, location + ".allowCustom");
+        List<ServerSettingsField.Sentinel> sentinels = parseSentinels(values.get("sentinels"), location + ".sentinels");
+        List<ServerSettingsField.ObjectField> fields = parseObjectFields(values.get("fields"), location + ".fields");
+        ServerSettingsField.CollectionSchema collection = parseCollection(values.get("collection"), location + ".collection");
+        String fieldsFrom = values.containsKey("fieldsFrom")
+                ? stringValue(values.get("fieldsFrom"), location + ".fieldsFrom") : null;
+        return new ServerSettingsField.ValueSpec(type, min, max, options, catalog, allowCustom, sentinels, fields,
+                collection, fieldsFrom);
+    }
+
+    private static ServerSettingsField.Catalog parseCatalog(Object raw, String location) {
+        if (raw == null) return null;
+        Map<String, Object> values = stringMap(raw, location);
+        requireOnly(values, location, "source", "field");
+        String source = values.containsKey("source") ? stringValue(values.get("source"), location + ".source") : null;
+        String field = values.containsKey("field") ? stringValue(values.get("field"), location + ".field") : null;
+        return new ServerSettingsField.Catalog(source, field);
+    }
+
+    private static List<ServerSettingsField.Sentinel> parseSentinels(Object raw, String location) {
+        if (raw == null) return List.of();
+        List<?> values = list(raw, location);
+        List<ServerSettingsField.Sentinel> result = new ArrayList<>();
+        for (int index = 0; index < values.size(); index++) {
+            String itemLocation = location + "[" + index + "]";
+            Map<String, Object> item = stringMap(values.get(index), itemLocation);
+            requireOnly(item, itemLocation, "value", "label", "role");
+            if (!item.containsKey("value")) throw invalid(itemLocation + ".value", "A sentinel value is required", null);
+            result.add(new ServerSettingsField.Sentinel(item.get("value"),
+                    requiredString(item, itemLocation + ".label", "label"),
+                    ServerSettingsField.SentinelRole.parse(requiredString(item, itemLocation + ".role", "role"))));
+        }
+        return List.copyOf(result);
+    }
+
+    private static List<ServerSettingsField.ObjectField> parseObjectFields(Object raw, String location) {
+        if (raw == null) return List.of();
+        List<?> values = list(raw, location);
+        List<ServerSettingsField.ObjectField> result = new ArrayList<>();
+        for (int index = 0; index < values.size(); index++) {
+            String itemLocation = location + "[" + index + "]";
+            Map<String, Object> item = stringMap(values.get(index), itemLocation);
+            ServerSettingsField.ValueSpec value = parseValueSpec(item, itemLocation, true);
+            result.add(new ServerSettingsField.ObjectField(
+                    requiredString(item, itemLocation + ".key", "key"),
+                    requiredString(item, itemLocation + ".name", "name"),
+                    firstString(item, "", "description"), value));
+        }
+        return List.copyOf(result);
+    }
+
+    private static void requireOnly(Map<String, Object> values, String location, String... allowed) {
+        LinkedHashSet<String> names = new LinkedHashSet<>(List.of(allowed));
+        for (String key : values.keySet()) {
+            if (!names.contains(key)) throw invalid(location + "." + key, "Unknown collection schema field", null);
         }
     }
 

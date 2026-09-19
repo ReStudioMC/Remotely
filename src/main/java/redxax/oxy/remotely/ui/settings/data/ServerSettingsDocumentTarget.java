@@ -4,6 +4,10 @@ import java.util.Collection;
 import java.util.Map;
 
 public interface ServerSettingsDocumentTarget {
+    default String catalogServerId() {
+        return "";
+    }
+
     Collection<String> softwareTokens();
 
     String property(String key);

@@ -3,11 +3,196 @@ package redxax.oxy.remotely.settings.server;
 import java.math.BigDecimal;
 import java.util.Collections;
 import java.util.LinkedHashMap;
-import java.util.Map;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 
 public final class ServerSettingsField {
+    public enum CollectionMode {
+        SEQUENCE,
+        FIXED_MAP,
+        DYNAMIC_MAP;
+
+        public static CollectionMode parse(String value) {
+            return valueOf(required(value, "collection mode").replace('-', '_').toUpperCase(Locale.ROOT));
+        }
+    }
+
+    public enum ValueType {
+        TEXT,
+        BOOLEAN,
+        INTEGER,
+        DECIMAL,
+        DURATION,
+        SELECT,
+        LIST,
+        MAP,
+        OBJECT,
+        RAW;
+
+        public static ValueType parse(String value) {
+            return valueOf(required(value, "value type").replace('-', '_').toUpperCase(Locale.ROOT));
+        }
+
+        private boolean numeric() {
+            return this == INTEGER || this == DECIMAL;
+        }
+
+        private boolean structured() {
+            return this == LIST || this == MAP;
+        }
+    }
+
+    public enum SentinelRole {
+        INHERIT,
+        DISABLED,
+        ALL;
+
+        public static SentinelRole parse(String value) {
+            return valueOf(required(value, "sentinel role").replace('-', '_').toUpperCase(Locale.ROOT));
+        }
+    }
+
+    public record FixedKey(String value, String label) {
+        public FixedKey {
+            value = required(value, "fixed key value");
+            label = required(label, "fixed key label");
+        }
+    }
+
+    public record Catalog(String source, String field) {
+        public Catalog {
+            source = optional(source);
+            field = optional(field);
+            if ((source == null) == (field == null)) {
+                throw new IllegalArgumentException("A catalog must define exactly one source or field");
+            }
+        }
+    }
+
+    public record Sentinel(Object value, String label, SentinelRole role) {
+        public Sentinel {
+            if (!(value instanceof String || value instanceof Boolean || value instanceof Number)) {
+                throw new IllegalArgumentException("A scalar sentinel value is required");
+            }
+            label = required(label, "sentinel label");
+            Objects.requireNonNull(role, "sentinel role");
+        }
+    }
+
+    public record ObjectField(String key, String name, String description, ValueSpec value) {
+        public ObjectField {
+            key = required(key, "object field key");
+            name = required(name, "object field name");
+            description = description == null ? "" : description.trim();
+            Objects.requireNonNull(value, "object field value");
+        }
+    }
+
+    public record ValueSpec(ValueType type, BigDecimal min, BigDecimal max, List<String> options, Catalog catalog,
+                            boolean allowCustom, List<Sentinel> sentinels, List<ObjectField> fields,
+                            CollectionSchema collection, String fieldsFrom) {
+        public ValueSpec {
+            Objects.requireNonNull(type, "value type");
+            options = options == null ? List.of() : List.copyOf(options);
+            sentinels = sentinels == null ? List.of() : List.copyOf(sentinels);
+            fields = fields == null ? List.of() : List.copyOf(fields);
+            fieldsFrom = optional(fieldsFrom);
+            if (!type.numeric() && (min != null || max != null)) {
+                throw new IllegalArgumentException("Only numeric collection values may define ranges");
+            }
+            if (min != null && max != null && min.compareTo(max) > 0) {
+                throw new IllegalArgumentException("Collection value minimum cannot exceed maximum");
+            }
+            if (type == ValueType.INTEGER) {
+                ensureIntegral(min, "minimum");
+                ensureIntegral(max, "maximum");
+            }
+            if (type == ValueType.SELECT && options.isEmpty()) {
+                throw new IllegalArgumentException("Select collection values need at least one option");
+            }
+            if (type != ValueType.SELECT && !options.isEmpty()) {
+                throw new IllegalArgumentException("Only select collection values may define options");
+            }
+            if (options.size() != options.stream().distinct().count()) {
+                throw new IllegalArgumentException("Collection value options must be unique");
+            }
+            for (String option : options) {
+                required(option, "collection value option");
+            }
+            if (allowCustom && catalog == null) {
+                throw new IllegalArgumentException("Custom catalog values require a catalog");
+            }
+            if (catalog != null && type != ValueType.TEXT && type != ValueType.SELECT) {
+                throw new IllegalArgumentException("Catalogs require text or select collection values");
+            }
+            if (!fields.isEmpty() && type != ValueType.OBJECT) {
+                throw new IllegalArgumentException("Only object collection values may define fields");
+            }
+            if (fieldsFrom != null && type != ValueType.OBJECT) {
+                throw new IllegalArgumentException("Only object collection values may reference fields");
+            }
+            if (fieldsFrom != null && !fields.isEmpty()) {
+                throw new IllegalArgumentException("Object collection values cannot define fields and fieldsFrom together");
+            }
+            if (type == ValueType.OBJECT && fields.isEmpty() && fieldsFrom == null) {
+                throw new IllegalArgumentException("Object collection values require fields or fieldsFrom");
+            }
+            if (collection != null && !type.structured()) {
+                throw new IllegalArgumentException("Only list or map collection values may define a nested collection");
+            }
+            if (collection == null && type.structured()) {
+                throw new IllegalArgumentException("List and map collection values require a nested collection");
+            }
+            if (collection != null && type == ValueType.LIST && collection.mode() != CollectionMode.SEQUENCE) {
+                throw new IllegalArgumentException("List collection values require sequence mode");
+            }
+            if (collection != null && type == ValueType.MAP && collection.mode() == CollectionMode.SEQUENCE) {
+                throw new IllegalArgumentException("Map collection values require map mode");
+            }
+            if (type == ValueType.RAW && (min != null || max != null || catalog != null || allowCustom
+                    || !sentinels.isEmpty() || !fields.isEmpty() || collection != null || fieldsFrom != null)) {
+                throw new IllegalArgumentException("Raw collection values cannot define typed behavior");
+            }
+            if (sentinels.stream().map(Sentinel::value).distinct().count() != sentinels.size()) {
+                throw new IllegalArgumentException("Collection value sentinels must be unique");
+            }
+            if (fields.stream().map(ObjectField::key).distinct().count() != fields.size()) {
+                throw new IllegalArgumentException("Object collection field keys must be unique");
+            }
+        }
+    }
+
+    public record CollectionSchema(CollectionMode mode, boolean ordered, boolean unique, List<FixedKey> keys,
+                                   ValueSpec key, ValueSpec value) {
+        public CollectionSchema {
+            Objects.requireNonNull(mode, "collection mode");
+            keys = keys == null ? List.of() : List.copyOf(keys);
+            Objects.requireNonNull(value, "collection value");
+            if (keys.stream().map(FixedKey::value).distinct().count() != keys.size()) {
+                throw new IllegalArgumentException("Fixed collection keys must be unique");
+            }
+            switch (mode) {
+                case SEQUENCE -> {
+                    if (key != null || !keys.isEmpty()) {
+                        throw new IllegalArgumentException("Sequence collections cannot define map keys");
+                    }
+                }
+                case FIXED_MAP -> {
+                    if (key != null || keys.isEmpty()) {
+                        throw new IllegalArgumentException("Fixed maps require fixed keys and cannot define a dynamic key");
+                    }
+                }
+                case DYNAMIC_MAP -> {
+                    if (key == null || !keys.isEmpty()) {
+                        throw new IllegalArgumentException("Dynamic maps require a key schema and cannot define fixed keys");
+                    }
+                }
+            }
+        }
+    }
+
     public enum Type {
         BOOLEAN,
         BOOLEAN_OR_DEFAULT,
@@ -43,21 +228,36 @@ public final class ServerSettingsField {
     private final BigDecimal min;
     private final BigDecimal max;
     private final List<String> options;
+    private final String disabledValue;
+    private final CollectionSchema collection;
 
     public ServerSettingsField(String id, String key, ServerSettingsFieldType type, String tab, String group, String name,
                                String description, Object defaultValue, BigDecimal min, BigDecimal max, List<String> options) {
-        this(id, key, type, tab, group, name, description, defaultValue, min, max, options, false, defaultValue != null);
+        this(id, key, type, tab, group, name, description, defaultValue, min, max, options, false, defaultValue != null, null);
     }
 
     public ServerSettingsField(String id, String key, ServerSettingsFieldType type, String tab, String group, String name,
                                String description, Object defaultValue, BigDecimal min, BigDecimal max, List<String> options,
                                boolean nullable) {
-        this(id, key, type, tab, group, name, description, defaultValue, min, max, options, nullable, defaultValue != null);
+        this(id, key, type, tab, group, name, description, defaultValue, min, max, options, nullable, defaultValue != null, null);
     }
 
     public ServerSettingsField(String id, String key, ServerSettingsFieldType type, String tab, String group, String name,
                                String description, Object defaultValue, BigDecimal min, BigDecimal max, List<String> options,
                                boolean nullable, boolean defaultSpecified) {
+        this(id, key, type, tab, group, name, description, defaultValue, min, max, options, nullable, defaultSpecified, null);
+    }
+
+    public ServerSettingsField(String id, String key, ServerSettingsFieldType type, String tab, String group, String name,
+                               String description, Object defaultValue, BigDecimal min, BigDecimal max, List<String> options,
+                               boolean nullable, boolean defaultSpecified, String disabledValue) {
+        this(id, key, type, tab, group, name, description, defaultValue, min, max, options, nullable, defaultSpecified,
+                disabledValue, null);
+    }
+
+    public ServerSettingsField(String id, String key, ServerSettingsFieldType type, String tab, String group, String name,
+                               String description, Object defaultValue, BigDecimal min, BigDecimal max, List<String> options,
+                               boolean nullable, boolean defaultSpecified, String disabledValue, CollectionSchema collection) {
         this.id = required(id, "id");
         this.key = required(key, "key");
         this.type = Objects.requireNonNull(type, "type");
@@ -74,6 +274,9 @@ public final class ServerSettingsField {
             throw new IllegalArgumentException("Field minimum cannot exceed maximum: " + id);
         }
         this.options = options == null ? List.of() : List.copyOf(options);
+        this.disabledValue = disabledValue != null && !disabledValue.isBlank() ? disabledValue.trim()
+                : collection == null ? inferDisabledValue(type, description) : null;
+        this.collection = collection;
         validateValueBounds();
     }
 
@@ -90,7 +293,13 @@ public final class ServerSettingsField {
     public ServerSettingsField(String id, String key, Type type, String tab, String group, String name, String description,
                                Object defaultValue, BigDecimal min, BigDecimal max, List<String> options,
                                boolean nullable, boolean defaultSpecified) {
-        this(id, key, Objects.requireNonNull(type, "type").toFieldType(), tab, group, name, description, defaultValue, min, max, options, nullable, defaultSpecified);
+        this(id, key, Objects.requireNonNull(type, "type").toFieldType(), tab, group, name, description, defaultValue, min, max, options, nullable, defaultSpecified, null);
+    }
+
+    public ServerSettingsField(String id, String key, Type type, String tab, String group, String name, String description,
+                               Object defaultValue, BigDecimal min, BigDecimal max, List<String> options,
+                               boolean nullable, boolean defaultSpecified, String disabledValue) {
+        this(id, key, Objects.requireNonNull(type, "type").toFieldType(), tab, group, name, description, defaultValue, min, max, options, nullable, defaultSpecified, disabledValue);
     }
 
     public String id() {
@@ -161,6 +370,37 @@ public final class ServerSettingsField {
         return options;
     }
 
+    public String disabledValue() {
+        return disabledValue;
+    }
+
+    public CollectionSchema collection() {
+        return collection;
+    }
+
+    private static String inferDisabledValue(ServerSettingsFieldType type, String description) {
+        if (type == ServerSettingsFieldType.INTEGER_OR_DISABLED || type == ServerSettingsFieldType.DECIMAL_OR_DISABLED
+                || type == ServerSettingsFieldType.BOOLEAN_OR_DISABLED || type == ServerSettingsFieldType.DURATION_OR_DISABLED) {
+            return "disabled";
+        }
+        if (description == null || description.isBlank()) {
+            return null;
+        }
+        String lower = description.toLowerCase(Locale.ROOT);
+        if (lower.contains("-1 disables") || lower.contains("use -1 to disable") || lower.contains("-1 to disable")
+                || lower.contains("set to -1 to disable") || lower.contains("-1 for vanilla timing") || lower.contains("-1 to turn off")) {
+            return "-1";
+        }
+        if (lower.contains("0 disables") || lower.contains("use 0 to disable") || lower.contains("0 to disable")
+                || lower.contains("set to 0 to disable") || lower.contains("0 to turn off")) {
+            return "0";
+        }
+        if (lower.contains("use none to disable") || lower.contains("none to disable")) {
+            return "none";
+        }
+        return null;
+    }
+
     private void validateValueBounds() {
         if (!type.numeric() && (min != null || max != null)) {
             throw new IllegalArgumentException("Only numeric fields may define ranges: " + id);
@@ -168,14 +408,14 @@ public final class ServerSettingsField {
         if (type == ServerSettingsFieldType.SELECT && options.isEmpty()) {
             throw new IllegalArgumentException("Select fields need at least one option: " + id);
         }
-        if (type != ServerSettingsFieldType.SELECT && !options.isEmpty()) {
-            throw new IllegalArgumentException("Only select fields may define options: " + id);
+        if (type != ServerSettingsFieldType.SELECT && type != ServerSettingsFieldType.LIST && !options.isEmpty()) {
+            throw new IllegalArgumentException("Only select and list fields may define options: " + id);
         }
         for (String option : options) {
             required(option, "option");
         }
         if (options.size() != options.stream().distinct().count()) {
-            throw new IllegalArgumentException("Select options must be unique: " + id);
+            throw new IllegalArgumentException("Field options must be unique: " + id);
         }
         if (defaultSpecified && defaultValue == null && !nullable) {
             throw new IllegalArgumentException("Null defaults require a nullable field: " + id);
@@ -185,7 +425,8 @@ public final class ServerSettingsField {
                 case BOOLEAN -> requireType(defaultValue instanceof Boolean, "boolean");
                 case BOOLEAN_OR_DEFAULT, BOOLEAN_OR_DISABLED -> {
                     requireType(defaultValue instanceof Boolean || defaultValue instanceof String, "boolean or sentinel");
-                    String sentinel = type == ServerSettingsFieldType.BOOLEAN_OR_DEFAULT ? "default" : "disabled";
+                    String sentinel = type == ServerSettingsFieldType.BOOLEAN_OR_DEFAULT ? "default"
+                            : disabledValue != null ? disabledValue : "disabled";
                     if (defaultValue instanceof String value && !value.equalsIgnoreCase(sentinel)) {
                         throw new IllegalArgumentException("Invalid boolean union sentinel: " + id);
                     }
@@ -203,14 +444,16 @@ public final class ServerSettingsField {
                     if (defaultValue instanceof Number) {
                         validateNumericDefault();
                         if (!isIntegral(defaultValue)) throw new IllegalArgumentException("Integer union default must be integral: " + id);
-                    } else if (!defaultValue.equals(type == ServerSettingsFieldType.INTEGER_OR_DEFAULT ? "default" : "disabled")) {
+                    } else if (!defaultValue.equals(type == ServerSettingsFieldType.INTEGER_OR_DEFAULT ? "default"
+                            : disabledValue != null ? disabledValue : "disabled")) {
                         throw new IllegalArgumentException("Invalid integer union sentinel: " + id);
                     }
                 }
                 case DECIMAL_OR_DEFAULT, DECIMAL_OR_DISABLED -> {
                     requireType(defaultValue instanceof Number || defaultValue instanceof String, "decimal or sentinel");
                     if (defaultValue instanceof Number) validateNumericDefault();
-                    else if (!defaultValue.equals(type == ServerSettingsFieldType.DECIMAL_OR_DEFAULT ? "default" : "disabled")) throw new IllegalArgumentException("Invalid decimal union sentinel: " + id);
+                    else if (!defaultValue.equals(type == ServerSettingsFieldType.DECIMAL_OR_DEFAULT ? "default"
+                            : disabledValue != null ? disabledValue : "disabled")) throw new IllegalArgumentException("Invalid decimal union sentinel: " + id);
                 }
                 case TEXT, DURATION, DURATION_OR_DISABLED -> requireType(defaultValue instanceof String, "text");
                 case SELECT -> {
@@ -221,6 +464,17 @@ public final class ServerSettingsField {
                 }
                 case LIST -> requireType(defaultValue instanceof List<?>, "list");
                 case MAP -> requireType(defaultValue instanceof Map<?, ?>, "map");
+            }
+        }
+        if (collection != null) {
+            if (type == ServerSettingsFieldType.LIST && collection.mode() != CollectionMode.SEQUENCE) {
+                throw new IllegalArgumentException("List fields require sequence collection mode: " + id);
+            }
+            if (type == ServerSettingsFieldType.MAP && collection.mode() == CollectionMode.SEQUENCE) {
+                throw new IllegalArgumentException("Map fields require map collection mode: " + id);
+            }
+            if (type != ServerSettingsFieldType.LIST && type != ServerSettingsFieldType.MAP) {
+                throw new IllegalArgumentException("Only list and map fields may define a collection schema: " + id);
             }
         }
     }
@@ -247,6 +501,16 @@ public final class ServerSettingsField {
             throw new IllegalArgumentException("A numeric value is required");
         }
         return new BigDecimal(number.toString());
+    }
+
+    private static void ensureIntegral(BigDecimal value, String name) {
+        if (value != null && value.stripTrailingZeros().scale() > 0) {
+            throw new IllegalArgumentException("Collection value " + name + " must be integral");
+        }
+    }
+
+    private static String optional(String value) {
+        return value == null || value.isBlank() ? null : value.trim();
     }
 
     private static Object immutableValue(Object value) {
@@ -282,11 +546,13 @@ public final class ServerSettingsField {
         return id.equals(that.id) && key.equals(that.key) && type == that.type && tab.equals(that.tab) && group.equals(that.group)
                 && name.equals(that.name) && description.equals(that.description) && Objects.equals(defaultValue, that.defaultValue)
                 && defaultSpecified == that.defaultSpecified && nullable == that.nullable
-                && Objects.equals(min, that.min) && Objects.equals(max, that.max) && options.equals(that.options);
+                && Objects.equals(min, that.min) && Objects.equals(max, that.max) && options.equals(that.options)
+                && Objects.equals(disabledValue, that.disabledValue) && Objects.equals(collection, that.collection);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(id, key, type, tab, group, name, description, defaultValue, defaultSpecified, nullable, min, max, options);
+        return Objects.hash(id, key, type, tab, group, name, description, defaultValue, defaultSpecified, nullable, min, max, options,
+                disabledValue, collection);
     }
 }

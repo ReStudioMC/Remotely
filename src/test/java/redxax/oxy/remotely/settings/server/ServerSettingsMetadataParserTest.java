@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -228,5 +229,153 @@ class ServerSettingsMetadataParserTest {
                 """;
 
         assertThrows(IllegalArgumentException.class, () -> new ServerSettingsMetadataParser().parse(yaml));
+    }
+
+    @Test
+    void parsesRecursiveCollectionSchemas() {
+        String yaml = """
+                providerId: test
+                packs:
+                  - id: test
+                    name: Test
+                    description: Test
+                    applicableSoftwareIds: [paper]
+                    documents:
+                      - path: config/test.yml
+                        format: YAML
+                        fields:
+                          - id: sequence
+                            key: sequence
+                            type: list
+                            tab: Software Settings
+                            group: Test
+                            name: Sequence
+                            description: Sequence.
+                            default: []
+                            collection:
+                              mode: sequence
+                              ordered: true
+                              unique: true
+                              value:
+                                type: text
+                                catalog: {source: 'server:minecraft:block'}
+                                allowCustom: true
+                          - id: fixed
+                            key: fixed
+                            type: map
+                            tab: Software Settings
+                            group: Test
+                            name: Fixed
+                            description: Fixed map.
+                            default: {ambient: -1}
+                            collection:
+                              mode: fixed-map
+                              ordered: true
+                              unique: true
+                              keys:
+                                - {value: ambient, label: Ambient}
+                              value:
+                                type: integer
+                                min: 0
+                                sentinels:
+                                  - {value: -1, label: Use Default, role: inherit}
+                          - id: nested
+                            key: nested
+                            type: map
+                            tab: Software Settings
+                            group: Test
+                            name: Nested
+                            description: Nested map.
+                            default: {}
+                            collection:
+                              mode: dynamic-map
+                              ordered: true
+                              unique: true
+                              key:
+                                type: text
+                                catalog: {source: 'server:minecraft:entity_type'}
+                                allowCustom: true
+                              value:
+                                type: object
+                                fields:
+                                  - key: action
+                                    name: Action
+                                    type: select
+                                    options: [DROP, KICK]
+                          - id: dependent
+                            key: dependent
+                            type: map
+                            tab: Software Settings
+                            group: Test
+                            name: Dependent
+                            description: Dependent map.
+                            default: {}
+                            collection:
+                              mode: dynamic-map
+                              ordered: true
+                              unique: true
+                              key: {type: text}
+                              value:
+                                type: list
+                                collection:
+                                  mode: sequence
+                                  ordered: true
+                                  unique: true
+                                  value:
+                                    type: text
+                                    catalog: {field: nested}
+                """;
+
+        List<ServerSettingsField> fields = new ServerSettingsMetadataParser().parse(yaml).packs().getFirst().documents().getFirst().fields();
+
+        ServerSettingsField.CollectionSchema sequence = fields.get(0).collection();
+        assertEquals(ServerSettingsField.CollectionMode.SEQUENCE, sequence.mode());
+        assertEquals("server:minecraft:block", sequence.value().catalog().source());
+        assertTrue(sequence.value().allowCustom());
+        ServerSettingsField.CollectionSchema fixed = fields.get(1).collection();
+        assertEquals("ambient", fixed.keys().getFirst().value());
+        assertNull(fields.get(1).disabledValue());
+        assertEquals(ServerSettingsField.SentinelRole.INHERIT, fixed.value().sentinels().getFirst().role());
+        assertEquals(-1, fixed.value().sentinels().getFirst().value());
+        ServerSettingsField.ValueSpec nested = fields.get(2).collection().value();
+        assertEquals(ServerSettingsField.ValueType.OBJECT, nested.type());
+        assertEquals(List.of("DROP", "KICK"), nested.fields().getFirst().value().options());
+        ServerSettingsField.ValueSpec dependent = fields.get(3).collection().value().collection().value();
+        assertEquals("nested", dependent.catalog().field());
+    }
+
+    @Test
+    void rejectsContradictoryCollectionSchemas() {
+        String yaml = """
+                providerId: test
+                packs:
+                  - id: test
+                    name: Test
+                    description: Test
+                    applicableSoftwareIds: [paper]
+                    documents:
+                      - path: config/test.yml
+                        format: YAML
+                        fields:
+                          - id: invalid
+                            key: invalid
+                            type: list
+                            tab: Software Settings
+                            group: Test
+                            name: Invalid
+                            description: Invalid collection.
+                            default: []
+                            collection:
+                              mode: sequence
+                              ordered: true
+                              unique: true
+                              key: {type: text}
+                              value: {type: text}
+                """;
+
+        IllegalArgumentException exception = assertThrows(IllegalArgumentException.class,
+                () -> new ServerSettingsMetadataParser().parse(yaml));
+
+        assertTrue(exception.getMessage().contains("Sequence collections cannot define map keys"));
     }
 }

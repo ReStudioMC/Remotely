@@ -250,5 +250,24 @@ packs:
             tab: Software Settings
             group: Worlds
             name: World Settings
-            description: Defines per-world biome providers and generators. Use plugin-name or plugin-name:parameters.
+            description: Assigns a generator and biome provider to each world. Provider values accept plugin-name or plugin-name:parameters.
             default: {}
+            collection:
+              mode: dynamic-map
+              ordered: true
+              unique: true
+              key:
+                type: text
+                catalog: {source: 'server:minecraft:world'}
+                allowCustom: true
+              value:
+                type: object
+                fields:
+                  - key: generator
+                    name: Generator
+                    description: Chooses the plugin generator and optional parameters for this world.
+                    type: text
+                  - key: biome-provider
+                    name: Biome Provider
+                    description: Chooses the plugin biome provider and optional parameters for this world.
+                    type: text

@@ -1505,6 +1505,17 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
                 if (!isCurrent(context)) return Async.failed(new IllegalStateException("Browser Session Expired"));
                 return observeSessionFailure(api.writeFile(target.id(), relativePath, content), context);
             }
+
+            @Override
+            public Async<List<Entry>> list(String relativePath) {
+                HostContext context = captureContext();
+                if (!isCurrent(context)) return Async.failed(new IllegalStateException("Browser Session Expired"));
+                String directory = relativePath == null || relativePath.isBlank() || relativePath.equals(".") ? "/" : relativePath;
+                return observeSessionFailure(api.listFiles(target.id(), directory).thenApply(files -> files == null ? List.of()
+                        : files.stream().filter(Objects::nonNull)
+                        .map(file -> new Entry(file.name, !file.isFile))
+                        .filter(entry -> !entry.name().isBlank()).toList()), context);
+            }
         };
         return new ServerSettingsDocumentDataController(target, registry.snapshot(target), store, BrowserSafeYaml::parse);
     }

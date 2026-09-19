@@ -76,6 +76,7 @@ class BrowserServerSoftwareCatalogSerializationTest {
 
         var target = new BrowserServerConfigurationTarget(server);
 
+        assertEquals("abc123", target.catalogServerId());
         assertEquals("QUILT", target.software());
         assertEquals("quilt", target.softwareTokens().iterator().next());
     }

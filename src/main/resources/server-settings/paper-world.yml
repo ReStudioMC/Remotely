@@ -34,8 +34,16 @@ packs:
             tab: Software Settings
             group: Anti-Xray
             name: Hidden Blocks
-            description: Lists blocks that Anti-Xray hides or replaces.
+            description: Chooses the blocks that Anti-Xray hides or replaces.
             default: [copper_ore, deepslate_copper_ore, raw_copper_block, gold_ore, deepslate_gold_ore, iron_ore, deepslate_iron_ore, raw_iron_block, coal_ore, deepslate_coal_ore, lapis_ore, deepslate_lapis_ore, mossy_cobblestone, obsidian, chest, diamond_ore, deepslate_diamond_ore, redstone_ore, deepslate_redstone_ore, clay, emerald_ore, deepslate_emerald_ore, ender_chest]
+            collection:
+              mode: sequence
+              ordered: true
+              unique: true
+              value:
+                type: text
+                catalog: {source: 'server:minecraft:block'}
+                allowCustom: true
           - id: anticheat-anti-xray-lava-obscures
             key: anticheat.anti-xray.lava-obscures
             type: boolean
@@ -58,8 +66,16 @@ packs:
             tab: Software Settings
             group: Anti-Xray
             name: Replacement Blocks
-            description: Lists blocks used to replace hidden blocks.
+            description: Chooses the blocks Anti-Xray may show in place of hidden blocks.
             default: [stone, oak_planks, deepslate]
+            collection:
+              mode: sequence
+              ordered: true
+              unique: true
+              value:
+                type: text
+                catalog: {source: 'server:minecraft:block'}
+                allowCustom: true
           - id: anticheat-anti-xray-update-radius
             key: anticheat.anti-xray.update-radius
             type: integer
@@ -568,8 +584,13 @@ packs:
             tab: Software Settings
             group: Spawning
             name: Filtered Entity NBT Paths
-            description: Lists NBT paths removed from entities spawned by item data.
+            description: Removes the selected NBT paths from entities created from item data.
             default: [Pos, Motion, sleeping_pos]
+            collection:
+              mode: sequence
+              ordered: true
+              unique: true
+              value: {type: text}
           - id: entities-spawning-iron-golems-can-spawn-in-air
             key: entities.spawning.iron-golems-can-spawn-in-air
             type: boolean
@@ -779,6 +800,19 @@ packs:
               arrow: -1
               fireball: -1
               small_fireball: -1
+            collection:
+              mode: dynamic-map
+              ordered: true
+              unique: true
+              key:
+                type: text
+                catalog: {source: 'server:minecraft:entity_type'}
+                allowCustom: true
+              value:
+                type: integer
+                min: 0
+                sentinels:
+                  - {value: -1, label: No Type Limit, role: disabled}
           - id: entities-behavior-door-breaking-difficulty
             key: entities.behavior.door-breaking-difficulty
             type: map
@@ -792,13 +826,30 @@ packs:
               zombie_villager: [HARD]
               zombified_piglin: [HARD]
               vindicator: [NORMAL, HARD]
+            collection:
+              mode: dynamic-map
+              ordered: true
+              unique: true
+              key:
+                type: text
+                catalog: {source: 'server:minecraft:entity_type'}
+                allowCustom: true
+              value:
+                type: list
+                collection:
+                  mode: sequence
+                  ordered: true
+                  unique: true
+                  value:
+                    type: select
+                    options: [PEACEFUL, EASY, NORMAL, HARD]
           - id: entities-spawning-spawn-limits
             key: entities.spawning.spawn-limits
             type: map
             tab: Software Settings
             group: Spawning
             name: Mob Spawn Limits
-            description: Sets per-world natural spawn limits by mob category; -1 uses bukkit.yml.
+            description: Sets the natural spawn cap for each mob category in this world. Use Bukkit Settings to inherit the server-wide cap.
             default:
               ambient: -1
               axolotls: -1
@@ -807,13 +858,30 @@ packs:
               underground_water_creature: -1
               water_ambient: -1
               water_creature: -1
+            collection:
+              mode: fixed-map
+              ordered: true
+              unique: true
+              keys:
+                - {value: ambient, label: Ambient}
+                - {value: axolotls, label: Axolotls}
+                - {value: creature, label: Creature}
+                - {value: monster, label: Monster}
+                - {value: underground_water_creature, label: Underground Water Creature}
+                - {value: water_ambient, label: Water Ambient}
+                - {value: water_creature, label: Water Creature}
+              value:
+                type: integer
+                min: 0
+                sentinels:
+                  - {value: -1, label: Use Bukkit Settings, role: inherit}
           - id: entities-spawning-ticks-per-spawn
             key: entities.spawning.ticks-per-spawn
             type: map
             tab: Software Settings
             group: Spawning
             name: Mob Spawn Intervals
-            description: Sets ticks between natural spawn attempts by mob category; -1 uses bukkit.yml.
+            description: Sets ticks between natural spawn attempts for each mob category. Use Bukkit Settings to inherit the server-wide interval.
             default:
               ambient: -1
               axolotls: -1
@@ -822,13 +890,30 @@ packs:
               underground_water_creature: -1
               water_ambient: -1
               water_creature: -1
+            collection:
+              mode: fixed-map
+              ordered: true
+              unique: true
+              keys:
+                - {value: ambient, label: Ambient}
+                - {value: axolotls, label: Axolotls}
+                - {value: creature, label: Creature}
+                - {value: monster, label: Monster}
+                - {value: underground_water_creature, label: Underground Water Creature}
+                - {value: water_ambient, label: Water Ambient}
+                - {value: water_creature, label: Water Creature}
+              value:
+                type: integer
+                min: 0
+                sentinels:
+                  - {value: -1, label: Use Bukkit Settings, role: inherit}
           - id: entities-spawning-despawn-ranges
             key: entities.spawning.despawn-ranges
             type: map
             tab: Software Settings
             group: Spawning
             name: Entity Despawn Ranges
-            description: Sets hard and soft despawn ranges by mob category; use default to keep Vanilla distances.
+            description: Sets soft and hard despawn distances for each mob category. Use Vanilla Distance to keep the game's default for either range.
             default:
               ambient: {hard: default, soft: default}
               axolotls: {hard: default, soft: default}
@@ -838,25 +923,78 @@ packs:
               water_ambient: {hard: default, soft: default}
               water_creature: {hard: default, soft: default}
               misc: {hard: default, soft: default}
+            collection:
+              mode: fixed-map
+              ordered: true
+              unique: true
+              keys:
+                - {value: ambient, label: Ambient}
+                - {value: axolotls, label: Axolotls}
+                - {value: creature, label: Creature}
+                - {value: monster, label: Monster}
+                - {value: underground_water_creature, label: Underground Water Creature}
+                - {value: water_ambient, label: Water Ambient}
+                - {value: water_creature, label: Water Creature}
+                - {value: misc, label: Miscellaneous}
+              value:
+                type: object
+                fields:
+                  - key: soft
+                    name: Soft Range
+                    description: Sets the distance where eligible entities may begin despawning.
+                    type: integer
+                    min: 0
+                    sentinels:
+                      - {value: default, label: Use Vanilla Distance, role: inherit}
+                  - key: hard
+                    name: Hard Range
+                    description: Sets the distance where eligible entities despawn immediately.
+                    type: integer
+                    min: 0
+                    sentinels:
+                      - {value: default, label: Use Vanilla Distance, role: inherit}
           - id: entities-spawning-despawn-time
             key: entities.spawning.despawn-time
             type: map
             tab: Software Settings
             group: Spawning
             name: Entity Despawn Times
-            description: Sets force-despawn times by entity type; disabled keeps Vanilla despawning.
+            description: Forces selected entity types to despawn after a duration. Use Vanilla Despawning to leave an entity type unchanged.
             default:
               snowball: disabled
               llama_spit: disabled
+            collection:
+              mode: dynamic-map
+              ordered: true
+              unique: true
+              key:
+                type: text
+                catalog: {source: 'server:minecraft:entity_type'}
+                allowCustom: true
+              value:
+                type: duration
+                sentinels:
+                  - {value: disabled, label: Use Vanilla Despawning, role: disabled}
           - id: entities-spawning-alt-item-despawn-rate-items
             key: entities.spawning.alt-item-despawn-rate.items
             type: map
             tab: Software Settings
             group: Spawning
             name: Item Despawn Rates
-            description: Sets custom item despawn times in ticks by item ID.
+            description: Sets how many ticks selected dropped items remain before despawning.
             default:
               cobblestone: 300
+            collection:
+              mode: dynamic-map
+              ordered: true
+              unique: true
+              key:
+                type: text
+                catalog: {source: 'server:minecraft:material'}
+                allowCustom: true
+              value:
+                type: integer
+                min: 0
           - id: tick-rates-sensor
             key: tick-rates.sensor
             type: map
@@ -867,6 +1005,26 @@ packs:
             default:
               villager:
                 secondarypoisensor: 40
+            collection:
+              mode: dynamic-map
+              ordered: true
+              unique: true
+              key:
+                type: text
+                catalog: {source: 'server:minecraft:entity_type'}
+                allowCustom: true
+              value:
+                type: map
+                collection:
+                  mode: dynamic-map
+                  ordered: true
+                  unique: true
+                  key: {type: text}
+                  value:
+                    type: integer
+                    min: 0
+                    sentinels:
+                      - {value: -1, label: Use Vanilla Rate, role: inherit}
           - id: tick-rates-behavior
             key: tick-rates.behavior
             type: map
@@ -877,6 +1035,26 @@ packs:
             default:
               villager:
                 validatenearbypoi: -1
+            collection:
+              mode: dynamic-map
+              ordered: true
+              unique: true
+              key:
+                type: text
+                catalog: {source: 'server:minecraft:entity_type'}
+                allowCustom: true
+              value:
+                type: map
+                collection:
+                  mode: dynamic-map
+                  ordered: true
+                  unique: true
+                  key: {type: text}
+                  value:
+                    type: integer
+                    min: 0
+                    sentinels:
+                      - {value: -1, label: Use Vanilla Rate, role: inherit}
           - id: feature-seeds-features
             key: feature-seeds.features
             type: map
@@ -885,6 +1063,18 @@ packs:
             name: Feature Seeds
             description: Sets population seeds by configured feature resource key; -1 keeps the Vanilla seed.
             default: {}
+            collection:
+              mode: dynamic-map
+              ordered: true
+              unique: true
+              key:
+                type: text
+                catalog: {source: 'server:minecraft:configured_feature'}
+                allowCustom: true
+              value:
+                type: integer
+                sentinels:
+                  - {value: -1, label: Use Vanilla Seed, role: inherit}
           - id: lootables-auto-replenish
             key: lootables.auto-replenish
             type: boolean

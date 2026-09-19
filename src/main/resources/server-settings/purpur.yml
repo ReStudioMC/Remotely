@@ -409,5 +409,14 @@ packs:
             tab: Software Settings
             group: Purpur World Overrides
             name: Named World Overrides
-            description: Stores arbitrary Purpur settings for named worlds; use the same shapes as world-settings.default.
+            description: Applies per-world Purpur overrides using the same setting shapes as the default world section.
             default: {}
+            collection:
+              mode: dynamic-map
+              ordered: true
+              unique: true
+              key:
+                type: text
+                catalog: {source: 'server:minecraft:world'}
+                allowCustom: true
+              value: {type: raw}
