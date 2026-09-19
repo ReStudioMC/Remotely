@@ -49,7 +49,7 @@ public class ReSyncStudioPanelState {
         if (panel == null) {
             return rowWidth();
         }
-        return Math.max(MIN_ROW_WIDTH, panel.getDesiredWidth() - padding * 2);
+        return Math.max(MIN_ROW_WIDTH, panel.getConfiguredWidth() - padding * 2);
     }
 
     public AnimatedButton hint(String label, int width) {

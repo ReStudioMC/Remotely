@@ -187,8 +187,6 @@ public class StudioScreen extends StudioInfiniteScreen {
     protected final Map<String, ToggleWidget> studioResourcePanelToggles = new HashMap<>();
     protected IconMessage studioEmptyMessage;
     protected final List<StudioDocument> studioDocuments = new ArrayList<>();
-    protected final Map<String, Long> pendingStudioTabDiscards = new HashMap<>();
-    protected static final long STUDIO_TAB_DISCARD_CONFIRMATION_MILLIS = 3_000L;
     protected static final long STUDIO_TAB_STATE_REFRESH_NANOS = 50_000_000L;
     private static final String AUTOMATION_DOCUMENT_TYPE = "automation_definition_workspace";
     private static final String AUTOMATION_DOCUMENT_ID = "all";
@@ -1142,7 +1140,6 @@ public class StudioScreen extends StudioInfiniteScreen {
         }
         StudioDocument document = findStudioDocument(key);
         if (document == null) {
-            clearStudioDiscardPrompt(key);
             return true;
         }
         if (isAutomationDocument(document)) {
@@ -1150,26 +1147,12 @@ public class StudioScreen extends StudioInfiniteScreen {
             if (designer != null && !designer.canCloseStudioDocument()) {
                 return false;
             }
-            clearStudioDiscardPrompt(key);
-            discardStudioDocumentForClose(document);
-            return true;
-        }
-        if (!isStudioDocumentDirty(document)) {
-            clearStudioDiscardPrompt(key);
-            return true;
-        }
-        long now = System.currentTimeMillis();
-        Long deadline = pendingStudioTabDiscards.get(key);
-        if (deadline != null && deadline >= now) {
-            clearStudioDiscardPrompt(key);
             return discardStudioDocumentForClose(document);
         }
-        pendingStudioTabDiscards.put(key, now + STUDIO_TAB_DISCARD_CONFIRMATION_MILLIS);
-        tab.setName("Discard Changes?");
-        tab.setIconPath("report.png");
-        tab.setUnsaved(false);
-        studioTabsManager.updateLayout();
-        return false;
+        if (!isStudioDocumentDirty(document)) {
+            return true;
+        }
+        return discardStudioDocumentForClose(document);
     }
 
     protected boolean discardStudioDocumentForClose(StudioDocument document) {
@@ -1393,7 +1376,6 @@ public class StudioScreen extends StudioInfiniteScreen {
             terminalLegacyCoreDocuments.remove(document.key());
             diagnosedLegacyCoreConflicts.remove(document.key());
             pendingCoreOpenIntents.remove(document.key());
-            pendingStudioTabDiscards.remove(document.key());
             studioResourcePanelResources.remove(document.key());
             studioResourceOpenIntents.remove(document.key());
             studioDocumentClosed(document);
@@ -1493,6 +1475,7 @@ public class StudioScreen extends StudioInfiniteScreen {
         }
         clearStudioDiscardPrompt(key);
         syncStudioDocumentTabs();
+        updateStudioTabStates();
     }
 
     private void closeStudioTab(TabsManager.Tab tab) {
@@ -1535,6 +1518,7 @@ public class StudioScreen extends StudioInfiniteScreen {
         }
         if (studioResourceStudioPanel == null) {
             studioResourceStudioPanel = rightStudioPanel("studioResourcePanel")
+                .collapsible("Resource Inspector")
                 .show();
             studioResourcePanel = studioResourceStudioPanel.sidePanel();
             studioResourceStudioPanel.padding(studioPanelState.padding());
@@ -1636,10 +1620,10 @@ public class StudioScreen extends StudioInfiniteScreen {
     }
 
     public int studioContentBrowserPanelWidth() {
-        if (studioContentBrowser == null || studioContentBrowser.sidePanel() == null || !studioContentBrowser.sidePanel().isVisible()) {
+        if (studioContentBrowser == null || studioContentBrowser.sidePanel() == null) {
             return 0;
         }
-        return studioContentBrowser.sidePanel().getDesiredWidth();
+        return studioContentBrowser.sidePanel().layoutWidth(0);
     }
 
     public void setStudioContentBrowserTemporarilyHidden(boolean hidden) {
@@ -3636,7 +3620,6 @@ public class StudioScreen extends StudioInfiniteScreen {
             return;
         }
         nextStudioTabStateRefreshAt = refreshAt + STUDIO_TAB_STATE_REFRESH_NANOS;
-        long now = System.currentTimeMillis();
         boolean layoutChanged = false;
         for (TabsManager.Tab tab : studioTabsManager.getTabs()) {
             if (!(tab.getData() instanceof String key)) {
@@ -3646,22 +3629,12 @@ public class StudioScreen extends StudioInfiniteScreen {
             if (document == null) {
                 continue;
             }
-            Long deadline = pendingStudioTabDiscards.get(key);
-            if (deadline != null && deadline < now) {
-                clearStudioDiscardPrompt(key);
-                deadline = null;
-            }
             boolean dirty = isStudioDocumentDirty(document);
-            if (!dirty && deadline != null) {
-                clearStudioDiscardPrompt(key);
-                deadline = null;
-            }
-            boolean unsaved = dirty && deadline == null;
-            if (tab.isUnsaved() != unsaved) {
-                tab.setUnsaved(unsaved);
+            if (tab.isUnsaved() != dirty) {
+                tab.setUnsaved(dirty);
                 layoutChanged = true;
             }
-            if (deadline == null && (!tab.getName().equals(document.title()) || !Objects.equals(tab.getIconPath(), studioResourceIconPath(document.type(), document.id())))) {
+            if (!tab.getName().equals(document.title()) || !Objects.equals(tab.getIconPath(), studioResourceIconPath(document.type(), document.id()))) {
                 tab.setName(document.title());
                 tab.setIconPath(studioResourceIconPath(document.type(), document.id()));
                 layoutChanged = true;
@@ -3674,28 +3647,19 @@ public class StudioScreen extends StudioInfiniteScreen {
     }
 
     private void clearStudioDiscardPrompts() {
-        for (String key : List.copyOf(pendingStudioTabDiscards.keySet())) {
-            clearStudioDiscardPrompt(key);
+        if (studioTabsManager != null) {
+            studioTabsManager.clearDiscardConfirms();
         }
     }
 
-    private void clearStudioDiscardPrompt(String key) {
-        if (key == null) {
+    protected void clearStudioDiscardPrompt(String key) {
+        if (studioTabsManager == null || key == null) {
             return;
         }
-        pendingStudioTabDiscards.remove(key);
-        if (studioTabsManager == null) {
-            return;
-        }
-        StudioDocument document = findStudioDocument(key);
         TabsManager.Tab tab = findStudioTab(key, studioTabsManager.getTabs());
-        if (document == null || tab == null) {
-            return;
+        if (tab != null) {
+            studioTabsManager.clearDiscardConfirm(tab);
         }
-        tab.setName(document.title());
-        tab.setIconPath(studioResourceIconPath(document.type(), document.id()));
-        tab.setUnsaved(isStudioDocumentDirty(document));
-        studioTabsManager.updateLayout();
     }
 
     protected void syncStudioDocumentTabs() {
@@ -3721,11 +3685,11 @@ public class StudioScreen extends StudioInfiniteScreen {
                 tab = studioTabsManager.addTab(document.title(), container, studioResourceIconPath(document.type(), document.id()));
                 tab.setData(document.key());
                 tabs.add(tab);
-            } else if (!pendingStudioTabDiscards.containsKey(document.key())) {
+            } else {
                 tab.setName(document.title());
                 tab.setIconPath(studioResourceIconPath(document.type(), document.id()));
             }
-            tab.setUnsaved(isStudioDocumentDirty(document) && !pendingStudioTabDiscards.containsKey(document.key()));
+            tab.setUnsaved(isStudioDocumentDirty(document));
         }
         if (activeStudioDocument != null) {
             TabsManager.Tab activeTab = findStudioTab(activeStudioDocument.key(), studioTabsManager.getTabs());
@@ -4977,7 +4941,7 @@ public class StudioScreen extends StudioInfiniteScreen {
         int top = 42;
         int bottom = studioContentBrowserAffectsLayout() ? studioContentBrowser.getY() - 8 : height - 8;
         int left = studioContentBrowserWidth() + 12;
-        int right = width - (studioResourcePanel != null && studioResourcePanel.isVisible() ? studioResourcePanel.getDesiredWidth() + 12 : 12);
+        int right = width - 12 - (studioResourcePanel != null ? studioResourcePanel.layoutWidth(0) : 0);
         int areaWidth = Math.max(20, right - left);
         int areaHeight = Math.max(20, bottom - top);
         ReSyncStudioView view = activeStudioView();
@@ -5031,7 +4995,7 @@ public class StudioScreen extends StudioInfiniteScreen {
 
     protected String studioResourceIconPath(String type, String id) {
         return switch (type) {
-            case ReSyncResourceDragPayload.FUNCTION -> "snippets.png";
+            case ReSyncResourceDragPayload.FUNCTION -> "json.png";
             case ReSyncResourceDragPayload.COMMAND -> "terminal.png";
             case ReSyncResourceDragPayload.CUSTOM_CONTENT -> customContentIconPath(id);
             case ReSyncResourceDragPayload.GUI -> "fullPanel.png";

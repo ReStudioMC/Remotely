@@ -28,7 +28,7 @@ public class StudioPanel {
 
     public StudioPanel(ReScreen screen, String id) {
         this.screen = screen;
-        this.sidePanel = screen.createSidePanel(id);
+        this.sidePanel = screen.createSidePanel(id).collapsible("Studio Panel");
         this.state = new ReSyncStudioPanelState();
         sidePanel.right()
             .minWidth(ReSyncStudioPanelState.MIN_WIDTH)
@@ -51,6 +51,21 @@ public class StudioPanel {
 
     public ReSyncStudioPanelState state() {
         return state;
+    }
+
+    public StudioPanel required() {
+        sidePanel.required();
+        return this;
+    }
+
+    public StudioPanel collapsible(String label) {
+        sidePanel.collapsible(label);
+        return this;
+    }
+
+    public StudioPanel dismissible(String label) {
+        sidePanel.dismissible(label);
+        return this;
     }
 
     public StudioPanel placement(Placement placement) {
@@ -112,7 +127,7 @@ public class StudioPanel {
     }
 
     private int currentWidth() {
-        int width = sidePanel.getDesiredWidth();
+        int width = sidePanel.getConfiguredWidth();
         if (width <= 0) {
             width = state.width();
         }

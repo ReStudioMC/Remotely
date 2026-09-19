@@ -100,7 +100,7 @@ final class ServerDevelopmentPanel {
             query = normalize(value);
             if (gitChangesTree != null) gitChangesTree.setQuery(query);
         }).build();
-        panel = host.createSidePanel("server-development").dismissible("Development").seam(false).right().y(60).minWidth(190).maxWidth(Integer.MAX_VALUE).maxWidthRatio(100).width(310).height(Math.max(80, host.getHeight() - 80));
+        panel = host.createSidePanel("server-development").dismissible("Development").right().y(60).minWidth(190).maxWidth(Integer.MAX_VALUE).maxWidthRatio(100).width(310).height(Math.max(80, host.getHeight() - 80));
         panel.onUserVisibilityChanged(visible -> requestedVisible = visible);
         panel.container().layout(new FreeLayout()).backgroundDrawing(true).enableSelecting(false).setAnimateLayout(false);
         addGitToolbarButton(Capability.REFRESH, "reload.png", "Refresh", this::refresh);

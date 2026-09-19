@@ -14,6 +14,7 @@ import restudio.resync.flow.identity.OwnerId;
 import restudio.resync.flow.identity.ResourceTypeId;
 import restudio.resync.flow.identity.ServerId;
 import restudio.resync.flow.identity.ServerResourceLocator;
+import restudio.rescreen.platform.Async;
 import restudio.rescreen.platform.IDrawContext;
 import restudio.rescreen.ui.rescreen.Container;
 import restudio.rescreen.ui.rescreen.TabsManager;
@@ -62,7 +63,6 @@ final class StudioCoreCloseTest {
         StudioDocument document = new StudioDocument("flow", RESOURCE.id(), "Close", null, session, null,
             new StudioViewportState());
         screen.studioDocuments.add(document);
-        screen.pendingStudioTabDiscards.put(document.key(), System.currentTimeMillis() + 1_000L);
         TabsManager.Tab tab = new TabsManager.Tab("Close", new Container("close", 0, 0, 1, 1));
         tab.setData(document.key());
 
@@ -335,8 +335,8 @@ final class StudioCoreCloseTest {
         }
 
         @Override
-        public CompletableFuture<ReSyncFlowClient> ensureFlowClientAsync(String serverId) {
-            return CompletableFuture.completedFuture(null);
+        public Async<ReSyncFlowClient> ensureFlowClientAsync(String serverId) {
+            return Async.completed(null);
         }
 
         @Override

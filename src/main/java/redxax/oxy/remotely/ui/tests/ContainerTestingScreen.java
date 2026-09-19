@@ -57,7 +57,7 @@ public class ContainerTestingScreen extends ReScreen {
         freeContainer.layout(new FreeLayout())
                 .addWidget(new AnimatedButton.Builder().size(120, 20).label(("Add Random Widget")).onClick(() -> freeContainer.addWidget(randomWidget())).build());
 
-        SidePanel sidePanel = createSidePanel("Global Panel").collapsible("Global Panel").y(60).height(height - 5).width(width - 50);
+        SidePanel sidePanel = createSidePanel("Global Panel").collapsible("Global Panel").y(60).height(height - 5).width(width - 50).show().collapse();
         sidePanel.addWidget(new AnimatedButton.Builder().size(100, 20).label(("Panel Button")).build())
                 .addWidget(new AnimatedButton.Builder().size(100, 20).label(("Increase Columns")).onClick(() -> sidePanel.container().columns(sidePanel.container().getColumns() + 1)).build())
                 .addWidget(new AnimatedButton.Builder().size(100, 20).label(("Decrease Columns")).onClick(() -> sidePanel.container().columns(sidePanel.container().getColumns() - 1)).build())
@@ -75,7 +75,6 @@ public class ContainerTestingScreen extends ReScreen {
 
         SearchMode searchMode = new SearchMode(true);
         headerBuilder.addRight("close.png", () -> client.setScreen(null), "Close Screen")
-                .addRight("unmerge.png", sidePanel::toggle, "Toggle Side Panel")
                 .addLeft("remotely.png", () -> client.setScreen(new ContainerTestingScreen()), "Reload Screen")
                 .setSearchMode(searchMode, true)
                 .build();
