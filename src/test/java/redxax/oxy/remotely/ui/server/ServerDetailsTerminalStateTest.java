@@ -67,4 +67,10 @@ class ServerDetailsTerminalStateTest {
         assertFalse(ServerDetailsScreen.shouldClearBrowserDetailState(true, false, true));
         assertFalse(ServerDetailsScreen.shouldClearBrowserDetailState(true, true, false));
     }
+
+    @Test
+    void localTerminalWaitsForObservedControllerState() {
+        assertFalse(DesktopServerTerminalPlatform.canStartTerminalFromInstanceState(true));
+        assertTrue(DesktopServerTerminalPlatform.canStartTerminalFromInstanceState(false));
+    }
 }

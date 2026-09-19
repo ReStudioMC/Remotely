@@ -250,19 +250,18 @@ public final class DesktopServerTerminalPlatform implements ServerTerminalPlatfo
     private void applyState(ServerTerminal terminal, InstanceState state) {
         if (state == null) return;
         terminal.acceptPlatformState(state.name());
-        if (state == InstanceState.RUNNING && !terminal.isTerminalReady()) {
+        if (state == InstanceState.RUNNING && canStartTerminalFromInstanceState(isLocal()) && !terminal.isTerminalReady()) {
             ScreenManager.getInstance().execute(() -> {
                 if (!terminal.isTerminalReady()) {
                     terminal.start();
                 }
             });
         }
-        if (state == InstanceState.STARTING && !isLocal() && !terminal.isTerminalReady()) {
+        if (state == InstanceState.STARTING && canStartTerminalFromInstanceState(isLocal()) && !terminal.isTerminalReady()) {
             ScreenManager.getInstance().execute(() -> {
                 if (!terminal.isTerminalReady()) terminal.startServerProcess();
             });
         }
-        if (state == InstanceState.STARTING && isLocal()) attachIfNeeded(terminal);
         if ((state == InstanceState.STOPPED || state == InstanceState.CRASHED) && !terminal.platformDesiredRunning()) {
             terminal.platformStopAndShowStopped();
         }
@@ -282,7 +281,6 @@ public final class DesktopServerTerminalPlatform implements ServerTerminalPlatfo
             if (recoverLocalStart(terminal)) return;
             terminal.acceptPlatformState("starting");
             instance.setState(InstanceState.STARTING);
-            attachIfNeeded(terminal);
             return;
         }
         if (("STOPPED".equals(state) || "CRASHED".equals(state)) && !stopPending && hasManagedProcess(status)) {
@@ -352,7 +350,6 @@ public final class DesktopServerTerminalPlatform implements ServerTerminalPlatfo
         localLaunchAllowed.set(false);
         terminal.acceptPlatformState("starting");
         instance.setState(InstanceState.STARTING);
-        attachIfNeeded(terminal);
         beginLocalStartGate(terminal, operationId);
         return true;
     }
@@ -450,6 +447,10 @@ public final class DesktopServerTerminalPlatform implements ServerTerminalPlatfo
         return status != null && status.ok && status.knownSession
                 && (status.pid > 0 || status.wrapperPid > 0 || status.serverPid > 0
                 || status.pids != null && status.pids.stream().anyMatch(value -> value != null && value > 0));
+    }
+
+    static boolean canStartTerminalFromInstanceState(boolean local) {
+        return !local;
     }
 
     private boolean isLocal() {
