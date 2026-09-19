@@ -1,13 +1,11 @@
 package redxax.oxy.remotely.data.player.source;
 
-import restudio.rescreen.logging.LogSource;
-import restudio.rescreen.logging.LogTypes;
-import restudio.rescreen.logging.ReLog;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonSyntaxException;
 import com.google.gson.reflect.TypeToken;
 import com.google.gson.stream.JsonReader;
-import java.io.StringReader;
+import com.google.gson.stream.JsonToken;
 import redxax.oxy.remotely.data.managed.BanEntry;
 import redxax.oxy.remotely.data.managed.IpBanEntry;
 import redxax.oxy.remotely.data.managed.OpEntry;
@@ -17,39 +15,55 @@ import redxax.oxy.remotely.data.player.PlayerService;
 import redxax.oxy.remotely.data.player.PlayerUpdateBatch;
 import redxax.oxy.remotely.data.player.model.BanInfo;
 import redxax.oxy.remotely.data.player.model.UnifiedPlayer;
+import redxax.oxy.remotely.util.AsyncTools;
+import redxax.oxy.remotely.util.TaskSchedulers;
 import restudio.rebase.api.RebaseAPI;
 import restudio.rebase.instance.Instance;
+import restudio.rebase.platform.jvm.JvmAsyncBridge;
+import restudio.rescreen.logging.LogSource;
+import restudio.rescreen.logging.LogTypes;
+import restudio.rescreen.logging.ReLog;
+import restudio.rescreen.platform.Async;
+import restudio.rescreen.platform.TaskScheduler;
 
+import java.io.StringReader;
 import java.lang.reflect.Type;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
-import restudio.rescreen.platform.Async;
-import restudio.rebase.platform.jvm.JvmAsyncBridge;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 public class StandardFileSource implements IPlayerSource {
-    private final RebaseAPI api;
-    private PlayerService service;
-    private final Gson gson = new GsonBuilder().setLenient().create();
-    private boolean enabled = false;
+    private static final Duration RETRY_DELAY = Duration.ofMillis(250L);
 
-    private final Path opsPath;
-    private final Path bannedPlayersPath;
-    private final Path bannedIpsPath;
-    private final Path whitelistPath;
-    private final Path usercachePath;
+    private final RebaseAPI api;
+    private final Gson gson = new GsonBuilder().setLenient().create();
+    private final WatchedFile<OpEntry> opsFile;
+    private final WatchedFile<BanEntry> bannedPlayersFile;
+    private final WatchedFile<IpBanEntry> bannedIpsFile;
+    private final WatchedFile<WhitelistEntry> whitelistFile;
+    private final WatchedFile<UserCacheEntry> usercacheFile;
+    private final List<WatchedFile<?>> watchedFiles;
+    private PlayerService service;
+    private volatile boolean enabled;
 
     public StandardFileSource(Instance instance, RebaseAPI api) {
         this.api = api;
         Path instancePath = Path.of(instance.getPath());
-        this.opsPath = instancePath.resolve("ops.json");
-        this.bannedPlayersPath = instancePath.resolve("banned-players.json");
-        this.bannedIpsPath = instancePath.resolve("banned-ips.json");
-        this.whitelistPath = instancePath.resolve("whitelist.json");
-        this.usercachePath = instancePath.resolve("usercache.json");
+        opsFile = new WatchedFile<>("ops.json", instancePath.resolve("ops.json"), new TypeToken<List<OpEntry>>() { }.getType(), this::processOps);
+        bannedPlayersFile = new WatchedFile<>("banned-players.json", instancePath.resolve("banned-players.json"),
+                new TypeToken<List<BanEntry>>() { }.getType(), this::processBans);
+        bannedIpsFile = new WatchedFile<>("banned-ips.json", instancePath.resolve("banned-ips.json"),
+                new TypeToken<List<IpBanEntry>>() { }.getType(), this::processIpBans);
+        whitelistFile = new WatchedFile<>("whitelist.json", instancePath.resolve("whitelist.json"),
+                new TypeToken<List<WhitelistEntry>>() { }.getType(), this::processWhitelist);
+        usercacheFile = new WatchedFile<>("usercache.json", instancePath.resolve("usercache.json"),
+                new TypeToken<List<UserCacheEntry>>() { }.getType(), this::processUsercache);
+        watchedFiles = List.of(opsFile, bannedPlayersFile, bannedIpsFile, whitelistFile, usercacheFile);
     }
 
     @Override
@@ -68,6 +82,7 @@ public class StandardFileSource implements IPlayerSource {
     @Override
     public void disable() {
         enabled = false;
+        watchedFiles.forEach(WatchedFile::stop);
     }
 
     @Override
@@ -81,38 +96,13 @@ public class StandardFileSource implements IPlayerSource {
     }
 
     public void refreshAll() {
-        loadJsonFile(opsPath, new TypeToken<List<OpEntry>>() {}).thenAccept(this::processOps);
-        loadJsonFile(bannedPlayersPath, new TypeToken<List<BanEntry>>() {}).thenAccept(this::processBans);
-        loadJsonFile(bannedIpsPath, new TypeToken<List<IpBanEntry>>() {}).thenAccept(this::processIpBans);
-        loadJsonFile(whitelistPath, new TypeToken<List<WhitelistEntry>>() {}).thenAccept(this::processWhitelist);
-        loadJsonFile(usercachePath, new TypeToken<List<UserCacheEntry>>() {}).thenAccept(this::processUsercache);
+        if (!enabled) return;
+        watchedFiles.forEach(WatchedFile::refresh);
     }
 
     public void updateFromContent(String fileName, String content) {
-        if (!enabled || content == null || content.isEmpty()) return;
-        try {
-            JsonReader reader = new JsonReader(new StringReader(content));
-            reader.setLenient(true);
-            
-            if (fileName.endsWith("ops.json")) {
-                List<OpEntry> ops = gson.fromJson(reader, new TypeToken<List<OpEntry>>() {}.getType());
-                processOps(ops);
-            } else if (fileName.endsWith("banned-players.json")) {
-                List<BanEntry> bans = gson.fromJson(reader, new TypeToken<List<BanEntry>>() {}.getType());
-                processBans(bans);
-            } else if (fileName.endsWith("banned-ips.json")) {
-                List<IpBanEntry> ipBans = gson.fromJson(reader, new TypeToken<List<IpBanEntry>>() {}.getType());
-                processIpBans(ipBans);
-            } else if (fileName.endsWith("whitelist.json")) {
-                List<WhitelistEntry> whitelist = gson.fromJson(reader, new TypeToken<List<WhitelistEntry>>() {}.getType());
-                processWhitelist(whitelist);
-            } else if (fileName.endsWith("usercache.json")) {
-                List<UserCacheEntry> cache = gson.fromJson(reader, new TypeToken<List<UserCacheEntry>>() {}.getType());
-                processUsercache(cache);
-            }
-        } catch (Exception e) {
-            ReLog.logger(LogTypes.FILESYSTEM).source(LogSource.resource(fileName, fileName)).component(StandardFileSource.class).operation("Read Player Data").error("Could not parse player data", e);
-        }
+        if (!enabled || fileName == null || content == null) return;
+        watchedFiles.stream().filter(file -> fileName.endsWith(file.name)).findFirst().ifPresent(file -> file.observe(content));
     }
 
     private void processOps(List<OpEntry> ops) {
@@ -239,14 +229,122 @@ public class StandardFileSource implements IPlayerSource {
         }
     }
 
-    private <T> Async<List<T>> loadJsonFile(Path path, TypeToken<List<T>> typeToken) {
-        return JvmAsyncBridge.fromFuture(api.fileExists(path)).thenCompose(exists -> {
-            if (!exists) return Async.completed(null);
-            return JvmAsyncBridge.fromFuture(api.readFile(path)).thenApply(content -> {
-                if (content == null || content.isEmpty()) return null;
-                Type type = typeToken.getType();
-                return gson.fromJson(content, type);
+    private final class WatchedFile<T> {
+        private final String name;
+        private final Path path;
+        private final Type type;
+        private final Consumer<List<T>> consumer;
+        private final PlayerFileSnapshotState state = new PlayerFileSnapshotState();
+        private TaskScheduler.ScheduledTask pendingRetry;
+
+        private WatchedFile(String name, Path path, Type type, Consumer<List<T>> consumer) {
+            this.name = name;
+            this.path = path;
+            this.type = type;
+            this.consumer = consumer;
+        }
+
+        private void refresh() {
+            long generation = state.observe();
+            cancelRetry();
+            read(generation, 0);
+        }
+
+        private void observe(String content) {
+            long generation = state.observe();
+            cancelRetry();
+            parse(content, generation, 0);
+        }
+
+        private void read(long generation, int attempt) {
+            if (!enabled || !state.current(generation)) return;
+            readContent().whenComplete((content, failure) -> {
+                if (!enabled || !state.current(generation)) return;
+                if (failure != null) {
+                    reject(generation, attempt, failure);
+                } else if (content != null) {
+                    parse(content, generation, attempt);
+                }
             });
-        });
+        }
+
+        private Async<String> readContent() {
+            return JvmAsyncBridge.fromFuture(api.fileExists(path)).thenCompose(exists -> {
+                if (!exists) return Async.completed(null);
+                return JvmAsyncBridge.fromFuture(api.readFile(path));
+            });
+        }
+
+        private void parse(String content, long generation, int attempt) {
+            if (!enabled || !state.current(generation)) return;
+            List<T> values;
+            try {
+                JsonReader reader = new JsonReader(new StringReader(content));
+                reader.setLenient(true);
+                values = gson.fromJson(reader, type);
+                if (values == null || reader.peek() != JsonToken.END_DOCUMENT) {
+                    throw new JsonSyntaxException("Expected one complete player data array");
+                }
+            } catch (Exception failure) {
+                reject(generation, attempt, failure);
+                return;
+            }
+            PlayerFileSnapshotState.Accepted accepted = state.accept(generation, content);
+            if (accepted.current() && accepted.changed()) {
+                consumer.accept(values);
+            }
+        }
+
+        private void reject(long generation, int attempt, Throwable failure) {
+            PlayerFileSnapshotState.Rejected rejected = state.reject(generation, attempt, System.currentTimeMillis());
+            if (!rejected.current()) return;
+            if (rejected.report()) {
+                report(failure);
+            }
+            if (rejected.retry()) {
+                scheduleRetry(generation, attempt + 1, failure);
+            }
+        }
+
+        private void scheduleRetry(long generation, int attempt, Throwable parseFailure) {
+            cancelRetry();
+            if (!enabled || !state.current(generation)) return;
+            try {
+                Duration delay = RETRY_DELAY.multipliedBy(attempt);
+                TaskScheduler.ScheduledTask scheduled = AsyncTools.schedule(TaskSchedulers.current(), delay, () -> {
+                    synchronized (this) {
+                        pendingRetry = null;
+                    }
+                    read(generation, attempt);
+                });
+                synchronized (this) {
+                    if (enabled && state.current(generation)) {
+                        pendingRetry = scheduled;
+                    } else {
+                        scheduled.cancel();
+                    }
+                }
+            } catch (Throwable schedulingFailure) {
+                if (state.reportNow(generation, System.currentTimeMillis())) {
+                    report(parseFailure);
+                }
+            }
+        }
+
+        private void report(Throwable failure) {
+            ReLog.logger(LogTypes.FILESYSTEM).source(LogSource.resource(path.toString(), name)).component(StandardFileSource.class)
+                    .operation("Read Player Data").error("Could not parse player data after retries", failure);
+        }
+
+        private synchronized void cancelRetry() {
+            if (pendingRetry == null) return;
+            pendingRetry.cancel();
+            pendingRetry = null;
+        }
+
+        private void stop() {
+            state.observe();
+            cancelRetry();
+        }
     }
 }
