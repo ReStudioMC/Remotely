@@ -1003,7 +1003,12 @@ public final class DesktopServerHost implements ServerScreenHost {
         if (!(instance instanceof Instance value)) {
             return ServerSettingsDataController.unavailable();
         }
-        return new ServerSettingsController(value, snapshot);
+        var catalogs = client.getComposition().serverSettingsCatalogService();
+        var token = client.getFlowManager() == null ? null
+            : client.getFlowManager().currentServerConnectionToken(value.getInstanceId());
+        var view = catalogs == null ? null : catalogs.open(value.getInstanceId(), token == null ? 0L : token.generation(),
+            value.getVersionId());
+        return new ServerSettingsController(value, snapshot, RebaseApiFactory.get(value), view);
     }
 
     public Async<Void> saveInstanceConfiguration(Instance instance, ServerSettingsDataController settingsController) {

@@ -1,6 +1,7 @@
 package redxax.oxy.remotely.ui.settings.data;
 
 import redxax.oxy.remotely.network.config.DesktopStructuredDocumentParser;
+import redxax.oxy.remotely.metadata.catalog.ServerSettingsCatalogService;
 import redxax.oxy.remotely.settings.server.ServerSettingsSnapshot;
 import restudio.rebase.api.RebaseAPI;
 import restudio.rebase.api.RebaseApiFactory;
@@ -26,7 +27,12 @@ public class DesktopServerSettingsDataController extends ServerSettingsDocumentD
     }
 
     public DesktopServerSettingsDataController(Instance instance, ServerSettingsSnapshot snapshot, RebaseAPI api) {
-        super(target(instance), snapshot, store(instance, api), false, new DesktopStructuredDocumentParser());
+        this(instance, snapshot, api, null);
+    }
+
+    public DesktopServerSettingsDataController(Instance instance, ServerSettingsSnapshot snapshot, RebaseAPI api,
+                                               ServerSettingsCatalogService.View catalogs) {
+        super(target(instance), snapshot, store(instance, api), false, new DesktopStructuredDocumentParser(), catalogs);
         source = instance;
         sourcePath = normalizedPath(instance.getPath());
         sourceApi = api;
@@ -47,6 +53,12 @@ public class DesktopServerSettingsDataController extends ServerSettingsDocumentD
             public String catalogServerId() {
                 String instanceId = instance.getInstanceId();
                 return instanceId == null ? "" : instanceId.trim();
+            }
+
+            @Override
+            public String minecraftVersion() {
+                String version = instance.getVersionId();
+                return version == null ? "" : version.trim();
             }
 
             @Override

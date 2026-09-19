@@ -105,6 +105,11 @@ public final class BrowserServerConfigurationTarget implements ServerConfigurati
     }
 
     @Override
+    public String minecraftVersion() {
+        return version == null ? "" : version.trim();
+    }
+
+    @Override
     public String name() {
         return name;
     }

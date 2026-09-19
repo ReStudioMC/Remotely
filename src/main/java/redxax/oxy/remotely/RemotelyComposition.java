@@ -9,6 +9,7 @@ import redxax.oxy.remotely.data.flow.ReSyncIdentityProvider;
 import redxax.oxy.remotely.config.RemotelyConfigStore;
 import redxax.oxy.remotely.flow.registry.NodeRegistry;
 import redxax.oxy.remotely.host.ApplicationHost;
+import redxax.oxy.remotely.metadata.catalog.ServerSettingsCatalogService;
 import redxax.oxy.remotely.session.TerminalSessionManager;
 import redxax.oxy.remotely.settings.server.ServerSettingsRegistry;
 import redxax.oxy.remotely.settings.server.ServerSettingsRegistryStorage;
@@ -107,6 +108,7 @@ public final class RemotelyComposition {
     private final Supplier<RemotelyServerApi> apiClientFactory;
     private final Consumer<RemotelyClient> initializationHook;
     private final ServerSettingsRegistry.StorageSnapshot serverSettingsRegistryStorageSnapshot;
+    private final ServerSettingsCatalogService serverSettingsCatalogService;
 
     private RemotelyComposition(Builder builder) {
         application = builder.application;
@@ -144,6 +146,7 @@ public final class RemotelyComposition {
         rootScreenFactory = builder.rootScreenFactory;
         apiClientFactory = builder.apiClientFactory;
         initializationHook = builder.initializationHook;
+        serverSettingsCatalogService = builder.serverSettingsCatalogService;
         ServerSettingsRegistry registry = ServerSettingsRegistry.getInstance();
         ServerSettingsRegistryStorage storage = builder.serverSettingsRegistryStorageFactory.apply(registry);
         if (environment == Environment.BROWSER) {
@@ -278,6 +281,10 @@ public final class RemotelyComposition {
         return serverSettingsRegistryStorageSnapshot;
     }
 
+    public ServerSettingsCatalogService serverSettingsCatalogService() {
+        return serverSettingsCatalogService;
+    }
+
     public static final class Builder {
         private final ApplicationHost host;
         private RemotelyApplication application = RemotelyApplication.APP;
@@ -306,6 +313,7 @@ public final class RemotelyComposition {
         private Supplier<RemotelyServerApi> apiClientFactory;
         private Consumer<RemotelyClient> initializationHook;
         private Function<ServerSettingsRegistry, ServerSettingsRegistryStorage> serverSettingsRegistryStorageFactory;
+        private ServerSettingsCatalogService serverSettingsCatalogService;
 
         private Builder(ApplicationHost host) {
             this.host = Objects.requireNonNull(host, "host");
@@ -370,6 +378,11 @@ public final class RemotelyComposition {
 
         public Builder remoteHostConnectionProvider(RemoteHostConnectionProvider provider) {
             this.remoteHostConnectionProvider = Objects.requireNonNull(provider, "remoteHostConnectionProvider");
+            return this;
+        }
+
+        public Builder serverSettingsCatalogService(ServerSettingsCatalogService serverSettingsCatalogService) {
+            this.serverSettingsCatalogService = serverSettingsCatalogService;
             return this;
         }
 

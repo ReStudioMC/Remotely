@@ -616,7 +616,7 @@ class ServerSettingsDataControllerTest {
     }
 
     @Test
-    void routesBiomeFieldToItemSelectorWithDisplayName() {
+    void routesBiomeFieldToSearchableSemanticCatalog() {
         Path root = Path.of("settings-source-" + UUID.randomUUID()).toAbsolutePath();
         MemoryFiles files = new MemoryFiles();
         Path configPath = root.resolve("paper-world.yml");
@@ -632,10 +632,10 @@ class ServerSettingsDataControllerTest {
         controller.load().join();
 
         ConfigOption<String> option = textOption(controller, "World");
-        assertTrue(option.isItemSelector());
-        assertNotNull(option.getDisplayFunction());
-        assertEquals("Cherry Grove", option.getDisplayFunction().apply("minecraft:cherry_grove"));
-        assertTrue(option.getOptions().contains("minecraft:cherry_grove"));
+        OptionEditor.Scalar<String> editor = assertInstanceOf(OptionEditor.Scalar.class, option.getOptionEditor());
+        OptionEditor.Choice<String> cherry = editor.value().catalog().get().choices().stream()
+            .filter(choice -> choice.value().equals("minecraft:cherry_grove")).findFirst().orElseThrow();
+        assertEquals("Cherry Grove", cherry.label());
         assertEquals("minecraft:plains", option.get());
 
         option.set("minecraft:cherry_grove");

@@ -163,7 +163,8 @@ public final class OptionCatalogLoader {
         }
         boolean loading = !present || cache.isStale(serverId, request.source(), contextKey)
             || cache.isRequestInFlight(serverId, request.source(), contextKey);
-        return new Snapshot(request, contextKey, cache.getValues(serverId, request.source(), contextKey),
+        return new Snapshot(request, contextKey, cache.lookup(serverId, request.source(), contextKey).revision(),
+            cache.getValues(serverId, request.source(), contextKey),
             cache.getItems(serverId, request.source(), contextKey), loading,
             cache.getStatus(serverId, request.source(), contextKey), cache.getDiagnostic(serverId, request.source(), contextKey));
     }
@@ -403,7 +404,7 @@ public final class OptionCatalogLoader {
         }
     }
 
-    public record Snapshot(Request request, String contextKey, List<String> values, List<OptionCatalogItem> items,
+    public record Snapshot(Request request, String contextKey, long revision, List<String> values, List<OptionCatalogItem> items,
                            boolean loading, String status, String diagnostic) {
         public Snapshot {
             request = request != null ? request : new Request("", Map.of());
@@ -414,8 +415,13 @@ public final class OptionCatalogLoader {
             diagnostic = diagnostic != null ? diagnostic : "";
         }
 
+        public Snapshot(Request request, String contextKey, List<String> values, List<OptionCatalogItem> items,
+                        boolean loading, String status, String diagnostic) {
+            this(request, contextKey, 0L, values, items, loading, status, diagnostic);
+        }
+
         private static Snapshot missing(Request request) {
-            return new Snapshot(request, "", List.of(), List.of(), true, "missing", "Catalog has not been loaded");
+            return new Snapshot(request, "", 0L, List.of(), List.of(), true, "missing", "Catalog has not been loaded");
         }
     }
 

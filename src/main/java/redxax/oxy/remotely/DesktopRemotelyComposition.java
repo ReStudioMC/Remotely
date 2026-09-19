@@ -14,6 +14,8 @@ import redxax.oxy.remotely.discord.DiscordRpcBridge;
 import redxax.oxy.remotely.discord.DiscordRpcService;
 import redxax.oxy.remotely.flow.registry.NodeRegistry;
 import redxax.oxy.remotely.host.ApplicationHost;
+import redxax.oxy.remotely.metadata.DesktopMetadataRepository;
+import redxax.oxy.remotely.metadata.catalog.ServerSettingsCatalogService;
 import redxax.oxy.remotely.network.DesktopNetworkManager;
 import redxax.oxy.remotely.network.DesktopNetworkAccess;
 import redxax.oxy.remotely.ui.server.DesktopServerUiCapabilities;
@@ -65,6 +67,8 @@ public final class DesktopRemotelyComposition {
                 .panelServerProvider(DesktopPanelServerProvider.instance())
                 .remoteHostConnectionProvider(DesktopRemoteHostConnectionProvider.instance())
                 .serverIconProvider(new DesktopServerIconProvider(applicationDirectory))
+                .serverSettingsCatalogService(new ServerSettingsCatalogService(
+                    DesktopMetadataRepository.create(applicationDirectory.resolve("data").resolve("metadata"))))
                 .terminalSessionManagerFactory(() -> new TerminalSessionManager(new DesktopTerminalSessionLifecycle()))
                 .networkManagerFactory(() -> new DesktopNetworkManager(applicationDirectory))
                 .instanceManagerFactory(() -> Rebase.get().getInstanceManager())

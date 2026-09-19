@@ -8,6 +8,10 @@ public interface ServerSettingsDocumentTarget {
         return "";
     }
 
+    default String minecraftVersion() {
+        return "";
+    }
+
     Collection<String> softwareTokens();
 
     String property(String key);

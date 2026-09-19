@@ -2,6 +2,8 @@ package redxax.oxy.remotely.ui.settings.data;
 
 import redxax.oxy.remotely.data.flow.OptionCatalogItem;
 import redxax.oxy.remotely.data.flow.OptionCatalogLoader;
+import redxax.oxy.remotely.metadata.catalog.ResolvedCatalogRepository;
+import redxax.oxy.remotely.metadata.catalog.ServerSettingsCatalogService;
 import redxax.oxy.remotely.network.ConfigurationFormat;
 import redxax.oxy.remotely.network.config.NetworkConfigurationAdapter;
 import redxax.oxy.remotely.network.config.NetworkConfigurationAdapters;
@@ -25,8 +27,10 @@ import java.io.StringReader;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -47,6 +51,7 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
     private final boolean writeServerProperties;
     private final NetworkConfigurationAdapters adapters;
     private final StructuredDocumentParser structuredParser;
+    private final ServerSettingsCatalogService.View hostedCatalogs;
     private final Object stateLock = new Object();
     private final Async<Void> loadFuture;
     private final LinkedHashMap<String, DocumentState> documents = new LinkedHashMap<>();
@@ -60,6 +65,8 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
     private final LinkedHashSet<String> declaredTabs = new LinkedHashSet<>();
     private final LinkedHashSet<String> publishedTabs = new LinkedHashSet<>();
     private final LinkedHashSet<String> completedDocuments = new LinkedHashSet<>();
+    private final IdentityHashMap<ResolvedCatalogRepository.Snapshot, OptionEditor.Catalog<Object>> catalogAdapters = new IdentityHashMap<>();
+    private final OptionEditor.Catalog<String> bundledBiomes = bundledBiomeCatalog();
     private final List<Consumer<List<String>>> publicationListeners = new ArrayList<>();
     private List<DocumentDefinition> documentDefinitions = List.of();
     private List<Async<Void>> documentLoads = List.of();
@@ -82,11 +89,25 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
     protected ServerSettingsDocumentDataController(ServerSettingsDocumentTarget source, ServerSettingsSnapshot snapshot,
                                                     ServerSettingsDocumentStore store, boolean writeServerProperties,
                                                     StructuredDocumentParser structuredParser) {
+        this(source, snapshot, store, writeServerProperties, structuredParser, null);
+    }
+
+    public ServerSettingsDocumentDataController(ServerSettingsDocumentTarget source, ServerSettingsSnapshot snapshot,
+                                                ServerSettingsDocumentStore store, StructuredDocumentParser structuredParser,
+                                                ServerSettingsCatalogService.View hostedCatalogs) {
+        this(source, snapshot, store, true, structuredParser, hostedCatalogs);
+    }
+
+    protected ServerSettingsDocumentDataController(ServerSettingsDocumentTarget source, ServerSettingsSnapshot snapshot,
+                                                    ServerSettingsDocumentStore store, boolean writeServerProperties,
+                                                    StructuredDocumentParser structuredParser,
+                                                    ServerSettingsCatalogService.View hostedCatalogs) {
         this.source = Objects.requireNonNull(source, "source");
         this.snapshot = snapshot == null ? new ServerSettingsSnapshot(List.of()) : snapshot;
         this.store = Objects.requireNonNull(store, "store");
         this.writeServerProperties = writeServerProperties;
         this.structuredParser = Objects.requireNonNull(structuredParser, "structuredParser");
+        this.hostedCatalogs = hostedCatalogs;
         adapters = new NetworkConfigurationAdapters(structuredParser);
         loadFuture = loadDocuments();
     }
@@ -228,10 +249,12 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
             documentPaths.clear();
             availableDocumentPaths.clear();
             unavailableDocumentPaths.clear();
+            catalogAdapters.clear();
             documentLoads.forEach(Async::cancel);
             documentLoads = List.of();
         }
         if (discovery != null) discovery.cancel();
+        if (hostedCatalogs != null) hostedCatalogs.close();
     }
 
     private Async<Void> loadDocuments() {
@@ -529,15 +552,11 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
 
     private ConfigOption<String> singleBiomeGeneratorOption(FieldBinding binding) {
         String current = generatorBiome(readValue(binding));
-        List<String> biomes = new ArrayList<>(MinecraftBiomeCatalog.biomeIds());
-        if (!biomes.contains(current)) biomes.add(0, current);
         return ConfigOption.<String>builder("Biome")
                 .description("Chooses the biome used by the Single Biome Surface world preset.")
                 .bind(() -> generatorBiome(readValue(binding)), value -> writeValue(binding, "{\"biome\":\"" + value + "\"}"))
                 .defaultValue(generatorBiome(binding.defaultValue))
-                .options(biomes)
-                .display(MinecraftBiomeCatalog::displayName)
-                .itemSelector(true)
+                .editor(biomeEditor(current, "current:" + binding.document.definition.relativePath() + ":generator-biome"))
                 .visibleWhen(() -> levelTypeValue().equals("minecraft:single_biome_surface"))
                 .build();
     }
@@ -648,19 +667,38 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
 
     private ConfigOption<String> biomeOption(FieldBinding binding) {
         ServerSettingsField field = binding.field;
-        List<String> biomes = new ArrayList<>(MinecraftBiomeCatalog.biomeIds());
         String current = binding.value == null ? null : binding.value.toString();
-        if (current != null && !current.isBlank() && !biomes.contains(current)) {
-            biomes.add(0, current);
-        }
         return ConfigOption.<String>builder(field.name())
                 .description(field.description())
                 .bind(() -> (String) readValue(binding), value -> writeValue(binding, value))
                 .defaultValue((String) binding.defaultValue)
-                .options(biomes)
-                .display(MinecraftBiomeCatalog::displayName)
-                .itemSelector(true)
+                .editor(biomeEditor(current, "current:" + binding.document.definition.relativePath() + ":" + field.id()))
                 .build();
+    }
+
+    private OptionEditor.Scalar<String> biomeEditor(String current, String identity) {
+        CatalogCurrent configured = CatalogCurrent.of(identity,
+            current == null || current.isBlank() ? List.of() : List.of(current));
+        OptionEditor.ScalarValue<String> value = new OptionEditor.ScalarValue<>(OptionEditor.ScalarKind.SELECT,
+            current == null || current.isBlank() ? "minecraft:plains" : current, text -> text, text -> text,
+            () -> biomeCatalog(configured), List.of());
+        return new OptionEditor.Scalar<>(value);
+    }
+
+    @SuppressWarnings("unchecked")
+    private OptionEditor.Catalog<String> biomeCatalog(CatalogCurrent current) {
+        OptionEditor.Catalog<Object> hosted = sourceCatalog("server:minecraft:biome", current);
+        boolean populated = hosted.choices().stream().anyMatch(OptionEditor.Choice::selectable);
+        if (populated) return (OptionEditor.Catalog<String>) (OptionEditor.Catalog<?>) hosted;
+        return bundledBiomes;
+    }
+
+    private static OptionEditor.Catalog<String> bundledBiomeCatalog() {
+        List<OptionEditor.Choice<String>> choices = MinecraftBiomeCatalog.biomeIds().stream()
+            .map(id -> new OptionEditor.Choice<>(id, MinecraftBiomeCatalog.displayName(id),
+                "Vanilla biome bundled with Remotely."))
+            .toList();
+        return new OptionEditor.Catalog<>("bundled-biomes", choices);
     }
 
     private ConfigOption<?> listOption(FieldBinding binding) {
@@ -713,7 +751,9 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
         if (schema == null) {
             return textOption(binding);
         }
-        OptionEditor<Object> editor = (OptionEditor<Object>) collectionEditor(schema, field.name());
+        CatalogCurrent keys = catalogCurrent(binding, schema, true);
+        CatalogCurrent values = catalogCurrent(binding, schema, false);
+        OptionEditor<Object> editor = (OptionEditor<Object>) collectionEditor(schema, field.name(), keys, values);
         Object fallback = normalizeCollection(schema, structuredValue(binding.defaultValue, map), map);
         ConfigOption<Object> option = ConfigOption.builder(field.name())
                 .description(field.description())
@@ -727,11 +767,16 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
     }
 
     private OptionEditor<?> collectionEditor(ServerSettingsField.CollectionSchema schema) {
-        return collectionEditor(schema, null);
+        return collectionEditor(schema, null, CatalogCurrent.empty(), CatalogCurrent.empty());
     }
 
     private OptionEditor<?> collectionEditor(ServerSettingsField.CollectionSchema schema, String settingName) {
-        OptionEditor.Value<Object> value = valueEditor(schema.value());
+        return collectionEditor(schema, settingName, CatalogCurrent.empty(), CatalogCurrent.empty());
+    }
+
+    private OptionEditor<?> collectionEditor(ServerSettingsField.CollectionSchema schema, String settingName,
+                                              CatalogCurrent keysCurrent, CatalogCurrent valuesCurrent) {
+        OptionEditor.Value<Object> value = valueEditor(schema.value(), valuesCurrent);
         OptionEditor.CollectionPresentation presentation = collectionPresentation(schema.presentation(), settingName);
         if (schema.mode() == ServerSettingsField.CollectionMode.SEQUENCE) {
             boolean custom = schema.value().catalog() == null || schema.value().allowCustom();
@@ -744,7 +789,7 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
                     .toList();
             keys = OptionEditor.KeyPolicy.fixed(choices);
         } else {
-            OptionEditor.ScalarValue<Object> key = scalarEditor(schema.key());
+            OptionEditor.ScalarValue<Object> key = scalarEditor(schema.key(), keysCurrent);
             if (schema.key().catalog() == null) {
                 keys = OptionEditor.KeyPolicy.custom(key);
             } else {
@@ -777,6 +822,10 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
 
     @SuppressWarnings("unchecked")
     private OptionEditor.Value<Object> valueEditor(ServerSettingsField.ValueSpec spec) {
+        return valueEditor(spec, CatalogCurrent.empty());
+    }
+
+    private OptionEditor.Value<Object> valueEditor(ServerSettingsField.ValueSpec spec, CatalogCurrent current) {
         if (spec.type() == ServerSettingsField.ValueType.OBJECT) {
             List<OptionEditor.Member<?>> members = new ArrayList<>();
             for (ServerSettingsField.ObjectField field : objectFields(spec)) {
@@ -789,7 +838,7 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
             Object fallback = spec.type() == ServerSettingsField.ValueType.LIST ? List.of() : Map.of();
             return new OptionEditor.CollectionValue<>(nested, fallback);
         }
-        return scalarEditor(spec);
+        return scalarEditor(spec, current);
     }
 
     private List<ServerSettingsField.ObjectField> objectFields(ServerSettingsField.ValueSpec spec) {
@@ -804,9 +853,30 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
     }
 
     private OptionEditor.ScalarValue<Object> scalarEditor(ServerSettingsField.ValueSpec spec) {
+        return scalarEditor(spec, CatalogCurrent.empty());
+    }
+
+    private OptionEditor.ScalarValue<Object> scalarEditor(ServerSettingsField.ValueSpec spec, CatalogCurrent current) {
         Object fallback = scalarDefault(spec);
         return new OptionEditor.ScalarValue<>(scalarKind(spec.type()), fallback,
-                value -> parseScalar(spec, value), value -> scalarText(spec, value), () -> catalog(spec), sentinels(spec));
+                value -> parseScalar(spec, value), value -> scalarText(spec, value), () -> catalog(spec, current), sentinels(spec));
+    }
+
+    private CatalogCurrent catalogCurrent(FieldBinding binding, ServerSettingsField.CollectionSchema schema, boolean keys) {
+        Object value = normalizeCollection(schema, structuredValue(binding.value,
+            binding.field.type() == ServerSettingsFieldType.MAP), binding.field.type() == ServerSettingsFieldType.MAP);
+        List<String> values;
+        if (value instanceof Map<?, ?> map) {
+            Collection<?> selected = keys ? map.keySet() : map.values();
+            values = selected.stream().filter(Objects::nonNull).map(String::valueOf).filter(text -> !text.isBlank()).distinct().toList();
+        } else if (!keys && value instanceof List<?> list) {
+            values = list.stream().filter(Objects::nonNull).map(String::valueOf).filter(text -> !text.isBlank()).distinct().toList();
+        } else {
+            values = List.of();
+        }
+        String kind = keys ? "keys" : "values";
+        return CatalogCurrent.of("current:" + binding.document.definition.relativePath() + ":" + binding.field.id() + ":" + kind,
+            values);
     }
 
     private OptionEditor.ScalarKind scalarKind(ServerSettingsField.ValueType type) {
@@ -972,7 +1042,10 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
                 normalizeSentinel(spec, sentinel.value()), sentinel.label(), sentinel.role().name())).toList();
     }
 
-    private OptionEditor.Catalog<Object> catalog(ServerSettingsField.ValueSpec spec) {
+    private OptionEditor.Catalog<Object> catalog(ServerSettingsField.ValueSpec spec, CatalogCurrent current) {
+        if (spec.options().isEmpty() && spec.catalog() != null && spec.catalog().field() == null) {
+            return sourceCatalog(spec.catalog().source(), current);
+        }
         LinkedHashMap<Object, OptionEditor.Choice<Object>> choices = new LinkedHashMap<>();
         for (String option : spec.options()) {
             choices.put(option, new OptionEditor.Choice<>(option, SettingWidgetFactory.formatFriendlyDisplayName(option)));
@@ -980,7 +1053,7 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
         Object stamp = List.copyOf(spec.options());
         if (spec.catalog() != null) {
             List<OptionEditor.Choice<Object>> catalog = spec.catalog().field() != null
-                    ? dependentCatalog(spec.catalog().field()) : sourceCatalog(spec.catalog().source());
+                    ? dependentCatalog(spec.catalog().field()) : sourceCatalog(spec.catalog().source(), current).choices();
             catalog.forEach(choice -> choices.putIfAbsent(choice.value(), choice));
             stamp = List.of(stamp, catalog);
         }
@@ -1005,12 +1078,21 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
         return List.of();
     }
 
-    private List<OptionEditor.Choice<Object>> sourceCatalog(String sourceId) {
+    private OptionEditor.Catalog<Object> sourceCatalog(String sourceId, CatalogCurrent current) {
         LinkedHashMap<String, OptionEditor.Choice<Object>> choices = new LinkedHashMap<>();
         if ("server:minecraft:world".equals(sourceId)) {
             worldCatalog.forEach(value -> choices.put(value, choice(value, "")));
         }
         String serverId = source.catalogServerId();
+        if (hostedCatalogs != null) {
+            ResolvedCatalogRepository.Snapshot resolved = hostedCatalogs.catalog(sourceId, current.identity(), current.values());
+            if (resolved != null) {
+                OptionEditor.Catalog<Object> adapted = catalogAdapters.computeIfAbsent(resolved, this::adaptCatalog);
+                if (choices.isEmpty()) return adapted;
+                adapted.choices().forEach(choice -> choices.put(String.valueOf(choice.value()), choice));
+                return new OptionEditor.Catalog<>(List.of(adapted.stamp(), List.copyOf(choices.keySet())), List.copyOf(choices.values()));
+            }
+        }
         OptionCatalogLoader.Snapshot snapshot = OptionCatalogLoader.snapshot(serverId, sourceId);
         for (OptionCatalogItem item : snapshot.items()) {
             if (item.getValue() != null && item.isAvailable()) {
@@ -1018,7 +1100,35 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
             }
         }
         for (String value : snapshot.values()) choices.putIfAbsent(value, choice(value, ""));
-        return List.copyOf(choices.values());
+        return new OptionEditor.Catalog<>(List.of(snapshot.revision(), snapshot.status(), snapshot.loading()),
+            List.copyOf(choices.values()));
+    }
+
+    private OptionEditor.Catalog<Object> adaptCatalog(ResolvedCatalogRepository.Snapshot snapshot) {
+        List<OptionEditor.Choice<Object>> choices = snapshot.items().stream().map(item -> {
+            ResolvedCatalogRepository.Item presentation = item.item();
+            String description = presentation.description();
+            String provenance = catalogProvenance(item);
+            if (!provenance.isBlank()) description = description.isBlank() ? provenance : description + " " + provenance;
+            if (!item.diagnostic().isBlank()) description = description.isBlank() ? item.diagnostic() : description + " " + item.diagnostic();
+            OptionEditor.ChoiceState state = switch (item.state()) {
+                case AVAILABLE -> OptionEditor.ChoiceState.AVAILABLE;
+                case STALE -> OptionEditor.ChoiceState.STALE;
+                case CURRENT_ONLY -> OptionEditor.ChoiceState.CURRENT_ONLY;
+                case UNAVAILABLE -> OptionEditor.ChoiceState.UNAVAILABLE;
+            };
+            return new OptionEditor.Choice<>((Object) presentation.value(), presentation.label(), description, state, "");
+        }).toList();
+        return new OptionEditor.Catalog<>(snapshot.stamp(), choices);
+    }
+
+    private String catalogProvenance(ResolvedCatalogRepository.ResolvedItem item) {
+        boolean hosted = item.provenance().contains(ResolvedCatalogRepository.Provenance.BASELINE);
+        boolean live = item.provenance().contains(ResolvedCatalogRepository.Provenance.LIVE);
+        if (hosted && live) return "Verified by the hosted release catalog and the connected server.";
+        if (live) return "Reported by the connected server.";
+        if (hosted) return "Provided by the hosted release catalog.";
+        return "";
     }
 
     private OptionEditor.Choice<Object> choice(String value, String description) {
@@ -1750,6 +1860,24 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
             this.value = value;
             this.presentAtLoad = presentAtLoad;
             this.rawAtLoad = rawAtLoad;
+        }
+    }
+
+    private record CatalogCurrent(String identity, List<String> values) {
+        private CatalogCurrent {
+            identity = identity == null || identity.isBlank() ? "current:none" : identity;
+            values = values == null ? List.of() : List.copyOf(values);
+        }
+
+        private static CatalogCurrent empty() {
+            return new CatalogCurrent("current:none", List.of());
+        }
+
+        private static CatalogCurrent of(String identity, List<String> values) {
+            List<String> snapshot = values == null ? List.of() : List.copyOf(values);
+            StringBuilder stamp = new StringBuilder(identity == null ? "current:configured" : identity);
+            for (String value : snapshot) stamp.append('|').append(value.length()).append(':').append(value);
+            return new CatalogCurrent(stamp.toString(), snapshot);
         }
     }
 

@@ -15,6 +15,7 @@ import redxax.oxy.remotely.data.flow.ReSyncFrameTransportFactory;
 import redxax.oxy.remotely.data.flow.ReSyncWebSocketFrameTransport;
 import redxax.oxy.remotely.host.ApplicationHost;
 import redxax.oxy.remotely.host.ApplicationHostRegistry;
+import redxax.oxy.remotely.metadata.catalog.ServerSettingsCatalogService;
 import redxax.oxy.remotely.web.platform.BrowserApplicationHost;
 import redxax.oxy.remotely.web.platform.BrowserClock;
 import redxax.oxy.remotely.util.TaskIdentities;
@@ -25,6 +26,7 @@ import redxax.oxy.remotely.web.platform.BrowserFileExplorerAdapters;
 import redxax.oxy.remotely.web.platform.BrowserHttpTransport;
 import redxax.oxy.remotely.web.platform.BrowserLaunchSession;
 import redxax.oxy.remotely.web.platform.BrowserMarketplaceDetailsProvider;
+import redxax.oxy.remotely.web.platform.BrowserMetadataRepository;
 import redxax.oxy.remotely.web.platform.BrowserReSyncClock;
 import redxax.oxy.remotely.web.platform.BrowserReSyncIdentityProvider;
 import redxax.oxy.remotely.web.platform.BrowserReSyncStorage;
@@ -156,6 +158,8 @@ public final class RemotelyBrowserComposition {
                 .reSyncFlowClientFactory(flowFactory)
                 .reSyncFrameTransportFactory(transportFactory)
                 .reSyncIdentityProvider(identity)
+                .serverSettingsCatalogService(new ServerSettingsCatalogService(
+                    BrowserMetadataRepository.create(activeAdapters.http())))
                 .enable(RemotelyComposition.Capability.PRIMARY_SCREEN)
                 .rootScreenFactory(value -> new ServerManagerScreen(null, value))
                 .build();

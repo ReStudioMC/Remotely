@@ -209,6 +209,9 @@ public class RemotelyClient {
         if (flowManager != null) {
             flowManager.shutdown();
         }
+        if (composition.serverSettingsCatalogService() != null) {
+            composition.serverSettingsCatalogService().close();
+        }
         if (networkManager != null) {
             networkManager.close();
         }

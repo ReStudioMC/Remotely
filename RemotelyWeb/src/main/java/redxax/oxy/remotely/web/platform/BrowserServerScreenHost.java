@@ -1517,7 +1517,10 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
                         .filter(entry -> !entry.name().isBlank()).toList()), context);
             }
         };
-        return new ServerSettingsDocumentDataController(target, registry.snapshot(target), store, BrowserSafeYaml::parse);
+        var catalogs = remotelyClient == null ? null : remotelyClient.getComposition().serverSettingsCatalogService();
+        var token = flowManager == null ? null : flowManager.currentServerConnectionToken(target.id());
+        var view = catalogs == null ? null : catalogs.open(target.id(), token == null ? 0L : token.generation(), target.minecraftVersion());
+        return new ServerSettingsDocumentDataController(target, registry.snapshot(target), store, BrowserSafeYaml::parse, view);
     }
 
     @Override
