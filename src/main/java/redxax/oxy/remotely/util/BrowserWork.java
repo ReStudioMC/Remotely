@@ -8,6 +8,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public final class BrowserWork {
     private BrowserWork() {
@@ -31,18 +32,28 @@ public final class BrowserWork {
         try {
             return TaskSchedulers.current().schedule(task, delay);
         } catch (RuntimeException ignored) {
-            execute(task);
+            if (delay == null || delay.isZero() || delay.isNegative()) {
+                execute(task);
+            }
             return TaskScheduler.direct().schedule(() -> {
             }, Duration.ZERO);
         }
     }
 
     public static Executor executor() {
-        return new Executor(false);
+        return new Executor(false, null);
+    }
+
+    public static Executor executor(String namePrefix) {
+        return new Executor(false, namePrefix);
     }
 
     public static Executor serialExecutor() {
-        return new Executor(true);
+        return new Executor(true, null);
+    }
+
+    public static Executor serialExecutor(String namePrefix) {
+        return new Executor(true, namePrefix);
     }
 
     public static boolean failed(Async<?> async) {
@@ -51,28 +62,64 @@ public final class BrowserWork {
 
     public static final class Executor {
         private final boolean serial;
+        private final String namePrefix;
+        private final AtomicInteger counter = new AtomicInteger();
         private final Deque<Runnable> pending = new ArrayDeque<>();
         private boolean running;
         private boolean shutdown;
         private int active;
 
-        private Executor(boolean serial) {
+        private Executor(boolean serial, String namePrefix) {
             this.serial = serial;
+            this.namePrefix = namePrefix;
+        }
+
+        private Runnable wrapTask(Runnable task) {
+            if (namePrefix == null) {
+                return task;
+            }
+            return () -> {
+                String original = TaskIdentities.access.name();
+                TaskIdentities.access.setName(namePrefix + counter.incrementAndGet());
+                try {
+                    task.run();
+                } finally {
+                    TaskIdentities.access.setName(original);
+                }
+            };
         }
 
         public void execute(Runnable task) {
             if (task == null) {
                 return;
             }
+            Runnable wrapped = wrapTask(task);
             if (!serial) {
-                BrowserWork.execute(task);
+                synchronized (this) {
+                    if (shutdown) {
+                        throw new IllegalStateException("Executor is shut down");
+                    }
+                    active++;
+                }
+                BrowserWork.execute(() -> {
+                    try {
+                        wrapped.run();
+                    } finally {
+                        synchronized (this) {
+                            active--;
+                            if (shutdown && active == 0) {
+                                notifyAll();
+                            }
+                        }
+                    }
+                });
                 return;
             }
             synchronized (this) {
                 if (shutdown) {
                     throw new IllegalStateException("Executor is shut down");
                 }
-                pending.addLast(task);
+                pending.addLast(wrapped);
                 if (running) {
                     return;
                 }
@@ -88,12 +135,14 @@ public final class BrowserWork {
                     if (shutdown) {
                         running = false;
                         active = 0;
+                        notifyAll();
                         return;
                     }
                     next = pending.pollFirst();
                     if (next == null) {
                         running = false;
                         active = 0;
+                        notifyAll();
                         return;
                     }
                     active = 1;
@@ -121,40 +170,53 @@ public final class BrowserWork {
         }
 
         public void shutdown() {
-            if (!serial) {
-                return;
-            }
             synchronized (this) {
                 shutdown = true;
+                if (!serial) {
+                    if (active == 0) {
+                        notifyAll();
+                    }
+                    return;
+                }
+                if (!running && pending.isEmpty()) {
+                    notifyAll();
+                }
             }
         }
 
         public List<Runnable> shutdownNow() {
-            if (!serial) {
-                return List.of();
-            }
             List<Runnable> discarded;
             synchronized (this) {
                 shutdown = true;
+                if (!serial) {
+                    discarded = List.of();
+                    if (active == 0) {
+                        notifyAll();
+                    }
+                    return discarded;
+                }
                 running = false;
                 active = 0;
                 discarded = new ArrayList<>(pending);
                 pending.clear();
+                notifyAll();
             }
             return discarded;
         }
 
         public boolean isShutdown() {
-            if (!serial) {
-                return false;
-            }
             synchronized (this) {
                 return shutdown;
             }
         }
 
         public boolean isTerminated() {
-            return false;
+            synchronized (this) {
+                if (!serial) {
+                    return shutdown && active == 0;
+                }
+                return shutdown && !running && pending.isEmpty();
+            }
         }
 
         public void setRemoveOnCancelPolicy(boolean value) {
@@ -179,9 +241,6 @@ public final class BrowserWork {
         }
 
         public int getActiveCount() {
-            if (!serial) {
-                return 0;
-            }
             synchronized (this) {
                 return active;
             }
@@ -199,8 +258,11 @@ public final class BrowserWork {
             try {
                 return TaskSchedulers.current().scheduleAtFixedRate(command, initial, period);
             } catch (RuntimeException ignored) {
-                execute(command);
-                return TaskScheduler.direct().scheduleAtFixedRate(command, initial, period);
+                if (initial == null || initial.isZero() || initial.isNegative()) {
+                    execute(command);
+                }
+                return TaskScheduler.direct().schedule(() -> {
+                }, Duration.ZERO);
             }
         }
 
@@ -212,12 +274,49 @@ public final class BrowserWork {
             return scheduleAtFixedRate(command, Duration.ofSeconds(Math.max(0L, initial)), Duration.ofSeconds(Math.max(1L, period)));
         }
 
-        public boolean awaitTermination(long timeout, Object ignoredUnit) {
-            return true;
+        public boolean awaitTermination(long timeout, Object unit) {
+            long millis = timeout;
+            if (unit != null) {
+                String unitName = unit.toString();
+                if ("NANOSECONDS".equals(unitName)) {
+                    millis = timeout / 1_000_000L;
+                } else if ("MICROSECONDS".equals(unitName)) {
+                    millis = timeout / 1_000L;
+                } else if ("MILLISECONDS".equals(unitName)) {
+                    millis = timeout;
+                } else if ("SECONDS".equals(unitName)) {
+                    millis = timeout * 1000L;
+                } else if ("MINUTES".equals(unitName)) {
+                    millis = timeout * 60_000L;
+                } else if ("HOURS".equals(unitName)) {
+                    millis = timeout * 3_600_000L;
+                } else if ("DAYS".equals(unitName)) {
+                    millis = timeout * 86_400_000L;
+                } else if (timeout > 1_000_000L) {
+                    millis = timeout / 1_000_000L;
+                }
+            } else if (timeout > 1_000_000L) {
+                millis = timeout / 1_000_000L;
+            }
+            return awaitTermination(millis);
         }
 
         public boolean awaitTermination(long timeoutMillis) {
-            return true;
+            long deadline = System.currentTimeMillis() + Math.max(0L, timeoutMillis);
+            synchronized (this) {
+                while (!isTerminated()) {
+                    long remaining = deadline - System.currentTimeMillis();
+                    if (remaining <= 0L) {
+                        return isTerminated();
+                    }
+                    try {
+                        wait(Math.min(remaining, 50L));
+                    } catch (InterruptedException ignored) {
+                        return isTerminated();
+                    }
+                }
+                return true;
+            }
         }
     }
 }

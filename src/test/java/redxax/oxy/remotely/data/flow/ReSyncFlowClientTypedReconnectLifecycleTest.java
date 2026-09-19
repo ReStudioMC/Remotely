@@ -820,7 +820,7 @@ class ReSyncFlowClientTypedReconnectLifecycleTest {
     }
 
     private static ReSyncCatalogPublicationCache isolatedCache(Path tempDirectory, String name) {
-        return new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(tempDirectory.resolve(name)).resolve("catalog-publication-cache.json"));
+        return new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(tempDirectory.resolve(name).resolve("catalog-publication-cache.json")));
     }
 
     private static CatalogCachePublication publication(ServerId server) {

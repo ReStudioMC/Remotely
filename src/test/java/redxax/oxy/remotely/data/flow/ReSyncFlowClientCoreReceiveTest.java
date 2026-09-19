@@ -636,7 +636,7 @@ class ReSyncFlowClientCoreReceiveTest {
         private final ScriptedReSyncTransport transport;
 
         private TestClient(ScriptedReSyncTransport transport, RemotelyClient owner) {
-            super(SERVER.canonicalText(), transport, owner, new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(temporaryDirectory.resolve(UUID.randomUUID()) + ".json")));
+            super(SERVER.canonicalText(), transport, owner, new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(temporaryDirectory.resolve(UUID.randomUUID().toString() + ".json"))));
             this.transport = transport;
         }
 

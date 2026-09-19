@@ -1,10 +1,8 @@
 package redxax.oxy.remotely.worldgen;
 
 import org.junit.jupiter.api.Test;
+import restudio.rescreen.platform.TaskScheduler;
 
-import java.util.concurrent.Delayed;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -43,11 +41,11 @@ class WorldGenPreviewControllerTest {
         assertEquals("creating", controller.state("server-a", "preview-new"));
     }
 
-    private static final class TestTimer implements ScheduledFuture<Object> {
+    private static final class TestTimer implements TaskScheduler.ScheduledTask {
         private boolean cancelled;
 
         @Override
-        public boolean cancel(boolean mayInterruptIfRunning) {
+        public boolean cancel() {
             cancelled = true;
             return true;
         }
@@ -55,31 +53,6 @@ class WorldGenPreviewControllerTest {
         @Override
         public boolean isCancelled() {
             return cancelled;
-        }
-
-        @Override
-        public boolean isDone() {
-            return cancelled;
-        }
-
-        @Override
-        public Object get() {
-            return null;
-        }
-
-        @Override
-        public Object get(long timeout, TimeUnit unit) {
-            return null;
-        }
-
-        @Override
-        public long getDelay(TimeUnit unit) {
-            return 0L;
-        }
-
-        @Override
-        public int compareTo(Delayed other) {
-            return 0;
         }
     }
 }

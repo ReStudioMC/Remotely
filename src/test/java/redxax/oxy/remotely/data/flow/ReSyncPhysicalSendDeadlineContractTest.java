@@ -10,6 +10,7 @@ import restudio.resync.flow.identity.ServerResourceLocator;
 import restudio.resync.flow.protocol.ResourceActivateRequest;
 import restudio.resync.flow.protocol.ResourceCreateRequest;
 import restudio.resync.flow.protocol.ResourceDeleteRequest;
+import restudio.resync.flow.protocol.ResourceDuplicateRequest;
 import restudio.resync.flow.protocol.ResourceLoadRequest;
 import restudio.resync.flow.protocol.ResourceListRequest;
 import restudio.resync.flow.protocol.ResourceOperation;
@@ -318,7 +319,8 @@ class ReSyncPhysicalSendDeadlineContractTest {
                 assertFalse(pendingTyped(client).containsKey(requestId), operation.kind().name());
                 assertFalse(typedDeliveries(client).containsKey(requestId), operation.kind().name());
                 boolean retained = List.of(ResourceOperationKind.CREATE, ResourceOperationKind.SAVE,
-                    ResourceOperationKind.DELETE, ResourceOperationKind.ACTIVATE).contains(operation.kind());
+                    ResourceOperationKind.DELETE, ResourceOperationKind.ACTIVATE, ResourceOperationKind.DUPLICATE)
+                    .contains(operation.kind());
                 assertEquals(retained, retainedTypedMutations(client).containsKey(requestId), operation.kind().name());
             }
         } finally {
@@ -556,12 +558,13 @@ class ReSyncPhysicalSendDeadlineContractTest {
         throws Exception {
         ReSyncResourceType type = ReSyncResourceType.CUSTOM_CONTENT;
         boolean mutation = List.of(ResourceOperationKind.CREATE, ResourceOperationKind.SAVE, ResourceOperationKind.DELETE,
-            ResourceOperationKind.ACTIVATE).contains(operation.kind());
+            ResourceOperationKind.ACTIVATE, ResourceOperationKind.DUPLICATE).contains(operation.kind());
         ServerResourceLocator resource = operationResource(operation);
         UUID mutationId = operationMutation(operation);
         long expectedRevision = operation instanceof ResourceSaveRequest<?> save ? save.expectedRevision()
             : operation instanceof ResourceDeleteRequest delete ? delete.expectedRevision()
-            : operation instanceof ResourceActivateRequest activate ? activate.expectedRevision() : 0L;
+            : operation instanceof ResourceActivateRequest activate ? activate.expectedRevision()
+            : operation instanceof ResourceDuplicateRequest duplicate ? duplicate.expectedRevision() : 0L;
         ContentHash payloadHash = operation instanceof ResourceCreateRequest<?> create ? create.payloadHash()
             : operation instanceof ResourceSaveRequest<?> save ? save.payloadHash() : null;
         Method method = ReSyncFlowClient.class.getDeclaredMethod("typedResourceRequest", ReSyncResourceType.class,
@@ -582,7 +585,7 @@ class ReSyncPhysicalSendDeadlineContractTest {
         return List.of(new ResourceListRequest(resource.type(), null, 100, null), new ResourceLoadRequest(resource),
             new ResourceCreateRequest<>(resource, payload, mutation), new ResourceSaveRequest<>(resource, 1L, payload,
                 mutation), new ResourceDeleteRequest(resource, 1L, mutation), new ResourceActivateRequest(resource, 1L,
-                mutation));
+                mutation), new ResourceDuplicateRequest(resource("custom_content", "typed-source"), resource, 1L, mutation));
     }
 
     private static ServerResourceLocator operationResource(ResourceOperation operation) {
@@ -604,6 +607,9 @@ class ReSyncPhysicalSendDeadlineContractTest {
         if (operation instanceof ResourceActivateRequest activate) {
             return activate.resource();
         }
+        if (operation instanceof ResourceDuplicateRequest duplicate) {
+            return duplicate.target();
+        }
         throw new IllegalArgumentException("Unsupported typed operation " + operation.kind());
     }
 
@@ -619,6 +625,9 @@ class ReSyncPhysicalSendDeadlineContractTest {
         }
         if (operation instanceof ResourceActivateRequest activate) {
             return activate.mutationId();
+        }
+        if (operation instanceof ResourceDuplicateRequest duplicate) {
+            return duplicate.mutationId();
         }
         return null;
     }

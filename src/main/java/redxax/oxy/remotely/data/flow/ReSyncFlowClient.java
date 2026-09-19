@@ -121,6 +121,7 @@ import restudio.resync.flow.protocol.ResourceActivationState;
 import restudio.resync.flow.protocol.ResourceCreateRequest;
 import restudio.resync.flow.protocol.ResourceCreateResult;
 import restudio.resync.flow.protocol.ResourceDeleteRequest;
+import restudio.resync.flow.protocol.ResourceDuplicateRequest;
 import restudio.resync.flow.protocol.ResourceDocument;
 import restudio.resync.flow.protocol.ResourceListRequest;
 import restudio.resync.flow.protocol.ResourceLoadRequest;
@@ -377,8 +378,7 @@ public class ReSyncFlowClient {
             operation = Objects.requireNonNull(operation, "Core mutation operation is required");
             resource = Objects.requireNonNull(resource, "Core mutation resource is required");
             status = Objects.requireNonNull(status, "Core mutation status is required");
-            if (!Set.of(ResourceOperationKind.CREATE, ResourceOperationKind.SAVE, ResourceOperationKind.DELETE,
-                ResourceOperationKind.ACTIVATE).contains(operation)) {
+            if (!resourceMutationOperation(operation)) {
                 throw new IllegalArgumentException("Core mutation results require a mutation operation");
             }
             if (expectedRevision < 0L || revision < 0L) {
@@ -431,7 +431,7 @@ public class ReSyncFlowClient {
     }
 
     private final String serverId;
-    private final Object apiClient;
+    private final RemotelyServerApi apiClient;
     private final String directWsUrl;
     private final String directApiKey;
     private final RemotelyClient client;
@@ -770,11 +770,11 @@ public class ReSyncFlowClient {
     private volatile ReSyncLuckPermsClient luckPermsClient;
     private final List<Consumer<String>> protocolErrorListeners = BrowserSafeState.list();
 
-    public ReSyncFlowClient(String serverId, Object apiClient, RemotelyClient client) {
+    public ReSyncFlowClient(String serverId, RemotelyServerApi apiClient, RemotelyClient client) {
         this(serverId, apiClient, null, null, client);
     }
 
-    public ReSyncFlowClient(String serverId, Object apiClient, String directWsUrl, String directApiKey, RemotelyClient client) {
+    public ReSyncFlowClient(String serverId, RemotelyServerApi apiClient, String directWsUrl, String directApiKey, RemotelyClient client) {
         this.serverId = serverId;
         this.catalogPublicationCache = ReSyncCatalogPublicationCache.deferred();
         this.catalogPublicationProjection = ReSyncCatalogPublicationProjection.forConfiguredServerId(serverId,
@@ -875,14 +875,10 @@ public class ReSyncFlowClient {
                             ReSyncFlowClientContext context, TaskScheduler scheduler, Clock clock,
                             ReSyncFrameTransportFactory transportFactory, ReSyncIdentityProvider identityProvider,
                             ReSyncCredentialProvider credentialProvider, boolean ownsScheduler) {
-        this(serverId, studioApi(apiClient), directWsUrl, directApiKey, hostClient());
+        this(serverId, apiClient, directWsUrl, directApiKey, hostClient());
         if (transportFactory != null && directWsUrl != null && !directWsUrl.isBlank() && this.frameTransport == null) {
             transportFactory.create(directWsUrl);
         }
-    }
-
-    private static Object studioApi(RemotelyServerApi apiClient) {
-        return apiClient == null ? null : apiClient.studioApi();
     }
 
     private static RemotelyClient hostClient() {
@@ -1928,6 +1924,58 @@ public class ReSyncFlowClient {
             initWebSocketConnection(normalizeWsUrl(directWsUrl), generation);
             return Async.completed(null);
         }
+        if (apiClient != null) {
+            return apiClient.getReSyncConfig(serverId).thenCompose(config -> {
+                if (!isActiveGeneration(generation)) {
+                    return Async.completed(null);
+                }
+                if (config != null && config.port > 0) {
+                    return apiClient.getServers().thenCompose(servers -> {
+                        if (!isActiveGeneration(generation)) {
+                            return Async.completed(null);
+                        }
+                        String serverUrl = servers != null ? servers.stream()
+                            .filter(s -> serverId.equals(s.identifier))
+                            .findFirst()
+                            .map(s -> {
+                                String ip = (s.ipAlias != null && !s.ipAlias.isEmpty()) ? s.ipAlias : s.ip;
+                                return ip + ":" + config.port;
+                            })
+                            .orElse(null) : null;
+                        if (serverUrl == null) {
+                            abandonConnectionGeneration(generation);
+                            notifyError("ReSyncServerNotFound");
+                            return Async.completed(null);
+                        }
+                        return apiClient.getReSyncApiKey(serverId).thenAccept(key -> {
+                            if (!isActiveGeneration(generation)) {
+                                return;
+                            }
+                            this.apiKey = key;
+                            if (this.apiKey != null && !this.apiKey.isEmpty()) {
+                                String wsUrl = normalizeWsUrl(serverUrl);
+                                initWebSocketConnection(wsUrl, generation);
+                            } else {
+                                abandonConnectionGeneration(generation);
+                                notifyError("ReSyncApiKeyMissing");
+                            }
+                        });
+                    });
+                }
+                abandonConnectionGeneration(generation);
+                notifyError("ReSyncNotEnabled");
+                return Async.completed(null);
+            }).exceptionally(error -> {
+                if (!isActiveGeneration(generation) || !abandonConnectionGeneration(generation)) {
+                    return null;
+                }
+                scheduleReconnect(generation + 1);
+                if (notifyConnectionErrorUnlessRetrying("ReSync Connection Failed. Check That The Server Is Online And ReSync Is Enabled")) {
+                    logger().operation("Connect").error("Could not connect to ReSync", error);
+                }
+                return null;
+            });
+        }
         abandonConnectionGeneration(generation);
         notifyError("ReSyncNotEnabled");
         return Async.completed(null);
@@ -2631,7 +2679,7 @@ public class ReSyncFlowClient {
 
     private Async<Void> submitConnectionDrain() {
         Async<Void> drained = Async.pending();
-        if (!submitConnectionEvent(() -> drained.complete(null))) {
+        if (onConnectionLifecycleThread() || !submitConnectionEvent(() -> drained.complete(null))) {
             drained.complete(null);
         }
         return drained;
@@ -2662,6 +2710,9 @@ public class ReSyncFlowClient {
     }
 
     private void awaitConnectionDrain(Async<Void> drained) {
+        if (drained == null || onConnectionLifecycleThread()) {
+            return;
+        }
         boolean interrupted = false;
         while (!drained.isDone()) {
             try {
@@ -2735,7 +2786,14 @@ public class ReSyncFlowClient {
             admission.coalesceKey(), () -> {
                 byte[] retained = new byte[retainedBytes];
                 frame.get(retained);
-                return () -> processAdmittedBinaryMessage(retained, generation, source);
+                return () -> {
+                    inConnectionEvent.set(true);
+                    try {
+                        processAdmittedBinaryMessage(retained, generation, source);
+                    } finally {
+                        inConnectionEvent.remove();
+                    }
+                };
             });
         if (!admitted && priority != BoundedTransportExecutor.Priority.REPLACEABLE) {
             scheduleTransportFailure(generation, "inbound_admission");
@@ -9994,11 +10052,8 @@ public class ReSyncFlowClient {
             } else if (resource == null) {
                 throw new IllegalArgumentException("Core resource requests require a resource locator");
             }
-            if (operation == ResourceOperationKind.CREATE || operation == ResourceOperationKind.SAVE
-                || operation == ResourceOperationKind.DELETE || operation == ResourceOperationKind.ACTIVATE) {
-                if (mutationId == null) {
-                    throw new IllegalArgumentException("Core mutations require a mutation ID");
-                }
+            if (resourceMutationOperation(operation) && mutationId == null) {
+                throw new IllegalArgumentException("Core mutations require a mutation ID");
             }
         }
 
@@ -10026,11 +10081,8 @@ public class ReSyncFlowClient {
             if (resource != null && !type.typeId().equals(resource.resourceType().value())) {
                 throw new IllegalArgumentException("Resource request type does not match its locator");
             }
-            if (operation == ResourceOperationKind.CREATE || operation == ResourceOperationKind.SAVE
-                || operation == ResourceOperationKind.DELETE || operation == ResourceOperationKind.ACTIVATE) {
-                if (mutationId == null || resource == null) {
-                    throw new IllegalArgumentException("Resource mutations require a locator and mutation ID");
-                }
+            if (resourceMutationOperation(operation) && (mutationId == null || resource == null)) {
+                throw new IllegalArgumentException("Resource mutations require a locator and mutation ID");
             }
         }
 
@@ -10458,8 +10510,7 @@ public class ReSyncFlowClient {
             if (transportGeneration < 0) {
                 throw new IllegalArgumentException("Resource request transport generation cannot be negative");
             }
-            if (mutation != (operation == ResourceOperationKind.CREATE || operation == ResourceOperationKind.SAVE
-                || operation == ResourceOperationKind.DELETE || operation == ResourceOperationKind.ACTIVATE)) {
+            if (mutation != resourceMutationOperation(operation)) {
                 throw new IllegalArgumentException("Resource mutation state does not match operation");
             }
         }
@@ -13968,6 +14019,29 @@ public class ReSyncFlowClient {
         return sendCoreGraphDelete(type, id);
     }
 
+    boolean sendCoreGraphDuplicate(ReSyncResourceType type, String sourceId, String targetId) {
+        if (shutdownRequested) {
+            return false;
+        }
+        if (!validCoreGraphTarget(type, sourceId) || !validCoreGraphTarget(type, targetId) || sourceId.equals(targetId)) {
+            return false;
+        }
+        if (!supportsGenericCoreResource(type, ResourceOperationKind.DUPLICATE, true)) {
+            return false;
+        }
+        ServerResourceLocator source = coreResource(type, sourceId);
+        ServerResourceLocator target = coreResource(type, targetId);
+        long expectedRevision = authoritativeResourceRevision(type, sourceId);
+        if (expectedRevision <= 0L) {
+            return false;
+        }
+        UUID mutationId = UUID.randomUUID();
+        PendingCoreGraphRequest pending = coreRequest(type, ResourceOperationKind.DUPLICATE, target, expectedRevision,
+            mutationId, null, null, null, null, null);
+        return dispatchCoreGraphRequest(pending, new ResourceDuplicateRequest(source, target, expectedRevision, mutationId),
+            null, true);
+    }
+
     private boolean dispatchCoreGraphRequest(PendingCoreGraphRequest pending, ResourceOperation operation,
                                              ContentHash payloadHash, boolean mutation) {
         return dispatchCoreGraphRequest(pending, operation, payloadHash, mutation, null);
@@ -14359,6 +14433,12 @@ public class ReSyncFlowClient {
         return ContractRef.of(PROTOCOL_OWNER, OperationId.of("resource." + operation.name().toLowerCase(Locale.ROOT)));
     }
 
+    static boolean resourceMutationOperation(ResourceOperationKind operation) {
+        return operation == ResourceOperationKind.CREATE || operation == ResourceOperationKind.SAVE
+            || operation == ResourceOperationKind.DELETE || operation == ResourceOperationKind.ACTIVATE
+            || operation == ResourceOperationKind.DUPLICATE;
+    }
+
     private static String normalizeOptionalText(String value) {
         if (value == null) {
             return null;
@@ -14697,6 +14777,13 @@ public class ReSyncFlowClient {
             if (manager != null) {
                 manager.failResourceDelete(serverId, pending.type(), pending.resource().id(), message);
             }
+        } else if (pending.operation() == ResourceOperationKind.DUPLICATE) {
+            FlowManager manager = client != null ? client.getFlowManager() : null;
+            if (manager != null) {
+                manager.refreshStudioWorkspace(serverId, true);
+            }
+            DesignerSaveNotifications.failMutation(serverId, pending.type(), pending.resource().id(),
+                pending.mutationId() == null ? null : pending.mutationId().toString(), message);
         } else if (pending.operation() != ResourceOperationKind.ACTIVATE) {
             return;
         }
@@ -14791,8 +14878,7 @@ public class ReSyncFlowClient {
             "generation", pending.transportGeneration(), "authorityEpoch", handshakeAuthorityEpoch, "revision",
             pending.expectedRevision(), "elapsedMs", temporaryLifecycleElapsed(pending.requestId(), true), "reason",
             boundedCoreDiagnostic(reason));
-        if (Set.of(ResourceOperationKind.CREATE, ResourceOperationKind.SAVE, ResourceOperationKind.DELETE,
-            ResourceOperationKind.ACTIVATE).contains(pending.operation())) {
+        if (resourceMutationOperation(pending.operation())) {
             failCoreGraphMutation(pending, message, retryable);
         }
         return true;
@@ -16470,7 +16556,10 @@ public class ReSyncFlowClient {
             FlowManager manager = client != null ? client.getFlowManager() : null;
             if (manager != null) {
                 manager.completeResourceActivation(serverId, type, resourceId, enabled, requestId, false,
-                    "The server does not advertise the typed resource activation capability.", true);
+                    !supportsGenericResourceActivation(type)
+                        ? "The server does not advertise the typed resource activation capability."
+                        : "The typed catalog authority is not established; the resource update was not sent.",
+                    true);
             }
             return;
         }
@@ -16602,6 +16691,7 @@ public class ReSyncFlowClient {
             case SAVE -> "save";
             case DELETE -> "delete";
             case ACTIVATE -> "activate";
+            case DUPLICATE -> "duplicate";
             default -> "";
         };
         return !advertised.isBlank() && hasResourceOperation(protocol, mutation, advertised);
@@ -17241,8 +17331,7 @@ public class ReSyncFlowClient {
 
     private void failUnsupportedCoreGraphRequests() {
         for (PendingCoreGraphRequest pending : pendingCoreGraphRequests.values()) {
-            boolean mutation = Set.of(ResourceOperationKind.CREATE, ResourceOperationKind.SAVE, ResourceOperationKind.DELETE,
-                ResourceOperationKind.ACTIVATE).contains(pending.operation());
+            boolean mutation = resourceMutationOperation(pending.operation());
             if (supportsGenericCoreResource(pending.type(), pending.operation(), mutation)) {
                 continue;
             }
@@ -18732,7 +18821,7 @@ public class ReSyncFlowClient {
                 if (retirement.source() != null) {
                     retirement.source().cancelCallbacks();
                 }
-                if (!Boolean.TRUE.equals(inConnectionEvent.get())) {
+                if (!onConnectionLifecycleThread()) {
                     drained = submitConnectionDrain();
                 }
             }

@@ -1,6 +1,7 @@
 package redxax.oxy.remotely.data.flow;
 
 import org.junit.jupiter.api.Test;
+import restudio.rescreen.platform.Async;
 import restudio.resync.flow.identity.ServerId;
 
 import java.lang.reflect.Field;
@@ -383,12 +384,12 @@ class ReSyncConnectionManagerLiveSessionTest {
     void frameConnectDefersWithoutWaitingForPriorCleanup() throws Exception {
         TestTransport transport = new TestTransport();
         ReSyncFlowClient client = new ReSyncFlowClient("deferred:frame", transport, null);
-        CompletableFuture<Void> cleanup = new CompletableFuture<>();
+        Async<Void> cleanup = Async.pending();
         Field cleanupField = ReSyncFlowClient.class.getDeclaredField("connectionCleanupCompletion");
         cleanupField.setAccessible(true);
         cleanupField.set(client, cleanup);
         try {
-            CompletableFuture<Void> connect = assertTimeoutPreemptively(Duration.ofSeconds(1), client::connect);
+            Async<Void> connect = assertTimeoutPreemptively(Duration.ofSeconds(1), client::connect);
 
             assertEquals(ReSyncFlowClient.ConnectionState.CONNECTING, client.connectionState());
             assertEquals(0, transport.sentFrames.get());
@@ -397,7 +398,7 @@ class ReSyncConnectionManagerLiveSessionTest {
             cleanup.complete(null);
 
             assertTrue(transport.frameSent.await(2, TimeUnit.SECONDS));
-            connect.get(2, TimeUnit.SECONDS);
+            connect.join();
             assertEquals(1, transport.sentFrames.get());
         } finally {
             cleanup.complete(null);

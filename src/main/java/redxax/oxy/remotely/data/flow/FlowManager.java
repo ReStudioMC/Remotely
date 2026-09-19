@@ -1269,7 +1269,6 @@ public class FlowManager {
         creationJournalCleanupRetryScheduled.set(0);
         creationJournalLoadQueued.set(0);
         creationJournalCleanupQueued.set(0);
-        creationJournalScheduler.getQueue().clear();
         creationJournalScheduler.shutdownNow();
         creationJournalScheduler.purge();
         List<CreationTransaction> transactions;
@@ -13945,8 +13944,8 @@ public class FlowManager {
             case ReSyncResourceDragPayload.FLOW, ReSyncResourceDragPayload.FUNCTION, ReSyncResourceDragPayload.COMMAND -> {
                 ReSyncResourceType graphType = ReSyncResourceType.byTypeId(type);
                 hydrateCoreGraphProjection(serverId, graphType, sourceId);
-                if (coreGraphUiProjection.authoritative(serverId, graphType, sourceId)) {
-                    yield false;
+                if (coreGraphUiProjection.authoritative(serverId, graphType, sourceId) || coreGraphAuthorityEnabled(serverId)) {
+                    yield duplicateCoreGraphResource(serverId, graphType, sourceId, targetId);
                 }
                 FlowGraph source = flowStore.get(serverId, graphType, sourceId);
                 if (source == null) {
@@ -14013,6 +14012,15 @@ public class FlowManager {
                 yield true;
             }
         };
+    }
+
+    private boolean duplicateCoreGraphResource(String serverId, ReSyncResourceType type, String sourceId, String targetId) {
+        if (type == null || !type.isGraph() || sourceId == null || sourceId.isBlank() || targetId == null
+            || targetId.isBlank() || sourceId.equals(targetId)) {
+            return false;
+        }
+        ReSyncFlowClient flowClient = ensureSubscribedFlowClient(serverId);
+        return flowClient != null && flowClient.sendCoreGraphDuplicate(type, sourceId, targetId);
     }
 
     private void applyCustomContentIdentity(CustomContentDefinition content, String targetId) {

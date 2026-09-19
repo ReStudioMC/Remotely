@@ -2,9 +2,9 @@ package redxax.oxy.remotely.worldgen;
 
 import restudio.rescreen.platform.TaskScheduler;
 import redxax.oxy.remotely.util.BrowserSafeState;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.Map;
 
 final class WorldGenPreviewController {
     private final Map<String, PreviewOperation> operations = BrowserSafeState.map();
@@ -62,7 +62,7 @@ final class WorldGenPreviewController {
 
     void clearServer(String serverId) {
         String prefix = WorldGenCatalogProjection.normalizeBaseServerId(serverId) + ":";
-        for (String key : operations.keySet()) {
+        for (String key : List.copyOf(operations.keySet())) {
             if (key.startsWith(prefix)) {
                 clear(key);
             }
@@ -70,7 +70,7 @@ final class WorldGenPreviewController {
     }
 
     void clearAll() {
-        for (String key : operations.keySet()) {
+        for (String key : List.copyOf(operations.keySet())) {
             clear(key);
         }
     }

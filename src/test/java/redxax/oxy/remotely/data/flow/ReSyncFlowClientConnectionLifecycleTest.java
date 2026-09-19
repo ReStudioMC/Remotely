@@ -2,9 +2,15 @@ package redxax.oxy.remotely.data.flow;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import redxax.oxy.remotely.DesktopRemotelyServerApi;
+import redxax.oxy.remotely.util.BrowserSafeState;
+import redxax.oxy.remotely.util.DesktopTaskIdentities;
 import restudio.rebase.restudio.api.ReStudioApiClient;
 import restudio.rebase.restudio.api.models.ServerModels;
+import restudio.rescreen.platform.Async;
 import restudio.resync.flow.identity.ServerId;
 
 import java.lang.reflect.Field;
@@ -25,6 +31,8 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -40,6 +48,29 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ReSyncFlowClientConnectionLifecycleTest {
     private static final short PLUGIN_CHANNEL_ID = 50;
     private static final ServerId TEST_SERVER = new ServerId(UUID.fromString("123e4567-e89b-42d3-a456-426614174000"));
+
+    private static Async.Snapshot asyncSnapshot;
+    private static ExecutorService asyncPool;
+
+    @BeforeAll
+    static void setUpAll() {
+        DesktopTaskIdentities.install();
+        DesktopReSyncLocalInstances.install();
+        DesktopReSyncDirectSockets.install();
+        asyncSnapshot = Async.snapshot();
+        asyncPool = Executors.newCachedThreadPool();
+        Async.installExecutor(asyncPool::execute, ignored -> Thread.currentThread().interrupt());
+    }
+
+    @AfterAll
+    static void tearDownAll() {
+        if (asyncSnapshot != null) {
+            Async.restore(asyncSnapshot);
+        }
+        if (asyncPool != null) {
+            asyncPool.shutdownNow();
+        }
+    }
 
     @Test
     void handshakeAuthenticatesBeforeReentrantCapabilityCallbacksButPublishesAfterStartup() throws Exception {
@@ -164,7 +195,7 @@ class ReSyncFlowClientConnectionLifecycleTest {
     @Test
     void shutdownClientCannotStartAnotherConnection() {
         AtomicInteger requests = new AtomicInteger();
-        ReSyncFlowClient client = new ReSyncFlowClient("live:proxy:test", new FailingApi(requests), null);
+        ReSyncFlowClient client = new ReSyncFlowClient("live:proxy:test", new DesktopRemotelyServerApi(new FailingApi(requests)), null);
 
         client.shutdown();
         client.connect().join();
@@ -178,10 +209,10 @@ class ReSyncFlowClientConnectionLifecycleTest {
         ReSyncFlowClient client = new ReSyncFlowClient(TEST_SERVER.canonicalText(), transport, null);
 
         RuntimeException failure = assertThrows(RuntimeException.class, client::shutdown);
-        CompletableFuture<Void> failedAttempt = client.shutdownCompletion();
+        Async<Void> failedAttempt = client.shutdownCompletion();
 
         assertTrue(failure.toString().contains("close failed once"));
-        assertTrue(failedAttempt.isCompletedExceptionally());
+        assertTrue(failedAttempt.isDone() && failedAttempt.failure() != null);
         assertEquals(1, transport.closeCalls.get());
 
         assertDoesNotThrow(client::shutdown);
@@ -218,7 +249,7 @@ class ReSyncFlowClientConnectionLifecycleTest {
         AtomicInteger requests = new AtomicInteger();
         AtomicInteger notifications = new AtomicInteger();
         CountDownLatch notified = new CountDownLatch(1);
-        ReSyncFlowClient client = new ReSyncFlowClient("server", new FailingApi(requests), null);
+        ReSyncFlowClient client = new ReSyncFlowClient("server", new DesktopRemotelyServerApi(new FailingApi(requests)), null);
         client.setErrorListener((nodeId, message) -> {
             notifications.incrementAndGet();
             notified.countDown();
@@ -311,9 +342,7 @@ class ReSyncFlowClientConnectionLifecycleTest {
 
         try {
             client.connect().join();
-            Field pendingHandshake = ReSyncFlowClient.class.getDeclaredField("pendingHandshakeGeneration");
-            pendingHandshake.setAccessible(true);
-            ((AtomicInteger) pendingHandshake.get(client)).set(-1);
+            setIntegerValue(client, "pendingHandshakeGeneration", -1);
             CountDownLatch start = new CountDownLatch(1);
             CompletableFuture<Boolean> authentication = CompletableFuture.supplyAsync(() -> {
                 await(start);
@@ -339,11 +368,9 @@ class ReSyncFlowClientConnectionLifecycleTest {
 
         try {
             client.connect().join();
-            AtomicInteger pendingHandshake = atomicIntegerField(client, "pendingHandshakeGeneration");
-
             assertTrue(client.currentConnectionOwnsTransport());
 
-            pendingHandshake.set(-1);
+            setIntegerValue(client, "pendingHandshakeGeneration", -1);
             assertTrue(client.currentConnectionOwnsTransport());
 
             assertTrue(client.authenticateGeneration(1));
@@ -353,7 +380,7 @@ class ReSyncFlowClientConnectionLifecycleTest {
             setField(client, "completedStartupGeneration", 1);
             assertEquals(ReSyncFlowClient.ConnectionState.CONNECTED, client.connectionState());
 
-            atomicBooleanField(client, "authenticated").set(false);
+            setBooleanValue(client, "authenticated", false);
             assertFalse(client.currentConnectionOwnsTransport());
         } finally {
             client.shutdown();
@@ -508,17 +535,17 @@ class ReSyncFlowClientConnectionLifecycleTest {
             assertTrue(connected.await(2, TimeUnit.SECONDS));
             int generation = intField(client, "activeTransportGeneration");
             setField(client, "completedStartupGeneration", generation);
-            atomicIntegerField(client, "sessionHydrationGeneration").set(generation);
-            atomicIntegerField(client, "sessionPublicationHydrationGeneration").set(-1);
+            setIntegerValue(client, "sessionHydrationGeneration", generation);
+            setIntegerValue(client, "sessionPublicationHydrationGeneration", -1);
             setField(client, "legacyCompatibilityProven", true);
             setField(client, "typedCatalogAuthorityAdvertised", false);
             setField(client, "catalogAuthority", ReSyncFlowClient.CatalogAuthority.TYPED_PUBLICATION);
 
             invokeReestablishSession(client, generation);
 
-            assertEquals(generation, atomicIntegerField(client, "sessionPublicationHydrationGeneration").get());
+            assertEquals(generation, getIntegerValue(client, "sessionPublicationHydrationGeneration"));
             invokeReestablishSession(client, generation);
-            assertEquals(generation, atomicIntegerField(client, "sessionPublicationHydrationGeneration").get());
+            assertEquals(generation, getIntegerValue(client, "sessionPublicationHydrationGeneration"));
         } finally {
             client.shutdown();
         }
@@ -564,7 +591,7 @@ class ReSyncFlowClientConnectionLifecycleTest {
         CountDownLatch completed = new CountDownLatch(1);
         AtomicBoolean workspaceJoined = new AtomicBoolean(true);
         AtomicBoolean collaborationPublished = new AtomicBoolean(true);
-        AtomicReference<CompletableFuture<JsonObject>> playerControl = new AtomicReference<>();
+        AtomicReference<Async<JsonObject>> playerControl = new AtomicReference<>();
         client.setConnectionListener(() -> {
             playerControl.set(client.requestPlayerControl("inspect", null, null));
             client.shutdown();
@@ -584,7 +611,7 @@ class ReSyncFlowClientConnectionLifecycleTest {
         transport.receive(new ReSyncFrameCodec().encode(ReSyncProtocolContract.MESSAGE_HANDSHAKE_RESPONSE, payload.array(), (short) 0, 1));
 
         assertTrue(completed.await(2, TimeUnit.SECONDS));
-        assertTrue(playerControl.get().isCompletedExceptionally());
+        assertTrue(playerControl.get().isDone() && playerControl.get().failure() != null);
         assertFalse(workspaceJoined.get());
         assertFalse(collaborationPublished.get());
         Field pendingSends = ReSyncFlowClient.class.getDeclaredField("pendingSends");
@@ -599,7 +626,7 @@ class ReSyncFlowClientConnectionLifecycleTest {
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch shutdownReturned = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
-        AtomicReference<CompletableFuture<Void>> completion = new AtomicReference<>();
+        AtomicReference<Async<Void>> completion = new AtomicReference<>();
         client.setConnectionListener(() -> {
             entered.countDown();
             client.shutdown();
@@ -621,14 +648,14 @@ class ReSyncFlowClientConnectionLifecycleTest {
 
             assertTrue(entered.await(2, TimeUnit.SECONDS));
             assertTrue(shutdownReturned.await(2, TimeUnit.SECONDS));
-            CompletableFuture<Void> shutdown = completion.get();
+            Async<Void> shutdown = completion.get();
             assertTrue(shutdown != null);
             assertFalse(shutdown.isDone());
             CompletableFuture<Void> awaiter = CompletableFuture.runAsync(client::awaitShutdown);
             assertFalse(awaiter.isDone());
 
             release.countDown();
-            shutdown.get(2, TimeUnit.SECONDS);
+            shutdown.join();
             awaiter.get(2, TimeUnit.SECONDS);
             assertTrue(shutdown.isDone());
         } finally {
@@ -673,16 +700,38 @@ class ReSyncFlowClientConnectionLifecycleTest {
         return field.getInt(client);
     }
 
-    private static AtomicInteger atomicIntegerField(ReSyncFlowClient client, String name) throws Exception {
+    private static int getIntegerValue(ReSyncFlowClient client, String name) throws Exception {
         Field field = ReSyncFlowClient.class.getDeclaredField(name);
         field.setAccessible(true);
-        return (AtomicInteger) field.get(client);
+        Object target = field.get(client);
+        if (target instanceof BrowserSafeState.IntegerValue integerValue) {
+            return integerValue.get();
+        } else if (target instanceof AtomicInteger atomic) {
+            return atomic.get();
+        }
+        return field.getInt(client);
     }
 
-    private static AtomicBoolean atomicBooleanField(ReSyncFlowClient client, String name) throws Exception {
+    private static void setIntegerValue(ReSyncFlowClient client, String name, int value) throws Exception {
         Field field = ReSyncFlowClient.class.getDeclaredField(name);
         field.setAccessible(true);
-        return (AtomicBoolean) field.get(client);
+        Object target = field.get(client);
+        if (target instanceof BrowserSafeState.IntegerValue integerValue) {
+            integerValue.set(value);
+        } else if (target instanceof AtomicInteger atomic) {
+            atomic.set(value);
+        }
+    }
+
+    private static void setBooleanValue(ReSyncFlowClient client, String name, boolean value) throws Exception {
+        Field field = ReSyncFlowClient.class.getDeclaredField(name);
+        field.setAccessible(true);
+        Object target = field.get(client);
+        if (target instanceof BrowserSafeState.BooleanValue booleanValue) {
+            booleanValue.set(value);
+        } else if (target instanceof AtomicBoolean atomic) {
+            atomic.set(value);
+        }
     }
 
     private static void setField(ReSyncFlowClient client, String name, Object value) throws Exception {

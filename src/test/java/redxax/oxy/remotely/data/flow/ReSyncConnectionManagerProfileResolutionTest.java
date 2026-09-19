@@ -1,6 +1,10 @@
 package redxax.oxy.remotely.data.flow;
 
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import redxax.oxy.remotely.util.DesktopTaskIdentities;
+import restudio.rescreen.platform.Async;
 import restudio.rebase.backend.BackendConfig;
 import restudio.rebase.backend.BackendFeature;
 import restudio.rebase.backend.ExecutionProvider;
@@ -19,6 +23,8 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -33,6 +39,28 @@ import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ReSyncConnectionManagerProfileResolutionTest {
+    private static Async.Snapshot asyncSnapshot;
+    private static ExecutorService asyncPool;
+
+    @BeforeAll
+    static void setUpAll() {
+        DesktopTaskIdentities.install();
+        DesktopReSyncLocalInstances.install();
+        DesktopReSyncDirectSockets.install();
+        asyncSnapshot = Async.snapshot();
+        asyncPool = Executors.newCachedThreadPool();
+        Async.installExecutor(asyncPool::execute, ignored -> Thread.currentThread().interrupt());
+    }
+
+    @AfterAll
+    static void tearDownAll() {
+        if (asyncSnapshot != null) {
+            Async.restore(asyncSnapshot);
+        }
+        if (asyncPool != null) {
+            asyncPool.shutdownNow();
+        }
+    }
 
     @Test
     void backendResolutionReturnsImmediatelyDeduplicatesAndCaches() throws Exception {
@@ -41,11 +69,11 @@ class ReSyncConnectionManagerProfileResolutionTest {
         TestInstance instance = new TestInstance("profile:server", "10.0.0.4", backend);
         AtomicReference<Instance> current = new AtomicReference<>(instance);
         TestConnectionManager manager = new TestConnectionManager(current);
-        AtomicReference<CompletableFuture<ReSyncConnectionManager.ProfileResolution>> first = new AtomicReference<>();
+        AtomicReference<Async<ReSyncConnectionManager.ProfileResolution>> first = new AtomicReference<>();
         try {
             assertTimeoutPreemptively(Duration.ofMillis(250),
                 () -> first.set(manager.resolveAndStoreProfile(instance.getInstanceId(), null)));
-            CompletableFuture<ReSyncConnectionManager.ProfileResolution> second =
+            Async<ReSyncConnectionManager.ProfileResolution> second =
                 manager.resolveAndStoreProfile(instance.getInstanceId(), null);
 
             assertSame(first.get(), second);
@@ -56,7 +84,7 @@ class ReSyncConnectionManagerProfileResolutionTest {
             assertTrue(backend.connectThread.get().startsWith("ReSync-Profile-"));
 
             exists.complete(true);
-            ReSyncConnectionManager.ProfileResolution resolution = first.get().get(2, TimeUnit.SECONDS);
+            ReSyncConnectionManager.ProfileResolution resolution = first.get().join();
 
             assertTrue(resolution.available());
             assertEquals("ws://10.0.0.4:8765", resolution.profile().wsUrl());
@@ -65,7 +93,7 @@ class ReSyncConnectionManagerProfileResolutionTest {
             assertEquals(3, backend.existsCalls.get());
 
             ReSyncConnectionManager.ProfileResolution cached =
-                manager.resolveAndStoreProfile(instance.getInstanceId(), null).get(2, TimeUnit.SECONDS);
+                manager.resolveAndStoreProfile(instance.getInstanceId(), null).join();
             assertNotNull(cached);
             assertEquals(resolution.profile(), cached.profile());
             assertEquals(3, backend.existsCalls.get());
@@ -80,17 +108,17 @@ class ReSyncConnectionManagerProfileResolutionTest {
         TestBackend backend = new TestBackend(exists, "");
         TestInstance instance = new TestInstance("profile:admission", "10.0.0.11", backend);
         TestConnectionManager manager = new TestConnectionManager(new AtomicReference<>(instance));
-        AtomicReference<CompletableFuture<ReSyncFlowClient>> first = new AtomicReference<>();
+        AtomicReference<Async<ReSyncFlowClient>> first = new AtomicReference<>();
         try {
             assertTimeoutPreemptively(Duration.ofMillis(250),
                 () -> first.set(manager.ensureFlowClientAsync(instance.getInstanceId(), false)));
-            CompletableFuture<ReSyncFlowClient> second =
+            Async<ReSyncFlowClient> second =
                 manager.ensureFlowClientAsync(instance.getInstanceId(), false);
 
             assertSame(first.get(), second);
             assertTrue(backend.existsCalled.await(2, TimeUnit.SECONDS));
             exists.complete(false);
-            assertNull(first.get().get(2, TimeUnit.SECONDS));
+            assertNull(first.get().join());
             assertFalse(manager.hasFlowClients());
         } finally {
             exists.complete(false);
@@ -136,17 +164,17 @@ class ReSyncConnectionManagerProfileResolutionTest {
         AtomicReference<Instance> current = new AtomicReference<>(firstInstance);
         TestConnectionManager manager = new TestConnectionManager(current);
         try {
-            CompletableFuture<ReSyncConnectionManager.ProfileResolution> displaced =
+            Async<ReSyncConnectionManager.ProfileResolution> displaced =
                 manager.resolveAndStoreProfile(firstInstance.getInstanceId(), null);
             assertTrue(firstBackend.existsCalled.await(2, TimeUnit.SECONDS));
 
             current.set(replacementInstance);
             firstExists.complete(true);
 
-            assertEquals("ReSyncProfileChanged", displaced.get(2, TimeUnit.SECONDS).issue());
-            CompletableFuture<ReSyncConnectionManager.ProfileResolution> replacement =
+            assertEquals("ReSyncProfileChanged", displaced.join().issue());
+            Async<ReSyncConnectionManager.ProfileResolution> replacement =
                 manager.resolveAndStoreProfile(replacementInstance.getInstanceId(), null);
-            ReSyncConnectionManager.ProfileResolution resolved = replacement.get(2, TimeUnit.SECONDS);
+            ReSyncConnectionManager.ProfileResolution resolved = replacement.join();
             assertTrue(resolved.available());
             assertEquals("ws://10.0.0.6:9876", resolved.profile().wsUrl());
             assertEquals("new-key", resolved.profile().apiKey());
@@ -165,16 +193,16 @@ class ReSyncConnectionManagerProfileResolutionTest {
         AtomicReference<Instance> current = new AtomicReference<>(instance);
         TestConnectionManager manager = new TestConnectionManager(current);
         try {
-            CompletableFuture<ReSyncConnectionManager.ProfileResolution> byInstance =
+            Async<ReSyncConnectionManager.ProfileResolution> byInstance =
                 manager.resolveAndStoreProfile(instance.getInstanceId(), null);
             assertTrue(backend.existsCalled.await(2, TimeUnit.SECONDS));
 
-            CompletableFuture<ReSyncConnectionManager.ProfileResolution> byBackend =
+            Async<ReSyncConnectionManager.ProfileResolution> byBackend =
                 manager.resolveAndStoreProfile(instance.backendIdentifier(), null);
 
             assertSame(byInstance, byBackend);
             exists.complete(true);
-            ReSyncConnectionManager.ProfileResolution resolution = byBackend.get(2, TimeUnit.SECONDS);
+            ReSyncConnectionManager.ProfileResolution resolution = byBackend.join();
             assertTrue(resolution.available());
             assertSame(resolution.profile(), manager.getProfile(instance.getInstanceId()));
             assertSame(resolution.profile(), manager.getProfile(instance.backendIdentifier()));
@@ -203,7 +231,7 @@ class ReSyncConnectionManagerProfileResolutionTest {
                 (Map<String, ReSyncConnectionManager.ReSyncConnectionProfile>) profilesField.get(manager);
             profiles.put(canonicalServerId, profile);
 
-            assertNull(manager.getFlowAvailabilityIssueAsync(canonicalServerId, null).get(2, TimeUnit.SECONDS));
+            assertNull(manager.getFlowAvailabilityIssueAsync(canonicalServerId, null).join());
             ReSyncFlowClient flowClient = manager.ensureFlowClient(canonicalServerId, false);
 
             assertNotNull(flowClient);
@@ -222,11 +250,11 @@ class ReSyncConnectionManagerProfileResolutionTest {
         TestConnectionManager manager = new TestConnectionManager(new AtomicReference<>(instance));
         try {
             ReSyncConnectionManager.ProfileResolution initial =
-                manager.resolveAndStoreProfile(instance.getInstanceId(), null).get(2, TimeUnit.SECONDS);
+                manager.resolveAndStoreProfile(instance.getInstanceId(), null).join();
             int initialReads = backend.existsCalls.get();
 
             ReSyncConnectionManager.ProfileResolution canonical =
-                manager.resolveAndStoreProfile(initial.serverId(), null).get(2, TimeUnit.SECONDS);
+                manager.resolveAndStoreProfile(initial.serverId(), null).join();
 
             assertTrue(canonical.available());
             assertEquals(initial.profile(), canonical.profile());
@@ -246,7 +274,7 @@ class ReSyncConnectionManagerProfileResolutionTest {
         TestConnectionManager manager = new TestConnectionManager(new AtomicReference<>(instance));
         try {
             ReSyncConnectionManager.ProfileResolution initial =
-                manager.resolveAndStoreProfile(instance.getInstanceId(), null).get(2, TimeUnit.SECONDS);
+                manager.resolveAndStoreProfile(instance.getInstanceId(), null).join();
             ReSyncFlowClient owner = ensureWithoutConnecting(manager, initial.serverId(), initial.profile());
             int initialReads = backend.existsCalls.get();
 
@@ -255,7 +283,7 @@ class ReSyncConnectionManagerProfileResolutionTest {
             invalidate.invoke(manager);
 
             ReSyncConnectionManager.ProfileResolution refreshed =
-                manager.resolveAndStoreProfile(initial.serverId(), null).get(2, TimeUnit.SECONDS);
+                manager.resolveAndStoreProfile(initial.serverId(), null).join();
             ReSyncFlowClient retained = ensureWithoutConnecting(manager, initial.serverId(), refreshed.profile());
 
             assertTrue(refreshed.available());
@@ -282,12 +310,12 @@ class ReSyncConnectionManagerProfileResolutionTest {
         TestConnectionManager manager = new TestConnectionManager(current);
         try {
             ReSyncConnectionManager.ProfileResolution first =
-                manager.resolveAndStoreProfile("stable-backend", null).get(2, TimeUnit.SECONDS);
+                manager.resolveAndStoreProfile("stable-backend", null).join();
             assertEquals("first-key", first.profile().apiKey());
 
             current.set(secondInstance);
             ReSyncConnectionManager.ProfileResolution second =
-                manager.resolveAndStoreProfile("stable-backend", null).get(2, TimeUnit.SECONDS);
+                manager.resolveAndStoreProfile("stable-backend", null).join();
 
             assertTrue(second.available());
             assertEquals("profile:second", second.instanceId());
@@ -310,7 +338,7 @@ class ReSyncConnectionManagerProfileResolutionTest {
             assertNotNull(ensureWithoutConnecting(manager, instance.backendIdentifier(), profile));
 
             ReSyncConnectionManager.ProfileResolution resolution =
-                manager.resolveAndStoreProfile(instance.backendIdentifier(), null).get(2, TimeUnit.SECONDS);
+                manager.resolveAndStoreProfile(instance.backendIdentifier(), null).join();
 
             assertEquals("ReSyncNotConfigured", resolution.issue());
             assertTimeoutPreemptively(Duration.ofSeconds(2), () -> {

@@ -17,6 +17,9 @@ public final class TaskIdentities {
 
         String name();
 
+        default void setName(String name) {
+        }
+
         Access BROWSER = new Access() {
             private final Object identity = new Object();
 

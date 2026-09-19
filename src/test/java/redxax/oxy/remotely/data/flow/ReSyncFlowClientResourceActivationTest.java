@@ -512,7 +512,7 @@ class ReSyncFlowClientResourceActivationTest {
         CatalogCachePublication publication = new CatalogCachePublication(CatalogCachePublication.Kind.FULL,
             key, BINDING, 1L, List.of(), authoring, Map.of());
         return ReSyncFlowClientTestHarness.connect(SERVER, probe, probe.manager,
-            new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(temporaryDirectory.resolve(UUID.randomUUID()) + ".json")), publication);
+            new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(temporaryDirectory.resolve(UUID.randomUUID().toString() + ".json"))), publication);
     }
 
     private static byte[] mismatchedEnvelopeMutation(ProtocolEnvelope<Map<String, Object>> envelope, UUID mutationId) {

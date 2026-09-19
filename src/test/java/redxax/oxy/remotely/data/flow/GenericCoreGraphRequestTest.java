@@ -706,7 +706,7 @@ class GenericCoreGraphRequestTest {
             manager = new FlowManager(this, null) {
                 @Override
                 public ServerConnectionToken captureServerConnectionToken(String serverId, ReSyncFlowClient source) {
-                    return new ServerConnectionToken(serverId, redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(source, 1L));
+                    return new ServerConnectionToken(serverId, source, 1L);
                 }
 
                 @Override

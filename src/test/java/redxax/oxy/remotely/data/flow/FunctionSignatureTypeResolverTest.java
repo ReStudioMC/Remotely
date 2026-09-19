@@ -21,6 +21,7 @@ import restudio.resync.flow.identity.ServerId;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -88,7 +89,7 @@ class FunctionSignatureTypeResolverTest {
     void incompleteBoundaryCapabilityFailsWithoutMutatingTheGraph(@TempDir Path temporaryDirectory) throws Exception {
         CatalogCachePublication publication = publication(false);
         try (ReSyncFlowClientTestHarness harness = ReSyncFlowClientTestHarness.connectReconciling(
-            publication.key().serverId(), new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(temporaryDirectory.resolve(UUID.randomUUID()) + ".json")), publication)) {
+            publication.key().serverId(), new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(temporaryDirectory.resolve(UUID.randomUUID().toString() + ".json"))), publication)) {
             ReSyncFlowClient client = harness.client();
             FlowGraph graph = typedFunctionGraph();
             FlowTypeRef input = graph.getFunctionInputs().getFirst().getTypeRef();
@@ -102,7 +103,7 @@ class FunctionSignatureTypeResolverTest {
 
     private ReSyncFlowClientTestHarness client(Path directory, CatalogCachePublication publication) throws Exception {
         return ReSyncFlowClientTestHarness.connect(publication.key().serverId(),
-            new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(directory.resolve(UUID.randomUUID()) + ".json")), publication);
+            new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(directory.resolve(UUID.randomUUID().toString() + ".json"))), publication);
     }
 
     private CatalogCachePublication publication(boolean completeBoundary) {
@@ -110,7 +111,7 @@ class FunctionSignatureTypeResolverTest {
         CatalogCacheKey key = new CatalogCacheKey(server, completeBoundary ? 1 : 2,
             new ContentHash((completeBoundary ? "a" : "b").repeat(64)), BINDING_HASH,
             CatalogProjectionVersion.current());
-        List<DescriptorEntry> entries = new java.util.ArrayList<>(List.of(
+        List<DescriptorEntry> entries = new ArrayList<>(List.of(
             descriptor("extension", "function.inputs", List.of(pin("run", "output", named("execution"))),
                 boundary("inputs", "run", INPUT_ID, "list<string>")),
             descriptor("extension", "consumer", List.of(pin("consumer-input", "input", named("list", named("string")))), Map.of()),

@@ -20,6 +20,13 @@ public final class DesktopTaskIdentities {
             public String name() {
                 return Thread.currentThread().getName();
             }
+
+            @Override
+            public void setName(String name) {
+                if (name != null) {
+                    Thread.currentThread().setName(name);
+                }
+            }
         });
     }
 }

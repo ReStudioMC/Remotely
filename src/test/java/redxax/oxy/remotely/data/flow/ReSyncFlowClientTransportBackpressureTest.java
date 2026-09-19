@@ -82,7 +82,7 @@ class ReSyncFlowClientTransportBackpressureTest {
         } finally {
             release.countDown();
             executor.shutdownNow();
-            executor.awaitTermination(2, TimeUnit.SECONDS);
+            executor.awaitTermination(2000L);
         }
     }
 
@@ -116,7 +116,7 @@ class ReSyncFlowClientTransportBackpressureTest {
         } finally {
             release.countDown();
             executor.shutdownNow();
-            executor.awaitTermination(2, TimeUnit.SECONDS);
+            executor.awaitTermination(2000L);
         }
     }
 
@@ -160,7 +160,7 @@ class ReSyncFlowClientTransportBackpressureTest {
         } finally {
             release.countDown();
             executor.shutdownNow();
-            executor.awaitTermination(2, TimeUnit.SECONDS);
+            executor.awaitTermination(2000L);
         }
     }
 
@@ -190,7 +190,7 @@ class ReSyncFlowClientTransportBackpressureTest {
         } finally {
             release.countDown();
             executor.shutdownNow();
-            executor.awaitTermination(2, TimeUnit.SECONDS);
+            executor.awaitTermination(2000L);
         }
     }
 
@@ -229,7 +229,7 @@ class ReSyncFlowClientTransportBackpressureTest {
         } finally {
             release.countDown();
             executor.shutdownNow();
-            executor.awaitTermination(2, TimeUnit.SECONDS);
+            executor.awaitTermination(2000L);
         }
     }
 
@@ -266,7 +266,7 @@ class ReSyncFlowClientTransportBackpressureTest {
         } finally {
             release.countDown();
             executor.shutdownNow();
-            executor.awaitTermination(2, TimeUnit.SECONDS);
+            executor.awaitTermination(2000L);
         }
     }
 

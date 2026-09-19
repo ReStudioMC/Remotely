@@ -985,7 +985,7 @@ final class ReSyncFlowClientAggregateCreateBehaviorTest {
         private final AtomicReference<Boolean> preflightRetryable = new AtomicReference<>();
 
         private RetryManager(RemotelyClient client, String failFirstId, Path stateRoot) {
-            super(client, null, null, stateRoot);
+            super(client, null, null, stateRoot != null ? DesktopReSyncStorage.fromKey(stateRoot) : null);
             this.failFirstId = failFirstId;
         }
 

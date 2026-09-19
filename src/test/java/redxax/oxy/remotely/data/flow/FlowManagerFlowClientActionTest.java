@@ -2,12 +2,12 @@ package redxax.oxy.remotely.data.flow;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import restudio.rebase.restudio.api.ReStudioApiClient;
+import redxax.oxy.remotely.RemotelyServerApi;
+import restudio.rescreen.platform.Async;
 
 import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.Queue;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
@@ -23,12 +23,12 @@ class FlowManagerFlowClientActionTest {
     void pendingAdmissionDeliversExactlyOnceToCurrentOwner(@TempDir Path stateRoot) {
         AdmissionManager manager = new AdmissionManager(stateRoot);
         ReSyncFlowClient owner = flowClient("current");
-        CompletableFuture<ReSyncFlowClient> admission = new CompletableFuture<>();
+        Async<ReSyncFlowClient> admission = Async.pending();
         AtomicInteger deliveries = new AtomicInteger();
         manager.current.set(owner);
         manager.admissions.add(admission);
 
-        CompletableFuture<FlowManager.FlowClientActionSettlement<String>> settlement = manager.withFlowClient(
+        Async<FlowManager.FlowClientActionSettlement<String>> settlement = manager.withFlowClient(
             "server", client -> {
                 assertSame(owner, client);
                 deliveries.incrementAndGet();
@@ -51,13 +51,13 @@ class FlowManagerFlowClientActionTest {
         AdmissionManager manager = new AdmissionManager(stateRoot);
         ReSyncFlowClient older = flowClient("older");
         ReSyncFlowClient newer = flowClient("newer");
-        CompletableFuture<ReSyncFlowClient> firstAdmission = new CompletableFuture<>();
+        Async<ReSyncFlowClient> firstAdmission = Async.pending();
         AtomicReference<ReSyncFlowClient> delivered = new AtomicReference<>();
         manager.current.set(older);
         manager.admissions.add(firstAdmission);
-        manager.admissions.add(CompletableFuture.completedFuture(newer));
+        manager.admissions.add(Async.completed(newer));
 
-        CompletableFuture<FlowManager.FlowClientActionSettlement<Void>> settlement = manager.withFlowClient(
+        Async<FlowManager.FlowClientActionSettlement<Void>> settlement = manager.withFlowClient(
             "server", client -> {
                 delivered.set(client);
                 return null;
@@ -83,7 +83,7 @@ class FlowManagerFlowClientActionTest {
     void nullAdmissionSettlesUnavailableWithoutRunningRequest(@TempDir Path stateRoot) {
         AdmissionManager manager = new AdmissionManager(stateRoot);
         AtomicInteger deliveries = new AtomicInteger();
-        manager.admissions.add(CompletableFuture.completedFuture(null));
+        manager.admissions.add(Async.completed(null));
 
         FlowManager.FlowClientActionSettlement<Void> settlement = manager.<Void>withFlowClient("server", client -> {
             deliveries.incrementAndGet();
@@ -99,22 +99,22 @@ class FlowManagerFlowClientActionTest {
     }
 
     private static ReSyncFlowClient flowClient(String serverId) {
-        return new ReSyncFlowClient(serverId, (ReStudioApiClient) null, null);
+        return new ReSyncFlowClient(serverId, (RemotelyServerApi) null, null);
     }
 
     private static final class AdmissionManager extends FlowManager {
-        private final Queue<CompletableFuture<ReSyncFlowClient>> admissions = new ArrayDeque<>();
+        private final Queue<Async<ReSyncFlowClient>> admissions = new ArrayDeque<>();
         private final Queue<Runnable> retries = new ArrayDeque<>();
         private final AtomicReference<ReSyncFlowClient> current = new AtomicReference<>();
 
         private AdmissionManager(Path stateRoot) {
-            super(null, null, null, stateRoot);
+            super(null, null, null, stateRoot != null ? DesktopReSyncStorage.fromKey(stateRoot) : null);
         }
 
         @Override
-        public CompletableFuture<ReSyncFlowClient> ensureFlowClientAsync(String serverId) {
-            CompletableFuture<ReSyncFlowClient> admission = admissions.poll();
-            return admission != null ? admission : CompletableFuture.completedFuture(null);
+        public Async<ReSyncFlowClient> ensureFlowClientAsync(String serverId) {
+            Async<ReSyncFlowClient> admission = admissions.poll();
+            return admission != null ? admission : Async.completed(null);
         }
 
         @Override

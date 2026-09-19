@@ -232,10 +232,10 @@ public class ReSyncConnectionManager {
         this.apiClient = apiClient;
         this.catalogPublicationCacheFactory = catalogPublicationCacheFactory != null
             ? catalogPublicationCacheFactory : ignored -> ReSyncCatalogPublicationCache.deferred();
-        this.profileResolutionExecutor = BrowserWork.executor();
+        this.profileResolutionExecutor = BrowserWork.executor("ReSync-Profile-");
         this.profileTimeoutExecutor = BrowserWork.executor();
         this.profileTimeoutExecutor.setRemoveOnCancelPolicy(true);
-        this.connectionLifecycleExecutor = BrowserWork.executor();
+        this.connectionLifecycleExecutor = BrowserWork.executor("ReSync-Connection-Lifecycle-");
         Object instanceManager = null;
         try {
             instanceManager = ReSyncLocalInstances.access.manager();
@@ -985,8 +985,7 @@ public class ReSyncConnectionManager {
                 connectionLifecycleExecutor.shutdownNow();
                 return;
             }
-            connectionLifecycleExecutor.awaitTermination(Math.min(remaining, ((100L) * 1_000_000L)),
-                1L);
+            connectionLifecycleExecutor.awaitTermination(Math.min(Math.max(1L, remaining / 1_000_000L), 100L));
         }
     }
 

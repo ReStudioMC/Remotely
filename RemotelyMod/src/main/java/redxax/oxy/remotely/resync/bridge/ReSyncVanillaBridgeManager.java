@@ -49,8 +49,8 @@ public class ReSyncVanillaBridgeManager {
     private static final int MAX_OUTBOUND_BYTES_PER_TICK = 768 * 1_024;
     private static final long MAX_OUTBOUND_NANOS_PER_TICK = 2_000_000L;
     private static final long MAX_OUTBOUND_DELIVERY_NANOS = TimeUnit.SECONDS.toNanos(30L);
-    private static final int MAX_ACTIVATION_FRAMES = 64;
-    private static final int MAX_ACTIVATION_BYTES = 4 * 1_024 * 1_024;
+    private static final int MAX_ACTIVATION_FRAMES = 2048;
+    private static final int MAX_ACTIVATION_BYTES = 32 * 1_024 * 1_024;
     private static final int MAX_ACTIVATION_CALLBACKS = 64;
     private final ReSyncVanillaPacketAdapter adapter = new ReSyncVanillaPacketAdapter();
     private final ReSyncBridgeChunker chunker = new ReSyncBridgeChunker();
