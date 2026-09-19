@@ -82,6 +82,12 @@ class OptionCatalogCacheTest {
 
         assertEquals("restricted", cache.getStatus(serverId, sourceId, ""));
         assertEquals("Permission required", cache.getDiagnostic(serverId, sourceId, ""));
+        cache.markStale(serverId, sourceId);
+        assertTrue(cache.markRequestInFlight(serverId, sourceId));
+        OptionCatalogCache.LegacyCatalogSnapshot snapshot = cache.snapshot(serverId, sourceId, "");
+        assertEquals("stale", snapshot.status());
+        assertEquals("Cached catalog is awaiting refresh", snapshot.diagnostic());
+        assertTrue(snapshot.requestInFlight());
     }
 
     @Test

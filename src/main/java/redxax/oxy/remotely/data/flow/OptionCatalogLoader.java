@@ -157,16 +157,13 @@ public final class OptionCatalogLoader {
         if (contextKey == null) {
             return Snapshot.missing(request);
         }
-        boolean present = cache.hasCatalog(serverId, request.source(), contextKey);
-        if (!present || cache.isStale(serverId, request.source(), contextKey)) {
+        OptionCatalogCache.LegacyCatalogSnapshot catalog = cache.snapshot(serverId, request.source(), contextKey);
+        if (!catalog.present() || catalog.stale()) {
             requests.request(serverId, request.source(), request.context(), false);
         }
-        boolean loading = !present || cache.isStale(serverId, request.source(), contextKey)
-            || cache.isRequestInFlight(serverId, request.source(), contextKey);
-        return new Snapshot(request, contextKey, cache.lookup(serverId, request.source(), contextKey).revision(),
-            cache.getValues(serverId, request.source(), contextKey),
-            cache.getItems(serverId, request.source(), contextKey), loading,
-            cache.getStatus(serverId, request.source(), contextKey), cache.getDiagnostic(serverId, request.source(), contextKey));
+        boolean loading = !catalog.present() || catalog.stale() || catalog.requestInFlight();
+        return new Snapshot(request, contextKey, catalog.revision(), catalog.values(), catalog.items(), loading,
+            catalog.status(), catalog.diagnostic());
     }
 
     public static ResourceRequest resourceRequest(ServerId serverId, ContractRef<ResourceTypeId> resourceType,

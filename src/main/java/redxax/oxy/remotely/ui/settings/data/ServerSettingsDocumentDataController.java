@@ -1874,10 +1874,8 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
         }
 
         private static CatalogCurrent of(String identity, List<String> values) {
-            List<String> snapshot = values == null ? List.of() : List.copyOf(values);
-            StringBuilder stamp = new StringBuilder(identity == null ? "current:configured" : identity);
-            for (String value : snapshot) stamp.append('|').append(value.length()).append(':').append(value);
-            return new CatalogCurrent(stamp.toString(), snapshot);
+            return new CatalogCurrent(identity == null ? "current:configured" : identity,
+                values == null ? List.of() : List.copyOf(values));
         }
     }
 

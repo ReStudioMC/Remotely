@@ -5,6 +5,7 @@ import redxax.oxy.remotely.metadata.MetadataRepository;
 import redxax.oxy.remotely.settings.server.HostedServerSettingsProvider;
 import redxax.oxy.remotely.settings.server.ServerSettingsRegistry;
 import restudio.rescreen.platform.Async;
+import restudio.rescreen.platform.Clock;
 import restudio.resync.metadata.CatalogId;
 import restudio.resync.metadata.MetadataCoordinate;
 import restudio.resync.metadata.MinecraftRegistryBundle;
@@ -19,6 +20,7 @@ import java.util.Objects;
 import java.util.Set;
 
 public final class ServerSettingsCatalogService {
+    private static final long REVALIDATE_MILLIS = 60_000L;
     private static final String SOURCE_PREFIX = "server:minecraft:";
     private static final Map<String, String> CATALOG_ALIASES = Map.of(
         "biome", "worldgen/biome",
@@ -31,21 +33,30 @@ public final class ServerSettingsCatalogService {
     private final MetadataRepository metadata;
     private final ResolvedCatalogRepository resolved;
     private final HostedServerSettingsProvider hostedSettings;
+    private final Clock clock;
     private final Map<String, MetadataRepository.Request> requests = new LinkedHashMap<>();
-    private final Set<MetadataRepository.Request> admitted = new LinkedHashSet<>();
+    private final Set<MetadataRepository.Request> refreshing = new LinkedHashSet<>();
+    private final Map<MetadataRepository.Request, Long> refreshedAt = new LinkedHashMap<>();
     private final Map<Context, Integer> references = new LinkedHashMap<>();
+    private final Map<ResolutionKey, CachedResolution> catalogSnapshots = new LinkedHashMap<>();
     private boolean closed;
-    private boolean settingsAdmitted;
 
     public ServerSettingsCatalogService(MetadataRepository metadata) {
-        this(metadata, new ResolvedCatalogRepository(), new HostedServerSettingsProvider(ServerSettingsRegistry.getInstance()));
+        this(metadata, new ResolvedCatalogRepository(), new HostedServerSettingsProvider(ServerSettingsRegistry.getInstance()),
+            Clock.system());
     }
 
     ServerSettingsCatalogService(MetadataRepository metadata, ResolvedCatalogRepository resolved,
                                  HostedServerSettingsProvider hostedSettings) {
+        this(metadata, resolved, hostedSettings, Clock.system());
+    }
+
+    ServerSettingsCatalogService(MetadataRepository metadata, ResolvedCatalogRepository resolved,
+                                 HostedServerSettingsProvider hostedSettings, Clock clock) {
         this.metadata = Objects.requireNonNull(metadata, "Metadata repository is required");
         this.resolved = Objects.requireNonNull(resolved, "Resolved catalog repository is required");
         this.hostedSettings = Objects.requireNonNull(hostedSettings, "Hosted settings provider is required");
+        this.clock = clock == null ? Clock.system() : clock;
     }
 
     public synchronized View open(String serverId, long connectionGeneration, String minecraftVersion) {
@@ -60,38 +71,46 @@ public final class ServerSettingsCatalogService {
     }
 
     private void admitSettings() {
-        synchronized (this) {
-            if (settingsAdmitted) return;
-            settingsAdmitted = true;
-        }
+        if (!beginRefresh(SETTINGS_REQUEST)) return;
         metadata.refresh(SETTINGS_REQUEST).whenComplete((snapshot, failure) -> {
-            if (failure != null) {
-                retrySettings();
-                return;
-            }
-            try {
-                hostedSettings.apply(snapshot);
-            } catch (RuntimeException invalid) {
-                retrySettings();
-            }
+            finishRefresh(SETTINGS_REQUEST, failure == null && applySettings(snapshot));
         });
     }
 
-    private synchronized void retrySettings() {
-        settingsAdmitted = false;
+    private boolean applySettings(MetadataRepository.Snapshot snapshot) {
+        if (!active()) return false;
+        try {
+            hostedSettings.apply(snapshot);
+            return true;
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+    }
+
+    private synchronized boolean active() {
+        return !closed;
     }
 
     private void admit(String minecraftVersion) {
         MetadataRepository.Request request = request(minecraftVersion);
-        synchronized (this) {
-            if (request == null || !admitted.add(request)) return;
-        }
+        if (request == null || !beginRefresh(request)) return;
         metadata.refresh(request).whenComplete((ignored, failure) -> {
-            if (failure == null) return;
-            synchronized (ServerSettingsCatalogService.this) {
-                admitted.remove(request);
-            }
+            finishRefresh(request, failure == null);
         });
+    }
+
+    private synchronized boolean beginRefresh(MetadataRepository.Request request) {
+        if (closed || refreshing.contains(request)) return false;
+        long now = clock.millis();
+        Long previous = refreshedAt.get(request);
+        if (previous != null && now >= previous && now - previous < REVALIDATE_MILLIS) return false;
+        refreshing.add(request);
+        return true;
+    }
+
+    private synchronized void finishRefresh(MetadataRepository.Request request, boolean success) {
+        refreshing.remove(request);
+        if (success && !closed) refreshedAt.put(request, clock.millis());
     }
 
     public Async<MetadataRepository.Snapshot> refresh(String minecraftVersion) {
@@ -100,25 +119,37 @@ public final class ServerSettingsCatalogService {
             : metadata.refresh(request);
     }
 
-    private ResolvedCatalogRepository.Snapshot resolve(Context context, String sourceId, String currentIdentity,
-                                                        Collection<String> currentValues) {
+    private synchronized ResolvedCatalogRepository.Snapshot resolve(Context context, String sourceId,
+                                                                     String currentIdentity,
+                                                                     Collection<String> currentValues) {
+        if (closed || !references.containsKey(context)) return null;
         CatalogId catalogId = catalogId(sourceId);
         if (catalogId == null) return null;
         MetadataRepository.Request request = request(context.minecraftVersion());
         MetadataRepository.Snapshot metadataSnapshot = request == null ? null : metadata.snapshot(request);
+        String server = context.resolutionIdentity();
+        OptionCatalogLoader.Snapshot liveSnapshot = OptionCatalogLoader.snapshot(context.serverId(), sourceId);
+        List<String> current = currentValues == null ? List.of() : currentValues.stream()
+            .filter(value -> value != null && !value.isBlank()).distinct().toList();
+        String ownerIdentity = text(currentIdentity, "current:configured");
+        String identity = currentIdentity(ownerIdentity, current);
+        ResolutionKey key = new ResolutionKey(context, sourceId, ownerIdentity);
+        ResolutionStamp stamp = new ResolutionStamp(metadataSnapshot == null ? "missing" : metadataSnapshot.stamp(),
+            liveSnapshot.contextKey(), liveSnapshot.revision(), liveSnapshot.loading(), liveSnapshot.status(),
+            liveSnapshot.diagnostic(), identity);
+        CachedResolution cached = catalogSnapshots.get(key);
+        if (cached != null && cached.stamp().equals(stamp)) return cached.snapshot();
         ResolvedCatalogRepository.Baseline baseline = metadataSnapshot == null
             ? ResolvedCatalogRepository.Baseline.missing()
             : ResolvedCatalogRepository.Baseline.from(metadataSnapshot, catalogId);
-        String server = context.resolutionIdentity();
-        OptionCatalogLoader.Snapshot liveSnapshot = OptionCatalogLoader.snapshot(context.serverId(), sourceId);
         ResolvedCatalogRepository.Live live = "server:none".equals(context.serverId())
             ? ResolvedCatalogRepository.Live.missing()
             : ResolvedCatalogRepository.Live.from(server, Long.toString(liveSnapshot.revision()), liveSnapshot);
-        List<String> current = currentValues == null ? List.of() : currentValues.stream()
-            .filter(value -> value != null && !value.isBlank()).distinct().toList();
-        String identity = current.isEmpty() ? "current:none" : text(currentIdentity, "current:configured");
-        return resolved.resolve(new ResolvedCatalogRepository.Input(catalogId.canonicalText(), baseline, live,
-            new ResolvedCatalogRepository.Current(identity, current)));
+        ResolvedCatalogRepository.Input input = new ResolvedCatalogRepository.Input(catalogId.canonicalText(), baseline,
+            live, new ResolvedCatalogRepository.Current(identity, current));
+        ResolvedCatalogRepository.Snapshot snapshot = resolved.resolve(input);
+        catalogSnapshots.put(key, new CachedResolution(stamp, snapshot));
+        return snapshot;
     }
 
     public static CatalogId catalogId(String sourceId) {
@@ -140,6 +171,13 @@ public final class ServerSettingsCatalogService {
         return value == null || value.isBlank() ? fallback : value.trim();
     }
 
+    private static String currentIdentity(String owner, List<String> values) {
+        StringBuilder identity = new StringBuilder(owner.length() + 16);
+        identity.append(owner.length()).append(':').append(owner);
+        for (String value : values) identity.append('|').append(value.length()).append(':').append(value);
+        return identity.toString();
+    }
+
     private synchronized void release(Context context) {
         Integer count = references.get(context);
         if (count == null) return;
@@ -148,6 +186,7 @@ public final class ServerSettingsCatalogService {
             return;
         }
         references.remove(context);
+        catalogSnapshots.keySet().removeIf(key -> key.context().equals(context));
         resolved.invalidateServer(context.resolutionIdentity());
     }
 
@@ -155,15 +194,28 @@ public final class ServerSettingsCatalogService {
         if (closed) return;
         closed = true;
         references.clear();
-        admitted.clear();
+        refreshing.clear();
+        refreshedAt.clear();
+        catalogSnapshots.clear();
         resolved.invalidateAll();
         hostedSettings.close();
     }
 
     private record Context(String serverId, long connectionGeneration, String minecraftVersion) {
         private String resolutionIdentity() {
-            return serverId + "@" + connectionGeneration;
+            return serverId.length() + ":" + serverId + '|' + connectionGeneration + '|' + minecraftVersion.length()
+                + ':' + minecraftVersion;
         }
+    }
+
+    private record ResolutionKey(Context context, String sourceId, String currentOwner) {
+    }
+
+    private record ResolutionStamp(String metadataStamp, String liveContext, long liveRevision, boolean liveLoading,
+                                   String liveStatus, String liveDiagnostic, String currentIdentity) {
+    }
+
+    private record CachedResolution(ResolutionStamp stamp, ResolvedCatalogRepository.Snapshot snapshot) {
     }
 
     public static final class View implements AutoCloseable {

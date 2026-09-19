@@ -482,8 +482,8 @@ public class OptionCatalogCache {
         BrowserSafeState.BooleanValue accepted = new BrowserSafeState.BooleanValue();
         BrowserSafeState.BooleanValue projectionChanged = new BrowserSafeState.BooleanValue();
         BrowserSafeState.BooleanValue persistenceChanged = new BrowserSafeState.BooleanValue();
-        boolean stale = staleCatalogs.contains(key);
         synchronized (catalogLookupLock) {
+            boolean stale = staleCatalogs.contains(key);
             catalogs.compute(key, (ignored, previous) -> {
                 Catalog next = offered.retain(previous);
                 if (!stale && previous != null && previous.isNewerThan(next)) {
@@ -499,10 +499,10 @@ public class OptionCatalogCache {
                 publishLookup(key, catalogs.get(key));
                 rebuild.run();
             }
+            inFlightRequests.remove(key);
+            if (accepted.get()) staleCatalogs.remove(key);
         }
-        inFlightRequests.remove(key);
         if (accepted.get()) {
-            staleCatalogs.remove(key);
             if (persistenceChanged.get()) {
                 scheduleSave();
             } else {
@@ -521,6 +521,21 @@ public class OptionCatalogCache {
     public List<String> getValues(String serverId, String sourceId, String contextKey) {
         Catalog catalog = catalogs.get(legacyKey(serverId, sourceId, contextKey));
         return catalog != null ? catalog.values() : List.of();
+    }
+
+    public LegacyCatalogSnapshot snapshot(String serverId, String sourceId, String contextKey) {
+        String key = legacyKey(serverId, sourceId, contextKey);
+        synchronized (catalogLookupLock) {
+            Catalog catalog = catalogs.get(key);
+            CatalogLookup lookup = catalogLookups.getOrDefault(key, CatalogLookup.EMPTY);
+            if (catalog == null) {
+                return LegacyCatalogSnapshot.missing(isRequestInFlight(key));
+            }
+            boolean stale = staleCatalogs.contains(key);
+            return new LegacyCatalogSnapshot(true, lookup.revision(), catalog.values(), catalog.items(), stale,
+                isRequestInFlight(key), stale ? "stale" : catalog.status(),
+                stale ? "Cached catalog is awaiting refresh" : catalog.diagnostic());
+        }
     }
 
     public boolean hasValues(String serverId, String sourceId) {
@@ -547,9 +562,9 @@ public class OptionCatalogCache {
             changed = catalogs.keySet().removeIf(key -> key.startsWith(prefix));
             catalogLookups.keySet().removeIf(key -> key.startsWith(prefix));
             catalogLookups.remove(crossContextKey(serverId, sourceId));
+            inFlightRequests.keySet().removeIf(key -> key.startsWith(prefix));
+            staleCatalogs.removeIf(key -> key.startsWith(prefix));
         }
-        inFlightRequests.keySet().removeIf(key -> key.startsWith(prefix));
-        staleCatalogs.removeIf(key -> key.startsWith(prefix));
         if (changed) {
             scheduleSave();
         }
@@ -562,9 +577,9 @@ public class OptionCatalogCache {
             changed = catalogs.remove(key) != null;
             catalogLookups.remove(key);
             rebuildAcrossContexts(serverId, sourceId);
+            inFlightRequests.remove(key);
+            staleCatalogs.remove(key);
         }
-        inFlightRequests.remove(key);
-        staleCatalogs.remove(key);
         if (changed) {
             scheduleSave();
         }
@@ -580,9 +595,9 @@ public class OptionCatalogCache {
             changed = catalogs.remove(key) != null;
             catalogLookups.remove(key);
             rebuildAcrossContexts(catalogKey);
+            inFlightRequests.remove(key);
+            staleCatalogs.remove(key);
         }
-        inFlightRequests.remove(key);
-        staleCatalogs.remove(key);
         if (changed) {
             scheduleSave();
         }
@@ -599,16 +614,18 @@ public class OptionCatalogCache {
 
     public void markStale(String serverId, String sourceId) {
         String prefix = legacyPrefix(serverId, sourceId);
-        catalogs.keySet().stream().filter(key -> key.startsWith(prefix)).forEach(staleCatalogs::add);
-        inFlightRequests.keySet().removeIf(key -> key.startsWith(prefix));
+        synchronized (catalogLookupLock) {
+            catalogs.keySet().stream().filter(key -> key.startsWith(prefix)).forEach(staleCatalogs::add);
+            inFlightRequests.keySet().removeIf(key -> key.startsWith(prefix));
+        }
     }
 
     public void markStale(String serverId, String sourceId, String contextKey) {
         String key = legacyKey(serverId, sourceId, contextKey);
-        if (catalogs.containsKey(key)) {
-            staleCatalogs.add(key);
+        synchronized (catalogLookupLock) {
+            if (catalogs.containsKey(key)) staleCatalogs.add(key);
+            inFlightRequests.remove(key);
         }
-        inFlightRequests.remove(key);
     }
 
     public void markStale(CatalogKey catalogKey) {
@@ -616,10 +633,10 @@ public class OptionCatalogCache {
             return;
         }
         String key = catalogKey.storageKey();
-        if (catalogs.containsKey(key)) {
-            staleCatalogs.add(key);
+        synchronized (catalogLookupLock) {
+            if (catalogs.containsKey(key)) staleCatalogs.add(key);
+            inFlightRequests.remove(key);
         }
-        inFlightRequests.remove(key);
     }
 
     public void markAllStale(String serverId, List<String> sourceIds) {
@@ -636,30 +653,36 @@ public class OptionCatalogCache {
     }
 
     public boolean markRequestInFlight(String serverId, String sourceId, String contextKey) {
-        if (sourceId == null || sourceId.isBlank() || hasCatalog(serverId, sourceId, contextKey) && !isStale(serverId, sourceId, contextKey)) {
-            return false;
+        if (sourceId == null || sourceId.isBlank()) return false;
+        String key = legacyKey(serverId, sourceId, contextKey);
+        synchronized (catalogLookupLock) {
+            if (catalogs.containsKey(key) && !staleCatalogs.contains(key)) return false;
+            return markRequestInFlight(key);
         }
-        return markRequestInFlight(legacyKey(serverId, sourceId, contextKey));
     }
 
     public boolean markRequestInFlight(CatalogKey catalogKey) {
-        if (catalogKey == null || hasCatalog(catalogKey) && !isStale(catalogKey)) {
-            return false;
+        if (catalogKey == null) return false;
+        String key = catalogKey.storageKey();
+        synchronized (catalogLookupLock) {
+            if (catalogs.containsKey(key) && !staleCatalogs.contains(key)) return false;
+            return markRequestInFlight(key);
         }
-        return markRequestInFlight(catalogKey.storageKey());
     }
 
     private boolean markRequestInFlight(String key) {
-        long now = System.currentTimeMillis();
-        BrowserSafeState.BooleanValue started = new BrowserSafeState.BooleanValue();
-        inFlightRequests.compute(key, (ignored, requestedAt) -> {
-            if (requestedAt == null || now - requestedAt >= REQUEST_TIMEOUT_MILLIS) {
-                started.set(true);
-                return now;
-            }
-            return requestedAt;
-        });
-        return started.get();
+        synchronized (catalogLookupLock) {
+            long now = System.currentTimeMillis();
+            BrowserSafeState.BooleanValue started = new BrowserSafeState.BooleanValue();
+            inFlightRequests.compute(key, (ignored, requestedAt) -> {
+                if (requestedAt == null || now - requestedAt >= REQUEST_TIMEOUT_MILLIS) {
+                    started.set(true);
+                    return now;
+                }
+                return requestedAt;
+            });
+            return started.get();
+        }
     }
 
     public boolean isRequestInFlight(String serverId, String sourceId) {
@@ -675,15 +698,13 @@ public class OptionCatalogCache {
     }
 
     private boolean isRequestInFlight(String key) {
-        Long requestedAt = inFlightRequests.get(key);
-        if (requestedAt == null) {
+        synchronized (catalogLookupLock) {
+            Long requestedAt = inFlightRequests.get(key);
+            if (requestedAt == null) return false;
+            if (System.currentTimeMillis() - requestedAt < REQUEST_TIMEOUT_MILLIS) return true;
+            inFlightRequests.remove(key, requestedAt);
             return false;
         }
-        if (System.currentTimeMillis() - requestedAt < REQUEST_TIMEOUT_MILLIS) {
-            return true;
-        }
-        inFlightRequests.remove(key, requestedAt);
-        return false;
     }
 
     public void clearRequestInFlight(String serverId, String sourceId) {
@@ -691,35 +712,47 @@ public class OptionCatalogCache {
     }
 
     public void clearRequestInFlight(String serverId, String sourceId, String contextKey) {
-        inFlightRequests.remove(legacyKey(serverId, sourceId, contextKey));
+        synchronized (catalogLookupLock) {
+            inFlightRequests.remove(legacyKey(serverId, sourceId, contextKey));
+        }
     }
 
     public void clearRequestInFlight(CatalogKey catalogKey) {
         if (catalogKey != null) {
-            inFlightRequests.remove(catalogKey.storageKey());
+            synchronized (catalogLookupLock) {
+                inFlightRequests.remove(catalogKey.storageKey());
+            }
         }
     }
 
     public void clearRequestsInFlight(String serverId) {
         String prefix = "legacy" + KEY_SEPARATOR + safe(serverId) + KEY_SEPARATOR;
-        inFlightRequests.keySet().removeIf(key -> key.startsWith(prefix));
         String typedPrefix = "resource" + KEY_SEPARATOR + safe(serverId) + KEY_SEPARATOR;
-        inFlightRequests.keySet().removeIf(key -> key.startsWith(typedPrefix));
+        synchronized (catalogLookupLock) {
+            inFlightRequests.keySet().removeIf(key -> key.startsWith(prefix));
+            inFlightRequests.keySet().removeIf(key -> key.startsWith(typedPrefix));
+        }
     }
 
     public void markServerStale(String serverId) {
         String prefix = "legacy" + KEY_SEPARATOR + safe(serverId) + KEY_SEPARATOR;
-        catalogs.keySet().stream().filter(key -> key.startsWith(prefix)).forEach(staleCatalogs::add);
         String typedPrefix = "resource" + KEY_SEPARATOR + safe(serverId) + KEY_SEPARATOR;
-        catalogs.keySet().stream().filter(key -> key.startsWith(typedPrefix)).forEach(staleCatalogs::add);
+        synchronized (catalogLookupLock) {
+            catalogs.keySet().stream().filter(key -> key.startsWith(prefix)).forEach(staleCatalogs::add);
+            catalogs.keySet().stream().filter(key -> key.startsWith(typedPrefix)).forEach(staleCatalogs::add);
+        }
     }
 
     public boolean isStale(String serverId, String sourceId, String contextKey) {
-        return staleCatalogs.contains(legacyKey(serverId, sourceId, contextKey));
+        synchronized (catalogLookupLock) {
+            return staleCatalogs.contains(legacyKey(serverId, sourceId, contextKey));
+        }
     }
 
     public boolean isStale(CatalogKey key) {
-        return key != null && staleCatalogs.contains(key.storageKey());
+        synchronized (catalogLookupLock) {
+            return key != null && staleCatalogs.contains(key.storageKey());
+        }
     }
 
     public List<OptionCatalogItem> getItems(String serverId, String sourceId) {
@@ -864,8 +897,8 @@ public class OptionCatalogCache {
                     }
                 }
                 rebuildAllLookups();
+                staleCatalogs.addAll(restored);
             }
-            staleCatalogs.addAll(restored);
             ReSyncFlowClient.traceLifecycle("", "option_catalog_cache_loaded", "catalogs", restored.size(),
                 "elapsedMs", ((System.nanoTime() - started) / 1_000_000L));
         } catch (Exception exception) {
@@ -1063,6 +1096,22 @@ public class OptionCatalogCache {
 
         public OptionCatalogItem get(ServerResourceLocator resource) {
             return resource == null ? null : resources.get(resource);
+        }
+    }
+
+    public record LegacyCatalogSnapshot(boolean present, long revision, List<String> values,
+                                        List<OptionCatalogItem> items, boolean stale, boolean requestInFlight,
+                                        String status, String diagnostic) {
+        public LegacyCatalogSnapshot {
+            values = values == null ? List.of() : List.copyOf(values);
+            items = items == null ? List.of() : List.copyOf(items);
+            status = status == null || status.isBlank() ? "missing" : status;
+            diagnostic = diagnostic == null ? "" : diagnostic;
+        }
+
+        private static LegacyCatalogSnapshot missing(boolean requestInFlight) {
+            return new LegacyCatalogSnapshot(false, 0L, List.of(), List.of(), false, requestInFlight,
+                "missing", "Catalog has not been loaded");
         }
     }
 
