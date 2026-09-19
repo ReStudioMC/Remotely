@@ -298,13 +298,29 @@ public final class ServerSettingsMetadataParser {
         for (int index = 0; index < values.size(); index++) {
             String itemLocation = location + "[" + index + "]";
             Map<String, Object> item = stringMap(values.get(index), itemLocation);
-            requireOnly(item, itemLocation, "value", "label", "role");
+            requireOnly(item, itemLocation, "value", "label", "description", "role", "reference");
             if (!item.containsKey("value")) throw invalid(itemLocation + ".value", "A sentinel value is required", null);
             result.add(new ServerSettingsField.Sentinel(item.get("value"),
                     requiredString(item, itemLocation + ".label", "label"),
-                    ServerSettingsField.SentinelRole.parse(requiredString(item, itemLocation + ".role", "role"))));
+                    firstString(item, "", "description"),
+                    ServerSettingsField.SentinelRole.parse(requiredString(item, itemLocation + ".role", "role")),
+                    parseValueReference(item.get("reference"), itemLocation + ".reference")));
         }
         return List.copyOf(result);
+    }
+
+    private static ServerSettingsField.ValueReference parseValueReference(Object raw, String location) {
+        if (raw == null) return null;
+        Map<String, Object> values = stringMap(raw, location);
+        requireOnly(values, location, "document", "field", "fields");
+        String document = values.containsKey("document") ? stringValue(values.get("document"), location + ".document") : null;
+        String field = values.containsKey("field") ? stringValue(values.get("field"), location + ".field") : null;
+        LinkedHashMap<String, String> fields = new LinkedHashMap<>();
+        if (values.containsKey("fields")) {
+            Map<String, Object> rawFields = stringMap(values.get("fields"), location + ".fields");
+            rawFields.forEach((key, value) -> fields.put(key, stringValue(value, location + ".fields." + key)));
+        }
+        return new ServerSettingsField.ValueReference(document, field, fields);
     }
 
     private static List<ServerSettingsField.ObjectField> parseObjectFields(Object raw, String location) {

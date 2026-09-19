@@ -94,7 +94,7 @@ packs:
                 addLabel: Add Item Model
                 emptyLabel: No Item Model Overrides
                 emptyDescription: Add an item model only when it needs different obfuscation rules.
-                detailsLabel: Obfuscation Rules
+                detailsLabel: Edit Rules
               key:
                 type: text
                 catalog: {source: 'server:minecraft:item_model'}

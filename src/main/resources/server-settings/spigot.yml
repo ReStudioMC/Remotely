@@ -215,7 +215,10 @@ packs:
                 catalog: {source: 'server:minecraft:advancement'}
                 allowCustom: true
                 sentinels:
-                  - {value: '*', label: Disable All, role: all}
+                  - value: '*'
+                    label: Disable All
+                    description: Disables every advancement.
+                    role: all
           - id: messages.whitelist
             key: messages.whitelist
             type: text

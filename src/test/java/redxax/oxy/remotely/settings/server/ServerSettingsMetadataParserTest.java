@@ -282,7 +282,13 @@ class ServerSettingsMetadataParserTest {
                                 type: integer
                                 min: 0
                                 sentinels:
-                                  - {value: -1, label: Use Default, role: inherit}
+                                  - value: -1
+                                    label: Use Default
+                                    description: Uses the current Bukkit setting.
+                                    role: inherit
+                                    reference:
+                                      document: bukkit.yml
+                                      fields: {ambient: spawn-limits.ambient}
                           - id: nested
                             key: nested
                             type: map
@@ -345,6 +351,9 @@ class ServerSettingsMetadataParserTest {
         assertNull(fields.get(1).disabledValue());
         assertEquals(ServerSettingsField.SentinelRole.INHERIT, fixed.value().sentinels().getFirst().role());
         assertEquals(-1, fixed.value().sentinels().getFirst().value());
+        assertEquals("Uses the current Bukkit setting.", fixed.value().sentinels().getFirst().description());
+        assertEquals("bukkit.yml", fixed.value().sentinels().getFirst().reference().document());
+        assertEquals("spawn-limits.ambient", fixed.value().sentinels().getFirst().reference().fieldFor("ambient"));
         ServerSettingsField.ValueSpec nested = fields.get(2).collection().value();
         assertEquals(ServerSettingsField.ValueType.OBJECT, nested.type());
         assertEquals(List.of("DROP", "KICK"), nested.fields().getFirst().value().options());
@@ -385,5 +394,18 @@ class ServerSettingsMetadataParserTest {
                 () -> new ServerSettingsMetadataParser().parse(yaml));
 
         assertTrue(exception.getMessage().contains("Sequence collections cannot define map keys"));
+    }
+
+    @Test
+    void rejectsAmbiguousAndInvalidSentinelReferences() {
+        assertThrows(IllegalArgumentException.class,
+                () -> new ServerSettingsField.ValueReference(null, null, Map.of()));
+        assertThrows(IllegalArgumentException.class,
+                () -> new ServerSettingsField.ValueReference("bukkit.yml", "spawn-limits.ambient",
+                        Map.of("ambient", "spawn-limits.ambient")));
+        ServerSettingsField.ValueReference reference = new ServerSettingsField.ValueReference("bukkit.yml",
+                "spawn-limits.ambient", Map.of());
+        assertThrows(IllegalArgumentException.class, () -> new ServerSettingsField.Sentinel(-1, "Disabled",
+                ServerSettingsField.SentinelRole.DISABLED, reference));
     }
 }

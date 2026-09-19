@@ -89,13 +89,44 @@ public final class ServerSettingsField {
         }
     }
 
-    public record Sentinel(Object value, String label, SentinelRole role) {
+    public record ValueReference(String document, String field, Map<String, String> fields) {
+        public ValueReference {
+            document = optional(document);
+            field = optional(field);
+            fields = fields == null ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(fields));
+            if ((field == null) == fields.isEmpty()) {
+                throw new IllegalArgumentException("A value reference must define exactly one field or keyed fields");
+            }
+            fields.forEach((key, value) -> {
+                required(key, "value reference key");
+                required(value, "value reference field");
+            });
+        }
+
+        public String fieldFor(Object entryKey) {
+            return field != null ? field : fields.get(String.valueOf(entryKey));
+        }
+    }
+
+    public record Sentinel(Object value, String label, String description, SentinelRole role, ValueReference reference) {
         public Sentinel {
             if (!(value instanceof String || value instanceof Boolean || value instanceof Number)) {
                 throw new IllegalArgumentException("A scalar sentinel value is required");
             }
             label = required(label, "sentinel label");
+            description = description == null ? "" : description.trim();
             Objects.requireNonNull(role, "sentinel role");
+            if (reference != null && role != SentinelRole.INHERIT) {
+                throw new IllegalArgumentException("Only inherit sentinels may reference another value");
+            }
+        }
+
+        public Sentinel(Object value, String label, SentinelRole role, ValueReference reference) {
+            this(value, label, "", role, reference);
+        }
+
+        public Sentinel(Object value, String label, SentinelRole role) {
+            this(value, label, "", role, null);
         }
     }
 

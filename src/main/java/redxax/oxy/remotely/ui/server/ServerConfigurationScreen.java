@@ -306,6 +306,11 @@ public class ServerConfigurationScreen extends ReScreen {
 
         settingsScreen = new SettingsScreen(parent, configurationUi.title(), settingsByTab, this::saveConfiguration, combinedCleanup) {
             @Override
+            protected int getEntryMaxWidth() {
+                return 760;
+            }
+
+            @Override
             public void removed() {
                 settingsCleanup.run();
                 super.removed();
@@ -329,7 +334,7 @@ public class ServerConfigurationScreen extends ReScreen {
                 for (ScreenWindowWidget window : overlay.getWindows()) {
                     if (window.getScreen() == this) {
                         settingsHandoff = true;
-                        window.setScreen(settingsScreen);
+                        window.replaceScreen(settingsScreen);
                         overlay.bringToFront(window);
                         return;
                     }

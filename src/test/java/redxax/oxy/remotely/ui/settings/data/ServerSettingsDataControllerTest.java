@@ -965,6 +965,46 @@ class ServerSettingsDataControllerTest {
     }
 
     @Test
+    void inheritSentinelResolvesTheCurrentReferencedFieldPerMapEntry() {
+        Path root = Path.of("settings-source-" + UUID.randomUUID()).toAbsolutePath();
+        MemoryFiles files = new MemoryFiles();
+        files.put(root.resolve("bukkit.yml"), "spawn-limits:\n  ambient: 23\n");
+        files.put(root.resolve("paper.yml"), "spawn-limits:\n  ambient: -1\n");
+        Instance instance = velocity(root);
+
+        ServerSettingsField bukkit = new ServerSettingsField("spawn-limits.ambient", "spawn-limits.ambient",
+                ServerSettingsFieldType.INTEGER, "Settings", "Bukkit", "Ambient Bukkit Limit", "Bukkit limit", 15,
+                BigDecimal.ZERO, null, List.of());
+        ServerSettingsField.ValueReference reference = new ServerSettingsField.ValueReference("bukkit.yml", null,
+                Map.of("ambient", "spawn-limits.ambient"));
+        ServerSettingsField.ValueSpec value = new ServerSettingsField.ValueSpec(ServerSettingsField.ValueType.INTEGER,
+                BigDecimal.ZERO, null, List.of(), null, false, List.of(new ServerSettingsField.Sentinel(-1,
+                "Use Bukkit Settings", ServerSettingsField.SentinelRole.INHERIT, reference)), List.of(), null, null);
+        ServerSettingsField.CollectionSchema collection = new ServerSettingsField.CollectionSchema(
+                ServerSettingsField.CollectionMode.FIXED_MAP, true, true,
+                List.of(new ServerSettingsField.FixedKey("ambient", "Ambient", "Ambient mob cap.")), null, value);
+        ServerSettingsField paper = new ServerSettingsField("paper-spawn-limits", "spawn-limits", ServerSettingsFieldType.MAP,
+                "Settings", "Paper", "Paper Spawn Limits", "Paper overrides", Map.of("ambient", -1), null, null,
+                List.of(), false, true, null, collection);
+        ServerSettingsPack pack = new ServerSettingsPack("settings", "Settings", "Settings", 0, List.of("velocity"), List.of(
+                new ServerSettingsDocument("bukkit.yml", ServerSettingsFormat.YAML, true, false, List.of(bukkit)),
+                new ServerSettingsDocument("paper.yml", ServerSettingsFormat.YAML, true, false, List.of(paper))));
+        ServerSettingsDataController controller = new DesktopServerSettingsDataController(instance,
+                new ServerSettingsSnapshot(List.of(pack)), new MemoryApi(files));
+        controller.load().join();
+
+        ConfigOption<Map<String, Object>> paperOption = optionNamed(controller, "Settings", "Paper Spawn Limits");
+        OptionEditor.MapEntries<?, ?> editor = assertInstanceOf(OptionEditor.MapEntries.class, paperOption.getOptionEditor());
+        OptionEditor.ScalarValue<?> scalar = assertInstanceOf(OptionEditor.ScalarValue.class, editor.value());
+        assertEquals(new BigInteger("23"), scalar.sentinels().getFirst().inheritedValueFor("ambient"));
+
+        ConfigOption<String> bukkitOption = optionNamed(controller, "Settings", "Ambient Bukkit Limit");
+        bukkitOption.set("31");
+
+        assertEquals(new BigInteger("31"), scalar.sentinels().getFirst().inheritedValueFor("ambient"));
+    }
+
+    @Test
     void preservesNestedTypedCollectionsThroughApplyAndSave() {
         Path root = Path.of("settings-source-" + UUID.randomUUID()).toAbsolutePath();
         MemoryFiles files = new MemoryFiles();
@@ -1075,6 +1115,20 @@ class ServerSettingsDataControllerTest {
         Setting setting = controller.settings(tab).getFirst();
         Widget widget = setting.getRows().getFirst().getWidgets().getFirst();
         return (ConfigOption<String>) ((SettingEntryWidget) widget).getOption();
+    }
+
+    @SuppressWarnings("unchecked")
+    private <T> ConfigOption<T> optionNamed(ServerSettingsDataController controller, String tab, String name) {
+        for (Setting setting : controller.settings(tab)) {
+            for (var row : setting.getRows()) {
+                for (Widget widget : row.getWidgets()) {
+                    if (widget instanceof SettingEntryWidget entry && entry.getOption().getName().equals(name)) {
+                        return (ConfigOption<T>) entry.getOption();
+                    }
+                }
+            }
+        }
+        throw new IllegalArgumentException("Missing option " + name);
     }
 
     @SuppressWarnings("unchecked")

@@ -836,7 +836,10 @@ packs:
                 type: integer
                 min: 0
                 sentinels:
-                  - {value: -1, label: No Type Limit, role: disabled}
+                  - value: -1
+                    label: No Type Limit
+                    description: Saves this entity type without a per-chunk limit.
+                    role: disabled
           - id: entities-behavior-door-breaking-difficulty
             key: entities.behavior.door-breaking-difficulty
             type: map
@@ -902,18 +905,31 @@ packs:
                 itemName: Category
                 itemsName: Categories
               keys:
-                - {value: ambient, label: Ambient}
-                - {value: axolotls, label: Axolotls}
-                - {value: creature, label: Creature}
-                - {value: monster, label: Monster}
-                - {value: underground_water_creature, label: Underground Water Creature}
-                - {value: water_ambient, label: Water Ambient}
-                - {value: water_creature, label: Water Creature}
+                - {value: ambient, label: Ambient, description: Sets the cap for ambient mobs such as bats.}
+                - {value: axolotls, label: Axolotls, description: Sets the cap for axolotls.}
+                - {value: creature, label: Creatures, description: Sets the cap for passive land animals.}
+                - {value: monster, label: Monsters, description: Sets the cap for hostile mobs.}
+                - {value: underground_water_creature, label: Underground Water Creatures, description: Sets the cap for underground aquatic mobs.}
+                - {value: water_ambient, label: Water Ambient, description: Sets the cap for ambient aquatic mobs.}
+                - {value: water_creature, label: Water Creatures, description: Sets the cap for aquatic creatures.}
               value:
                 type: integer
                 min: 0
                 sentinels:
-                  - {value: -1, label: Use Bukkit Settings, role: inherit}
+                  - value: -1
+                    label: Use Bukkit Settings
+                    description: Uses the current spawn limit from Bukkit Settings.
+                    role: inherit
+                    reference:
+                      document: bukkit.yml
+                      fields:
+                        ambient: spawn-limits.ambient
+                        axolotls: spawn-limits.axolotls
+                        creature: spawn-limits.animals
+                        monster: spawn-limits.monsters
+                        underground_water_creature: spawn-limits.water-underground-creature
+                        water_ambient: spawn-limits.water-ambient
+                        water_creature: spawn-limits.water-animals
           - id: entities-spawning-ticks-per-spawn
             key: entities.spawning.ticks-per-spawn
             type: map
@@ -937,18 +953,31 @@ packs:
                 itemName: Category
                 itemsName: Categories
               keys:
-                - {value: ambient, label: Ambient}
-                - {value: axolotls, label: Axolotls}
-                - {value: creature, label: Creature}
-                - {value: monster, label: Monster}
-                - {value: underground_water_creature, label: Underground Water Creature}
-                - {value: water_ambient, label: Water Ambient}
-                - {value: water_creature, label: Water Creature}
+                - {value: ambient, label: Ambient, description: Sets how often ambient mob spawning is attempted.}
+                - {value: axolotls, label: Axolotls, description: Sets how often axolotl spawning is attempted.}
+                - {value: creature, label: Creatures, description: Sets how often passive animal spawning is attempted.}
+                - {value: monster, label: Monsters, description: Sets how often hostile mob spawning is attempted.}
+                - {value: underground_water_creature, label: Underground Water Creatures, description: Sets how often underground aquatic spawning is attempted.}
+                - {value: water_ambient, label: Water Ambient, description: Sets how often ambient aquatic spawning is attempted.}
+                - {value: water_creature, label: Water Creatures, description: Sets how often aquatic creature spawning is attempted.}
               value:
                 type: integer
                 min: 0
                 sentinels:
-                  - {value: -1, label: Use Bukkit Settings, role: inherit}
+                  - value: -1
+                    label: Use Bukkit Settings
+                    description: Uses the current spawn interval from Bukkit Settings.
+                    role: inherit
+                    reference:
+                      document: bukkit.yml
+                      fields:
+                        ambient: ticks-per.ambient-spawns
+                        axolotls: ticks-per.axolotl-spawns
+                        creature: ticks-per.animal-spawns
+                        monster: ticks-per.monster-spawns
+                        underground_water_creature: ticks-per.water-underground-creature-spawns
+                        water_ambient: ticks-per.water-ambient-spawns
+                        water_creature: ticks-per.water-spawns
           - id: entities-spawning-despawn-ranges
             key: entities.spawning.despawn-ranges
             type: map
@@ -972,16 +1001,16 @@ packs:
               presentation:
                 itemName: Category
                 itemsName: Categories
-                detailsLabel: Despawn Ranges
+                detailsLabel: Edit Ranges
               keys:
-                - {value: ambient, label: Ambient}
-                - {value: axolotls, label: Axolotls}
-                - {value: creature, label: Creature}
-                - {value: monster, label: Monster}
-                - {value: underground_water_creature, label: Underground Water Creature}
-                - {value: water_ambient, label: Water Ambient}
-                - {value: water_creature, label: Water Creature}
-                - {value: misc, label: Miscellaneous}
+                - {value: ambient, label: Ambient, description: Sets soft and hard despawn ranges for ambient mobs such as bats.}
+                - {value: axolotls, label: Axolotls, description: Sets soft and hard despawn ranges for axolotls.}
+                - {value: creature, label: Creatures, description: Sets soft and hard despawn ranges for passive land animals.}
+                - {value: monster, label: Monsters, description: Sets soft and hard despawn ranges for hostile mobs.}
+                - {value: underground_water_creature, label: Underground Water Creatures, description: Sets soft and hard despawn ranges for underground aquatic mobs.}
+                - {value: water_ambient, label: Water Ambient, description: Sets soft and hard despawn ranges for ambient aquatic mobs.}
+                - {value: water_creature, label: Water Creatures, description: Sets soft and hard despawn ranges for aquatic creatures.}
+                - {value: misc, label: Miscellaneous, description: Sets soft and hard despawn ranges for entities outside the standard mob categories.}
               value:
                 type: object
                 fields:
@@ -991,14 +1020,20 @@ packs:
                     type: integer
                     min: 0
                     sentinels:
-                      - {value: default, label: Use Vanilla Distance, role: inherit}
+                      - value: default
+                        label: Use Vanilla Distance
+                        description: Uses the default Minecraft soft despawn distance.
+                        role: inherit
                   - key: hard
                     name: Hard Range
                     description: Sets the distance where eligible entities despawn immediately.
                     type: integer
                     min: 0
                     sentinels:
-                      - {value: default, label: Use Vanilla Distance, role: inherit}
+                      - value: default
+                        label: Use Vanilla Distance
+                        description: Uses the default Minecraft hard despawn distance.
+                        role: inherit
           - id: entities-spawning-despawn-time
             key: entities.spawning.despawn-time
             type: map
@@ -1026,7 +1061,10 @@ packs:
               value:
                 type: duration
                 sentinels:
-                  - {value: disabled, label: Use Vanilla Despawning, role: disabled}
+                  - value: disabled
+                    label: Use Vanilla Despawning
+                    description: Leaves despawning for this entity type to Minecraft.
+                    role: disabled
           - id: entities-spawning-alt-item-despawn-rate-items
             key: entities.spawning.alt-item-despawn-rate.items
             type: map
@@ -1094,7 +1132,10 @@ packs:
                     type: integer
                     min: 0
                     sentinels:
-                      - {value: -1, label: Use Vanilla Rate, role: inherit}
+                      - value: -1
+                        label: Use Vanilla Rate
+                        description: Uses the default Minecraft sensor tick rate.
+                        role: inherit
           - id: tick-rates-behavior
             key: tick-rates.behavior
             type: map
@@ -1136,7 +1177,10 @@ packs:
                     type: integer
                     min: 0
                     sentinels:
-                      - {value: -1, label: Use Vanilla Rate, role: inherit}
+                      - value: -1
+                        label: Use Vanilla Rate
+                        description: Uses the default Minecraft behavior tick rate.
+                        role: inherit
           - id: feature-seeds-features
             key: feature-seeds.features
             type: map
@@ -1162,7 +1206,10 @@ packs:
               value:
                 type: integer
                 sentinels:
-                  - {value: -1, label: Use Vanilla Seed, role: inherit}
+                  - value: -1
+                    label: Use Vanilla Seed
+                    description: Lets Minecraft choose the configured feature seed.
+                    role: inherit
           - id: lootables-auto-replenish
             key: lootables.auto-replenish
             type: boolean

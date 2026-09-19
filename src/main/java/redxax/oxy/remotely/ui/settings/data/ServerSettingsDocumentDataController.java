@@ -1039,7 +1039,42 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
 
     private List<OptionEditor.Sentinel<Object>> sentinels(ServerSettingsField.ValueSpec spec) {
         return spec.sentinels().stream().map(sentinel -> new OptionEditor.Sentinel<>(
-                normalizeSentinel(spec, sentinel.value()), sentinel.label(), sentinel.role().name())).toList();
+                normalizeSentinel(spec, sentinel.value()), sentinel.label(), sentinelDescription(sentinel),
+                entryKey -> referencedValue(spec, sentinel.reference(), entryKey))).toList();
+    }
+
+    private String sentinelDescription(ServerSettingsField.Sentinel sentinel) {
+        if (!sentinel.description().isBlank()) return sentinel.description();
+        if (sentinel.reference() != null) {
+            return "Uses the current referenced setting.";
+        }
+        return switch (sentinel.role()) {
+            case INHERIT -> "Uses the software default.";
+            case DISABLED -> "Keeps this setting disabled.";
+            case ALL -> "Applies to every value.";
+        };
+    }
+
+    private Object referencedValue(ServerSettingsField.ValueSpec spec, ServerSettingsField.ValueReference reference,
+                                   Object entryKey) {
+        if (reference == null) return null;
+        String fieldReference = reference.fieldFor(entryKey);
+        if (fieldReference == null || fieldReference.isBlank()) return null;
+        for (DocumentState document : documents.values()) {
+            if (reference.document() != null && !reference.document().equals(document.definition.relativePath())) continue;
+            for (FieldBinding binding : document.bindings) {
+                if (!binding.field.id().equals(fieldReference) && !binding.field.key().equals(fieldReference)) continue;
+                ConfigOption<?> resident = fieldOptions.get(binding);
+                Object value = resident == null ? readValue(binding) : resident.get();
+                if (value == null) return null;
+                try {
+                    return parseScalar(spec, String.valueOf(value));
+                } catch (RuntimeException ignored) {
+                    return null;
+                }
+            }
+        }
+        return null;
     }
 
     private OptionEditor.Catalog<Object> catalog(ServerSettingsField.ValueSpec spec, CatalogCurrent current) {
@@ -1079,20 +1114,17 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
     }
 
     private OptionEditor.Catalog<Object> sourceCatalog(String sourceId, CatalogCurrent current) {
+        if (hostedCatalogs != null) {
+            ResolvedCatalogRepository.Snapshot resolved = hostedCatalogs.catalog(sourceId, current.identity(), current.values());
+            if (resolved != null) {
+                return catalogAdapters.computeIfAbsent(resolved, this::adaptCatalog);
+            }
+        }
         LinkedHashMap<String, OptionEditor.Choice<Object>> choices = new LinkedHashMap<>();
         if ("server:minecraft:world".equals(sourceId)) {
             worldCatalog.forEach(value -> choices.put(value, choice(value, "")));
         }
         String serverId = source.catalogServerId();
-        if (hostedCatalogs != null) {
-            ResolvedCatalogRepository.Snapshot resolved = hostedCatalogs.catalog(sourceId, current.identity(), current.values());
-            if (resolved != null) {
-                OptionEditor.Catalog<Object> adapted = catalogAdapters.computeIfAbsent(resolved, this::adaptCatalog);
-                if (choices.isEmpty()) return adapted;
-                adapted.choices().forEach(choice -> choices.put(String.valueOf(choice.value()), choice));
-                return new OptionEditor.Catalog<>(List.of(adapted.stamp(), List.copyOf(choices.keySet())), List.copyOf(choices.values()));
-            }
-        }
         OptionCatalogLoader.Snapshot snapshot = OptionCatalogLoader.snapshot(serverId, sourceId);
         for (OptionCatalogItem item : snapshot.items()) {
             if (item.getValue() != null && item.isAvailable()) {
@@ -1100,8 +1132,12 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
             }
         }
         for (String value : snapshot.values()) choices.putIfAbsent(value, choice(value, ""));
-        return new OptionEditor.Catalog<>(List.of(snapshot.revision(), snapshot.status(), snapshot.loading()),
-            List.copyOf(choices.values()));
+        OptionEditor.CatalogState state = !choices.isEmpty() ? OptionEditor.CatalogState.READY
+                : snapshot.loading() ? OptionEditor.CatalogState.LOADING : OptionEditor.CatalogState.UNAVAILABLE;
+        String message = state == OptionEditor.CatalogState.LOADING ? "Catalog Is Loading"
+                : snapshot.diagnostic();
+        return new OptionEditor.Catalog<>(List.of(snapshot.contextKey(), snapshot.revision(), snapshot.status(), snapshot.loading()),
+            List.copyOf(choices.values()), state, message);
     }
 
     private OptionEditor.Catalog<Object> adaptCatalog(ResolvedCatalogRepository.Snapshot snapshot) {
@@ -1119,7 +1155,16 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
             };
             return new OptionEditor.Choice<>((Object) presentation.value(), presentation.label(), description, state, "");
         }).toList();
-        return new OptionEditor.Catalog<>(snapshot.stamp(), choices);
+        OptionEditor.CatalogState state = switch (snapshot.state()) {
+            case READY -> OptionEditor.CatalogState.READY;
+            case STALE -> OptionEditor.CatalogState.STALE;
+            case LOADING -> OptionEditor.CatalogState.LOADING;
+            case UNAVAILABLE -> OptionEditor.CatalogState.UNAVAILABLE;
+            case FAILED -> OptionEditor.CatalogState.FAILED;
+        };
+        String message = snapshot.diagnostics().stream().map(ResolvedCatalogRepository.SourceDiagnostic::message)
+                .filter(value -> !value.isBlank()).distinct().collect(Collectors.joining(" "));
+        return new OptionEditor.Catalog<>(snapshot.stamp(), choices, state, message);
     }
 
     private String catalogProvenance(ResolvedCatalogRepository.ResolvedItem item) {
