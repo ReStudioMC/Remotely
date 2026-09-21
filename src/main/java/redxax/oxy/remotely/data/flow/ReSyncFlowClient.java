@@ -2170,7 +2170,7 @@ public class ReSyncFlowClient {
         byte[] apiKeyBytes = apiKey.getBytes(StandardCharsets.UTF_8);
         byte[] clientIdBytes = clientId.getBytes(StandardCharsets.UTF_8);
         byte[] clientVersionBytes = CLIENT_VERSION.getBytes(StandardCharsets.UTF_8);
-        byte[] capabilitiesBytes = gson.toJson(clientCapabilities()).getBytes(StandardCharsets.UTF_8);
+        byte[] capabilitiesBytes = clientCapabilitiesJson().getBytes(StandardCharsets.UTF_8);
         byte[] collaborationProfileBytes = collaborationProfile().getBytes(StandardCharsets.UTF_8);
 
         ByteBuffer buffer = ByteBuffer.allocate(
@@ -2211,10 +2211,21 @@ public class ReSyncFlowClient {
         return List.copyOf(capabilities);
     }
 
+    private String clientCapabilitiesJson() {
+        JsonArray json = new JsonArray();
+        clientCapabilities().forEach(json::add);
+        return json.toString();
+    }
+
     private String collaborationProfile() {
         CollaborationService.Identity identity = collaborationIdentity();
         collaboration.identify(identity);
-        return gson.toJson(identity);
+        JsonObject json = new JsonObject();
+        json.addProperty("subjectId", identity.subjectId());
+        json.addProperty("displayName", identity.displayName());
+        json.addProperty("avatar", identity.avatar());
+        json.addProperty("source", identity.source());
+        return json.toString();
     }
 
     private CollaborationService.Identity collaborationIdentity() {
@@ -2713,7 +2724,8 @@ public class ReSyncFlowClient {
                 try {
                     event.run();
                 } catch (RuntimeException exception) {
-                    logger().operation("Connection Event").with("reason", exception.getMessage()).warn("ReSync connection event failed");
+                    logger().operation("Connection Event").with("reason", exception.getMessage())
+                        .warn("ReSync connection event failed", exception);
                 } finally {
                     if (previous == null) {
                         inboundSource.remove();
