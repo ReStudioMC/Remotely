@@ -125,6 +125,7 @@ import restudio.rescreen.game.MinecraftGameAssets;
 import restudio.rescreen.logging.LogSource;
 import restudio.rescreen.logging.LogTypes;
 import restudio.rescreen.logging.ReLog;
+import restudio.rescreen.platform.Async;
 import restudio.rescreen.platform.IDrawContext;
 import restudio.rescreen.platform.ITextRenderer;
 import restudio.rescreen.platform.input.ReKey;
@@ -566,6 +567,10 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         MIGRATION_REQUIRED,
         MIGRATION_PREPARED,
         READY
+    }
+
+    private record StartupProbeOutcome(ReSyncInstallationStatus installationStatus,
+                                       ReSyncProvisioningService.StartupProbeResult result) {
     }
 
     private static class DragState {
@@ -8571,9 +8576,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             setStartupState(StudioStartupState.LOADING, "Loading...\nDetecting ReSync", "remotely.png", false);
         }
         long generation = lifecycleTaskGeneration;
-        if (!submitLifecycleTask(() -> probeStartupStateAsync(generation))) {
-            startupProbeRunning = false;
-        }
+        probeStartupStateAsync(generation);
     }
 
     protected final boolean submitLifecycleTask(Runnable task) {
@@ -8599,70 +8602,81 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (!lifecycleTaskCurrent(generation)) {
             return;
         }
-        ReSyncInstallationStatus resolvedInstallationStatus = null;
+        Async<Optional<ReSyncInstallationStatus>> installation;
         try {
-            resolvedInstallationStatus = reSyncProvisioningService.installationStatus(serverId, startupServer).join().orElse(null);
-        } catch (Exception ignored) {
+            installation = reSyncProvisioningService.installationStatus(serverId, startupServer);
+        } catch (RuntimeException | Error failure) {
+            installation = Async.completed(Optional.empty());
         }
-        ReSyncProvisioningService.StartupProbeResult result;
-        if (resolvedInstallationStatus != null && resolvedInstallationStatus.blocksStartup()) {
-            result = new ReSyncProvisioningService.StartupProbeResult(
-                ReSyncProvisioningService.StartupStatus.MIGRATION_REQUIRED, false, false);
-        } else {
-            try {
-                result = reSyncProvisioningService.computeStartupState(serverId, startupServer, loaderHint).join();
-            } catch (Exception ignored) {
-                result = new ReSyncProvisioningService.StartupProbeResult(
-                    ReSyncProvisioningService.StartupStatus.SETUP, false, false);
+        installation.handle((status, failure) -> failure == null && status != null ? status.orElse(null) : null)
+            .thenCompose(status -> {
+                if (status != null && status.blocksStartup()) {
+                    return Async.completed(new StartupProbeOutcome(status, new ReSyncProvisioningService.StartupProbeResult(
+                        ReSyncProvisioningService.StartupStatus.MIGRATION_REQUIRED, false, false)));
+                }
+                Async<ReSyncProvisioningService.StartupProbeResult> probe;
+                try {
+                    probe = reSyncProvisioningService.computeStartupState(serverId, startupServer, loaderHint);
+                } catch (RuntimeException | Error failure) {
+                    probe = Async.failed(failure);
+                }
+                return probe.handle((result, failure) -> new StartupProbeOutcome(status,
+                    failure == null && result != null ? result : new ReSyncProvisioningService.StartupProbeResult(
+                        ReSyncProvisioningService.StartupStatus.SETUP, false, false)));
+            }).whenComplete((outcome, failure) -> {
+                StartupProbeOutcome resolved = failure == null && outcome != null ? outcome
+                    : new StartupProbeOutcome(null, new ReSyncProvisioningService.StartupProbeResult(
+                        ReSyncProvisioningService.StartupStatus.SETUP, false, false));
+                ScreenManager.getInstance().execute(() -> applyStartupProbe(generation, resolved));
+            });
+    }
+
+    private void applyStartupProbe(long generation, StartupProbeOutcome outcome) {
+        if (!lifecycleTaskCurrent(generation)) {
+            return;
+        }
+        startupProbeRunning = false;
+        ReSyncInstallationStatus resolvedStatus = outcome.installationStatus();
+        ReSyncProvisioningService.StartupProbeResult resolvedResult = outcome.result();
+        installationStatus = resolvedStatus;
+        applyInstallationStatusToContentBrowser();
+        if (resolvedStatus != null && resolvedStatus.blocksStartup()) {
+            setStartupState(StudioStartupState.MIGRATION_REQUIRED,
+                resolvedStatus.title() + "\n" + resolvedStatus.summary() + "\nYour Existing Files Will Stay Untouched",
+                "stop.png", true);
+            return;
+        }
+        FlowManager manager = FlowManager.getInstance();
+        if (manager != null && manager.isFlowClientConnected(serverId)) {
+            enterStudioReadyState();
+            return;
+        }
+        if (startupState == StudioStartupState.INSTALLING) {
+            return;
+        }
+        if (resolvedResult.updateChecked()) {
+            updateReSyncAvailability(resolvedResult.updateAvailable());
+        }
+        StudioStartupState resolvedState = startupStateFor(resolvedResult.status());
+        switch (resolvedState) {
+            case READY -> enterStudioReadyState();
+            case NOT_SUPPORTED -> setStartupState(StudioStartupState.NOT_SUPPORTED, "ReSync Is Not On This Server\nBukkit-Based Server Required", "close.png", false);
+            case SERVER_STOPPED -> setStartupState(StudioStartupState.SERVER_STOPPED, "Server Is Offline\nStart The Server To Use ReSync", "stop.png", false);
+            case SETUP -> setStartupState(StudioStartupState.SETUP, "Setup ReSync\nInstall And Configure", "ReSync.png", true);
+            case MIGRATION_REQUIRED -> setStartupState(StudioStartupState.MIGRATION_REQUIRED,
+                "Old ReSync Data Needs Your Choice\nYour Existing Files Will Stay Untouched", "stop.png", true);
+            case MIGRATION_PREPARED -> {
+            }
+            case LOADING -> {
+                ReSyncFlowClient.ConnectionState connectionState = manager != null
+                    ? manager.getFlowClientConnectionState(serverId) : ReSyncFlowClient.ConnectionState.DISCONNECTED;
+                if (connectionState == ReSyncFlowClient.ConnectionState.CONNECTING) {
+                    setStartupState(StudioStartupState.LOADING, "Loading...\nConnecting To ReSync", "remotely.png", false);
+                } else {
+                    setStartupState(StudioStartupState.LOADING, "ReSync Connection Failed\nRetrying", "remotely.png", false);
+                }
             }
         }
-        ReSyncProvisioningService.StartupProbeResult resolvedResult = result;
-        ReSyncInstallationStatus resolvedStatus = resolvedInstallationStatus;
-        ScreenManager.getInstance().execute(() -> {
-            if (!lifecycleTaskCurrent(generation)) {
-                return;
-            }
-            startupProbeRunning = false;
-            installationStatus = resolvedStatus;
-            applyInstallationStatusToContentBrowser();
-            if (resolvedStatus != null && resolvedStatus.blocksStartup()) {
-                setStartupState(StudioStartupState.MIGRATION_REQUIRED,
-                    resolvedStatus.title() + "\n" + resolvedStatus.summary() + "\nYour Existing Files Will Stay Untouched",
-                    "stop.png", true);
-                return;
-            }
-            FlowManager manager = FlowManager.getInstance();
-            if (manager != null && manager.isFlowClientConnected(serverId)) {
-                enterStudioReadyState();
-                return;
-            }
-            if (startupState == StudioStartupState.INSTALLING) {
-                return;
-            }
-            if (resolvedResult.updateChecked()) {
-                updateReSyncAvailability(resolvedResult.updateAvailable());
-            }
-            StudioStartupState resolvedState = startupStateFor(resolvedResult.status());
-            switch (resolvedState) {
-                case READY -> enterStudioReadyState();
-                case NOT_SUPPORTED -> setStartupState(StudioStartupState.NOT_SUPPORTED, "ReSync Is Not On This Server\nBukkit-Based Server Required", "close.png", false);
-                case SERVER_STOPPED -> setStartupState(StudioStartupState.SERVER_STOPPED, "Server Is Offline\nStart The Server To Use ReSync", "stop.png", false);
-                case SETUP -> setStartupState(StudioStartupState.SETUP, "Setup ReSync\nInstall And Configure", "ReSync.png", true);
-                case MIGRATION_REQUIRED -> setStartupState(StudioStartupState.MIGRATION_REQUIRED,
-                    "Old ReSync Data Needs Your Choice\nYour Existing Files Will Stay Untouched", "stop.png", true);
-                case MIGRATION_PREPARED -> {
-                }
-                case LOADING -> {
-                    ReSyncFlowClient.ConnectionState connectionState = manager != null
-                        ? manager.getFlowClientConnectionState(serverId) : ReSyncFlowClient.ConnectionState.DISCONNECTED;
-                    if (connectionState == ReSyncFlowClient.ConnectionState.CONNECTING) {
-                        setStartupState(StudioStartupState.LOADING, "Loading...\nConnecting To ReSync", "remotely.png", false);
-                    } else {
-                        setStartupState(StudioStartupState.LOADING, "ReSync Connection Failed\nRetrying", "remotely.png", false);
-                    }
-                }
-            }
-        });
     }
 
     private StudioStartupState startupStateFor(ReSyncProvisioningService.StartupStatus status) {
@@ -8690,26 +8704,23 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         }
         reSyncUpdateProbeRunning = true;
         long generation = lifecycleTaskGeneration;
-        if (!submitLifecycleTask(() -> {
-            if (!lifecycleTaskCurrent(generation)) {
-                return;
-            }
-            boolean available = false;
-            try {
-                available = Boolean.TRUE.equals(reSyncProvisioningService.isReSyncUpdateAvailable(serverId, startupServer).join());
-            } catch (Exception ignored) {
-            }
-            boolean resolved = available;
-            ScreenManager.getInstance().execute(() -> {
-                if (!lifecycleTaskCurrent(generation)) {
-                    return;
-                }
-                reSyncUpdateProbeRunning = false;
-                updateReSyncAvailability(resolved);
-            });
-        })) {
-            reSyncUpdateProbeRunning = false;
+        Async<Boolean> probe;
+        try {
+            probe = reSyncProvisioningService.isReSyncUpdateAvailable(serverId, startupServer);
+        } catch (RuntimeException | Error failure) {
+            probe = Async.failed(failure);
         }
+        probe.handle((available, failure) -> failure == null && Boolean.TRUE.equals(available))
+            .whenComplete((available, failure) -> {
+                boolean resolved = failure == null && Boolean.TRUE.equals(available);
+                ScreenManager.getInstance().execute(() -> {
+                    if (!lifecycleTaskCurrent(generation)) {
+                        return;
+                    }
+                    reSyncUpdateProbeRunning = false;
+                    updateReSyncAvailability(resolved);
+                });
+            });
     }
 
     @Override
@@ -8794,40 +8805,38 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         setStartupState(StudioStartupState.INSTALLING, "Preparing A Clean ReSync Workspace...\nYour Old Data Will Be Preserved",
             "remotely.png", false);
         long generation = lifecycleTaskGeneration;
-        if (!submitLifecycleTask(() -> {
-            ReSyncProvisioningService.OperationResult result;
-            try {
-                result = reSyncProvisioningService.archiveLegacyData(serverId, startupServer, status).join();
-            } catch (Exception error) {
-                result = ReSyncProvisioningService.OperationResult.failed(
-                    error.getMessage() == null || error.getMessage().isBlank() ? "Archive Request Failed" : error.getMessage());
-            }
-            ReSyncProvisioningService.OperationResult resolved = result;
-            ScreenManager.getInstance().execute(() -> {
-                if (!lifecycleTaskCurrent(generation)) {
-                    return;
-                }
-                installationActionRunning = false;
-                if (!resolved.success()) {
-                    setStartupState(StudioStartupState.MIGRATION_REQUIRED,
-                        status.title() + "\n" + status.summary() + "\nYour Existing Files Will Stay Untouched",
-                        "stop.png", true);
-                    new Notification("ReSync Data", resolved.failureMessage().isBlank()
-                        ? "Could Not Prepare The Archive" : resolved.failureMessage(), Notification.Type.ERROR);
-                    return;
-                }
-                setStartupState(StudioStartupState.MIGRATION_PREPARED,
-                    "Archive Requested\nRestart The Server To Preserve The Old Data\nAnd Open A Clean ReSync Workspace",
-                    "ReSync.png", false);
-                if (welcomeServerButton != null) {
-                    welcomeServerButton.setVisible(true);
-                }
-            });
-        })) {
-            installationActionRunning = false;
-            setStartupState(StudioStartupState.MIGRATION_REQUIRED,
-                status.title() + "\n" + status.summary(), "stop.png", true);
+        Async<ReSyncProvisioningService.OperationResult> archive;
+        try {
+            archive = reSyncProvisioningService.archiveLegacyData(serverId, startupServer, status);
+        } catch (RuntimeException | Error failure) {
+            archive = Async.failed(failure);
         }
+        archive.handle((result, failure) -> failure == null && result != null ? result
+                : ReSyncProvisioningService.OperationResult.failed(lifecycleFailure(failure, "Archive Request Failed")))
+            .whenComplete((result, failure) -> {
+                ReSyncProvisioningService.OperationResult resolved = failure == null && result != null ? result
+                    : ReSyncProvisioningService.OperationResult.failed(lifecycleFailure(failure, "Archive Request Failed"));
+                ScreenManager.getInstance().execute(() -> {
+                    if (!lifecycleTaskCurrent(generation)) {
+                        return;
+                    }
+                    installationActionRunning = false;
+                    if (!resolved.success()) {
+                        setStartupState(StudioStartupState.MIGRATION_REQUIRED,
+                            status.title() + "\n" + status.summary() + "\nYour Existing Files Will Stay Untouched",
+                            "stop.png", true);
+                        new Notification("ReSync Data", resolved.failureMessage().isBlank()
+                            ? "Could Not Prepare The Archive" : resolved.failureMessage(), Notification.Type.ERROR);
+                        return;
+                    }
+                    setStartupState(StudioStartupState.MIGRATION_PREPARED,
+                        "Archive Requested\nRestart The Server To Preserve The Old Data\nAnd Open A Clean ReSync Workspace",
+                        "ReSync.png", false);
+                    if (welcomeServerButton != null) {
+                        welcomeServerButton.setVisible(true);
+                    }
+                });
+            });
     }
 
     private void applyInstallationStatusToContentBrowser() {
@@ -8843,36 +8852,32 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         setupRunning = true;
         setStartupState(StudioStartupState.INSTALLING, "Installing ReSync...", "remotely.png", false);
         long generation = lifecycleTaskGeneration;
-        if (!submitLifecycleTask(() -> setupReSyncAsync(generation))) {
-            setupRunning = false;
-            setStartupState(StudioStartupState.SETUP, "Setup ReSync\nInstall And Configure", "ReSync.png", true);
-        }
+        setupReSyncAsync(generation);
     }
 
     private void setupReSyncAsync(long generation) {
         if (!lifecycleTaskCurrent(generation)) {
             return;
         }
-        boolean success;
-        boolean needsRestart = false;
-        String failureMessage = "";
-        try {
-            FlowManager manager = FlowManager.getInstance();
-            if (manager != null && manager.isFlowClientConnected(serverId)) {
-                success = true;
-            } else {
-                ReSyncProvisioningService.OperationResult result = reSyncProvisioningService.setup(serverId, startupServer).join();
-                success = result.success();
-                failureMessage = result.failureMessage();
-                needsRestart = success;
-            }
-        } catch (Exception error) {
-            success = false;
-            failureMessage = error.getMessage() == null || error.getMessage().isBlank() ? "Setup Failed" : error.getMessage();
+        FlowManager manager = FlowManager.getInstance();
+        if (manager != null && manager.isFlowClientConnected(serverId)) {
+            applySetupResult(generation, true, false, "");
+            return;
         }
-        boolean completed = success;
-        boolean shouldRestart = needsRestart;
-        String reason = failureMessage;
+        Async<ReSyncProvisioningService.OperationResult> setup;
+        try {
+            setup = reSyncProvisioningService.setup(serverId, startupServer);
+        } catch (RuntimeException | Error failure) {
+            setup = Async.failed(failure);
+        }
+        setup.whenComplete((result, failure) -> {
+            boolean success = failure == null && result != null && result.success();
+            String reason = failure == null && result != null ? result.failureMessage() : lifecycleFailure(failure, "Setup Failed");
+            applySetupResult(generation, success, success, reason);
+        });
+    }
+
+    private void applySetupResult(long generation, boolean completed, boolean shouldRestart, String reason) {
         ScreenManager.getInstance().execute(() -> {
             if (!lifecycleTaskCurrent(generation)) {
                 return;
@@ -8900,28 +8905,27 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         reSyncUpdateRunning = true;
         new Notification("ReSync", "Updating ReSync...", Notification.Type.INFO);
         long generation = lifecycleTaskGeneration;
-        if (!submitLifecycleTask(() -> updateReSyncAsync(generation))) {
-            reSyncUpdateRunning = false;
-            new Notification("ReSync", "Update Queue Busy", Notification.Type.ERROR);
-        }
+        updateReSyncAsync(generation);
     }
 
     private void updateReSyncAsync(long generation) {
         if (!lifecycleTaskCurrent(generation)) {
             return;
         }
-        boolean success;
-        String failureMessage = "";
+        Async<ReSyncProvisioningService.OperationResult> update;
         try {
-            ReSyncProvisioningService.OperationResult result = reSyncProvisioningService.update(serverId, startupServer).join();
-            success = result.success();
-            failureMessage = result.failureMessage();
-        } catch (Exception error) {
-            success = false;
-            failureMessage = error.getMessage() == null || error.getMessage().isBlank() ? "Update Failed" : error.getMessage();
+            update = reSyncProvisioningService.update(serverId, startupServer);
+        } catch (RuntimeException | Error failure) {
+            update = Async.failed(failure);
         }
-        boolean completed = success;
-        String reason = failureMessage;
+        update.whenComplete((result, failure) -> {
+            boolean completed = failure == null && result != null && result.success();
+            String reason = failure == null && result != null ? result.failureMessage() : lifecycleFailure(failure, "Update Failed");
+            applyUpdateResult(generation, completed, reason);
+        });
+    }
+
+    private void applyUpdateResult(long generation, boolean completed, String reason) {
         ScreenManager.getInstance().execute(() -> {
             if (!lifecycleTaskCurrent(generation)) {
                 return;
@@ -8943,6 +8947,11 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             }
             updateReSyncAvailability(true);
         });
+    }
+
+    private String lifecycleFailure(Throwable failure, String fallback) {
+        return failure == null || failure.getMessage() == null || failure.getMessage().isBlank()
+            ? fallback : failure.getMessage();
     }
 
     private void showUpdatedNotification() {

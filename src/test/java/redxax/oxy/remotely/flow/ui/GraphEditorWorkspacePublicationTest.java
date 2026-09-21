@@ -106,20 +106,20 @@ class GraphEditorWorkspacePublicationTest {
     }
 
     @Test
-    void studioLifecycleIoUsesABoundedPortableWorker() throws IOException {
+    void studioLifecycleIoComposesWithoutBlockingBrowserCallbacks() throws IOException {
         String source = Files.readString(Path.of("src/main/java/redxax/oxy/remotely/flow/ui/GraphEditorScreen.java"));
-        String worker = Files.readString(Path.of("src/main/java/redxax/oxy/remotely/flow/ui/AsyncTaskWorker.java"));
+        int lifecycleStart = source.indexOf("private void beginStartupProbe(boolean force)");
+        int lifecycleEnd = source.indexOf("private void showUpdatedNotification()", lifecycleStart);
+        String lifecycle = source.substring(lifecycleStart, lifecycleEnd);
 
         assertFalse(source.contains("CompletableFuture.runAsync"));
         assertFalse(source.contains("ThreadPoolExecutor"));
         assertFalse(source.contains("new Thread("));
-        assertTrue(source.contains("new AsyncTaskWorker(1, 1, 4)"));
-        assertTrue(source.contains("private boolean submitLifecycleTask(Runnable task)"));
-        assertTrue(source.contains("generation == lifecycleTaskGeneration"));
-        assertTrue(source.contains("lifecycleTasks.close();"));
-        assertTrue(worker.contains("Async.supplyAsync"));
-        assertTrue(worker.contains("pending.size() < capacity"));
-        assertTrue(worker.contains("cancellations.forEach(Async::cancel)"));
+        assertFalse(lifecycle.contains(".join()"));
+        assertTrue(lifecycle.contains(".thenCompose(status ->"));
+        assertTrue(lifecycle.contains(".whenComplete((outcome, failure) ->"));
+        assertTrue(lifecycle.contains("generation == lifecycleTaskGeneration"));
+        assertTrue(source.contains("lifecycleTaskGeneration++;"));
     }
 
     @Test
