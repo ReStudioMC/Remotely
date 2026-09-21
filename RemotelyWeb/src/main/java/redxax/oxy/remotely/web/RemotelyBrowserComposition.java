@@ -11,6 +11,7 @@ import redxax.oxy.remotely.data.flow.ReSyncNotificationLevel;
 import redxax.oxy.remotely.data.flow.ReSyncFlowClient;
 import redxax.oxy.remotely.data.flow.ReSyncFlowClientContext;
 import redxax.oxy.remotely.data.flow.ReSyncFlowClientFactory;
+import redxax.oxy.remotely.data.flow.ReSyncFrameTransport;
 import redxax.oxy.remotely.data.flow.ReSyncFrameTransportFactory;
 import redxax.oxy.remotely.data.flow.ReSyncWebSocketFrameTransport;
 import redxax.oxy.remotely.host.ApplicationHost;
@@ -145,10 +146,14 @@ public final class RemotelyBrowserComposition {
             ReSyncCredentialProvider credentials = ReSyncCredentialProvider.browserTicket();
             ReSyncFlowClientFactory flowFactory = (serverId, apiClient, directWsUrl, directApiKey, suppliedTransport, state) -> {
                 ReSyncFlowClientContext context = state instanceof ReSyncFlowClientContext resolved ? resolved : ReSyncFlowClientContext.defaults();
-                if (suppliedTransport != null) return new ReSyncFlowClient(serverId, suppliedTransport, directApiKey, context,
+                ReSyncFrameTransport frameTransport = suppliedTransport;
+                if (frameTransport == null) {
+                    String endpoint = directWsUrl == null || directWsUrl.isBlank()
+                        ? BrowserLaunchSession.reSyncUrl(serverId) : directWsUrl;
+                    frameTransport = transportFactory.create(endpoint);
+                }
+                return new ReSyncFlowClient(serverId, frameTransport, directApiKey, context,
                     activeAdapters.scheduler(), activeAdapters.clock(), identity, credentials);
-                return new ReSyncFlowClient(serverId, apiClient, directWsUrl, directApiKey, context, activeAdapters.scheduler(),
-                    activeAdapters.clock(), transportFactory, identity, credentials);
             };
             composition = RemotelyComposition.browser(host)
                 .configManager(config)
