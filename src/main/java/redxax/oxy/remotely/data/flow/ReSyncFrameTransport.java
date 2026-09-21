@@ -247,7 +247,7 @@ public interface ReSyncFrameTransport {
     }
 
     default boolean reconnectable() {
-        return false;
+        return reusableAfterDisconnect();
     }
 
     default CallbackPublication publishCallback(Runnable callback) {

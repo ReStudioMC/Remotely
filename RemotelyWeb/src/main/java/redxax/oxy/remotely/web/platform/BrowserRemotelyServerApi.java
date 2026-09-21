@@ -1413,23 +1413,27 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
     Async<Void> downloadFiles(String serverId, List<String> paths) {
         BrowserHostActionHandler actions = host == null ? null : host.hostActionHandler();
         if (actions == null) return Async.failed(new UnsupportedOperationException("Browser File Download Is Unavailable"));
-        return downloadFiles(paths, path -> downloadFile(serverId, path), actions::downloadUrl);
+        return downloadFiles(paths, name -> BrowserTransferBridge.downloadSink(actions, name, "application/octet-stream"),
+                (path, sink) -> downloadFileData(serverId, path, sink, null, () -> false));
     }
 
-    static Async<Void> downloadFiles(List<String> paths, Function<String, Async<String>> signer,
-                                     BiFunction<String, String, Boolean> downloader) {
+    static Async<Void> downloadFiles(List<String> paths, Function<String, TransferSink> destinations,
+                                     BiFunction<String, TransferSink, Async<Void>> downloader) {
         List<String> selected = paths == null ? List.of() : paths.stream()
                 .filter(Objects::nonNull).map(String::strip).filter(path -> !path.isEmpty()).toList();
         if (selected.isEmpty()) return Async.failed(new IllegalArgumentException("Select Files To Download"));
         Async<Void> result = Async.completed(null);
         for (String remotePath : selected) {
-            result = result.thenCompose(ignored -> signer.apply(remotePath).thenCompose(url -> {
-                if (url == null || url.isBlank()) return Async.failed(new IllegalStateException("File Download Is Unavailable"));
-                if (!Boolean.TRUE.equals(downloader.apply(downloadName(remotePath), url))) {
-                    return Async.failed(new UnsupportedOperationException("Browser File Download Is Unavailable"));
+            result = result.thenCompose(ignored -> {
+                TransferSink destination = Objects.requireNonNull(destinations.apply(downloadName(remotePath)),
+                        "Download Destination Is Required");
+                try {
+                    return Objects.requireNonNull(downloader.apply(remotePath, destination), "Download Transfer Is Required");
+                } catch (Throwable failure) {
+                    return BrowserTransferBridge.abort(destination).exceptionally(ignoredFailure -> null)
+                            .thenCompose(unused -> Async.failed(failure));
                 }
-                return Async.completed(null);
-            }));
+            });
         }
         return result;
     }

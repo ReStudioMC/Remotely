@@ -431,7 +431,7 @@ tasks.register<Sync>("browserDist") {
         require(indexHtml.contains("__RESCREEN_ICON_ATLAS_MANIFEST__")) { "Remotely Web Index Icon Atlas Placeholder Is Missing" }
         val identity = manifests.single().name.removePrefix("atlas-").removeSuffix(".json")
         @Suppress("UNCHECKED_CAST")
-        val versionRescreenWebFonts = extra["versionRescreenWebFonts"] as BiFunction<String, File, String>
+        val versionRescreenWebFonts = project.extra["versionRescreenWebFonts"] as BiFunction<String, File, String>
 
         root.resolve("remotely-web-build-id.txt").writeText("$buildId\n")
         index.writeText(versionRescreenWebFonts.apply(

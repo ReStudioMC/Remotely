@@ -21,6 +21,30 @@ class ReSyncWebSocketCompositionTest {
 
     @Test
     void providerProfileCreatesTheConfiguredTransportAndTicketRotationReplacesIt() throws Exception {
+        verifyProfileReplacement(ReSyncCredentialProvider.apiKey(), false);
+    }
+
+    @Test
+    void browserTicketRemainsAtTheTransportBoundaryAcrossProfileReplacement() throws Exception {
+        verifyProfileReplacement(ReSyncCredentialProvider.browserTicket(), true);
+    }
+
+    @Test
+    void suppliedBrowserTransportUsesAnEmptyHandshakeCredential() {
+        OpeningTransport transport = new OpeningTransport();
+        ReSyncFlowClient client = new ReSyncFlowClient("123e4567-e89b-42d3-a456-426614174000", transport,
+            "browser-ticket", ReSyncFlowClientContext.defaults(), TaskScheduler.unavailable(), Clock.system(),
+            null, ReSyncCredentialProvider.browserTicket());
+        try {
+            client.connect().join();
+            assertEquals(1, transport.connectCalls.get());
+            assertEquals("", transport.handshakeCredential());
+        } finally {
+            client.shutdown();
+        }
+    }
+
+    private void verifyProfileReplacement(ReSyncCredentialProvider credentials, boolean browserTicket) throws Exception {
         String serverId = "123e4567-e89b-42d3-a456-426614174000";
         String endpoint = "wss://example.test/ws/remotely-web/resync/" + serverId;
         AtomicReference<String> ticket = new AtomicReference<>("browser-ticket");
@@ -34,9 +58,9 @@ class ReSyncWebSocketCompositionTest {
         };
         ReSyncFlowClientFactory clients = (id, api, url, credential, supplied, state) ->
             supplied != null ? new ReSyncFlowClient(id, supplied, credential, ReSyncFlowClientContext.defaults(),
-                TaskScheduler.unavailable(), Clock.system(), null, ReSyncCredentialProvider.apiKey())
+                TaskScheduler.unavailable(), Clock.system(), null, credentials)
                 : new ReSyncFlowClient(id, api, url, credential, ReSyncFlowClientContext.defaults(),
-                    TaskScheduler.unavailable(), Clock.system(), transports, null, ReSyncCredentialProvider.apiKey());
+                    TaskScheduler.unavailable(), Clock.system(), transports, null, credentials);
         ReSyncConnectionProfileProvider profiles = identity ->
             new ReSyncConnectionManager.ReSyncConnectionProfile(endpoint, ticket.get());
         ReSyncConnectionManager manager = new ReSyncConnectionManager(null, null,
@@ -51,7 +75,7 @@ class ReSyncWebSocketCompositionTest {
             assertSame(client, manager.getFlowClient(serverId));
             assertEquals(endpoint, createdEndpoint.get());
             assertEquals(1, transport.connectCalls.get());
-            assertEquals(ticket.get(), transport.handshakeCredential());
+            assertEquals(browserTicket ? "" : ticket.get(), transport.handshakeCredential());
             assertEquals(ReSyncFlowClient.ReadinessState.CONNECTING, client.readiness());
 
             manager.disconnectServerConnection(serverId);
@@ -63,7 +87,7 @@ class ReSyncWebSocketCompositionTest {
             assertNotSame(client, rotated);
             assertNotSame(transport, rotatedTransport);
             assertEquals(1, rotatedTransport.connectCalls.get());
-            assertEquals("rotated-ticket", rotatedTransport.handshakeCredential());
+            assertEquals(browserTicket ? "" : "rotated-ticket", rotatedTransport.handshakeCredential());
         } finally {
             manager.shutdownAll();
         }

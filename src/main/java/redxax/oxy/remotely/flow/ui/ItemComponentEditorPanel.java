@@ -414,7 +414,7 @@ public final class ItemComponentEditorPanel {
                 textControl(textComponent(value), next -> view.replace(Map.of("text", next)), width)));
         } else if ("minecraft:lore".equals(id)) {
             CodeEditorWidget editor = codeEditor(String.join("\n", stringList(value)), width - 12, text ->
-                view.replace(text.lines().map(String::trim).filter(line -> !line.isBlank()).toList()));
+                view.replace(nonBlankLines(text)));
             rows.add(largeRow("Lore", "One Line Per Entry", width, editor));
         } else if ("minecraft:enchantments".equals(id) || "minecraft:stored_enchantments".equals(id)) {
             view.enchantments = new EnchantmentsEditor(view, value, width);
@@ -426,6 +426,15 @@ public final class ItemComponentEditorPanel {
             addValueEditors(rows, view, "", value, schema(view.item), label(id), width, 0);
         }
         return rows;
+    }
+
+    private static List<String> nonBlankLines(String text) {
+        List<String> lines = new ArrayList<>();
+        for (String value : text.replace("\r\n", "\n").replace('\r', '\n').split("\n", -1)) {
+            String line = value.trim();
+            if (!line.isBlank()) lines.add(line);
+        }
+        return List.copyOf(lines);
     }
 
     private void addValueEditors(List<AnimatedWidget> rows, ComponentView view, String path, Object value,

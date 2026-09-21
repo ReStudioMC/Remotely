@@ -101,78 +101,74 @@ class BrowserRemotelyServerApiDownloadTest {
     }
 
     @Test
-    void deviceDownloadsAreSignedAndStartedInSelectionOrder() {
-        List<String> signed = new ArrayList<>();
+    void deviceDownloadsStreamToNamedSinksInSelectionOrder() {
+        List<String> destinations = new ArrayList<>();
         List<String> started = new ArrayList<>();
-
+        Async<Void> first = Async.pending();
         Async<Void> result = BrowserRemotelyServerApi.downloadFiles(
                 List.of("/world/level.dat", "/plugins/Essentials.jar"),
-                path -> {
-                    signed.add(path);
-                    return Async.completed("https://downloads.example" + path);
+                name -> {
+                    destinations.add(name);
+                    return new RecordingSink();
                 },
-                (name, url) -> started.add(name + "=" + url));
+                (path, sink) -> {
+                    started.add(path);
+                    return started.size() == 1 ? first : Async.completed(null);
+                });
+
+        assertFalse(result.isDone());
+        assertEquals(List.of("level.dat"), destinations);
+        assertEquals(List.of("/world/level.dat"), started);
+        first.complete(null);
 
         assertTrue(result.isDone());
-        assertEquals(List.of("/world/level.dat", "/plugins/Essentials.jar"), signed);
-        assertEquals(List.of(
-                "level.dat=https://downloads.example/world/level.dat",
-                "Essentials.jar=https://downloads.example/plugins/Essentials.jar"), started);
+        assertEquals(List.of("level.dat", "Essentials.jar"), destinations);
+        assertEquals(List.of("/world/level.dat", "/plugins/Essentials.jar"), started);
     }
 
     @Test
     void deviceDownloadFailureStopsTheRemainingBatch() {
-        List<String> signed = new ArrayList<>();
-
+        List<String> started = new ArrayList<>();
         Async<Void> result = BrowserRemotelyServerApi.downloadFiles(
-                List.of("/one.jar", "/two.jar", "/three.jar"),
-                path -> {
-                    signed.add(path);
+                List.of("/one.jar", "/two.jar", "/three.jar"), name -> new RecordingSink(),
+                (path, sink) -> {
+                    started.add(path);
                     return "/two.jar".equals(path)
-                            ? Async.failed(new IllegalStateException("signing failed"))
-                            : Async.completed("https://downloads.example" + path);
-                },
-                (name, url) -> true);
+                            ? Async.failed(new IllegalStateException("transfer failed")) : Async.completed(null);
+                });
 
         assertTrue(result.isDone());
         assertTrue(result.failure() instanceof IllegalStateException);
-        assertEquals(List.of("/one.jar", "/two.jar"), signed);
+        assertEquals(List.of("/one.jar", "/two.jar"), started);
     }
 
     @Test
-    void rejectedDeviceDownloadStopsTheRemainingBatch() {
-        List<String> signed = new ArrayList<>();
-
-        Async<Void> result = BrowserRemotelyServerApi.downloadFiles(
-                List.of("/one.jar", "/two.jar", "/three.jar"),
-                path -> {
-                    signed.add(path);
-                    return Async.completed("https://downloads.example" + path);
-                },
-                (name, url) -> !"two.jar".equals(name));
+    void failureBeforeStreamingAbortsTheDestination() {
+        RecordingSink sink = new RecordingSink();
+        Async<Void> result = BrowserRemotelyServerApi.downloadFiles(List.of("/one.jar"), name -> sink,
+                (path, destination) -> { throw new IllegalStateException("request creation failed"); });
 
         assertTrue(result.isDone());
-        assertTrue(result.failure() instanceof UnsupportedOperationException);
-        assertEquals(List.of("/one.jar", "/two.jar"), signed);
+        assertTrue(result.failure() instanceof IllegalStateException);
+        assertEquals(1, sink.closeCount.get());
     }
 
     @Test
-    void cancellingDeviceDownloadCancelsTheActiveSignerAndStopsTheBatch() {
-        Async<String> signer = Async.pending();
-        List<String> signed = new ArrayList<>();
+    void cancellingDeviceDownloadCancelsTheActiveStreamAndStopsTheBatch() {
+        Async<Void> transfer = Async.pending();
+        List<String> started = new ArrayList<>();
         Async<Void> result = BrowserRemotelyServerApi.downloadFiles(
-                List.of("/one.jar", "/two.jar"),
-                path -> {
-                    signed.add(path);
-                    return signer;
-                },
-                (name, url) -> true);
+                List.of("/one.jar", "/two.jar"), name -> new RecordingSink(),
+                (path, sink) -> {
+                    started.add(path);
+                    return transfer;
+                });
 
         result.cancel();
 
         assertTrue(result.isCancelled());
-        assertTrue(signer.isCancelled());
-        assertEquals(List.of("/one.jar"), signed);
+        assertTrue(transfer.isCancelled());
+        assertEquals(List.of("/one.jar"), started);
     }
 
     private static HttpResponse<Void> response(int status) {

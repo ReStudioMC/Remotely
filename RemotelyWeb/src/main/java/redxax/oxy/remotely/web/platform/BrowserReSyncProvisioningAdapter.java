@@ -525,7 +525,7 @@ public final class BrowserReSyncProvisioningAdapter implements ReSyncProvisionin
 
     private boolean authoritativeReason(RemotelyServerApi.ReSyncReadinessReason reasonCode) {
         return switch (reasonCode == null ? RemotelyServerApi.ReSyncReadinessReason.UNKNOWN : reasonCode) {
-            case NOT_PROVISIONED, PROVISIONING_INCOMPLETE, CREDENTIAL_UNAVAILABLE, RUNTIME_VERSION_UNAVAILABLE,
+            case NOT_PROVISIONED, PROVISIONING_INCOMPLETE, CREDENTIAL_UNAVAILABLE,
                  INVALID_ENDPOINT, MISSING_TLS_PIN, PLAINTEXT_PUBLIC_ENDPOINT, RUNTIME_METADATA_STALE,
                  PROTOCOL_INCOMPATIBLE -> true;
             default -> false;
@@ -534,7 +534,7 @@ public final class BrowserReSyncProvisioningAdapter implements ReSyncProvisionin
 
     private ReSyncProvisioningService.StartupStatus statusFor(RemotelyServerApi.ReSyncReadinessReason reasonCode) {
         return switch (reasonCode == null ? RemotelyServerApi.ReSyncReadinessReason.UNKNOWN : reasonCode) {
-            case NOT_PROVISIONED, PROVISIONING_INCOMPLETE, CREDENTIAL_UNAVAILABLE, RUNTIME_VERSION_UNAVAILABLE ->
+            case NOT_PROVISIONED, PROVISIONING_INCOMPLETE, CREDENTIAL_UNAVAILABLE ->
                 ReSyncProvisioningService.StartupStatus.SETUP;
             case INVALID_ENDPOINT, MISSING_TLS_PIN, PLAINTEXT_PUBLIC_ENDPOINT, RUNTIME_METADATA_STALE,
                  PROTOCOL_INCOMPATIBLE -> ReSyncProvisioningService.StartupStatus.SECURE_CONNECTION_REPAIR;
@@ -548,7 +548,8 @@ public final class BrowserReSyncProvisioningAdapter implements ReSyncProvisionin
             case PROTOCOL_INCOMPATIBLE -> "ReSync Runtime Must Be Updated";
             case UPSTREAM_UNREACHABLE -> "ReSync Endpoint Unreachable. Check That The Server And ReSync Are Running";
             case INVALID_ENDPOINT -> "ReSync Endpoint Is Invalid";
-            case NOT_PROVISIONED, PROVISIONING_INCOMPLETE, CREDENTIAL_UNAVAILABLE, RUNTIME_VERSION_UNAVAILABLE ->
+            case RUNTIME_VERSION_UNAVAILABLE -> "ReSync Version Is Unavailable";
+            case NOT_PROVISIONED, PROVISIONING_INCOMPLETE, CREDENTIAL_UNAVAILABLE ->
                 "ReSync Setup Required";
             default -> "";
         };

@@ -842,7 +842,8 @@ public class ReSyncFlowClient {
                             ReSyncFlowClientContext context, TaskScheduler scheduler, Clock clock,
                             ReSyncIdentityProvider identityProvider, ReSyncCredentialProvider credentialProvider,
                             boolean ownsScheduler) {
-        this(serverId, null, null, apiKey, hostClient(), Objects.requireNonNull(frameTransport, "Frame transport is required"),
+        this(serverId, null, null, handshakeCredential(credentialProvider, serverId, null, apiKey), hostClient(),
+            Objects.requireNonNull(frameTransport, "Frame transport is required"),
             catalogCache(context));
     }
 
@@ -858,8 +859,16 @@ public class ReSyncFlowClient {
                             ReSyncFlowClientContext context, TaskScheduler scheduler, Clock clock,
                             ReSyncFrameTransportFactory transportFactory, ReSyncIdentityProvider identityProvider,
                             ReSyncCredentialProvider credentialProvider, boolean ownsScheduler) {
-        this(serverId, apiClient, directWsUrl, directApiKey, hostClient(), createTransport(transportFactory, directWsUrl),
+        this(serverId, apiClient, directWsUrl, handshakeCredential(credentialProvider, serverId, directWsUrl, directApiKey),
+            hostClient(), createTransport(transportFactory, directWsUrl),
             catalogCache(context));
+    }
+
+    private static String handshakeCredential(ReSyncCredentialProvider provider, String serverId, String endpoint,
+                                               String suppliedCredential) {
+        ReSyncCredentialProvider source = provider == null ? ReSyncCredentialProvider.apiKey() : provider;
+        return Objects.requireNonNull(source.resolve(serverId, endpoint, suppliedCredential),
+            "ReSync credential provider returned no credential").handshakeValue();
     }
 
     private static ReSyncFrameTransport createTransport(ReSyncFrameTransportFactory factory, String endpoint) {
@@ -2487,7 +2496,7 @@ public class ReSyncFlowClient {
                 });
             }
         });
-        this.apiKey = directApiKey == null || directApiKey.isBlank() ? "bridge" : directApiKey;
+        this.apiKey = directApiKey == null ? "bridge" : directApiKey;
         sendHandshake(generation);
         return Async.completed(null);
     }
