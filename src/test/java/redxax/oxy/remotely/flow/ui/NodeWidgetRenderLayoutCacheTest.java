@@ -91,4 +91,13 @@ class NodeWidgetRenderLayoutCacheTest {
         widget.prepareRenderLayout();
         assertEquals(dataLayoutOperations, widget.getChildLayoutOperationCount());
     }
+
+    @Test
+    void unresolvedDefinitionReservesAVisibleLoadingBody() {
+        FlowNode node = new FlowNode("custom:missing", 30, 50, new LinkedHashMap<>());
+        NodeWidget widget = new NodeWidget(30, 50, node, new FlowGraph(), "node", null, () -> {
+        }, null, null, false, true);
+
+        assertTrue(widget.getHeight() >= 37);
+    }
 }

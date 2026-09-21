@@ -49,6 +49,7 @@ import redxax.oxy.remotely.flow.ui.GraphEditorScreen;
 import redxax.oxy.remotely.flow.ui.GuiEditOverlayState;
 import redxax.oxy.remotely.flow.ui.GuiDesignerScreen;
 import redxax.oxy.remotely.flow.ui.ResourceDesigners;
+import redxax.oxy.remotely.flow.ui.ReSyncProvisioningService;
 import redxax.oxy.remotely.flow.ui.ScoreboardDesignerScreen;
 import redxax.oxy.remotely.flow.ui.TabDesignerScreen;
 import redxax.oxy.remotely.flow.ui.FlowNodeWidget;
@@ -1019,7 +1020,8 @@ public class FlowManager {
 
     public FlowManager(Object client, RemotelyServerApi apiClient, ReSyncFlowClientFactory flowClientFactory,
                        TaskScheduler taskScheduler, Clock flowClock, ReSyncFlowClientConfiguration configuration) {
-        this(requireRemotelyClient(client), apiClient, ignored -> ReSyncCatalogPublicationCache.deferred());
+        this(requireRemotelyClient(client), apiClient, ignored -> ReSyncCatalogPublicationCache.deferred(),
+            ReSyncStorage.legacy("remotely.creation-journal"), flowClientFactory, configuration);
     }
 
     public FlowManager(RemotelyClient client, RemotelyServerApi apiClient) {
@@ -1034,11 +1036,32 @@ public class FlowManager {
     FlowManager(RemotelyClient client, RemotelyServerApi apiClient,
                 Function<String, ReSyncCatalogPublicationCache> catalogPublicationCacheFactory,
                 ReSyncStorage creationJournalStorage) {
+        this(client, apiClient, catalogPublicationCacheFactory, creationJournalStorage,
+            ReSyncFlowClientFactory.unavailable(), null);
+    }
+
+    private FlowManager(RemotelyClient client, RemotelyServerApi apiClient,
+                        Function<String, ReSyncCatalogPublicationCache> catalogPublicationCacheFactory,
+                        ReSyncStorage creationJournalStorage, ReSyncFlowClientFactory flowClientFactory,
+                        ReSyncFlowClientConfiguration configuration) {
         this.client = client;
         this.remotelyApi = apiClient;
         this.creationJournalStorage = creationJournalStorage != null
             ? creationJournalStorage : ReSyncStorage.legacy("remotely.creation-journal");
-        this.connectionManager = new ReSyncConnectionManager(client, apiClient, catalogPublicationCacheFactory);
+        ReSyncFlowClientContext defaultContext = ReSyncFlowClientContext.defaults();
+        ReSyncFlowClientConfiguration defaults = configuration == null
+            ? new ReSyncFlowClientConfiguration(flowClientFactory, ReSyncConnectionProfileProvider.unavailable(),
+                this::notify, defaultContext.nodeRegistry(), defaultContext)
+            : configuration;
+        ApplicationHost host = getApplicationHost();
+        ReSyncFlowClientConfiguration resolved = host == null ? defaults
+            : host.configureFlowClient(client, this, flowClientFactory, defaults);
+        if (resolved == null) {
+            resolved = defaults;
+        }
+        this.connectionManager = new ReSyncConnectionManager(client, apiClient, catalogPublicationCacheFactory,
+            resolved.factory(), resolved.profileProvider(), resolved.notificationSink(), resolved.nodeRegistry(),
+            resolved.context());
         this.debugController = new FlowDebugController(this);
         this.worldService = new ReSyncWorldService();
         this.playerService = new ReSyncPlayerService();
@@ -1104,7 +1127,10 @@ public class FlowManager {
         if (flowClient != null && flowClient.isConnectedState()) {
             return Async.completed(ReSyncFlowClient.ReadinessState.READY);
         }
-        return Async.completed(ReSyncFlowClient.ReadinessState.DISCONNECTED);
+        if (!initiate && flowClient == null) {
+            return Async.completed(ReSyncFlowClient.ReadinessState.DISCONNECTED);
+        }
+        return connectionManager.awaitFlowClientConnected(serverId, false);
     }
 
     public Async<WorldMapSnapshot> requestWorldMapSnapshotAsync(String serverId, String worldName,
@@ -1498,18 +1524,73 @@ public class FlowManager {
 
     public void openReSyncStudio(String serverId, ClientServerView server, String loaderHint, String serverTitle,
                                  BooleanSupplier admission) {
-        String actualServerId = (server != null && server.identifier != null) ? server.identifier : serverId;
+        ReSyncServerIdentity identity = ReSyncServerIdentity.from(serverId, server);
+        String actualServerId = identity.serverId();
+        ApplicationHost host = getApplicationHost();
+        if (host == null) {
+            return;
+        }
         long generation = studioOpenGeneration.incrementAndGet();
-        connectionManager.resolveAndStoreProfile(actualServerId, server).thenAccept(resolution ->
-            ScreenManager.getInstance().execute(() -> {
-                if (closed || studioOpenGeneration.get() != generation || admission == null || !admission.getAsBoolean()) {
-                    return;
-                }
-                String resolvedServerId = resolution != null && resolution.available()
-                    && resolution.serverId() != null && !resolution.serverId().isBlank()
-                    ? resolution.serverId() : actualServerId;
-                openResolvedReSyncStudio(resolvedServerId, server, loaderHint, serverTitle);
-            }));
+        Async<ReSyncProvisioningService.StartupProbeResult> preparation;
+        try {
+            preparation = host.prepareReSyncServerContextAsync(actualServerId, server, loaderHint);
+        } catch (Throwable failure) {
+            reportReSyncPreparationFailure(host, null, failure);
+            return;
+        }
+        if (preparation == null) {
+            reportReSyncPreparationFailure(host, null, null);
+            return;
+        }
+        preparation.whenComplete((result, failure) -> ScreenManager.getInstance().execute(() -> {
+            if (closed || preparation.isCancelled() || studioOpenGeneration.get() != generation
+                || admission == null || !admission.getAsBoolean()) {
+                return;
+            }
+            if (failure != null || result == null) {
+                reportReSyncPreparationFailure(host, result, failure);
+                return;
+            }
+            connectionManager.resolveAndStoreProfile(actualServerId, server).whenComplete((resolution, resolutionFailure) ->
+                ScreenManager.getInstance().execute(() -> {
+                    if (closed || studioOpenGeneration.get() != generation || admission == null
+                        || !admission.getAsBoolean()) {
+                        return;
+                    }
+                    if (resolutionFailure != null) {
+                        reportReSyncPreparationFailure(host, result, resolutionFailure);
+                        return;
+                    }
+                    String resolvedServerId = resolution != null && resolution.available()
+                        && resolution.serverId() != null && !resolution.serverId().isBlank()
+                        ? resolution.serverId() : actualServerId;
+                    openResolvedReSyncStudio(resolvedServerId, server, loaderHint, serverTitle);
+                }));
+        }));
+    }
+
+    private void reportReSyncPreparationFailure(ApplicationHost host,
+                                                ReSyncProvisioningService.StartupProbeResult result,
+                                                Throwable failure) {
+        String message = result == null ? "" : result.readinessMessage();
+        if ((message == null || message.isBlank()) && failure != null) {
+            Throwable cause = failure;
+            while (cause.getCause() != null) {
+                cause = cause.getCause();
+            }
+            message = cause.getMessage();
+        }
+        if (message == null || message.isBlank()) {
+            message = result == null ? "ReSync Unavailable" : switch (result.status()) {
+                case SERVER_STOPPED -> "Server Is Offline. Start The Server To Use ReSync";
+                case SETUP -> "ReSync Setup Required";
+                case NOT_SUPPORTED -> "ReSync Is Not Supported On This Server";
+                case SECURE_CONNECTION_REPAIR -> "ReSync Connection Requires Repair";
+                case MIGRATION_REQUIRED -> "ReSync Migration Required";
+                default -> "ReSync Unavailable";
+            };
+        }
+        host.reportReSyncPreparationFailure(normalizeReSyncNotificationMessage(message));
     }
 
     private void openResolvedReSyncStudio(String actualServerId, ClientServerView server, String loaderHint,
@@ -10221,7 +10302,7 @@ public class FlowManager {
             case ReSyncResourceDragPayload.GUI -> deleteGui(serverId, id);
             case ReSyncResourceDragPayload.SCOREBOARD -> deleteScoreboard(serverId, id);
             case ReSyncResourceDragPayload.TAB -> deleteTab(serverId, id);
-            case ReSyncResourceDragPayload.CHAT, ReSyncResourceDragPayload.MOTD_PROFILE, ReSyncResourceDragPayload.MESSAGE_RULE,
+            case ReSyncResourceDragPayload.CHAT, ReSyncResourceDragPayload.COMPONENT_BUILDER, ReSyncResourceDragPayload.MOTD_PROFILE, ReSyncResourceDragPayload.MESSAGE_RULE,
                  ReSyncResourceDragPayload.RECIPE_DEFINITION, ReSyncResourceDragPayload.TEXT_TEMPLATE, ReSyncResourceDragPayload.ADVANCEMENT_TREE,
                  ReSyncResourceDragPayload.DIALOG, ReSyncResourceDragPayload.TRADE_PROFILE, ReSyncResourceDragPayload.NPC_DEFINITION,
                  ReSyncResourceDragPayload.LOOT_TABLE -> {
@@ -10290,7 +10371,7 @@ public class FlowManager {
                 }
                 yield Async.completed(false);
             }
-            case ReSyncResourceDragPayload.CHAT, ReSyncResourceDragPayload.MOTD_PROFILE, ReSyncResourceDragPayload.MESSAGE_RULE,
+            case ReSyncResourceDragPayload.CHAT, ReSyncResourceDragPayload.COMPONENT_BUILDER, ReSyncResourceDragPayload.MOTD_PROFILE, ReSyncResourceDragPayload.MESSAGE_RULE,
                  ReSyncResourceDragPayload.RECIPE_DEFINITION, ReSyncResourceDragPayload.TEXT_TEMPLATE, ReSyncResourceDragPayload.ADVANCEMENT_TREE,
                  ReSyncResourceDragPayload.DIALOG, ReSyncResourceDragPayload.TRADE_PROFILE, ReSyncResourceDragPayload.NPC_DEFINITION,
                  ReSyncResourceDragPayload.LOOT_TABLE -> {
@@ -10367,6 +10448,7 @@ public class FlowManager {
             case ReSyncResourceDragPayload.SCOREBOARD -> "Scoreboards";
             case ReSyncResourceDragPayload.TAB -> "Tabs";
             case ReSyncResourceDragPayload.CHAT -> "Chat";
+            case ReSyncResourceDragPayload.COMPONENT_BUILDER -> "Component Builders";
             case ReSyncResourceDragPayload.DIALOG -> "Dialogs";
             case ReSyncResourceDragPayload.TRADE_PROFILE -> "Trades";
             case ReSyncResourceDragPayload.NPC_DEFINITION -> "NPCs";
@@ -10394,6 +10476,7 @@ public class FlowManager {
 
     private boolean usesJsonResourceStore(ReSyncResourceType type) {
         return type == ReSyncResourceType.CHAT
+            || type == ReSyncResourceType.COMPONENT_BUILDER
             || type == ReSyncResourceType.MOTD_PROFILE
             || type == ReSyncResourceType.MESSAGE_RULE
             || type == ReSyncResourceType.RECIPE_DEFINITION
@@ -10428,6 +10511,13 @@ public class FlowManager {
         resource.addProperty("folder", folder == null || folder.isBlank() ? type.defaultFolder() : folder);
         resource.addProperty("enabled", true);
         switch (type) {
+            case COMPONENT_BUILDER -> {
+                JsonObject scope = new JsonObject();
+                scope.addProperty("kind", "dynamic");
+                scope.addProperty("value", "");
+                resource.add("scope", scope);
+                resource.add("components", new JsonObject());
+            }
             case CHAT -> {
                 JsonObject channel = new JsonObject();
                 channel.addProperty("priority", 0);
@@ -13373,7 +13463,7 @@ public class FlowManager {
             case SCOREBOARD -> createDefaultScoreboard(id);
             case TAB -> createDefaultTab(id);
             case CUSTOM_CONTENT -> buildCustomContentForCreation(id, templateName);
-            case VARIABLE_DEFINITION, TIMER_DEFINITION, SCHEDULE_DEFINITION ->
+            case VARIABLE_DEFINITION, TIMER_DEFINITION, SCHEDULE_DEFINITION, COMPONENT_BUILDER ->
                 buildAutomationResourceForCreation(type, id, templateName);
             default -> defaultJsonResource(type, id, folder);
         };

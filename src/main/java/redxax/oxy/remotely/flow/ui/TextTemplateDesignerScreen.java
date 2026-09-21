@@ -282,8 +282,8 @@ public class TextTemplateDesignerScreen extends FocusedJsonResourceDesignerScree
     private void layoutContentEditor() {
         int left = Math.max(8, host != null ? host.studioContentBrowserWidth() : 0);
         int right = Math.max(left + 80, workspaceWidth - 8);
-        if (studioResourcePanel != null && studioResourcePanel.isVisible() && !studioResourcePanel.isLeftAnchored()) {
-            right = Math.max(left + 80, workspaceWidth - studioResourcePanel.getDesiredWidth() - 8);
+        if (studioResourcePanel != null && !studioResourcePanel.isLeftAnchored()) {
+            right = Math.max(left + 80, workspaceWidth - studioResourcePanel.layoutWidth(0) - 8);
         }
         int top = studioPanelTop();
         int bottom = Math.max(top + 80, workspaceHeight - studioPanelBottomReserve());

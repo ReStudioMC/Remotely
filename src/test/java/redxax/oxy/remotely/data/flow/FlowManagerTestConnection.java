@@ -1,11 +1,11 @@
 package redxax.oxy.remotely.data.flow;
 
+import redxax.oxy.remotely.util.BrowserSafeState;
+
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 final class FlowManagerTestConnection {
@@ -17,10 +17,10 @@ final class FlowManagerTestConnection {
         int activeGeneration = 1;
         Field authenticated = ReSyncFlowClient.class.getDeclaredField("authenticated");
         authenticated.setAccessible(true);
-        ((AtomicBoolean) authenticated.get(client)).set(true);
+        ((BrowserSafeState.BooleanValue) authenticated.get(client)).set(true);
         Field generation = ReSyncFlowClient.class.getDeclaredField("connectionGeneration");
         generation.setAccessible(true);
-        ((AtomicInteger) generation.get(client)).set(activeGeneration);
+        ((BrowserSafeState.IntegerValue) generation.get(client)).set(activeGeneration);
         set(client, "activeTransportGeneration", activeGeneration);
         set(client, "completedStartupGeneration", activeGeneration);
         installConnectionSource(client, activeGeneration);
@@ -110,19 +110,19 @@ final class FlowManagerTestConnection {
     static void primeConnecting(ReSyncFlowClient client, int generation) throws Exception {
         Field connecting = ReSyncFlowClient.class.getDeclaredField("connecting");
         connecting.setAccessible(true);
-        ((AtomicBoolean) connecting.get(client)).set(true);
+        ((BrowserSafeState.BooleanValue) connecting.get(client)).set(true);
         Field connectionGeneration = ReSyncFlowClient.class.getDeclaredField("connectionGeneration");
         connectionGeneration.setAccessible(true);
-        ((AtomicInteger) connectionGeneration.get(client)).set(generation);
+        ((BrowserSafeState.IntegerValue) connectionGeneration.get(client)).set(generation);
         Field pendingGeneration = ReSyncFlowClient.class.getDeclaredField("pendingHandshakeGeneration");
         pendingGeneration.setAccessible(true);
-        ((AtomicInteger) pendingGeneration.get(client)).set(generation);
+        ((BrowserSafeState.IntegerValue) pendingGeneration.get(client)).set(generation);
     }
 
     static int atomicInt(ReSyncFlowClient client, String name) throws Exception {
         Field field = ReSyncFlowClient.class.getDeclaredField(name);
         field.setAccessible(true);
-        return ((AtomicInteger) field.get(client)).get();
+        return ((BrowserSafeState.IntegerValue) field.get(client)).get();
     }
 
     static boolean booleanValue(ReSyncFlowClient client, String name) throws Exception {

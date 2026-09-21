@@ -103,6 +103,60 @@ class ReSyncConnectionManagerProfileResolutionTest {
     }
 
     @Test
+    void desktopServerViewResolvesTheInstanceProfileAndCanonicalServerId() {
+        TestBackend backend = new TestBackend(CompletableFuture.completedFuture(true),
+            "port=8765\napi-key=desktop-key");
+        TestInstance instance = new TestInstance("profile:desktop-view", "10.0.0.15", backend);
+        TestConnectionManager manager = new TestConnectionManager(new AtomicReference<>(instance));
+        ClientServerView view = new ClientServerView();
+        view.identifier = instance.getInstanceId();
+        view.uuid = instance.getInstanceId();
+        view.name = "Desktop Server";
+        view.backendType = "SSH";
+        try {
+            ReSyncConnectionManager.ProfileResolution resolution =
+                manager.resolveAndStoreProfile(instance.getInstanceId(), view).join();
+
+            assertTrue(resolution.available());
+            assertEquals(backend.serverId, resolution.serverId());
+            assertEquals("ws://10.0.0.15:8765", resolution.profile().wsUrl());
+            assertEquals("desktop-key", resolution.profile().apiKey());
+            assertSame(resolution.profile(), manager.getProfile(instance.getInstanceId()));
+            assertSame(resolution.profile(), manager.getProfile(backend.serverId));
+        } finally {
+            manager.shutdownAll();
+        }
+    }
+
+    @Test
+    void desktopInstanceProfileRemainsAuthoritativeOverThePlatformFallback() {
+        TestBackend backend = new TestBackend(CompletableFuture.completedFuture(true),
+            "port=8765\napi-key=instance-key");
+        TestInstance instance = new TestInstance("profile:authoritative-instance", "10.0.0.16", backend);
+        AtomicBoolean fallbackRead = new AtomicBoolean();
+        ReSyncConnectionProfileProvider fallback = identity -> {
+            fallbackRead.set(true);
+            return new ReSyncConnectionManager.ReSyncConnectionProfile(
+                "00000000-0000-0000-0000-000000000000", "ws://wrong.test:1", "wrong-key");
+        };
+        TestConnectionManager manager = new TestConnectionManager(new AtomicReference<>(instance), fallback);
+        ClientServerView view = new ClientServerView();
+        view.identifier = instance.getInstanceId();
+        view.backendType = "SSH";
+        try {
+            ReSyncConnectionManager.ProfileResolution resolution =
+                manager.resolveAndStoreProfile(instance.getInstanceId(), view).join();
+
+            assertTrue(resolution.available());
+            assertFalse(fallbackRead.get());
+            assertEquals(backend.serverId, resolution.serverId());
+            assertEquals("instance-key", resolution.profile().apiKey());
+        } finally {
+            manager.shutdownAll();
+        }
+    }
+
+    @Test
     void asyncClientAdmissionReturnsImmediatelyCoalescesAndFailsClosed() throws Exception {
         CompletableFuture<Boolean> exists = new CompletableFuture<>();
         TestBackend backend = new TestBackend(exists, "");
@@ -366,6 +420,14 @@ class ReSyncConnectionManagerProfileResolutionTest {
 
         private TestConnectionManager(AtomicReference<Instance> current) {
             super(null, null);
+            this.current = current;
+        }
+
+        private TestConnectionManager(AtomicReference<Instance> current,
+                                      ReSyncConnectionProfileProvider profileProvider) {
+            super(null, null, ignored -> ReSyncCatalogPublicationCache.deferred(),
+                ReSyncFlowClientFactory.unavailable(), profileProvider, ReSyncConnectionNotificationSink.noop(),
+                null, null);
             this.current = current;
         }
 

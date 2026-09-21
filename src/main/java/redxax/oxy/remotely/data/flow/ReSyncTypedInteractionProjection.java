@@ -6,6 +6,7 @@ import redxax.oxy.remotely.flow.data.FlowTypeRef;
 import redxax.oxy.remotely.flow.registry.NodeDefinition;
 import restudio.resync.contract.canonical.JsonValue;
 import restudio.resync.contract.identity.IdentityCodec;
+import restudio.resync.flow.cache.CatalogAuthoringPublication;
 import restudio.resync.flow.cache.CatalogCacheKey;
 import restudio.resync.flow.cache.CatalogCachePublication;
 import restudio.resync.flow.cache.CatalogCacheState;
@@ -45,13 +46,15 @@ public final class ReSyncTypedInteractionProjection {
     private final Map<DropSemanticKey, DropAuthoring> dropAuthoring;
     private final Palette palette;
     private final Palette worldGenPalette;
+    private final Map<String, List<String>> conversions;
 
     private ReSyncTypedInteractionProjection(CatalogCacheKey key,
                                               long revision,
                                               Map<ContractRef<NodeId>, ReSyncGenericDescriptorProjection.Projection> descriptors,
                                               Map<ContractRef<NodeId>, FunctionBoundary> functionBoundaries,
                                               Map<ContractRef<NodeId>, List<DropContribution>> dropContributions,
-                                              Set<ContractRef<NodeId>> activeDefinitions) {
+                                              Set<ContractRef<NodeId>> activeDefinitions,
+                                              CatalogAuthoringPublication authoring) {
         this.key = Objects.requireNonNull(key, "Catalog cache key is required");
         this.revision = revision;
         this.descriptors = immutableMap(descriptors);
@@ -65,7 +68,7 @@ public final class ReSyncTypedInteractionProjection {
         this.worldGenDefinitions = worldGenDefinitions(this.widgetDefinitions);
         this.functionBoundaries = immutableMap(functionBoundaries);
         LinkedHashMap<ContractRef<NodeId>, List<DropContribution>> drops = new LinkedHashMap<>();
-        LinkedHashMap<DropSemanticKey, DropAuthoring> authoring = new LinkedHashMap<>();
+        LinkedHashMap<DropSemanticKey, DropAuthoring> admittedDropAuthoring = new LinkedHashMap<>();
         if (dropContributions != null) {
             dropContributions.forEach((identity, values) -> {
                 if (identity != null && values != null && !values.isEmpty()) {
@@ -74,7 +77,7 @@ public final class ReSyncTypedInteractionProjection {
                             activeDefinitions);
                         if (admitted != null) {
                             drops.computeIfAbsent(identity, ignored -> new ArrayList<>()).add(contribution);
-                            authoring.put(DropSemanticKey.of(contribution), admitted);
+                            admittedDropAuthoring.put(DropSemanticKey.of(contribution), admitted);
                         }
                     }
                 }
@@ -83,9 +86,10 @@ public final class ReSyncTypedInteractionProjection {
         drops.replaceAll((ignored, values) -> List.copyOf(values));
         this.dropContributions = Collections.unmodifiableMap(drops);
         this.allDropContributions = drops.values().stream().flatMap(Collection::stream).toList();
-        this.dropAuthoring = Collections.unmodifiableMap(authoring);
+        this.dropAuthoring = Collections.unmodifiableMap(admittedDropAuthoring);
         this.palette = Palette.from(key, revision, this.descriptors, this.widgetDefinitions);
         this.worldGenPalette = this.palette.worldGen();
+        this.conversions = conversionIndex(authoring);
     }
 
     public static Optional<ReSyncTypedInteractionProjection> from(ReSyncFlowClient client) {
@@ -93,6 +97,11 @@ public final class ReSyncTypedInteractionProjection {
     }
 
     public static ReSyncTypedInteractionProjection from(ReSyncCatalogPublicationProjection.Snapshot snapshot) {
+        return from(snapshot, null);
+    }
+
+    public static ReSyncTypedInteractionProjection from(ReSyncCatalogPublicationProjection.Snapshot snapshot,
+                                                         CatalogAuthoringPublication authoring) {
         long startedAt = System.nanoTime();
         Objects.requireNonNull(snapshot, "Catalog publication snapshot is required");
         CatalogCacheKey catalogKey = snapshot.publication().key();
@@ -168,7 +177,7 @@ public final class ReSyncTypedInteractionProjection {
             }
         }
         ReSyncTypedInteractionProjection projection = new ReSyncTypedInteractionProjection(catalogKey,
-            snapshot.publication().revision(), descriptors, boundaries, drops, activeDefinitions);
+            snapshot.publication().revision(), descriptors, boundaries, drops, activeDefinitions, authoring);
         List<String> readOnlyReasons = descriptors.values().stream()
             .filter(ReSyncGenericDescriptorProjection.Projection::readOnly)
             .map(ReSyncGenericDescriptorProjection.Projection::reason).filter(reason -> reason != null && !reason.isBlank())
@@ -187,6 +196,60 @@ public final class ReSyncTypedInteractionProjection {
             projection.palette(false).definitions().size(), "worldGenPaletteCount",
             projection.palette(true).definitions().size(), "elapsedMs", elapsedMillis(startedAt));
         return projection;
+    }
+
+    public boolean canConvert(FlowTypeRef source, FlowTypeRef target) {
+        if (source == null || target == null) {
+            return false;
+        }
+        String sourceType = source.normalizedGenerics().toString();
+        String targetType = target.normalizedGenerics().toString();
+        if (sourceType.equals(targetType)) {
+            return true;
+        }
+        LinkedHashSet<String> visited = new LinkedHashSet<>();
+        ArrayList<String> pending = new ArrayList<>();
+        visited.add(sourceType);
+        pending.add(sourceType);
+        for (int index = 0; index < pending.size() && index < 256; index++) {
+            for (String candidate : conversions.getOrDefault(pending.get(index), List.of())) {
+                if (targetType.equals(candidate)) {
+                    return true;
+                }
+                if (visited.add(candidate)) {
+                    pending.add(candidate);
+                }
+            }
+        }
+        return false;
+    }
+
+    private static Map<String, List<String>> conversionIndex(CatalogAuthoringPublication publication) {
+        if (publication == null || publication.section(CatalogAuthoringPublication.Section.CONVERSIONS).state()
+            == CatalogCacheState.UNAVAILABLE) {
+            return Map.of();
+        }
+        LinkedHashMap<String, LinkedHashSet<String>> values = new LinkedHashMap<>();
+        for (CatalogAuthoringPublication.Entry entry : publication.conversions()) {
+            if (entry == null || entry.opaque() || entry.state() == CatalogCacheState.UNAVAILABLE) {
+                continue;
+            }
+            try {
+                JsonValue value = JsonValue.parse(entry.data().canonicalBytes());
+                if (!(value instanceof JsonValue.JsonObject object)) {
+                    continue;
+                }
+                String source = typeExpression(object.value("source").toJava());
+                String target = typeExpression(object.value("target").toJava());
+                if (!source.isBlank() && !target.isBlank()) {
+                    values.computeIfAbsent(source, ignored -> new LinkedHashSet<>()).add(target);
+                }
+            } catch (RuntimeException ignored) {
+            }
+        }
+        LinkedHashMap<String, List<String>> result = new LinkedHashMap<>();
+        values.forEach((source, targets) -> result.put(source, List.copyOf(targets)));
+        return Collections.unmodifiableMap(result);
     }
 
     private static void traceRejected(CatalogCacheKey key, int inputCount, int descriptorCount, String reason,

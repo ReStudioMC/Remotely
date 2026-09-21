@@ -72,6 +72,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
     private TabSwitchWidget remoteHostAuthModeSwitch;
     private AnimatedButton remoteHostConfirmButton;
     private AnimatedButton remoteHostDeleteButton;
+    private TabsManager.Tab remoteHostEditTab;
     private final Object parent;
     private IconButton userButton;
     private boolean serverManagerContextMenuPressed;
@@ -339,7 +340,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
             .onPlusButtonClicked(() -> runManagerAction(ServerScreenHost.Action.REMOTE_HOST,
                     () -> serverHost().openRemoteHost(this)))
             .onTabSelected(this::onHostTabSelected)
-            .onTabRenamed(this::onHostTabRenamed);
+            .onTabContextMenu(this::onHostTabContextMenu);
         layoutDesktopTabs(tabsBuilder);
         tabsBuilder.build();
         updateManagerActionControls();
@@ -1372,14 +1373,14 @@ public class ServerManagerScreen extends DesktopShellScreen {
         }));
     }
 
-    private void onHostTabRenamed(TabsManager.Tab tab) {
+    private void onHostTabContextMenu(TabsManager.Tab tab) {
         if (tab != null && tab.getData() instanceof ServerScreenHost.HostView) {
-            openRemoteHostPopup(true);
+            openRemoteHostPopup(tab);
         }
     }
 
     public void openRemoteHostEditor() {
-        openRemoteHostPopup(false);
+        openRemoteHostPopup(null);
     }
 
     private Accent getDesktopIconAccent(ServerModels.ClientServerView info, boolean isCreate) {
@@ -1573,7 +1574,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
 
     private boolean canServerManagerAction(ServerModels.ClientServerView server, ServerScreenHost.Action action, String capability) {
         if (!reactorOnlyServerManager()) {
-            return canStandaloneMutation(server);
+            return serverHost().serverActionAvailability(server, action).available();
         }
         if (server == null || !serverHost().authenticated() || !serverHost().supports(action)) {
             return false;
@@ -2660,9 +2661,10 @@ public class ServerManagerScreen extends DesktopShellScreen {
         }));
     }
 
-    private void openRemoteHostPopup(boolean isEditing) {
-        int activeTabIndex = tabs().getActiveTabIndex();
-        Object data = (tabs().getActiveTab() != null) ? tabs().getActiveTab().getData() : null;
+    private void openRemoteHostPopup(TabsManager.Tab editTab) {
+        remoteHostEditTab = editTab;
+        ServerScreenHost.HostView host = editTab != null && editTab.getData() instanceof ServerScreenHost.HostView value ? value : null;
+        boolean isEditing = host != null;
 
         remoteHostPopup.clearRows();
 
@@ -2675,7 +2677,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
         String hostType = "SSH";
         String registryPathText = "";
 
-        if (isEditing && activeTabIndex > 0 && data instanceof ServerScreenHost.HostView host) {
+        if (isEditing) {
             nameText = host.name();
             userText = host.user().isBlank() ? userText : host.user();
             ipText = host.address();
@@ -2691,7 +2693,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
 
         String authModeText = "PASSWORD";
         String keyPathText = "";
-        if (isEditing && activeTabIndex > 0 && data instanceof ServerScreenHost.HostView host) {
+        if (isEditing) {
             authModeText = host.authMode();
             keyPathText = host.keyPath();
             registryPathText = host.registryPath();
@@ -2763,7 +2765,8 @@ public class ServerManagerScreen extends DesktopShellScreen {
     }
 
     private void onConfirmRemoteHost() {
-        boolean isEditing = tabs().getActiveTabIndex() > 0 && "Save".equals(remoteHostConfirmButton.getMessage());
+        TabsManager.Tab editTab = remoteHostEditTab;
+        boolean isEditing = editTab != null && editTab.getData() instanceof ServerScreenHost.HostView;
         boolean isPanel = isPanelHostSelected();
         int port;
         try {
@@ -2780,7 +2783,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
             new Notification("Error", "Host Name and IP cannot be empty.", Notification.Type.ERROR);
             return;
         }
-        String id = isEditing && tabs().getActiveTab().getData() instanceof ServerScreenHost.HostView host ? host.id() : "";
+        String id = isEditing && editTab.getData() instanceof ServerScreenHost.HostView host ? host.id() : "";
         ServerScreenHost.RemoteHostDraft draft = new ServerScreenHost.RemoteHostDraft(id, name, isPanel ? "" : remoteHostUserInput.getText(), address, port, type, authMode,
                 isPanel ? remoteHostSftpPasswordInput.getText() : remoteHostPasswordInput.getText(), isPanel ? remoteHostPasswordInput.getText() : "",
                 remoteHostKeyPathInput.getText(), remoteHostKeyPassphraseInput.getText(), remoteHostRegistryPathInput.getText());
@@ -2803,9 +2806,9 @@ public class ServerManagerScreen extends DesktopShellScreen {
                 return;
             }
             notification.update().message("Host Ready").description(host.name()).type(Notification.Type.SUCCESS).loading(false).autoSlideOut(true).commit();
-            if (tabs().getActiveTab() != null) {
-                tabs().getActiveTab().setName(host.name());
-                tabs().getActiveTab().setData(host);
+            if (tabs().getTabs().contains(editTab)) {
+                editTab.setName(host.name());
+                editTab.setData(host);
             }
             closeRemoteHostPopup();
         }));
@@ -2882,7 +2885,8 @@ public class ServerManagerScreen extends DesktopShellScreen {
     }
 
     private void onDeleteRemoteHost() {
-        if (tabs().getActiveTabIndex() <= 0 || !(tabs().getActiveTab().getData() instanceof ServerScreenHost.HostView host)) return;
+        TabsManager.Tab editTab = remoteHostEditTab;
+        if (editTab == null || !(editTab.getData() instanceof ServerScreenHost.HostView host)) return;
         long generation = callbackGeneration;
         serverHost().hostAction(host, "delete").whenComplete((ignored, failure) -> ScreenManager.getInstance().execute(() -> {
             if (!isCurrentCallback(generation)) {
@@ -2892,8 +2896,14 @@ public class ServerManagerScreen extends DesktopShellScreen {
                 new Notification("Host Delete Failed", rootMessage(failure), Notification.Type.ERROR);
                 return;
             }
-            tabs().removeTab(tabs().getActiveTabIndex());
-            tabs().setActiveTab(0);
+            int tabIndex = tabs().getTabs().indexOf(editTab);
+            if (tabIndex >= 0) {
+                boolean wasActive = tabs().getActiveTab() == editTab;
+                tabs().removeTab(tabIndex);
+                if (wasActive) {
+                    tabs().setActiveTab(0);
+                }
+            }
             closeRemoteHostPopup();
         }));
     }
@@ -2924,6 +2934,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
     }
 
     private void closeRemoteHostPopup() {
+        remoteHostEditTab = null;
         if(remoteHostPopup != null) {
             remoteHostPopup.hide();
         }

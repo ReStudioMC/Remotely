@@ -13,6 +13,7 @@ import redxax.oxy.remotely.data.managed.PlayerAction;
 import redxax.oxy.remotely.data.managed.PlayerSession;
 import redxax.oxy.remotely.data.managed.SessionEvent;
 import redxax.oxy.remotely.data.player.model.BanInfo;
+import redxax.oxy.remotely.data.player.model.PlayerAvatarUrl;
 import redxax.oxy.remotely.data.player.model.UnifiedPlayer;
 import redxax.oxy.remotely.data.player.management.PlayerManagementService;
 import redxax.oxy.remotely.data.player.management.PlayerManagementSnapshot;
@@ -1098,12 +1099,13 @@ public class PlayerManagementScreen extends ReScreen implements DesktopWindowBeh
         if (faceRequested) {
             return;
         }
-        faceRequested = true;
-        if (player.getUuid() == null || RemotelyClient.INSTANCE == null || RemotelyClient.INSTANCE.getHost() == null) {
+        if (RemotelyClient.INSTANCE == null || RemotelyClient.INSTANCE.getHost() == null) {
             return;
         }
-        Identifier faceId = RemotelyClient.INSTANCE.getHost().registerRemoteImage(
-                "https://mc-heads.net/avatar/" + player.getUuid() + "/64.png");
+        String source = PlayerAvatarUrl.resolve(player.getName(), player.getUuid(), 64);
+        if (source.isBlank()) return;
+        faceRequested = true;
+        Identifier faceId = RemotelyClient.INSTANCE.getHost().registerRemoteImage(source);
         if (faceId != null) {
             playerFace = faceId;
             updateHeaderButton();

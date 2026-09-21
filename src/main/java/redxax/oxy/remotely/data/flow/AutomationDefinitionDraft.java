@@ -26,9 +26,10 @@ public final class AutomationDefinitionDraft {
     public static final String VARIABLE = "variable_definition";
     public static final String TIMER = "timer_definition";
     public static final String SCHEDULE = "schedule_definition";
+    public static final String COMPONENT_BUILDER = "component_builder";
     public static final String CORE_OWNER = "restudio.resync";
 
-    private static final Set<String> TYPES = Set.of(VARIABLE, TIMER, SCHEDULE);
+    private static final Set<String> TYPES = Set.of(VARIABLE, TIMER, SCHEDULE, COMPONENT_BUILDER);
     private static final Set<String> TARGET_TYPES = Set.of("flow", "function", "command");
     private static final List<String> COMMON_FIELDS = List.of("name", "description", "scope", "persistent");
 
@@ -83,6 +84,7 @@ public final class AutomationDefinitionDraft {
             case SCHEDULE -> combine(COMMON_FIELDS, List.of("targetType", "targetId", "timingMode", "duration", "unit",
                 "initialDelay", "dateTime", "timeZone", "cron", "overlapPolicy", "existingTaskPolicy",
                 "failurePolicy", "offlinePolicy", "missedRunPolicy"));
+            case COMPONENT_BUILDER -> List.of("name", "description", "scopeKind", "scopeValue");
             default -> throw new IllegalArgumentException("Unsupported automation type: " + type);
         };
     }
@@ -99,6 +101,7 @@ public final class AutomationDefinitionDraft {
             case "failurePolicy" -> List.of("continue", "stop");
             case "offlinePolicy" -> List.of("wait", "skip", "run_without_player", "cancel");
             case "missedRunPolicy" -> List.of("run_once", "skip", "cancel");
+            case "scopeKind" -> List.of("dynamic", "category", "tag", "item");
             default -> List.of();
         };
     }
@@ -167,6 +170,14 @@ public final class AutomationDefinitionDraft {
                 value.addProperty("offlinePolicy", "wait");
                 value.addProperty("missedRunPolicy", "run_once");
             }
+            case COMPONENT_BUILDER -> {
+                value.addProperty("displayName", exactId);
+                JsonObject scope = new JsonObject();
+                scope.addProperty("kind", "dynamic");
+                scope.addProperty("value", "");
+                value.add("scope", scope);
+                value.add("components", new JsonObject());
+            }
             default -> throw new IllegalArgumentException("Unsupported automation type: " + type);
         }
         return prepare(type, exactId, value).document();
@@ -220,6 +231,8 @@ public final class AutomationDefinitionDraft {
             case "failurePolicy" -> text(value, field, "continue");
             case "offlinePolicy" -> text(value, field, "wait");
             case "missedRunPolicy" -> text(value, field, "run_once");
+            case "scopeKind" -> text(object(value, "scope"), "kind", "dynamic");
+            case "scopeValue" -> text(object(value, "scope"), "value", "");
             default -> text(value, field, "");
         };
     }
@@ -237,6 +250,8 @@ public final class AutomationDefinitionDraft {
             case "targetId" -> putTargetId(document, value);
             case "timingMode" -> putTiming(document, "mode", "timingMode", value);
             case "unit", "dateTime", "timeZone", "cron" -> putTiming(document, field, field, value);
+            case "scopeKind" -> putObjectText(document, "scope", "kind", value);
+            case "scopeValue" -> putObjectText(document, "scope", "value", value);
             default -> putText(document, field, value);
         }
     }
@@ -294,6 +309,16 @@ public final class AutomationDefinitionDraft {
                 throw new IllegalArgumentException("Variable value type must be a known data type");
             }
             validateDefaultValue(value, resolved.getTypeId());
+        }
+        if (COMPONENT_BUILDER.equals(type)) {
+            String kind = text(type, value, "scopeKind");
+            String scopeValue = text(type, value, "scopeValue");
+            if (!"dynamic".equals(kind) && scopeValue.isBlank()) {
+                throw new IllegalArgumentException("Choose What This Component Builder Applies To");
+            }
+            if (!value.has("components") || !value.get("components").isJsonObject()) {
+                throw new IllegalArgumentException("Component Builder components must be an object");
+            }
         }
         if (!SCHEDULE.equals(type)) {
             return;
@@ -442,6 +467,15 @@ public final class AutomationDefinitionDraft {
         if (flat) {
             putText(value, flatField, text);
         }
+    }
+
+    private static void putObjectText(JsonObject value, String objectField, String field, String text) {
+        JsonObject object = object(value, objectField);
+        if (object == null) {
+            object = new JsonObject();
+            value.add(objectField, object);
+        }
+        putText(object, field, text);
     }
 
     private static void putNumber(JsonObject value, String field, String text) {

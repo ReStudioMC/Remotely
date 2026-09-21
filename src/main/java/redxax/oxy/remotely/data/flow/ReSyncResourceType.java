@@ -104,6 +104,11 @@ public enum ReSyncResourceType {
             ReSyncResourceType::renameJsonObject, ReSyncResourceType::jsonObjectId, ReSyncResourceType::jsonObjectName
     ),
 
+    COMPONENT_BUILDER(
+            ReSyncResourceType::serializeJsonObject, ReSyncResourceType::deserializeJsonObject,
+            ReSyncResourceType::renameJsonObject, ReSyncResourceType::jsonObjectId, ReSyncResourceType::jsonObjectName
+    ),
+
     MOTD_PROFILE(
             ReSyncResourceType::serializeJsonObject, ReSyncResourceType::deserializeJsonObject,
             ReSyncResourceType::renameJsonObject, ReSyncResourceType::jsonObjectId, ReSyncResourceType::jsonObjectName

@@ -74,6 +74,7 @@ import restudio.rescreen.ui.widgets.ReorderableWidget;
 import restudio.rescreen.ui.widgets.RowWidget;
 import restudio.rescreen.ui.widgets.SquareButtonWidget;
 import restudio.rescreen.ui.widgets.TextInputWidget;
+import restudio.resync.contract.install.ReSyncInstallationStatus;
 import restudio.rescreen.ui.widgets.TitledRowWidget;
 import restudio.rescreen.ui.widgets.ToggleWidget;
 import restudio.rescreen.util.Notification;
@@ -163,17 +164,12 @@ public class StudioScreen extends StudioInfiniteScreen {
     @Override
     public Map<String, Widget> collaborationContainers() {
         Map<String, Widget> containers = new LinkedHashMap<>(super.collaborationContainers());
-        if (studioResourcePanel != null && studioResourcePanel.isVisible()) {
+        if (studioResourcePanel != null && isSidePanelActive(studioResourcePanel) && studioResourcePanel.isVisible()) {
             containers.put(studioResourcePanel.id(), studioResourcePanel.container());
         }
         return Collections.unmodifiableMap(containers);
     }
 
-    @Override
-    protected Iterable<Widget> screenOverlayContainers() {
-        Screen viewScreen = activeStudioViewScreen();
-        return viewScreen != null && viewScreen != this ? List.of() : super.screenOverlayContainers();
-    }
     private long collaborationChatOpenedAt;
     private IconButton collaborationChangeBadge;
     private long lastPresenceAt;
@@ -729,7 +725,7 @@ public class StudioScreen extends StudioInfiniteScreen {
                 failCoreOpenIntent(intent, coreActivationReason(outcome));
                 continue;
             }
-            if (coreOpenExpired(intent, now)) {
+            if (coreOpenExpired(intent, now) && !coreActivationPublicationLoading(outcome)) {
                 failCoreOpenIntent(intent, coreActivationReason(outcome));
                 continue;
             }
@@ -795,6 +791,11 @@ public class StudioScreen extends StudioInfiniteScreen {
 
     private boolean coreOpenExpired(CoreOpenIntent intent, long now) {
         return intent != null && now - intent.acceptedAt() >= CORE_STUDIO_REBIND_TIMEOUT_MILLIS;
+    }
+
+    private boolean coreActivationPublicationLoading(ReSyncFlowClient.CoreGraphActivationOutcome outcome) {
+        return outcome != null && outcome.state() == ReSyncFlowClient.CoreGraphActivationState.PENDING
+            && outcome.revision() > 0L;
     }
 
     private boolean failCoreOpenIntent(CoreOpenIntent intent, String reason) {
@@ -1681,6 +1682,34 @@ public class StudioScreen extends StudioInfiniteScreen {
             }));
     }
 
+    protected void showReSyncInstallationStatus(ReSyncInstallationStatus status) {
+        if (status == null) {
+            return;
+        }
+        PopupWidget.Builder builder = new PopupWidget.Builder(status.title()).setResizable(false).width(440);
+        builder.addRow("Status", readOnlyStatus(status.summary()));
+        builder.addRow("Data", readOnlyStatus(status.preservesLegacyData() ? "Preserved" : "Unavailable"));
+        if (status.state() == ReSyncInstallationStatus.State.LEGACY_DATA_ARCHIVED) {
+            builder.addRow("Next Step", readOnlyStatus("Recreate Needed Resources In This Clean Workspace"));
+        }
+        if (!status.archivePath().isBlank()) {
+            builder.addRow("Archive", readOnlyStatus(status.archivePath()));
+        }
+        PopupWidget popup = builder.build();
+        addDrawableChild(popup);
+        popup.show();
+    }
+
+    private AnimatedButton readOnlyStatus(String text) {
+        AnimatedButton button = new AnimatedButton.Builder()
+            .label(text)
+            .centered(false)
+            .entranceAnimation(false)
+            .build();
+        button.active = false;
+        return button;
+    }
+
     public boolean hasReSyncUpdateAvailable() {
         return false;
     }
@@ -2392,10 +2421,18 @@ public class StudioScreen extends StudioInfiniteScreen {
     }
 
     protected void openFocusedResourceDocument(String type, String id, String title, JsonObject resource) {
+        if (AutomationDefinitionDraft.supports(type)) {
+            openDefinition(type, id);
+            return;
+        }
         openStudioViewDocument(type, id, title == null || title.isBlank() ? id : title, focusedResourceView(type, id, detachedJson(resource)));
     }
 
     protected void openFocusedResourceDocumentOwned(String type, String id, String title, JsonObject resource) {
+        if (AutomationDefinitionDraft.supports(type)) {
+            openDefinition(type, id);
+            return;
+        }
         openStudioViewDocumentOwned(type, id, title == null || title.isBlank() ? id : title, null,
             focusedResourceView(type, id, resource), false, true);
     }
@@ -2426,7 +2463,7 @@ public class StudioScreen extends StudioInfiniteScreen {
         AutomationDefinitionDesignerScreen designer = automationDesigner(document);
         if (designer == null) {
             ReSyncStudioView view = AutomationDefinitionDesignerScreen.typeScreen(this, studioServerId(), type);
-            openStudioViewDocument(AUTOMATION_DOCUMENT_TYPE, AUTOMATION_DOCUMENT_ID, "Automation", null, view,
+            openStudioViewDocument(AUTOMATION_DOCUMENT_TYPE, AUTOMATION_DOCUMENT_ID, "Sub Resources", null, view,
                 false, false);
             document = findStudioDocument(key);
             designer = automationDesigner(document);
@@ -2464,9 +2501,6 @@ public class StudioScreen extends StudioInfiniteScreen {
     }
 
     protected ReSyncStudioView focusedResourceView(String type, String id, JsonObject resource) {
-        if (AutomationDefinitionDraft.supports(type)) {
-            return AutomationDefinitionDesignerScreen.designer(this, studioServerId(), type, id, resource);
-        }
         return ResourceDesigners.create(this, type, id, resource, studioServerId(), this);
     }
 
@@ -2734,6 +2768,17 @@ public class StudioScreen extends StudioInfiniteScreen {
         return view != null && view.hasPanel();
     }
 
+    @Override
+    protected boolean isSidePanelActive(SidePanel panel) {
+        if (panel == studioResourcePanel) {
+            return activeStudioDocument != null && (activeStudioView() == null || activeStudioViewUsesResourcePanel());
+        }
+        if (studioContentBrowser != null && panel == studioContentBrowser.sidePanel()) {
+            return shouldRenderStudioContentBrowser();
+        }
+        return super.isSidePanelActive(panel);
+    }
+
     protected boolean activeStudioDocumentUsesFlowGraphCanvas() {
         return activeStudioDocument != null && activeStudioDocument.coreSession() == null
             && activeStudioDocument.view() == null && activeStudioDocument.graph() != null;
@@ -2779,6 +2824,10 @@ public class StudioScreen extends StudioInfiniteScreen {
             studioResourcePanel.hide();
             return;
         }
+        if (!isSidePanelActive(studioResourcePanel)) {
+            studioResourcePanel.hide();
+            return;
+        }
         ReSyncStudioView view = activeStudioView();
         if (view != null && view.hasPanel()) {
             if (view.preferredPanelPlacement() == StudioPanel.Placement.LEFT) {
@@ -2800,7 +2849,8 @@ public class StudioScreen extends StudioInfiniteScreen {
     }
 
     protected boolean hidesStudioResourcePanel(StudioDocument document) {
-        return ReSyncResourceDragPayload.FLOW.equals(document.type())
+        return document.view() instanceof ScreenBackedStudioView screenView && screenView.ownsSidePanels()
+            || ReSyncResourceDragPayload.FLOW.equals(document.type())
             || ReSyncResourceDragPayload.FUNCTION.equals(document.type())
             || ReSyncResourceDragPayload.CUSTOM_CONTENT.equals(document.type());
     }
@@ -4995,13 +5045,15 @@ public class StudioScreen extends StudioInfiniteScreen {
 
     protected String studioResourceIconPath(String type, String id) {
         return switch (type) {
+            case AUTOMATION_DOCUMENT_TYPE -> "resources.png";
             case ReSyncResourceDragPayload.FUNCTION -> "json.png";
             case ReSyncResourceDragPayload.COMMAND -> "terminal.png";
-            case ReSyncResourceDragPayload.CUSTOM_CONTENT -> customContentIconPath(id);
+            case ReSyncResourceDragPayload.CUSTOM_CONTENT -> "content.png";
             case ReSyncResourceDragPayload.GUI -> "fullPanel.png";
             case ReSyncResourceDragPayload.SCOREBOARD -> "panel.png";
             case ReSyncResourceDragPayload.TAB -> "topPanel.png";
             case ReSyncResourceDragPayload.CHAT -> "chat.png";
+            case ReSyncResourceDragPayload.COMPONENT_BUILDER -> "item.png";
             case ReSyncResourceDragPayload.MOTD_PROFILE -> "hi.png";
             case ReSyncResourceDragPayload.MESSAGE_RULE -> "edit.png";
             case ReSyncResourceDragPayload.RECIPE_DEFINITION -> "crafting.png";
@@ -5012,22 +5064,10 @@ public class StudioScreen extends StudioInfiniteScreen {
             case ReSyncResourceDragPayload.NPC_DEFINITION -> "steve.png";
             case ReSyncResourceDragPayload.WORLDGEN -> "map.png";
             case ReSyncResourceDragPayload.WORLD -> "earth.png";
-            case ReSyncResourceDragPayload.VARIABLE_DEFINITION -> "edit.png";
+            case ReSyncResourceDragPayload.VARIABLE_DEFINITION -> "snippets.png";
             case ReSyncResourceDragPayload.TIMER_DEFINITION -> "history.png";
             case ReSyncResourceDragPayload.SCHEDULE_DEFINITION -> "calendar.png";
-            default -> "graph.png";
-        };
-    }
-
-    protected String customContentIconPath(String id) {
-        FlowManager manager = FlowManager.getInstance();
-        String contentType = manager != null ? manager.getCustomContentType(studioServerId(), id) : "";
-        return switch (safeStudioText(contentType).toLowerCase(Locale.ROOT)) {
-            case "armor" -> "armor.png";
-            case "block" -> "block.png";
-            case "item" -> "item.png";
-            case "projectile" -> "item.png";
-            default -> "item.png";
+            default -> "flow.png";
         };
     }
 

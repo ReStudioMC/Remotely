@@ -13,6 +13,7 @@ import restudio.rebase.instance.InstanceState;
 import restudio.rebase.resource.InstanceResource;
 import restudio.rebase.restudio.api.models.ServerModels.ClientServerView;
 import restudio.rebase.util.VersionUtil;
+import restudio.resync.contract.install.ReSyncInstallationStatus;
 
 import java.io.IOException;
 import java.net.URI;
@@ -28,6 +29,8 @@ import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -152,6 +155,47 @@ public final class DesktopReSyncProvisioningService {
 
     void clearReleaseCache() {
         latestReSyncRelease = null;
+    }
+
+    Optional<ReSyncInstallationStatus> installationStatus(String serverId, ClientServerView startupServer) {
+        Instance instance = findInstance(serverId, startupServer);
+        if (instance == null || instance.getPath() == null || instance.getPath().isBlank()) {
+            return Optional.empty();
+        }
+        try {
+            ServerBackend backend = instance.getBackend();
+            FileSystemProvider fileSystem = backend == null ? null : backend.getFileSystem();
+            if (fileSystem == null) {
+                return Optional.empty();
+            }
+            Path path = Path.of(instance.getPath()).resolve(ReSyncInstallationStatus.FILE_PATH);
+            if (!Boolean.TRUE.equals(fileSystem.exists(path).get(10, TimeUnit.SECONDS))) {
+                return Optional.empty();
+            }
+            return Optional.of(ReSyncInstallationStatus.decode(fileSystem.read(path).get(10, TimeUnit.SECONDS)));
+        } catch (Exception ignored) {
+            return Optional.empty();
+        }
+    }
+
+    OperationResult archiveLegacyData(String serverId, ClientServerView startupServer,
+                                      ReSyncInstallationStatus status) throws Exception {
+        if (status == null || !status.blocksStartup()
+            || !ReSyncInstallationStatus.ARCHIVE_MARKER_PATH.equals(status.markerPath())) {
+            return OperationResult.failed("ReSync Is Not Waiting For Legacy Data Archiving");
+        }
+        Instance instance = findInstance(serverId, startupServer);
+        if (instance == null || instance.getPath() == null || instance.getPath().isBlank()) {
+            return OperationResult.failed("Server Not Found");
+        }
+        ServerBackend backend = instance.getBackend();
+        FileSystemProvider fileSystem = backend == null ? null : backend.getFileSystem();
+        if (fileSystem == null) {
+            return OperationResult.failed("Server Files Are Unavailable");
+        }
+        Path marker = Path.of(instance.getPath()).resolve(status.markerPath());
+        fileSystem.write(marker, UUID.randomUUID() + "\n").get(30, TimeUnit.SECONDS);
+        return OperationResult.successful();
     }
 
     public boolean isInstalled(Instance instance) {
@@ -530,6 +574,11 @@ public final class DesktopReSyncProvisioningService {
             return backendConfig != null && "RESTUDIO".equalsIgnoreCase(safeText(backendConfig.type));
         }
         return startupServer != null && "RESTUDIO".equalsIgnoreCase(safeText(startupServer.backendType));
+    }
+
+    private Instance findInstance(String serverId, ClientServerView startupServer) {
+        FlowManager manager = FlowManager.getInstance();
+        return manager == null ? null : (Instance) manager.findInstanceByServerId(serverId, startupServer);
     }
 
     private String safeText(String value) {

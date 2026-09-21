@@ -32,7 +32,6 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -49,13 +48,13 @@ class ReSyncCatalogAuthoringReceiptIntegrationTest {
     private static final String SECOND_SESSION_OWNER = "owner-session-two";
 
     @Test
-    void commitsNodeAndSessionAuthoringTogetherButPersistsOnlyNodePublication(@TempDir Path tempDir) throws Exception {
+    void commitsAndPersistsNodeAndCapabilityBoundAuthoringTogether(@TempDir Path tempDir) throws Exception {
         Path path = tempDir.resolve("catalog-publication-cache.json");
         ReSyncCatalogPublicationCache cache = new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path));
         ReSyncCatalogPublicationProjection nodeProjection = new ReSyncCatalogPublicationProjection(SERVER, cache);
         ReSyncCatalogAuthoringProjection authoringProjection = new ReSyncCatalogAuthoringProjection(SERVER);
         ReSyncCatalogPublicationReceiptHandler handler = new ReSyncCatalogPublicationReceiptHandler(SERVER, SESSION,
-            nodeProjection, authoringProjection, cache);
+            nodeProjection, authoringProjection, cache, List.of("restudio.resync/catalog_authoring"));
         handler.setAuthoringRequired(true);
         CatalogCachePublication publication = publication(CatalogCachePublication.Kind.FULL, 3, "first",
             authoring(BINDING, CatalogCacheState.ACTIVE));
@@ -70,23 +69,26 @@ class ReSyncCatalogAuthoringReceiptIntegrationTest {
         assertEquals(publication.authoringPublicationChecksum(), authoringProjection.activeChecksum().orElseThrow());
         assertEquals(ReSyncCatalogPublicationReceiptHandler.PersistenceStatus.STORED,
             handler.cachePersistenceCompletion().join().status());
-        assertNull(cache.latest(SERVER).orElseThrow().publication().authoringPublication());
-        assertFalse(Files.readString(path).contains("\"authoring\""));
+        ReSyncCatalogPublicationCache.CachedPublication cached = cache.latest(SERVER).orElseThrow();
+        assertNull(cached.publication().authoringPublication());
+        assertEquals(publication.authoringPublication(), cached.authoringPublication());
+        assertEquals(List.of("restudio.resync/catalog_authoring"), cached.authoringCapabilities());
+        assertTrue(Files.readString(path).contains("\"authoring\""));
         assertTrue(handler.apply(receipt, publication, bytes).applied());
         assertEquals(ReSyncCatalogPublicationReceiptHandler.PersistenceStatus.STORED,
             handler.cachePersistenceCompletion().join().status());
     }
 
     @Test
-    void acceptsSameNodeRevisionWithDifferentSessionAuthoringAndKeepsCacheNodeOnly(@TempDir Path tempDir) {
+    void capabilityStampReplacesSessionSpecificAuthoringAtTheSameNodeRevision(@TempDir Path tempDir) {
         ReSyncCatalogPublicationCache cache = new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(tempDir.resolve("catalog-publication-cache.json")));
         ReSyncCatalogPublicationProjection nodeProjection = new ReSyncCatalogPublicationProjection(SERVER, cache);
         ReSyncCatalogAuthoringProjection firstAuthoring = new ReSyncCatalogAuthoringProjection(SERVER);
         ReSyncCatalogAuthoringProjection secondAuthoring = new ReSyncCatalogAuthoringProjection(SERVER);
         ReSyncCatalogPublicationReceiptHandler firstHandler = new ReSyncCatalogPublicationReceiptHandler(SERVER,
-            "session-one", nodeProjection, firstAuthoring, cache);
+            "session-one", nodeProjection, firstAuthoring, cache, List.of("cap-one"));
         ReSyncCatalogPublicationReceiptHandler secondHandler = new ReSyncCatalogPublicationReceiptHandler(SERVER,
-            "session-two", nodeProjection, secondAuthoring, cache);
+            "session-two", nodeProjection, secondAuthoring, cache, List.of("cap-two"));
         firstHandler.setAuthoringRequired(true);
         secondHandler.setAuthoringRequired(true);
         CatalogCachePublication first = publication(CatalogCachePublication.Kind.FULL, 3, "same",
@@ -104,22 +106,33 @@ class ReSyncCatalogAuthoringReceiptIntegrationTest {
             .clientReceived(second.key(), second.revision()).receipt().orElseThrow();
 
         assertTrue(firstHandler.apply(firstReceipt, first, firstBytes).applied());
-        assertTrue(secondHandler.apply(secondReceipt, second, secondBytes).applied());
+        ReSyncCatalogPublicationReceiptHandler.CachePersistence firstPersistence =
+            firstHandler.cachePersistenceCompletion().join();
         assertEquals(ReSyncCatalogPublicationReceiptHandler.PersistenceStatus.STORED,
-            secondHandler.cachePersistenceCompletion().join().status());
+            firstPersistence.status(), firstPersistence.diagnostic());
+        ReSyncCatalogPublicationCache.CachedPublication firstCached = cache.latest(SERVER).orElseThrow();
+        assertEquals(second.withAuthoringPublication(null), firstCached.publication());
+        assertArrayEquals(codec.encodeBytes(second.withAuthoringPublication(null)), firstCached.canonicalBytes());
+        assertEquals(List.of("cap-one"), firstCached.authoringCapabilities());
+        assertTrue(secondHandler.apply(secondReceipt, second, secondBytes).applied());
+        ReSyncCatalogPublicationReceiptHandler.CachePersistence secondPersistence =
+            secondHandler.cachePersistenceCompletion().join();
+        assertEquals(ReSyncCatalogPublicationReceiptHandler.PersistenceStatus.STORED,
+            secondPersistence.status(), secondPersistence.diagnostic());
         assertEquals(first.withAuthoringPublication(null), nodeProjection.active().orElseThrow().publication());
         assertEquals(first.authoringPublication(), firstAuthoring.activePublication().orElseThrow());
         assertEquals(second.authoringPublication(), secondAuthoring.activePublication().orElseThrow());
         ReSyncCatalogPublicationCache.CachedPublication cached = cache.latest(SERVER).orElseThrow();
         assertNull(cached.publication().authoringPublication());
         assertArrayEquals(codec.encodeBytes(first.withAuthoringPublication(null)), cached.canonicalBytes());
+        assertEquals(second.authoringPublication(), cached.authoringPublication());
+        assertEquals(List.of("cap-two"), cached.authoringCapabilities());
 
         ReSyncCatalogPublicationProjection restarted = new ReSyncCatalogPublicationProjection(SERVER,
             new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(tempDir.resolve("catalog-publication-cache.json"))));
         assertTrue(restarted.hydrateFromCache());
         assertEquals(first.withAuthoringPublication(null), restarted.active().orElseThrow().publication());
         assertNull(restarted.active().orElseThrow().publication().authoringPublication());
-        assertTrue(new ReSyncCatalogAuthoringProjection(SERVER).active().isEmpty());
     }
 
     @Test
@@ -155,8 +168,10 @@ class ReSyncCatalogAuthoringReceiptIntegrationTest {
         assertTrue(handler.apply(receipt, publication, bytes).applied());
         assertEquals(publication.authoringPublication(), authoringProjection.activePublication().orElseThrow());
         assertEquals(publication.withAuthoringPublication(null), nodeProjection.active().orElseThrow().publication());
+        ReSyncCatalogPublicationReceiptHandler.CachePersistence persistence =
+            handler.cachePersistenceCompletion().join();
         assertEquals(ReSyncCatalogPublicationReceiptHandler.PersistenceStatus.STORED,
-            handler.cachePersistenceCompletion().join().status());
+            persistence.status(), persistence.diagnostic());
     }
 
     @Test

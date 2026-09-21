@@ -2,6 +2,7 @@ package redxax.oxy.remotely.data.flow;
 
 import com.google.gson.JsonObject;
 import redxax.oxy.remotely.RemotelyClient;
+import restudio.rescreen.platform.Async;
 import restudio.rescreen.ui.core.ScreenManager;
 import restudio.resync.flow.cache.CatalogCachePublication;
 import restudio.resync.flow.cache.CatalogCachePublicationCodec;
@@ -9,8 +10,9 @@ import restudio.resync.flow.identity.ServerId;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.locks.LockSupport;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -108,8 +110,23 @@ public final class ReSyncFlowClientTestHarness implements AutoCloseable {
     private static void drain(ReSyncFlowClient client, String methodName) throws Exception {
         Method method = ReSyncFlowClient.class.getDeclaredMethod(methodName);
         method.setAccessible(true);
-        CompletableFuture<?> completion = (CompletableFuture<?>) method.invoke(client);
-        completion.get(2L, TimeUnit.SECONDS);
+        Object completion = method.invoke(client);
+        if (completion instanceof CompletionStage<?> stage) {
+            stage.toCompletableFuture().get(2L, TimeUnit.SECONDS);
+            return;
+        }
+        if (completion instanceof Async<?> async) {
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2L);
+            while (!async.isDone() && System.nanoTime() < deadline) {
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1L));
+            }
+            if (!async.isDone()) {
+                throw new TimeoutException(methodName + " did not settle");
+            }
+            async.join();
+            return;
+        }
+        throw new IllegalStateException(methodName + " returned an unsupported async result");
     }
 
     private static String capabilities(ServerId server, CatalogCachePublication publication) {

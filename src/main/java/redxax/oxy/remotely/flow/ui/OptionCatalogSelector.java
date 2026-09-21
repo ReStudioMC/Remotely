@@ -12,6 +12,7 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -30,6 +31,19 @@ public final class OptionCatalogSelector {
 
     public static Runnable refreshAction(OptionCatalogLoader.CoreRequest request) {
         return () -> OptionCatalogLoader.refresh(request);
+    }
+
+    public static Runnable refreshAction(Supplier<Optional<OptionCatalogLoader.CoreRequest>> requestSupplier) {
+        return () -> request(requestSupplier).ifPresent(OptionCatalogLoader::refresh);
+    }
+
+    public static ItemSelectorWidget.AsyncItemSnapshot snapshot(
+        Supplier<Optional<OptionCatalogLoader.CoreRequest>> requestSupplier, Supplier<TypedValue> selectedSupplier,
+        Consumer<TypedValue> onSelected, String emptyMessage) {
+        OptionCatalogLoader.CoreRequest request = request(requestSupplier).orElse(null);
+        return request == null
+            ? new ItemSelectorWidget.AsyncItemSnapshot(List.of(), true, "Loading Options")
+            : snapshot(request, selectedSupplier, onSelected, emptyMessage);
     }
 
     public static ItemSelectorWidget.AsyncItemSnapshot snapshot(OptionCatalogLoader.CoreRequest request,
@@ -58,14 +72,15 @@ public final class OptionCatalogSelector {
                 item.label() + " " + item.description() + " " + identity, 0,
                 item.available() ? "" : "Unavailable", "", action));
         }
+        boolean loading = catalog != null && catalog.loading();
         TypedValue selected = selectedSupplier != null ? selectedSupplier.get() : null;
         if (selected != null && !options.containsKey(selected)) {
-            items.add(unavailable(typedLabel(selected), selected.canonicalJson()));
+            items.add(loading ? selected(selected) : unavailable(typedLabel(selected), selected.canonicalJson()));
         }
-        boolean loading = catalog != null && catalog.loading();
         String message = emptyMessage != null && !emptyMessage.isBlank() ? emptyMessage : "No Options";
         if (!loading && (catalog == null || !"available".equals(catalog.status()) && !"missing".equals(catalog.status()))) {
-            message = "Option Source Unavailable";
+            String diagnostic = catalog != null ? catalog.diagnostic() : "";
+            message = diagnostic != null && !diagnostic.isBlank() ? diagnostic : "Option Source Unavailable";
         }
         return new ItemSelectorWidget.AsyncItemSnapshot(items, loading, message);
     }
@@ -210,6 +225,11 @@ public final class OptionCatalogSelector {
             "Unavailable", "", null);
     }
 
+    private static ItemSelectorWidget.AsyncItem selected(TypedValue value) {
+        return new ItemSelectorWidget.AsyncItem(typedLabel(value), "", "Current Value", value.canonicalJson(), 0,
+            "Selected", "", null);
+    }
+
     private static String typedLabel(TypedValue value) {
         if (value == null) {
             return "";
@@ -217,7 +237,9 @@ public final class OptionCatalogSelector {
         return value.locator() != null ? value.locator().id() : switch (value.state()) {
             case ABSENT -> "Absent";
             case NULL -> "Null";
-            default -> value.canonicalJson();
+            case VALUE -> value.value() instanceof String text ? text : String.valueOf(value.value());
+            case OPAQUE -> "Unavailable";
+            case LOCATOR -> value.locator().id();
         };
     }
 
@@ -227,5 +249,14 @@ public final class OptionCatalogSelector {
 
     private static boolean real(String value) {
         return value != null && !value.isBlank() && !"Loading".equals(value) && !"No Options".equals(value);
+    }
+
+    private static Optional<OptionCatalogLoader.CoreRequest> request(
+        Supplier<Optional<OptionCatalogLoader.CoreRequest>> requestSupplier) {
+        if (requestSupplier == null) {
+            return Optional.empty();
+        }
+        Optional<OptionCatalogLoader.CoreRequest> request = requestSupplier.get();
+        return request != null ? request : Optional.empty();
     }
 }

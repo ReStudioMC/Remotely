@@ -13,7 +13,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -420,7 +419,7 @@ class ReSyncConnectionManagerLiveSessionTest {
         Method dispatch = firstClaim.getClass().getDeclaredMethod("dispatch");
         completion.setAccessible(true);
         dispatch.setAccessible(true);
-        ((CompletableFuture<?>) completion.invoke(firstClaim)).complete(null);
+        ((Async<?>) completion.invoke(firstClaim)).complete(null);
 
         Object retryClaim = claimConnect.invoke(manager, owner);
         Object duplicateClaim = claimConnect.invoke(manager, owner);
@@ -966,7 +965,7 @@ class ReSyncConnectionManagerLiveSessionTest {
         connectDispatch.setAccessible(true);
         connectInvoking.setBoolean(owner, true);
         connectClaimed.setBoolean(owner, true);
-        connectDispatch.set(owner, new CompletableFuture<>());
+        connectDispatch.set(owner, Async.pending());
 
         assertTimeoutPreemptively(Duration.ofMillis(250), () -> assertSame(client, manager.activateLiveSession(session)));
 

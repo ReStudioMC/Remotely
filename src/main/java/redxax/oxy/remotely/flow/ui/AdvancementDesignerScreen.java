@@ -515,7 +515,7 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
         historyRebase.drain();
         treeDraft.drain();
         super.renderHandler(context, mouseX, mouseY, delta);
-        if (shouldRenderInspectorPanel()) {
+        if (inspectorPanel != null && inspector != null && (inspector.isVisible() || inspector.getAnimatedWidth() > 1f)) {
             renderStudioPanel(inspectorPanel, context, mouseX, mouseY, delta);
         }
     }
@@ -601,14 +601,8 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
 
     @Override
     public boolean mouseClicked(ReMouseEvent event) {
-        if (inspector != null) {
-            if (inspector.mouseClicked(event.retarget(inspector, event.x(), event.y()))) {
-                return true;
-            }
-            if (inspector.isMouseOver(event.x(), event.y())) {
-                setFocusedWidget(null);
-                return true;
-            }
+        if (dispatchSidePanelMouseClicked(event)) {
+            return true;
         }
         if (event.button() == ReMouseButton.LEFT && mouseClickedViewport(event.x(), event.y())) {
             setFocusedWidget(null);
@@ -651,7 +645,7 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
 
     @Override
     public boolean mouseDragged(ReMouseEvent event) {
-        if (inspector != null && inspector.mouseDragged(event.retarget(inspector, event.x(), event.y(), event.deltaX(), event.deltaY()))) {
+        if (dispatchSidePanelMouseDragged(event)) {
             return true;
         }
         if (event.button() != ReMouseButton.LEFT || draggedNode == null) {
@@ -681,7 +675,7 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
 
     @Override
     public boolean mouseReleased(ReMouseEvent event) {
-        if (inspector != null && inspector.mouseReleased(event.retarget(inspector, event.x(), event.y()))) {
+        if (dispatchSidePanelMouseReleased(event)) {
             return true;
         }
         if (event.button() == ReMouseButton.LEFT && isDraggingNode()) {
@@ -700,9 +694,6 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
 
     @Override
     public boolean mouseScrolled(ReScrollEvent event) {
-        if (inspector != null && inspector.mouseScrolled(event.retarget(inspector, event.x(), event.y()))) {
-            return true;
-        }
         if (super.mouseScrolled(event)) {
             return true;
         }
@@ -731,7 +722,7 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
         if (activeSearchSelector != null && activeSearchSelector.visible && activeSearchSelector.keyPressed(event.retarget(activeSearchSelector))) {
             return true;
         }
-        if (inspector != null && inspector.keyPressed(event.retarget(inspector))) {
+        if (super.keyPressed(event)) {
             return true;
         }
         if (event.key() == ReKey.ESCAPE) {
@@ -742,15 +733,12 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
             deleteSelected();
             return true;
         }
-        return super.keyPressed(event);
+        return false;
     }
 
     @Override
     public boolean textInput(ReTextInputEvent event) {
         if (activeSearchSelector != null && activeSearchSelector.visible && activeSearchSelector.textInput(event.retarget(activeSearchSelector))) {
-            return true;
-        }
-        if (inspector != null && inspector.textInput(event.retarget(inspector))) {
             return true;
         }
         return super.textInput(event);
@@ -857,10 +845,6 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
         if (inspectorPanel != null) {
             inspectorPanel.layout();
         }
-    }
-
-    private boolean shouldRenderInspectorPanel() {
-        return inspectorPanel != null && inspector != null && (inspector.isVisible() || inspector.getAnimatedWidth() > 1f);
     }
 
     private void ensureInspectorPanel() {
@@ -3448,7 +3432,7 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
     }
 
     private int advancementWindowX() {
-        int rightWidth = inspector != null ? (int) inspector.getAnimatedWidth() : 0;
+        int rightWidth = inspector != null ? inspector.layoutWidth(0) : 0;
         return Math.max(6, (width - rightWidth - WINDOW_WIDTH) / 2);
     }
 

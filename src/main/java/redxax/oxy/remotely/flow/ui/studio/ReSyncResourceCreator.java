@@ -428,7 +428,7 @@ public final class ReSyncResourceCreator {
             case ReSyncResourceDragPayload.FLOW, ReSyncResourceDragPayload.FUNCTION,
                  ReSyncResourceDragPayload.COMMAND, ReSyncResourceDragPayload.CUSTOM_CONTENT,
                  ReSyncResourceDragPayload.GUI, ReSyncResourceDragPayload.SCOREBOARD,
-                 ReSyncResourceDragPayload.TAB, ReSyncResourceDragPayload.CHAT,
+                 ReSyncResourceDragPayload.TAB, ReSyncResourceDragPayload.CHAT, ReSyncResourceDragPayload.COMPONENT_BUILDER,
                  ReSyncResourceDragPayload.MOTD_PROFILE, ReSyncResourceDragPayload.MESSAGE_RULE,
                  ReSyncResourceDragPayload.RECIPE_DEFINITION, ReSyncResourceDragPayload.TEXT_TEMPLATE,
                  ReSyncResourceDragPayload.ADVANCEMENT_TREE, ReSyncResourceDragPayload.DIALOG,
@@ -477,6 +477,7 @@ public final class ReSyncResourceCreator {
             case ReSyncResourceDragPayload.SCOREBOARD -> "Scoreboard ID";
             case ReSyncResourceDragPayload.TAB -> "Tab ID";
             case ReSyncResourceDragPayload.CHAT -> "Chat ID";
+            case ReSyncResourceDragPayload.COMPONENT_BUILDER -> "Component Builder ID";
             case ReSyncResourceDragPayload.MOTD_PROFILE -> "MOTD ID";
             case ReSyncResourceDragPayload.MESSAGE_RULE -> "Message Rule ID";
             case ReSyncResourceDragPayload.RECIPE_DEFINITION -> "Recipe ID";
@@ -505,6 +506,7 @@ public final class ReSyncResourceCreator {
             case ReSyncResourceDragPayload.SCOREBOARD -> "Scoreboard";
             case ReSyncResourceDragPayload.TAB -> "Tab";
             case ReSyncResourceDragPayload.CHAT -> "Chat";
+            case ReSyncResourceDragPayload.COMPONENT_BUILDER -> "Component Builder";
             case ReSyncResourceDragPayload.MOTD_PROFILE -> "MOTD";
             case ReSyncResourceDragPayload.MESSAGE_RULE -> "Message Rule";
             case ReSyncResourceDragPayload.RECIPE_DEFINITION -> "Recipe";

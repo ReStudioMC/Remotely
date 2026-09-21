@@ -600,6 +600,8 @@ tasks.register<Jar>("fatJar") {
     group = "build"
     dependsOn(reStudioReleaseJarTasks)
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
     archiveFileName.set("Remotely-Fat.jar")
     from(sourceSets.main.get().output)
     from({

@@ -31,8 +31,6 @@ import restudio.rescreen.platform.input.ReKey;
 import restudio.rescreen.platform.input.ReKeyEvent;
 import restudio.rescreen.platform.input.ReMouseButton;
 import restudio.rescreen.platform.input.ReMouseEvent;
-import restudio.rescreen.platform.input.ReScrollEvent;
-import restudio.rescreen.platform.input.ReTextInputEvent;
 import restudio.rescreen.game.MinecraftRenderItem;
 import restudio.rescreen.theme.ThemeManager;
 import restudio.rescreen.ui.core.Screen;
@@ -485,7 +483,7 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
     @Override
     public void renderHandler(IDrawContext context, int mouseX, int mouseY, float delta) {
         super.renderHandler(context, mouseX, mouseY, delta);
-        if (shouldRenderInspectorPanel()) {
+        if (inspectorStudioPanel != null && inspectorPanel != null && (inspectorPanel.isVisible() || inspectorPanel.getAnimatedWidth() > 1f)) {
             renderStudioPanel(inspectorStudioPanel, context, mouseX, mouseY, delta);
         }
         drawGuiSlotTooltip(context, mouseX, mouseY);
@@ -544,10 +542,6 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
             studioCloseNotified = true;
             studioCloseHandler.run();
         }
-    }
-
-    private boolean shouldRenderInspectorPanel() {
-        return inspectorStudioPanel != null && inspectorPanel != null && (inspectorPanel.isVisible() || inspectorPanel.getAnimatedWidth() > 1f);
     }
 
     private void finishClose() {
@@ -701,21 +695,21 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
         updateLayout(true);
     }
 
+    @Override
+    protected void onSidePanelWidthChanged() {
+        super.onSidePanelWidthChanged();
+        updateLayout(false);
+    }
+
 
     @Override
     public boolean mouseClicked(ReMouseEvent event) {
+        if (dispatchSidePanelMouseClicked(event)) {
+            return true;
+        }
         double mouseX = event.x();
         double mouseY = event.y();
         ReMouseButton button = event.button();
-        if (inspectorPanel != null) {
-            if (inspectorPanel.mouseClicked(event.retarget(inspectorPanel, mouseX, mouseY))) {
-                return true;
-            }
-            if (inspectorPanel.isMouseOver(mouseX, mouseY)) {
-                setFocusedWidget(null);
-                return true;
-            }
-        }
         if (!isAnyPopupOpen() && (button == ReMouseButton.LEFT || button == ReMouseButton.RIGHT)) {
             int slot = getSlotAt((int) mouseX, (int) mouseY);
             if (slot >= 0) {
@@ -736,12 +730,12 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
 
     @Override
     public boolean mouseDragged(ReMouseEvent event) {
+        if (dispatchSidePanelMouseDragged(event)) {
+            return true;
+        }
         double mouseX = event.x();
         double mouseY = event.y();
         ReMouseButton button = event.button();
-        if (inspectorPanel != null && inspectorPanel.mouseDragged(event.retarget(inspectorPanel, mouseX, mouseY, event.deltaX(), event.deltaY()))) {
-            return true;
-        }
         if (draggingPlacement && button == ReMouseButton.LEFT) {
             if (placementStroke != null) {
                 placementStroke.moveTo((int) mouseX, (int) mouseY);
@@ -763,12 +757,12 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
 
     @Override
     public boolean mouseReleased(ReMouseEvent event) {
+        if (dispatchSidePanelMouseReleased(event)) {
+            return true;
+        }
         double mouseX = event.x();
         double mouseY = event.y();
         ReMouseButton button = event.button();
-        if (inspectorPanel != null && inspectorPanel.mouseReleased(event.retarget(inspectorPanel, mouseX, mouseY))) {
-            return true;
-        }
         if (draggingPlacement && button == ReMouseButton.LEFT) {
             finishPlacementDrag();
             return true;
@@ -782,14 +776,6 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
 
 
     @Override
-    public boolean mouseScrolled(ReScrollEvent event) {
-        if (inspectorPanel != null && inspectorPanel.mouseScrolled(event.retarget(inspectorPanel, event.x(), event.y()))) {
-            return true;
-        }
-        return super.mouseScrolled(event);
-    }
-
-    @Override
     public boolean keyPressed(ReKeyEvent event) {
         if (handleStudioSaveShortcut(event)) {
             return true;
@@ -797,14 +783,11 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
         if (handleStudioHistoryShortcut(event)) {
             return true;
         }
-        if (inspectorPanel != null && inspectorPanel.keyPressed(event.retarget(inspectorPanel))) {
+        if (super.keyPressed(event)) {
             return true;
         }
         if (event.key() == ReKey.ESCAPE) {
             requestClose();
-            return true;
-        }
-        if (super.keyPressed(event)) {
             return true;
         }
         if (selectedElement != null && (event.key() == ReKey.DELETE || event.key() == ReKey.BACKSPACE)) {
@@ -816,14 +799,6 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
             }
         }
         return false;
-    }
-
-    @Override
-    public boolean textInput(ReTextInputEvent event) {
-        if (inspectorPanel != null && inspectorPanel.textInput(event.retarget(inspectorPanel))) {
-            return true;
-        }
-        return super.textInput(event);
     }
 
     private int mouseButtonCode(ReMouseEvent event) {
@@ -2093,7 +2068,7 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
     }
 
     private void updateLayout(boolean force) {
-        int inspectorWidth = inspectorPanel != null ? Math.round(inspectorPanel.getAnimatedWidth()) : 0;
+        int inspectorWidth = inspectorPanel != null ? inspectorPanel.layoutWidth(0) : 0;
         if (!force && width == lastWidth && height == lastHeight && inspectorWidth == lastInspectorWidth) {
             return;
         }

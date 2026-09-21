@@ -13,6 +13,7 @@ import restudio.resync.flow.inspector.InspectorOptionSource;
 import restudio.resync.flow.inspector.OptionQuerySchemaV1;
 import restudio.resync.flow.protocol.OptionItem;
 import restudio.resync.flow.protocol.OptionQuery;
+import restudio.resync.flow.type.TypeExpr;
 import restudio.resync.flow.type.TypedValue;
 
 import java.util.ArrayList;
@@ -70,18 +71,60 @@ public final class OptionCatalogLoader {
         return automaticCoreRequest(client, source, currentResource, context, dependencies, search);
     }
 
-    static Optional<CoreRequest> automaticCoreRequest(ReSyncFlowClient client,
-                                                       ContractRef<InspectorFieldId> source,
-                                                       ServerResourceLocator currentResource,
-                                                       Map<String, TypedValue> context,
-                                                       Map<String, TypedValue> dependencies,
-                                                       String search) {
+    public static Optional<CoreRequest> automaticCoreRequest(ReSyncFlowClient client,
+                                                              ContractRef<InspectorFieldId> source,
+                                                              ServerResourceLocator currentResource,
+                                                              Map<String, TypedValue> context,
+                                                              Map<String, TypedValue> dependencies,
+                                                              String search) {
         return client == null ? Optional.empty()
             : client.automaticCoreOptionRequest(source, currentResource, context, dependencies, search);
     }
 
+    public static CoreQueryValues automaticValues(InspectorOptionSource source, String nodeType,
+                                                   Map<String, TypedValue> pinValues) {
+        Objects.requireNonNull(source, "Option source is required");
+        Map<String, TypedValue> values = pinValues != null ? pinValues : Map.of();
+        Map<String, TypedValue> context = new LinkedHashMap<>();
+        Map<String, TypedValue> dependencies = new LinkedHashMap<>();
+        source.querySchema().context().forEach((key, field) -> {
+            TypedValue value = automaticValue(key, field.type(), nodeType, values);
+            if (value != null) {
+                context.put(key, value);
+            }
+        });
+        source.querySchema().dependencies().forEach((key, field) -> {
+            TypedValue value = automaticValue(key, field.type(), nodeType, values);
+            if (value != null) {
+                dependencies.put(key, value);
+            }
+        });
+        return new CoreQueryValues(context, dependencies);
+    }
+
+    private static TypedValue automaticValue(String key, TypeExpr type, String nodeType,
+                                             Map<String, TypedValue> pinValues) {
+        if ("$nodeType".equals(key)) {
+            return TypedValue.value(type, nodeType != null ? nodeType : "");
+        }
+        if ("$pin".equals(key)) {
+            return null;
+        }
+        TypedValue value = pinValues.get(key);
+        if (value == null || !value.type().equals(type) || value.state() == TypedValue.State.ABSENT) {
+            return null;
+        }
+        return value.state() != TypedValue.State.NULL || type instanceof TypeExpr.OptionalType ? value : null;
+    }
+
     public static CoreSnapshot snapshot(CoreRequest request) {
         return snapshot(request, CoreRequestTransport.INSTANCE, OptionCatalogCache.getInstance());
+    }
+
+    public static CoreSnapshot snapshot(ReSyncFlowClient client, CoreRequest request) {
+        return snapshot(request, (candidate, forceRefresh) -> client != null
+            ? client.requestCoreOptionCatalogOutcome(candidate, forceRefresh) : CoreRequestOutcome.REJECTED,
+            OptionCatalogCache.getInstance());
     }
 
     public static CoreSnapshot snapshot(CoreRequest request, CoreRequests requests, OptionCatalogCache cache) {
@@ -109,6 +152,11 @@ public final class OptionCatalogLoader {
     public static boolean refresh(CoreRequest request) {
         return request != null && request.automaticSupported()
             && CoreRequestTransport.INSTANCE.request(request, true) == CoreRequestOutcome.STARTED;
+    }
+
+    public static boolean refresh(ReSyncFlowClient client, CoreRequest request) {
+        return client != null && request != null && request.automaticSupported()
+            && client.requestCoreOptionCatalogOutcome(request, true) == CoreRequestOutcome.STARTED;
     }
 
     public static void preload(String serverId, String source) {
@@ -384,6 +432,13 @@ public final class OptionCatalogLoader {
 
         private static boolean automaticallyFilled(Map<String, OptionQuerySchemaV1.Field> fields) {
             return fields.values().stream().allMatch(field -> !field.required() || field.defaultValue() != null);
+        }
+    }
+
+    public record CoreQueryValues(Map<String, TypedValue> context, Map<String, TypedValue> dependencies) {
+        public CoreQueryValues {
+            context = context == null || context.isEmpty() ? Map.of() : Map.copyOf(context);
+            dependencies = dependencies == null || dependencies.isEmpty() ? Map.of() : Map.copyOf(dependencies);
         }
     }
 

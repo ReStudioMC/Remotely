@@ -28,7 +28,7 @@ public class StudioPanel {
 
     public StudioPanel(ReScreen screen, String id) {
         this.screen = screen;
-        this.sidePanel = screen.createSidePanel(id).collapsible("Studio Panel");
+        this.sidePanel = screen.createSidePanel(id).collapsible("Studio Panel").renderedByOwner();
         this.state = new ReSyncStudioPanelState();
         sidePanel.right()
             .minWidth(ReSyncStudioPanelState.MIN_WIDTH)

@@ -145,6 +145,26 @@ class ReSyncCatalogPublicationReceiptHandlerTest {
     }
 
     @Test
+    void nodeOnlyPublicationPersistsWhenTheClientSupportsAuthoring(@TempDir Path tempDir) {
+        Path path = tempDir.resolve("cache.json");
+        ReSyncCatalogPublicationCache cache = new ReSyncCatalogPublicationCache(
+            DesktopReSyncStorage.fromKey(path));
+        CatalogCachePublication publication = publication(new CatalogCacheKey(SERVER, 17,
+            new ContentHash("7".repeat(64)), BINDING_HASH, VERSION), 23, "node-only");
+        ReSyncCatalogPublicationProjection projection = new ReSyncCatalogPublicationProjection(SERVER, cache);
+        ReSyncCatalogPublicationReceiptHandler handler = new ReSyncCatalogPublicationReceiptHandler(SERVER, SESSION,
+            projection, new ReSyncCatalogAuthoringProjection(SERVER), cache, List.of("catalog-authoring"));
+        byte[] bytes = new CatalogCachePublicationCodec().encodeBytes(publication);
+        CatalogPublicationReceipt receipt = CatalogPublicationReceipt.pending(SESSION, SESSION_OWNER, publication)
+            .dispatched().clientReceived(publication.key(), publication.revision()).receipt().orElseThrow();
+
+        assertTrue(handler.apply(receipt, publication, bytes).applied());
+        assertEquals(ReSyncCatalogPublicationReceiptHandler.PersistenceStatus.STORED,
+            handler.cachePersistenceCompletion().join().status());
+        assertTrue(cache.latest(SERVER).orElseThrow().authoringCapabilities().isEmpty());
+    }
+
+    @Test
     void rejectedFinalPublisherRestoresTheExactPreparedProjection() {
         CatalogCacheKey key = new CatalogCacheKey(SERVER, 8, new ContentHash("8".repeat(64)), BINDING_HASH, VERSION);
         CatalogCachePublication first = publication(key, 14, "first");

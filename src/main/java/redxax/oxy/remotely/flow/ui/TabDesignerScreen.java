@@ -21,8 +21,6 @@ import restudio.rescreen.platform.IDrawContext;
 import restudio.rescreen.platform.input.ReKey;
 import restudio.rescreen.platform.input.ReKeyEvent;
 import restudio.rescreen.platform.input.ReMouseEvent;
-import restudio.rescreen.platform.input.ReScrollEvent;
-import restudio.rescreen.platform.input.ReTextInputEvent;
 import restudio.rescreen.ui.core.Screen;
 import restudio.rescreen.ui.core.ScreenManager;
 import restudio.rescreen.ui.desktop.DesktopWindowBehaviorProvider;
@@ -384,19 +382,25 @@ public class TabDesignerScreen extends StudioScreen implements DesktopWindowBeha
         renderPreview(context);
     }
 
-
     @Override
     public boolean mouseClicked(ReMouseEvent event) {
-        if (inspectorPanel != null && inspectorPanel.mouseClicked(event.retarget(inspectorPanel, event.x(), event.y()))) {
+        if (dispatchSidePanelMouseClicked(event)) {
             return true;
         }
         return super.mouseClicked(event);
     }
 
+    @Override
+    public boolean mouseDragged(ReMouseEvent event) {
+        if (dispatchSidePanelMouseDragged(event)) {
+            return true;
+        }
+        return super.mouseDragged(event);
+    }
 
     @Override
     public boolean mouseReleased(ReMouseEvent event) {
-        if (inspectorPanel != null && inspectorPanel.mouseReleased(event.retarget(inspectorPanel, event.x(), event.y()))) {
+        if (dispatchSidePanelMouseReleased(event)) {
             return true;
         }
         return super.mouseReleased(event);
@@ -404,28 +408,8 @@ public class TabDesignerScreen extends StudioScreen implements DesktopWindowBeha
 
 
     @Override
-    public boolean mouseDragged(ReMouseEvent event) {
-        if (inspectorPanel != null && inspectorPanel.mouseDragged(event.retarget(inspectorPanel, event.x(), event.y(), event.deltaX(), event.deltaY()))) {
-            return true;
-        }
-        return super.mouseDragged(event);
-    }
-
-
-    @Override
-    public boolean mouseScrolled(ReScrollEvent event) {
-        if (inspectorPanel != null && inspectorPanel.mouseScrolled(event.retarget(inspectorPanel, event.x(), event.y()))) {
-            return true;
-        }
-        return super.mouseScrolled(event);
-    }
-
-    @Override
     public boolean keyPressed(ReKeyEvent event) {
         if (handleStudioSaveShortcut(event)) {
-            return true;
-        }
-        if (inspectorPanel != null && inspectorPanel.keyPressed(event.retarget(inspectorPanel))) {
             return true;
         }
         if (super.keyPressed(event)) {
@@ -437,15 +421,6 @@ public class TabDesignerScreen extends StudioScreen implements DesktopWindowBeha
         }
         return false;
     }
-
-    @Override
-    public boolean textInput(ReTextInputEvent event) {
-        if (inspectorPanel != null && inspectorPanel.textInput(event.retarget(inspectorPanel))) {
-            return true;
-        }
-        return super.textInput(event);
-    }
-
 
     private void buildHeader() {
         header().reset();
@@ -586,7 +561,7 @@ public class TabDesignerScreen extends StudioScreen implements DesktopWindowBeha
     }
 
     private int getPreviewAreaWidth() {
-        int rightWidth = inspectorPanel != null ? (int) inspectorPanel.getAnimatedWidth() : 0;
+        int rightWidth = inspectorPanel != null ? inspectorPanel.layoutWidth(0) : 0;
         int availableWidth = width - rightWidth - PANEL_PADDING * 2;
         return Math.max(2, availableWidth);
     }

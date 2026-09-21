@@ -3,6 +3,7 @@ package redxax.oxy.remotely.ui.collaboration;
 import redxax.oxy.remotely.util.BrowserSafeState;
 
 import redxax.oxy.remotely.collaboration.CollaborationService;
+import redxax.oxy.remotely.data.player.model.PlayerAvatarUrl;
 import restudio.rescreen.ui.core.ScreenManager;
 import restudio.rescreen.util.Identifier;
 
@@ -45,9 +46,6 @@ public final class CollaborationAvatarResolver implements CollaborationOverlay.A
             return "";
         }
         String subject = avatar.isBlank() ? identity.displayName() : avatar;
-        if (subject == null || subject.isBlank()) {
-            return "";
-        }
-        return "https://mc-heads.net/avatar/" + subject.replaceAll("[^A-Za-z0-9._-]", "_") + "/64.png";
+        return PlayerAvatarUrl.resolve(subject, "", 64);
     }
 }

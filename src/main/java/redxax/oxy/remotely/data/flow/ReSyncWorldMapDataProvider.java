@@ -8,6 +8,7 @@ import redxax.oxy.remotely.data.flow.player.PlayerFacetState;
 import redxax.oxy.remotely.data.flow.world.WorldMapCoordinate;
 import redxax.oxy.remotely.data.flow.world.WorldMapDrawing;
 import redxax.oxy.remotely.data.flow.world.WorldMapSnapshot;
+import redxax.oxy.remotely.data.player.model.PlayerAvatarUrl;
 import restudio.rebase.minecraft.MinecraftPlayerLocation;
 import restudio.rescreen.platform.Async;
 import restudio.rebase.ui.worldmap.WorldMapChunkSnapshot;
@@ -113,12 +114,11 @@ public final class ReSyncWorldMapDataProvider implements WorldMapDataProvider, A
         if (closed || manager == null || player == null) {
             return Async.completed(null);
         }
-        String subject = player.uuid() != null ? player.uuid().toString() : player.name();
-        if (subject == null || subject.isBlank()) {
+        String source = PlayerAvatarUrl.resolve(player.name(), player.uuid(), 64);
+        if (source.isBlank()) {
             return Async.completed(null);
         }
-        String safeSubject = subject.replaceAll("[^A-Za-z0-9._-]", "_");
-        return Async.completed(manager.getApplicationHost().registerRemoteImage("https://mc-heads.net/avatar/" + safeSubject + "/64.png"));
+        return Async.completed(manager.getApplicationHost().registerRemoteImage(source));
     }
 
     @Override

@@ -12,6 +12,7 @@ import redxax.oxy.remotely.data.integrations.luckperms.ReSyncLuckPermsNetworkCli
 import redxax.oxy.remotely.data.integrations.luckperms.ReSyncLuckPermsNetworkClient.DistributionResult;
 import redxax.oxy.remotely.data.integrations.luckperms.ReSyncLuckPermsNetworkClient.Snapshot;
 import redxax.oxy.remotely.data.integrations.luckperms.ReSyncLuckPermsNetworkClient.TargetResult;
+import redxax.oxy.remotely.data.player.model.PlayerAvatarUrl;
 import redxax.oxy.remotely.flow.ui.OptionCatalogSelector;
 import restudio.rescreen.theme.ThemeManager;
 import restudio.rescreen.ui.core.Screen;
@@ -379,7 +380,7 @@ public final class LuckPermsDashboardScreen extends ReScreen {
                 return created;
             });
             updateUserEntry(user, entry);
-            requestUserFace(user.uniqueId(), displayUser(user), entry::setGeneratedIcon);
+            requestUserFace(user.uniqueId(), user.username(), entry::setGeneratedIcon);
             entry.visible = true;
         }
         userCursor = page.nextCursor();
@@ -1219,11 +1220,13 @@ public final class LuckPermsDashboardScreen extends ReScreen {
     }
 
     private void requestUserFace(String uniqueId, String username, Consumer<Identifier> consumer) {
-        if (uniqueId == null || uniqueId.isBlank() || consumer == null) return;
-        String key = uniqueId.replace("-", "").replaceAll("[^A-Za-z0-9_]", "");
-        if (key.isBlank() && username != null) key = username.replaceAll("[^A-Za-z0-9_]", "");
-        if (key.isBlank()) return;
-        Identifier face = ScreenManager.getInstance().imageAssets().registerRemoteImage("https://mc-heads.net/avatar/" + key + "/32");
+        if (consumer == null) return;
+        String playerId = uniqueId == null ? "" : uniqueId.trim();
+        String playerName = username == null ? "" : username.trim();
+        if (!playerId.isBlank() && (playerName.equalsIgnoreCase(playerId) || playerName.equalsIgnoreCase(shortId(playerId)))) playerName = "";
+        String source = PlayerAvatarUrl.resolve(playerName, playerId, 32);
+        if (source.isBlank()) return;
+        Identifier face = ScreenManager.getInstance().imageAssets().registerRemoteImage(source);
         if (face != null) consumer.accept(face);
     }
 

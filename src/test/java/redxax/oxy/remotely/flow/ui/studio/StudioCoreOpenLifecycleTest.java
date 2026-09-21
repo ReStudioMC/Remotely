@@ -81,6 +81,23 @@ final class StudioCoreOpenLifecycleTest {
     }
 
     @Test
+    void knownGraphPublicationCanLoadPastTheConnectionDeadline() {
+        manager.activationReason = "Core graph authoring publication is loading.";
+        manager.activationRevision = 7L;
+        TestStudioScreen screen = new TestStudioScreen(SERVER.canonicalText(), 20_000L);
+
+        screen.beginOpen();
+        screen.advanceTo(35_000L);
+        screen.drain();
+        screen.advanceTo(60_000L);
+        screen.drain();
+
+        assertEquals(3, screen.requests.get());
+        assertEquals(0, screen.failures.get());
+        assertTrue(screen.hasPendingCoreOpenIntent("flow", RESOURCE.id()));
+    }
+
+    @Test
     void authoritativeSessionPreparesUntilExactEditorReadiness() {
         TestStudioScreen screen = new TestStudioScreen(SERVER.canonicalText(), 30_000L);
         screen.retainActiveDocument();
@@ -530,6 +547,7 @@ final class StudioCoreOpenLifecycleTest {
         private ReSyncFlowClient.CoreGraphActivationState activationState =
             ReSyncFlowClient.CoreGraphActivationState.PENDING;
         private String activationReason = "The Core graph connection is unavailable.";
+        private long activationRevision;
         private final List<Boolean> persistedActivations = new ArrayList<>();
 
         private CoreAuthorityManager() {
@@ -548,7 +566,7 @@ final class StudioCoreOpenLifecycleTest {
                 ? ReSyncFlowClient.CoreGraphActivationState.LIVE : activationState;
             return new ReSyncFlowClient.CoreGraphActivationOutcome(state,
                 state == ReSyncFlowClient.CoreGraphActivationState.LIVE ? "" : activationReason,
-                state == ReSyncFlowClient.CoreGraphActivationState.PENDING ? 0L : 1L);
+                state == ReSyncFlowClient.CoreGraphActivationState.PENDING ? activationRevision : 1L);
         }
 
         @Override

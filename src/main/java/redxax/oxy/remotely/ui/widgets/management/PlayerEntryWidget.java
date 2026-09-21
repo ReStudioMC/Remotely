@@ -5,6 +5,7 @@ import redxax.oxy.remotely.util.BrowserSafeState;
 import redxax.oxy.remotely.data.integrations.luckperms.ReSyncLuckPermsClient;
 import restudio.resync.permissions.LuckPermsManagementContract.PageRequest;
 import redxax.oxy.remotely.data.managed.PlayerAction;
+import redxax.oxy.remotely.data.player.model.PlayerAvatarUrl;
 import redxax.oxy.remotely.data.player.model.UnifiedPlayer;
 import redxax.oxy.remotely.RemotelyClient;
 import restudio.rescreen.platform.IDrawContext;
@@ -30,7 +31,8 @@ public class PlayerEntryWidget extends MountableButtonWidget {
     private final PlayerManagerController controller;
     private final Identifier opIcon = Identifier.icon("op.png");
     private final Identifier deopIcon = Identifier.icon("deop.png");
-    private boolean faceRequested = false;
+    private String faceName;
+    private boolean faceRequested;
 
     private String cachedPrefix = "";
     private String cachedSuffix = "";
@@ -163,15 +165,16 @@ public class PlayerEntryWidget extends MountableButtonWidget {
     @Override
     public void tick() {
         super.tick();
-        if (getIconId() == null && !faceRequested) {
-            faceRequested = true;
-            String uuid = player.getUuid() == null ? "" : player.getUuid().toString();
-            if (!uuid.isBlank() && RemotelyClient.INSTANCE != null && RemotelyClient.INSTANCE.getHost() != null) {
-                Identifier fetchedFaceId = RemotelyClient.INSTANCE.getHost().registerRemoteImage("https://mc-heads.net/avatar/" + uuid + "/64");
-                if (fetchedFaceId != null) {
-                    setGeneratedIcon(fetchedFaceId);
-                    this.iconSize = 26;
-                }
+        String nextFaceName = player.getName();
+        if ((!faceRequested || !Objects.equals(faceName, nextFaceName))
+                && RemotelyClient.INSTANCE != null && RemotelyClient.INSTANCE.getHost() != null) {
+            String source = PlayerAvatarUrl.resolve(nextFaceName, player.getUuid(), 64);
+            Identifier fetchedFaceId = source.isBlank() ? null : RemotelyClient.INSTANCE.getHost().registerRemoteImage(source);
+            if (fetchedFaceId != null) {
+                faceName = nextFaceName;
+                faceRequested = true;
+                setGeneratedIcon(fetchedFaceId);
+                this.iconSize = 26;
             }
         }
 

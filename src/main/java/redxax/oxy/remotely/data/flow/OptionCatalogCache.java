@@ -38,6 +38,7 @@ import restudio.rescreen.platform.Clock;
 public class OptionCatalogCache {
     private static final int CACHE_SCHEMA_VERSION = 2;
     private static final long REQUEST_TIMEOUT_MILLIS = 10_000L;
+    private static final long CORE_REQUEST_TIMEOUT_MILLIS = 20_000L;
     static final int MAX_CORE_KEYS = 256;
     static final int MAX_CORE_ITEMS = 100_000;
     private static final String KEY_SEPARATOR = "\0";
@@ -45,6 +46,7 @@ public class OptionCatalogCache {
     private final Gson gson = new GsonBuilder().create();
     private final Storage storage;
     private final Work work;
+    private final Clock clock;
     private final boolean asyncPersistence;
     private final int maxCoreKeys;
     private final int maxCoreItems;
@@ -67,13 +69,13 @@ public class OptionCatalogCache {
 
     private OptionCatalogCache() {
         this(new ReSyncBackedStorage(ReSyncStorage.legacy("remotely.option-catalogs")),
-            DesktopWork.INSTANCE, true);
+            DesktopWork.INSTANCE, true, Clock.system());
     }
 
     public static synchronized OptionCatalogCache install(ReSyncStorage storage, Clock clock) {
         OptionCatalogCache previous = INSTANCE;
         INSTANCE = new OptionCatalogCache(new ReSyncBackedStorage(storage != null ? storage : ReSyncStorage.memory()),
-            DesktopWork.INSTANCE, true);
+            DesktopWork.INSTANCE, true, clock);
         return previous;
     }
 
@@ -82,31 +84,41 @@ public class OptionCatalogCache {
     }
 
     OptionCatalogCache(ReSyncStorage storage) {
-        this(new ReSyncBackedStorage(storage != null ? storage : ReSyncStorage.memory()), Work.direct(), false);
+        this(new ReSyncBackedStorage(storage != null ? storage : ReSyncStorage.memory()), Work.direct(), false,
+            Clock.system());
     }
 
     OptionCatalogCache(ReSyncStorage storage, boolean asyncPersistence) {
         this(new ReSyncBackedStorage(storage != null ? storage : ReSyncStorage.memory()),
-            asyncPersistence ? DesktopWork.INSTANCE : Work.direct(), asyncPersistence);
+            asyncPersistence ? DesktopWork.INSTANCE : Work.direct(), asyncPersistence, Clock.system());
     }
 
     OptionCatalogCache(Storage storage) {
-        this(storage, Work.direct(), false);
+        this(storage, Work.direct(), false, Clock.system());
+    }
+
+    OptionCatalogCache(Storage storage, Clock clock) {
+        this(storage, Work.direct(), false, clock);
     }
 
     OptionCatalogCache(Storage storage, int maxCoreKeys, int maxCoreItems) {
-        this(storage, Work.direct(), false, maxCoreKeys, maxCoreItems);
+        this(storage, Work.direct(), false, Clock.system(), maxCoreKeys, maxCoreItems);
     }
 
     OptionCatalogCache(Storage storage, Work work, boolean asyncPersistence) {
-        this(storage, work, asyncPersistence, MAX_CORE_KEYS, MAX_CORE_ITEMS);
+        this(storage, work, asyncPersistence, Clock.system());
     }
 
-    private OptionCatalogCache(Storage storage, Work work, boolean asyncPersistence,
+    private OptionCatalogCache(Storage storage, Work work, boolean asyncPersistence, Clock clock) {
+        this(storage, work, asyncPersistence, clock, MAX_CORE_KEYS, MAX_CORE_ITEMS);
+    }
+
+    private OptionCatalogCache(Storage storage, Work work, boolean asyncPersistence, Clock clock,
                                int maxCoreKeys, int maxCoreItems) {
         this.storage = storage != null ? storage : Storage.none();
         this.work = work != null ? work : Work.direct();
         this.asyncPersistence = asyncPersistence;
+        this.clock = clock != null ? clock : Clock.system();
         if (maxCoreKeys < 1 || maxCoreKeys > MAX_CORE_KEYS || maxCoreItems < 1 || maxCoreItems > MAX_CORE_ITEMS) {
             throw new IllegalArgumentException("Core option cache bounds are invalid");
         }
@@ -131,15 +143,22 @@ public class OptionCatalogCache {
     public CoreAdmission admit(CoreKey key, boolean forceRefresh) {
         Objects.requireNonNull(key, "Core option catalog key is required");
         synchronized (coreLock) {
+            long now = clock.millis();
             CoreEntry entry = coreEntries.get(key);
             if (entry != null) {
-                if (entry.inFlight) {
+                if (entry.inFlight && now - entry.startedAtMillis < CORE_REQUEST_TIMEOUT_MILLIS) {
                     return CoreAdmission.COALESCED;
+                }
+                if (entry.inFlight) {
+                    entry.inFlight = false;
+                    entry.failure = null;
+                    entry.stale = entry.catalog != null;
                 }
                 if (!forceRefresh && entry.catalog != null && !entry.stale) {
                     return CoreAdmission.FRESH;
                 }
                 entry.inFlight = true;
+                entry.startedAtMillis = now;
                 entry.failure = null;
                 entry.stale = entry.catalog != null;
                 return CoreAdmission.STARTED;
@@ -147,7 +166,7 @@ public class OptionCatalogCache {
             if (!makeCoreKeyRoom()) {
                 return CoreAdmission.BUSY;
             }
-            coreEntries.put(key, CoreEntry.started());
+            coreEntries.put(key, CoreEntry.started(now));
             return CoreAdmission.STARTED;
         }
     }
@@ -167,6 +186,7 @@ public class OptionCatalogCache {
                 CoreEntry entry = coreEntries.get(key);
                 if (entry != null && entry.inFlight) {
                     entry.inFlight = false;
+                    entry.startedAtMillis = 0L;
                     entry.failure = "Option Catalog Exceeds Client Capacity";
                     entry.stale = entry.catalog != null;
                 }
@@ -186,6 +206,7 @@ public class OptionCatalogCache {
             }
             if (!makeCoreItemRoom(key, catalog.items().size(), entry.itemCount())) {
                 entry.inFlight = false;
+                entry.startedAtMillis = 0L;
                 entry.failure = "Option Catalog Exceeds Client Capacity";
                 entry.stale = entry.catalog != null;
                 return CoreSettlement.REJECTED;
@@ -195,6 +216,7 @@ public class OptionCatalogCache {
             coreItems += catalog.items().size() - entry.itemCount();
             entry.catalog = catalog;
             entry.inFlight = false;
+            entry.startedAtMillis = 0L;
             entry.stale = false;
             entry.failure = null;
             return changed ? CoreSettlement.STORED : CoreSettlement.UNCHANGED;
@@ -220,6 +242,7 @@ public class OptionCatalogCache {
                 }
                 entry.stale = entry.catalog != null;
                 entry.inFlight = false;
+                entry.startedAtMillis = 0L;
                 entry.failure = null;
                 invalidated.add(key);
             }
@@ -257,7 +280,24 @@ public class OptionCatalogCache {
                 return;
             }
             entry.inFlight = false;
+            entry.startedAtMillis = 0L;
             entry.failure = diagnostic == null || diagnostic.isBlank() ? "Option Catalog Unavailable" : diagnostic;
+            entry.stale = entry.catalog != null;
+        }
+    }
+
+    public void retry(CoreKey key) {
+        if (key == null) {
+            return;
+        }
+        synchronized (coreLock) {
+            CoreEntry entry = coreEntries.get(key);
+            if (entry == null) {
+                return;
+            }
+            entry.inFlight = false;
+            entry.startedAtMillis = 0L;
+            entry.failure = null;
             entry.stale = entry.catalog != null;
         }
     }
@@ -303,6 +343,7 @@ public class OptionCatalogCache {
                 if (serverId.equals(candidate.getKey().serverId()) && candidate.getValue().inFlight) {
                     CoreEntry entry = candidate.getValue();
                     entry.inFlight = false;
+                    entry.startedAtMillis = 0L;
                     entry.failure = diagnostic == null || diagnostic.isBlank()
                         ? "Option Catalog Unavailable" : diagnostic;
                     entry.stale = entry.catalog != null;
@@ -324,6 +365,7 @@ public class OptionCatalogCache {
                 entry.stale = entry.catalog != null;
                 if (entry.inFlight) {
                     entry.inFlight = false;
+                    entry.startedAtMillis = 0L;
                     entry.failure = "The ReSync connection is unavailable";
                 }
             }
@@ -1240,12 +1282,14 @@ public class OptionCatalogCache {
     private static final class CoreEntry {
         private CompletedCoreCatalog catalog;
         private boolean inFlight;
+        private long startedAtMillis;
         private boolean stale;
         private String failure;
 
-        private static CoreEntry started() {
+        private static CoreEntry started(long startedAtMillis) {
             CoreEntry entry = new CoreEntry();
             entry.inFlight = true;
+            entry.startedAtMillis = startedAtMillis;
             return entry;
         }
 

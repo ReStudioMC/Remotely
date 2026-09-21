@@ -35,8 +35,6 @@ import restudio.rescreen.platform.input.ReKey;
 import restudio.rescreen.platform.input.ReKeyEvent;
 import restudio.rescreen.platform.input.ReMouseButton;
 import restudio.rescreen.platform.input.ReMouseEvent;
-import restudio.rescreen.platform.input.ReScrollEvent;
-import restudio.rescreen.platform.input.ReTextInputEvent;
 import restudio.rescreen.game.MinecraftRenderItem;
 import restudio.rescreen.render.Render;
 import restudio.rescreen.theme.ThemeManager;
@@ -393,20 +391,20 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
         updateLayout(true);
     }
 
+    @Override
+    protected void onSidePanelWidthChanged() {
+        super.onSidePanelWidthChanged();
+        updateLayout(false);
+    }
+
 
     @Override
     public boolean mouseClicked(ReMouseEvent event) {
+        if (dispatchSidePanelMouseClicked(event)) {
+            return true;
+        }
         double mouseX = event.x();
         double mouseY = event.y();
-        if (inspector != null) {
-            if (inspector.mouseClicked(event.retarget(inspector, mouseX, mouseY))) {
-                return true;
-            }
-            if (inspector.isMouseOver(mouseX, mouseY)) {
-                setFocusedWidget(null);
-                return true;
-            }
-        }
         if (event.button() == ReMouseButton.LEFT && mouseClickedPreview(mouseX, mouseY)) {
             setFocusedWidget(null);
             return true;
@@ -437,32 +435,6 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
 
 
     @Override
-    public boolean mouseReleased(ReMouseEvent event) {
-        if (inspector != null && inspector.mouseReleased(event.retarget(inspector, event.x(), event.y()))) {
-            return true;
-        }
-        return super.mouseReleased(event);
-    }
-
-
-    @Override
-    public boolean mouseDragged(ReMouseEvent event) {
-        if (inspector != null && inspector.mouseDragged(event.retarget(inspector, event.x(), event.y(), event.deltaX(), event.deltaY()))) {
-            return true;
-        }
-        return super.mouseDragged(event);
-    }
-
-
-    @Override
-    public boolean mouseScrolled(ReScrollEvent event) {
-        if (inspector != null && inspector.mouseScrolled(event.retarget(inspector, event.x(), event.y()))) {
-            return true;
-        }
-        return super.mouseScrolled(event);
-    }
-
-    @Override
     public boolean keyPressed(ReKeyEvent event) {
         if (handleStudioSaveShortcut(event)) {
             return true;
@@ -470,28 +442,17 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
         if (handleStudioHistoryShortcut(event)) {
             return true;
         }
-        if (inspector != null && inspector.keyPressed(event.retarget(inspector))) {
+        if (super.keyPressed(event)) {
             return true;
         }
         if (event.key() == ReKey.ESCAPE) {
             requestClose();
             return true;
         }
-        if (super.keyPressed(event)) {
-            return true;
-        }
         if ((event.key() == ReKey.DELETE || event.key() == ReKey.BACKSPACE) && !isStudioKeyboardInputFocused()) {
             return deleteSelection();
         }
         return false;
-    }
-
-    @Override
-    public boolean textInput(ReTextInputEvent event) {
-        if (inspector != null && inspector.textInput(event.retarget(inspector))) {
-            return true;
-        }
-        return super.textInput(event);
     }
 
     private void buildHeader() {
@@ -588,7 +549,7 @@ public class DialogDesignerScreen extends StudioScreen implements DesktopWindowB
     }
 
     private void updateLayout(boolean force) {
-        int inspectorWidth = inspector != null ? Math.round(inspector.getAnimatedWidth()) : 0;
+        int inspectorWidth = inspector != null ? inspector.layoutWidth(0) : 0;
         if (!force && width == lastWidth && height == lastHeight && inspectorWidth == lastInspectorWidth) {
             return;
         }

@@ -10,6 +10,7 @@ public record ReSyncResourceDragPayload(String type, String id, String displayNa
     public static final String SCOREBOARD = "scoreboard";
     public static final String TAB = "tab";
     public static final String CHAT = "chat";
+    public static final String COMPONENT_BUILDER = "component_builder";
     public static final String MOTD_PROFILE = "motd_profile";
     public static final String MESSAGE_RULE = "message_rule";
     public static final String RECIPE_DEFINITION = "recipe_definition";
@@ -39,6 +40,7 @@ public record ReSyncResourceDragPayload(String type, String id, String displayNa
 
     public boolean isLiteralAssignable() {
         return FLOW.equals(type) || FUNCTION.equals(type) || COMMAND.equals(type) || CUSTOM_CONTENT.equals(type) || GUI.equals(type) || SCOREBOARD.equals(type) || TAB.equals(type) || CHAT.equals(type)
+            || COMPONENT_BUILDER.equals(type)
             || MOTD_PROFILE.equals(type) || MESSAGE_RULE.equals(type)
             || RECIPE_DEFINITION.equals(type) || TEXT_TEMPLATE.equals(type) || ADVANCEMENT_TREE.equals(type) || DIALOG.equals(type)
             || TRADE_PROFILE.equals(type) || NPC_DEFINITION.equals(type) || LOOT_TABLE.equals(type)

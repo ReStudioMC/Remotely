@@ -31,6 +31,9 @@ class ReSyncContentBrowserRebuildGenerationTest {
             "src/main/java/redxax/oxy/remotely/flow/ui/studio/StudioScreen.java"));
 
         assertTrue(browser.contains("screen.openDefinitions(AutomationDefinitionDraft.VARIABLE)"));
+        assertTrue(browser.contains("showCreateResourcePopup(ReSyncResourceDragPayload.VARIABLE_DEFINITION"));
+        assertTrue(browser.contains("showCreateResourcePopup(ReSyncResourceDragPayload.TIMER_DEFINITION"));
+        assertTrue(browser.contains("showCreateResourcePopup(ReSyncResourceDragPayload.SCHEDULE_DEFINITION"));
         assertTrue(browser.contains("!AutomationDefinitionDraft.supports(resource.getType())"));
         assertFalse(browser.contains("boolean subresources"));
         assertFalse(studio.contains("ReSyncSubresourcesWidget"));

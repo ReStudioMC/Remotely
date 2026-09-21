@@ -8,6 +8,8 @@ import restudio.resync.contract.canonical.CanonicalCodec;
 import restudio.resync.contract.canonical.JsonValue;
 import restudio.resync.flow.canonical.CanonicalLimits;
 import restudio.resync.flow.cache.CatalogCacheKey;
+import restudio.resync.flow.cache.CatalogAuthoringPublication;
+import restudio.resync.flow.cache.CatalogAuthoringPublicationCodec;
 import restudio.resync.flow.cache.CatalogCachePublication;
 import restudio.resync.flow.cache.CatalogCachePublicationCodec;
 import restudio.resync.flow.identity.ContractRef;
@@ -56,6 +58,7 @@ public final class ReSyncCatalogPublicationCache {
     private final Object pathLock;
     private final int maxSnapshots;
     private final CatalogCachePublicationCodec codec = new CatalogCachePublicationCodec();
+    private final CatalogAuthoringPublicationCodec authoringCodec = new CatalogAuthoringPublicationCodec();
     private final ArrayDeque<PendingStore> pendingStores = new ArrayDeque<>();
     private volatile Map<String, Map<String, CachedPublication>> snapshots = Map.of();
     private volatile boolean loaded;
@@ -203,8 +206,16 @@ public final class ReSyncCatalogPublicationCache {
 
     private boolean storePrepared(ServerId serverId, CatalogCachePublication publication, byte[] canonicalBytes,
                                    CatalogCachePublication hydrationProjection) {
+        return storePrepared(serverId, publication, canonicalBytes, hydrationProjection, null, List.of());
+    }
+
+    private boolean storePrepared(ServerId serverId, CatalogCachePublication publication, byte[] canonicalBytes,
+                                  CatalogCachePublication hydrationProjection,
+                                  CatalogAuthoringPublication authoringPublication,
+                                  List<String> authoringCapabilities) {
         validatedStores.incrementAndGet();
-        CachedPublication candidate = validate(serverId, publication, canonicalBytes, hydrationProjection);
+        CachedPublication candidate = validate(serverId, publication, canonicalBytes, hydrationProjection,
+            authoringPublication, authoringCapabilities);
         if (candidate == null) {
             return false;
         }
@@ -238,11 +249,16 @@ public final class ReSyncCatalogPublicationCache {
                     return false;
                 }
                 if (candidate.publication().revision() == previous.publication().revision()) {
-                    if (!sameCachedPublication(previous, candidate)) {
+                    if (sameCachedPublication(previous, candidate)) {
+                        snapshots = current;
+                        return true;
+                    }
+                    if (!sameNodePublication(previous, candidate)
+                        || previous.authoringPublication() != null && candidate.authoringPublication() == null
+                        || previous.authoringPublication() != null && candidate.authoringPublication() != null
+                            && Objects.equals(previous.authoringCapabilities(), candidate.authoringCapabilities())) {
                         return false;
                     }
-                    snapshots = current;
-                    return true;
                 }
                 if (candidate.publication().kind() == CatalogCachePublication.Kind.DELTA
                     && (!deltaAdvances(previous, candidate.publication())
@@ -265,7 +281,10 @@ public final class ReSyncCatalogPublicationCache {
             next.put(serverKey, serverSnapshots);
             trimServers(next, serverKey);
             PreparedReplacement replacement = fitSnapshots(next, serverKey, cacheKey);
-            return replacement != null && replaceSnapshots(replacement.snapshots(), replacement.encoded());
+            if (replacement == null) {
+                return false;
+            }
+            return replaceSnapshots(replacement.snapshots(), replacement.encoded());
         }
     }
 
@@ -288,34 +307,44 @@ public final class ReSyncCatalogPublicationCache {
 
     synchronized Async<Persistence> storeAsync(ServerId serverId,
                                                             ReSyncCatalogPublicationProjection.Snapshot snapshot) {
+        return storeAsync(serverId, snapshot, null, List.of());
+    }
+
+    synchronized Async<Persistence> storeAsync(ServerId serverId,
+                                                ReSyncCatalogPublicationProjection.Snapshot snapshot,
+                                                ReSyncCatalogAuthoringProjection.Snapshot authoring,
+                                                List<String> authoringCapabilities) {
         Objects.requireNonNull(serverId, "Server ID is required");
         Objects.requireNonNull(snapshot, "Catalog publication snapshot is required");
         CatalogCachePublication publication = snapshot.publication();
         return enqueueStore(publication.key(), publication.revision(), () -> storeProjectionSnapshot(serverId,
-            snapshot));
+            snapshot, authoring, authoringCapabilities));
     }
 
-    private boolean storeProjectionSnapshot(ServerId serverId, ReSyncCatalogPublicationProjection.Snapshot snapshot) {
+    private boolean storeProjectionSnapshot(ServerId serverId, ReSyncCatalogPublicationProjection.Snapshot snapshot,
+                                            ReSyncCatalogAuthoringProjection.Snapshot authoring,
+                                            List<String> authoringCapabilities) {
         CatalogCachePublication publication = snapshot.publication();
         synchronized (pathLock) {
             Map<String, CachedPublication> serverSnapshots = currentSnapshots().get(serverId.canonicalText());
             CachedPublication existing = serverSnapshots == null ? null
                 : serverSnapshots.get(publication.key().canonicalText());
             if (existing != null && existing.publication().revision() == publication.revision()) {
-                boolean exact = existing.matches(snapshot);
+                boolean exact = existing.matches(snapshot, authoring, authoringCapabilities);
                 if (exact) {
                     exactReplayStores.incrementAndGet();
                     ReSyncFlowClient.traceLifecycle(serverId.canonicalText(), "catalog_cache_persistence_skipped",
                         "catalogKey", publication.key().canonicalText(), "revision", publication.revision());
+                    return true;
                 }
-                return exact;
             }
             byte[] canonicalBytes = snapshot.canonicalBytes();
             long started = System.nanoTime();
             ReSyncFlowClient.traceLifecycle(serverId.canonicalText(), "catalog_cache_persistence_started",
                 "catalogKey", publication.key().canonicalText(), "revision", publication.revision(),
                 "bytes", canonicalBytes.length);
-            boolean stored = storePrepared(serverId, publication, canonicalBytes, snapshot.hydrationPublication());
+            boolean stored = storePrepared(serverId, publication, canonicalBytes, snapshot.hydrationPublication(),
+                authoring == null ? null : authoring.publication(), authoringCapabilities);
             ReSyncFlowClient.traceLifecycle(serverId.canonicalText(), stored
                     ? "catalog_cache_persistence_stored" : "catalog_cache_persistence_rejected",
                 "catalogKey", publication.key().canonicalText(), "revision", publication.revision(),
@@ -409,7 +438,9 @@ public final class ReSyncCatalogPublicationCache {
     }
 
     private CachedPublication validate(ServerId serverId, CatalogCachePublication publication, byte[] canonicalBytes,
-                                       CatalogCachePublication hydrationProjection) {
+                                       CatalogCachePublication hydrationProjection,
+                                       CatalogAuthoringPublication authoringPublication,
+                                       List<String> authoringCapabilities) {
         if (publication == null || canonicalBytes == null || canonicalBytes.length == 0 || hydrationProjection == null) {
             return null;
         }
@@ -429,6 +460,13 @@ public final class ReSyncCatalogPublicationCache {
             }
             CatalogCachePublication nodePublication = nodePublication(publication);
             CatalogCachePublication nodeHydrationProjection = nodePublication(hydrationProjection);
+            List<String> capabilities = canonicalCapabilities(authoringCapabilities);
+            if (authoringPublication != null && (!nodePublication.key().hasCatalogBinding()
+                || !nodePublication.key().catalogBinding().equals(authoringPublication.binding())
+                || !nodePublication.projectionVersion().equals(authoringPublication.projectionVersion())
+                || !canonicalAuthoring(authoringPublication))) {
+                return null;
+            }
             byte[] nodeCanonicalBytes = codec.encodeBytes(nodePublication);
             byte[] hydrationBytes = codec.encodeBytes(nodeHydrationProjection);
             CatalogCachePublication decodedHydration = codec.decodeBytes(hydrationBytes);
@@ -438,7 +476,7 @@ public final class ReSyncCatalogPublicationCache {
                 return null;
             }
             return new CachedPublication(serverId, nodePublication.key(), nodePublication, nodeHydrationProjection,
-                nodeCanonicalBytes);
+                nodeCanonicalBytes, authoringPublication, capabilities);
         } catch (RuntimeException exception) {
             return null;
         }
@@ -451,6 +489,30 @@ public final class ReSyncCatalogPublicationCache {
         } catch (RuntimeException exception) {
             return false;
         }
+    }
+
+    private boolean canonicalAuthoring(CatalogAuthoringPublication publication) {
+        try {
+            byte[] bytes = authoringCodec.encodeBytes(publication);
+            CatalogAuthoringPublication decoded = authoringCodec.decodeBytes(bytes);
+            return publication.equals(decoded) && Arrays.equals(bytes, authoringCodec.encodeBytes(decoded));
+        } catch (RuntimeException exception) {
+            return false;
+        }
+    }
+
+    private static List<String> canonicalCapabilities(List<String> capabilities) {
+        if (capabilities == null || capabilities.isEmpty()) {
+            return List.of();
+        }
+        List<String> validated = new ArrayList<>(capabilities.size());
+        for (String capability : capabilities) {
+            if (capability == null || capability.isBlank() || !capability.equals(capability.strip())) {
+                throw new IllegalArgumentException("Authoring capability is invalid");
+            }
+            validated.add(capability);
+        }
+        return validated.stream().distinct().sorted().toList();
     }
 
     private CatalogCachePublication nodePublication(CatalogCachePublication publication) {
@@ -613,8 +675,18 @@ public final class ReSyncCatalogPublicationCache {
                 if (!key.equals(publication.key()) || !key.equals(hydrationProjection.key())) {
                     throw new IllegalArgumentException("Catalog publication cache snapshot key mismatch");
                 }
+                CatalogAuthoringPublication authoringPublication = null;
+                List<String> authoringCapabilities = List.of();
+                JsonValue authoringValue = value.value("authoring");
+                if (authoringValue instanceof JsonValue.JsonObject authoringObject
+                    && authoringObject.fields().containsKey("publication")) {
+                    requireFields(authoringObject, Set.of("publication", "capabilities"));
+                    authoringPublication = authoringCodec.decode(authoringObject.value("publication"));
+                    authoringCapabilities = stringList(authoringObject.value("capabilities"),
+                        "Catalog authoring capabilities");
+                }
                 CachedPublication checked = validateDecoded(serverId, publication, publicationValue,
-                    hydrationProjection);
+                    hydrationProjection, authoringPublication, authoringCapabilities);
                 if (checked == null) {
                     throw new IllegalArgumentException("Catalog publication cache snapshot is invalid");
                 }
@@ -665,7 +737,9 @@ public final class ReSyncCatalogPublicationCache {
 
     private CachedPublication validateDecoded(ServerId serverId, CatalogCachePublication publication,
                                               JsonValue publicationValue,
-                                              CatalogCachePublication hydrationProjection) {
+                                              CatalogCachePublication hydrationProjection,
+                                              CatalogAuthoringPublication authoringPublication,
+                                              List<String> authoringCapabilities) {
         try {
             if (publication == null || publicationValue == null || hydrationProjection == null
                 || !serverId.equals(publication.serverId()) || !serverId.equals(hydrationProjection.serverId())
@@ -678,12 +752,16 @@ public final class ReSyncCatalogPublicationCache {
             }
             CatalogCachePublication nodePublication = nodePublication(publication);
             CatalogCachePublication nodeHydration = nodePublication(hydrationProjection);
-            if (!sameProjectionEntries(nodePublication, nodeHydration)) {
+            if (!sameProjectionEntries(nodePublication, nodeHydration)
+                || authoringPublication != null && (!nodePublication.key().hasCatalogBinding()
+                    || !nodePublication.key().catalogBinding().equals(authoringPublication.binding())
+                    || !nodePublication.projectionVersion().equals(authoringPublication.projectionVersion())
+                    || !canonicalAuthoring(authoringPublication))) {
                 return null;
             }
             byte[] canonicalBytes = codec.encodeBytes(nodePublication);
             return new CachedPublication(serverId, nodePublication.key(), nodePublication, nodeHydration,
-                canonicalBytes);
+                canonicalBytes, authoringPublication, canonicalCapabilities(authoringCapabilities));
         } catch (RuntimeException exception) {
             return null;
         }
@@ -761,6 +839,12 @@ public final class ReSyncCatalogPublicationCache {
                     snapshot.put("projection", "publication");
                 } else {
                     snapshot.put("projection", codec.encode(value.hydrationProjection()));
+                }
+                if (value.authoringPublication() != null) {
+                    snapshot.put("authoring", Map.of(
+                        "publication", authoringCodec.encode(value.authoringPublication()),
+                        "capabilities", value.authoringCapabilities()
+                    ));
                 }
                 serverSnapshots.put(cacheEntry.getKey(), snapshot);
             });
@@ -855,6 +939,11 @@ public final class ReSyncCatalogPublicationCache {
                         || !publication.publication().equals(publication.hydrationProjection())) {
                         bytes += codec.encodeBytes(publication.hydrationProjection()).length;
                     }
+                    if (publication.authoringPublication() != null) {
+                        bytes += authoringCodec.encodeBytes(publication.authoringPublication()).length;
+                        bytes += publication.authoringCapabilities().stream()
+                            .mapToLong(value -> value.getBytes(StandardCharsets.UTF_8).length + 8L).sum();
+                    }
                     if (bytes > Integer.MAX_VALUE) {
                         return bytes;
                     }
@@ -895,8 +984,9 @@ public final class ReSyncCatalogPublicationCache {
             if (encoded != null && encoded.length > MAX_CACHE_BYTES) {
                 return false;
             }
-            storage.write("payload", encoded == null ? "" : new String(encoded, StandardCharsets.ISO_8859_1));
-            return true;
+            String payload = encoded == null ? "" : new String(encoded, StandardCharsets.ISO_8859_1);
+            storage.write("payload", payload);
+            return payload.equals(storage.read("payload"));
         } catch (RuntimeException exception) {
             return false;
         }
@@ -937,7 +1027,7 @@ public final class ReSyncCatalogPublicationCache {
                     throw new IllegalArgumentException("Catalog publication cache snapshot identity mismatch");
                 }
                 CachedPublication checkedValue = validate(serverId, value.publication(), value.canonicalBytes(),
-                    value.hydrationProjection());
+                    value.hydrationProjection(), value.authoringPublication(), value.authoringCapabilities());
                 if (checkedValue == null) {
                     throw new IllegalArgumentException("Catalog publication cache snapshot is invalid");
                 }
@@ -1033,6 +1123,16 @@ public final class ReSyncCatalogPublicationCache {
             && first.key().equals(second.key())
             && first.publication().equals(second.publication())
             && first.hydrationProjection().equals(second.hydrationProjection())
+            && Arrays.equals(first.canonicalBytes(), second.canonicalBytes())
+            && Objects.equals(first.authoringPublication(), second.authoringPublication())
+            && first.authoringCapabilities().equals(second.authoringCapabilities());
+    }
+
+    private static boolean sameNodePublication(CachedPublication first, CachedPublication second) {
+        return first.serverId().equals(second.serverId())
+            && first.key().equals(second.key())
+            && first.publication().equals(second.publication())
+            && first.hydrationProjection().equals(second.hydrationProjection())
             && Arrays.equals(first.canonicalBytes(), second.canonicalBytes());
     }
 
@@ -1068,8 +1168,34 @@ public final class ReSyncCatalogPublicationCache {
         }
     }
 
+    private static List<String> stringList(JsonValue value, String name) {
+        if (!(value instanceof JsonValue.JsonArray array)) {
+            throw new IllegalArgumentException(name + " must be an array");
+        }
+        List<String> values = new ArrayList<>(array.values().size());
+        for (JsonValue member : array.values()) {
+            if (!(member instanceof JsonValue.JsonString text) || text.value().isBlank()
+                || !text.value().equals(text.value().strip())) {
+                throw new IllegalArgumentException(name + " contains an invalid value");
+            }
+            values.add(text.value());
+        }
+        List<String> canonical = canonicalCapabilities(values);
+        if (!canonical.equals(values)) {
+            throw new IllegalArgumentException(name + " must be canonical");
+        }
+        return canonical;
+    }
+
     public record CachedPublication(ServerId serverId, CatalogCacheKey key, CatalogCachePublication publication,
-                                    CatalogCachePublication hydrationProjection, byte[] canonicalBytes) {
+                                    CatalogCachePublication hydrationProjection, byte[] canonicalBytes,
+                                    CatalogAuthoringPublication authoringPublication,
+                                    List<String> authoringCapabilities) {
+        public CachedPublication(ServerId serverId, CatalogCacheKey key, CatalogCachePublication publication,
+                                 CatalogCachePublication hydrationProjection, byte[] canonicalBytes) {
+            this(serverId, key, publication, hydrationProjection, canonicalBytes, null, List.of());
+        }
+
         public CachedPublication {
             serverId = Objects.requireNonNull(serverId, "Server ID is required");
             key = Objects.requireNonNull(key, "Catalog cache key is required");
@@ -1079,6 +1205,15 @@ public final class ReSyncCatalogPublicationCache {
                 throw new IllegalArgumentException("Catalog publication cache accepts node publication only");
             }
             canonicalBytes = Objects.requireNonNull(canonicalBytes, "Catalog publication bytes are required").clone();
+            authoringCapabilities = canonicalCapabilities(authoringCapabilities);
+            if (authoringPublication == null && !authoringCapabilities.isEmpty()) {
+                throw new IllegalArgumentException("Catalog authoring capabilities require a publication");
+            }
+            if (authoringPublication != null && (!key.hasCatalogBinding()
+                || !key.catalogBinding().equals(authoringPublication.binding())
+                || !key.projectionVersion().equals(authoringPublication.projectionVersion()))) {
+                throw new IllegalArgumentException("Catalog authoring publication does not match its cache key");
+            }
         }
 
         @Override
@@ -1086,7 +1221,9 @@ public final class ReSyncCatalogPublicationCache {
             return canonicalBytes.clone();
         }
 
-        boolean matches(ReSyncCatalogPublicationProjection.Snapshot snapshot) {
+        boolean matches(ReSyncCatalogPublicationProjection.Snapshot snapshot,
+                        ReSyncCatalogAuthoringProjection.Snapshot authoring,
+                        List<String> capabilities) {
             if (snapshot == null || !key.equals(snapshot.publication().key())
                 || publication.revision() != snapshot.publication().revision()
                 || !publication.equals(snapshot.publication())
@@ -1094,7 +1231,11 @@ public final class ReSyncCatalogPublicationCache {
                 || !snapshot.canonicalBytesEqual(canonicalBytes)) {
                 return false;
             }
-            return true;
+            return authoring == null
+                ? authoringPublication == null
+                : authoring.key().equals(key) && authoring.revision() == publication.revision()
+                    && authoring.publication().equals(authoringPublication)
+                    && authoringCapabilities.equals(canonicalCapabilities(capabilities));
         }
 
         int canonicalByteLength() {
@@ -1113,12 +1254,15 @@ public final class ReSyncCatalogPublicationCache {
                 && key.equals(other.key)
                 && publication.equals(other.publication)
                 && hydrationProjection.equals(other.hydrationProjection)
-                && Arrays.equals(canonicalBytes, other.canonicalBytes);
+                && Arrays.equals(canonicalBytes, other.canonicalBytes)
+                && Objects.equals(authoringPublication, other.authoringPublication)
+                && authoringCapabilities.equals(other.authoringCapabilities);
         }
 
         @Override
         public int hashCode() {
-            int result = Objects.hash(serverId, key, publication, hydrationProjection);
+            int result = Objects.hash(serverId, key, publication, hydrationProjection, authoringPublication,
+                authoringCapabilities);
             return 31 * result + Arrays.hashCode(canonicalBytes);
         }
     }

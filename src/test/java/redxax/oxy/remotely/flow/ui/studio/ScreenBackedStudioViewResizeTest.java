@@ -14,6 +14,8 @@ import redxax.oxy.remotely.flow.ui.StudioCloseHandledScreen;
 import restudio.rescreen.platform.IDrawContext;
 import restudio.rescreen.theme.ThemeManager;
 import restudio.rescreen.ui.core.Screen;
+import restudio.rescreen.ui.rescreen.ReScreen;
+import restudio.rescreen.ui.rescreen.SidePanel;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -65,6 +67,55 @@ class ScreenBackedStudioViewResizeTest {
         view.render(new TestDrawContext(), 0, 0, 0.0F);
         assertEquals(2, child.tickCalls);
         assertEquals(2, child.renderCalls);
+    }
+
+    @Test
+    void embeddedScreenReportsItsOwnedPanelsAfterInitialization() {
+        Screen host = new Screen();
+        host.resize(1280, 720);
+        ReScreen child = new ReScreen() {
+            @Override
+            public void init() {
+                super.init();
+                if (getSidePanels().isEmpty()) {
+                    createSidePanel("Inspector").collapsible("Inspector").show();
+                }
+            }
+        };
+        ScreenBackedStudioView view = new ScreenBackedStudioView(host, child);
+
+        assertTrue(view.ownsSidePanels());
+        assertEquals(1, child.getSidePanels().size());
+    }
+
+    @Test
+    void embeddedScreenDelegatesItsSharedPanelCapability() {
+        Screen host = new Screen();
+        host.resize(1280, 720);
+        ScreenBackedStudioView view = new ScreenBackedStudioView(host, new SharedPanelScreen());
+
+        assertTrue(view.hasPanel());
+        assertEquals(StudioPanel.Placement.LEFT, view.preferredPanelPlacement());
+    }
+
+    @Test
+    void embeddedDesignerPanelExcludesTheStudioHostPanel() {
+        PanelHostScreen host = new PanelHostScreen();
+        host.resize(1280, 720);
+        ReScreen child = new ReScreen() {
+            @Override
+            public void init() {
+                super.init();
+                createSidePanel("designer-inspector").collapsible("Inspector").width(240).show();
+            }
+        };
+        ScreenBackedStudioView view = new ScreenBackedStudioView(host, child);
+
+        host.activate(view);
+
+        assertTrue(view.ownsSidePanels());
+        assertFalse(host.hostPanelActive());
+        assertEquals(0, host.getTotalRightSidePanelWidth());
     }
 
     @Test
@@ -126,6 +177,32 @@ class ScreenBackedStudioViewResizeTest {
         @Override
         public void renderHandler(IDrawContext context, int mouseX, int mouseY, float delta) {
             renderCalls++;
+        }
+    }
+
+    private static final class SharedPanelScreen extends Screen implements ReSyncStudioView {
+        @Override
+        public boolean hasPanel() {
+            return true;
+        }
+
+        @Override
+        public StudioPanel.Placement preferredPanelPlacement() {
+            return StudioPanel.Placement.LEFT;
+        }
+    }
+
+    private static final class PanelHostScreen extends StudioScreen {
+        private final SidePanel hostPanel = createSidePanel("studio-resource").collapsible("Resource Inspector").width(220).show();
+
+        private void activate(ReSyncStudioView view) {
+            studioMode = true;
+            studioResourcePanel = hostPanel;
+            activeStudioDocument = new StudioDocument("test", "designer", "Designer", null, view, new StudioViewportState());
+        }
+
+        private boolean hostPanelActive() {
+            return isSidePanelActive(hostPanel);
         }
     }
 

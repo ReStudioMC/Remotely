@@ -17,6 +17,9 @@ import restudio.rebase.backend.DeveloperCapabilityProvider;
 import restudio.rebase.backend.GitJobProvider;
 import restudio.rebase.backend.RemoteFileSystemProvider;
 import restudio.rebase.backend.RemotePath;
+import restudio.rebase.backend.EditorCommandRegistry;
+import restudio.rebase.backend.StoredEditorSettings;
+import restudio.rescreen.platform.browser.BrowserKeyValueStore;
 import restudio.rebase.backend.TerminalSession;
 import restudio.rebase.backend.TerminalSessionProvider;
 import restudio.rebase.backend.TerminalSize;
@@ -1605,6 +1608,7 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
 
     private final class BrowserDeveloperProvider implements DeveloperCapabilityProvider {
         private final String serverId;
+        private final Settings editorSettings = new StoredEditorSettings(BrowserKeyValueStore.local("rebase.editor.settings.v1"));
         private final Workspace workspace = new BrowserWorkspace();
         private final RemoteFileSystemProvider files = new BrowserWorkspaceFiles();
         private volatile Workspace.Binding binding;
@@ -1616,6 +1620,16 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
 
         private BrowserDeveloperProvider(String serverId) {
             this.serverId = serverId;
+        }
+
+        @Override
+        public EditorCommandRegistry commandRegistry(RemotePath configDir) {
+            return EditorCommandRegistry.stored(BrowserKeyValueStore.local("rebase.editor.keybindings.v1"));
+        }
+
+        @Override
+        public Settings settings() {
+            return editorSettings;
         }
 
         private String workspaceId() {
@@ -1632,6 +1646,11 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         @Override
         public RemoteFileSystemProvider logicalFilesystem() {
             return files;
+        }
+
+        @Override
+        public TaskScheduler scheduler() {
+            return scheduler;
         }
 
         @Override
@@ -1691,6 +1710,11 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         @Override
         public Lsp lsp() {
             return new Lsp() {
+                @Override
+                public Map<String, CapabilityDescriptor> capabilities() {
+                    return Map.of(CapabilityIds.LSP, BrowserDeveloperProvider.this.capabilities().get(CapabilityIds.LSP));
+                }
+
                 @Override
                 public Async<String> open(String language, List<RemotePath> roots) {
                     return requireBinding().thenCompose(selected -> post("/developer/workspaces/" + path(selected.id()) + "/lsp/sessions",

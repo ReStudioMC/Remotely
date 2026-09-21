@@ -149,6 +149,7 @@ import restudio.rescreen.ui.screens.PopupOverlay;
 import restudio.rescreen.ui.widgets.*;
 import restudio.rescreen.util.Identifier;
 import restudio.rescreen.util.Notification;
+import restudio.resync.contract.install.ReSyncInstallationStatus;
 
 import java.lang.ref.WeakReference;
 import java.math.BigDecimal;
@@ -492,6 +493,9 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
     protected SidePanel paletteSidePanel;
     protected StudioPanel paletteStudioPanel;
+    private ItemComponentEditorPanel itemComponentEditor;
+    private SidePanel itemComponentEditorPeerPanel;
+    private boolean itemComponentEditorPeerWasVisible;
     private final Map<NodeDefinition.NodeCategory, PopupWidget> categoryPopups = new HashMap<>();
     private List<NodeDefinition.NodeCategory> categoryOrder = List.of();
     private static final int CATALOG_WIDGETS_PER_TICK = 12;
@@ -541,6 +545,8 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     private AnimatedWidget workspaceConflictButton;
     private boolean startupProbeRunning;
     private boolean setupRunning;
+    private ReSyncInstallationStatus installationStatus;
+    private boolean installationActionRunning;
     private volatile boolean reSyncUpdateAvailable;
     private volatile boolean reSyncUpdateRunning;
     private volatile boolean reSyncUpdateProbeRunning;
@@ -557,6 +563,8 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         INSTALLING,
         INSTALLED,
         SERVER_STOPPED,
+        MIGRATION_REQUIRED,
+        MIGRATION_PREPARED,
         READY
     }
 
@@ -3469,6 +3477,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             case ReSyncResourceDragPayload.SCOREBOARD -> "scoreboard_id";
             case ReSyncResourceDragPayload.TAB -> "tab_id";
             case ReSyncResourceDragPayload.CHAT -> "chat_id";
+            case ReSyncResourceDragPayload.COMPONENT_BUILDER -> "component_builder_id";
             case ReSyncResourceDragPayload.MOTD_PROFILE -> "motd_profile_id";
             case ReSyncResourceDragPayload.MESSAGE_RULE -> "message_rule_id";
             case ReSyncResourceDragPayload.RECIPE_DEFINITION -> "recipe_id";
@@ -7145,14 +7154,26 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         return session.isFunction() ? session.functionSourceDocument().graph() : session.graphDocument();
     }
 
-    private GraphConnection coreGraphConnection(FlowConnection sourceConnection, String sourceNodeId, String sourcePin,
-                                                String targetNodeId, String targetPin) {
-        GraphEndpoint source = coreEndpoint(sourceConnection, sourceNodeId, sourcePin, true);
-        GraphEndpoint target = coreEndpoint(null, targetNodeId, targetPin, false);
-        if (source == null || target == null) {
+    private CoreWireSource coreWireSource(String nodeId, String pinName) {
+        if (!NodeWidget.isPassthroughOutputPin(pinName)) {
+            GraphEndpoint endpoint = coreEndpoint(null, nodeId, pinName, true);
+            return endpoint == null ? null : new CoreWireSource(endpoint, null, null);
+        }
+        NodeInstanceId passthroughNode = coreNodeId(nodeId);
+        PinId passthroughPin = corePinId(NodeWidget.passthroughInputPin(pinName));
+        GraphDocument document = coreGraphDocument(activeCoreGraphSession());
+        if (passthroughNode == null || passthroughPin == null || document == null) {
             return null;
         }
-        return new GraphConnection(ConnectionId.interactive(), source, target);
+        GraphConnection incoming = document.connections().stream()
+            .filter(connection -> connection.target().nodeId().equals(passthroughNode)
+                && connection.target().pinId().equals(passthroughPin))
+            .findFirst()
+            .orElse(null);
+        return incoming == null ? null : new CoreWireSource(incoming.source(), passthroughNode, passthroughPin);
+    }
+
+    private record CoreWireSource(GraphEndpoint endpoint, NodeInstanceId passthroughNode, PinId passthroughPin) {
     }
 
     private CreatedCoreEndpoint createdCoreEndpoint(GraphNode node, NodeDefinition definition, String pinName) {
@@ -7268,9 +7289,19 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         for (GraphEditorScreen screen : OPEN_SCREENS) {
             if (screen != null && screen.isWorkspaceLifecycleActive() && serverId != null
                 && serverId.equals(screen.getServerId())) {
+                if (screen.retainNodeCatalogUntilPublication()) {
+                    continue;
+                }
                 screen.queueNodeCatalogRefresh();
             }
         }
+    }
+
+    private boolean retainNodeCatalogUntilPublication() {
+        ReSyncFlowClient client = typedCatalogClient();
+        return client != null && client.catalogAuthority() != ReSyncFlowClient.CatalogAuthority.TYPED_PUBLICATION
+            && client.catalogAuthority() != ReSyncFlowClient.CatalogAuthority.LEGACY_COMPATIBILITY
+            && !widgetCache.isEmpty();
     }
 
     public static GraphEditorScreen getStudioScreen(String serverId) {
@@ -7362,6 +7393,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         for (FlowNodeWidget widget : widgetCache.values()) {
             widget.refreshOptionCatalog(sourceId);
         }
+        refreshItemComponentEditorCatalog();
         refreshStudioCatalogDocuments();
     }
 
@@ -7592,9 +7624,15 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (paletteSidePanel != null && !paletteSidePanel.isLeftAnchored()) {
             right += paletteSidePanel.layoutWidth(8);
         }
+        int contextualPanelWidth = 0;
         if (studioResourcePanel != null && !studioResourcePanel.isLeftAnchored()) {
-            right += studioResourcePanel.layoutWidth(8);
+            contextualPanelWidth = studioResourcePanel.layoutWidth(8);
         }
+        if (itemComponentEditor != null && itemComponentEditor.isOpen()
+            && !itemComponentEditor.sidePanel().isLeftAnchored()) {
+            contextualPanelWidth = Math.max(contextualPanelWidth, itemComponentEditor.sidePanel().layoutWidth(8));
+        }
+        right += contextualPanelWidth;
         return Math.max(1, width - viewportFitLeft() - right);
     }
 
@@ -7792,7 +7830,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     }
 
     public String getDesktopAppIconPath() {
-        return "flow.png";
+        return studioMode ? "ReSync.png" : "flow.png";
     }
 
     @Override
@@ -8251,6 +8289,16 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             widget.configureInspector(generic.inspector(), inspectorProjection,
                 editable ? this::handleCoreInspectorMutation : null);
         }
+        if (node != null && node.getType() != null && node.getType().endsWith("itemstack.apply_component_builder")) {
+            widget.configureEditAction("Edit Component Builder", () -> {
+                String builderId = widget.inputResourceId("builder");
+                if (builderId == null || builderId.isBlank()) {
+                    new Notification("Component Builder", "Select A Component Builder First", Notification.Type.ERROR);
+                    return;
+                }
+                openComponentBuilderPanel(builderId);
+            });
+        }
         widget.setEditorDiagnostics(editorDiagnosticsForNode(nodeId));
         return widget;
     }
@@ -8381,7 +8429,8 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (stableWorkspaceDocument == null && graph != null && !workspaceSnapshotPending()) {
             activateWorkspaceGraph(graph);
         }
-        if (!studioMode || startupState == StudioStartupState.INSTALLING) {
+        if (!studioMode || startupState == StudioStartupState.INSTALLING
+            || startupState == StudioStartupState.MIGRATION_PREPARED) {
             return;
         }
         FlowManager manager = FlowManager.getInstance();
@@ -8486,8 +8535,9 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             startupIcon.setVisible(true);
         }
         if (setupReSyncButton != null) {
-            setupReSyncButton.setMessage("Setup ReSync");
-            setupReSyncButton.setHint("Setup ReSync");
+            boolean migration = state == StudioStartupState.MIGRATION_REQUIRED && installationStatus != null;
+            setupReSyncButton.setMessage(migration ? installationStatus.actionLabel() : "Setup ReSync");
+            setupReSyncButton.setHint(migration ? "Preserve The Old Data And Prepare A Clean ReSync Workspace" : "Setup ReSync");
             setupReSyncButton.setVisible(showSetupButton && !setupRunning);
         }
         if (welcomeServerButton != null) {
@@ -8549,18 +8599,38 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (!lifecycleTaskCurrent(generation)) {
             return;
         }
-        ReSyncProvisioningService.StartupProbeResult result;
+        ReSyncInstallationStatus resolvedInstallationStatus = null;
         try {
-            result = reSyncProvisioningService.computeStartupState(serverId, startupServer, loaderHint).join();
+            resolvedInstallationStatus = reSyncProvisioningService.installationStatus(serverId, startupServer).join().orElse(null);
         } catch (Exception ignored) {
-            result = new ReSyncProvisioningService.StartupProbeResult(ReSyncProvisioningService.StartupStatus.SETUP, false, false);
+        }
+        ReSyncProvisioningService.StartupProbeResult result;
+        if (resolvedInstallationStatus != null && resolvedInstallationStatus.blocksStartup()) {
+            result = new ReSyncProvisioningService.StartupProbeResult(
+                ReSyncProvisioningService.StartupStatus.MIGRATION_REQUIRED, false, false);
+        } else {
+            try {
+                result = reSyncProvisioningService.computeStartupState(serverId, startupServer, loaderHint).join();
+            } catch (Exception ignored) {
+                result = new ReSyncProvisioningService.StartupProbeResult(
+                    ReSyncProvisioningService.StartupStatus.SETUP, false, false);
+            }
         }
         ReSyncProvisioningService.StartupProbeResult resolvedResult = result;
+        ReSyncInstallationStatus resolvedStatus = resolvedInstallationStatus;
         ScreenManager.getInstance().execute(() -> {
             if (!lifecycleTaskCurrent(generation)) {
                 return;
             }
             startupProbeRunning = false;
+            installationStatus = resolvedStatus;
+            applyInstallationStatusToContentBrowser();
+            if (resolvedStatus != null && resolvedStatus.blocksStartup()) {
+                setStartupState(StudioStartupState.MIGRATION_REQUIRED,
+                    resolvedStatus.title() + "\n" + resolvedStatus.summary() + "\nYour Existing Files Will Stay Untouched",
+                    "stop.png", true);
+                return;
+            }
             FlowManager manager = FlowManager.getInstance();
             if (manager != null && manager.isFlowClientConnected(serverId)) {
                 enterStudioReadyState();
@@ -8578,6 +8648,10 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                 case NOT_SUPPORTED -> setStartupState(StudioStartupState.NOT_SUPPORTED, "ReSync Is Not On This Server\nBukkit-Based Server Required", "close.png", false);
                 case SERVER_STOPPED -> setStartupState(StudioStartupState.SERVER_STOPPED, "Server Is Offline\nStart The Server To Use ReSync", "stop.png", false);
                 case SETUP -> setStartupState(StudioStartupState.SETUP, "Setup ReSync\nInstall And Configure", "ReSync.png", true);
+                case MIGRATION_REQUIRED -> setStartupState(StudioStartupState.MIGRATION_REQUIRED,
+                    "Old ReSync Data Needs Your Choice\nYour Existing Files Will Stay Untouched", "stop.png", true);
+                case MIGRATION_PREPARED -> {
+                }
                 case LOADING -> {
                     ReSyncFlowClient.ConnectionState connectionState = manager != null
                         ? manager.getFlowClientConnectionState(serverId) : ReSyncFlowClient.ConnectionState.DISCONNECTED;
@@ -8601,6 +8675,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             case SETUP -> StudioStartupState.SETUP;
             case LOADING -> StudioStartupState.LOADING;
             case SERVER_STOPPED -> StudioStartupState.SERVER_STOPPED;
+            case MIGRATION_REQUIRED -> StudioStartupState.MIGRATION_REQUIRED;
             case SECURE_CONNECTION_REPAIR -> StudioStartupState.SETUP;
         };
     }
@@ -8677,11 +8752,88 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             }
         }
         refreshReSyncUpdateAvailabilityAsync();
+        applyInstallationStatusToContentBrowser();
         updateStudioLayout();
     }
 
     private void runReSyncStartupAction() {
+        if (startupState == StudioStartupState.MIGRATION_REQUIRED && installationStatus != null) {
+            showReSyncInstallationStatus(installationStatus);
+            return;
+        }
         runSetupFlow();
+    }
+
+    @Override
+    protected void showReSyncInstallationStatus(ReSyncInstallationStatus status) {
+        if (status == null || !status.blocksStartup()) {
+            super.showReSyncInstallationStatus(status);
+            return;
+        }
+        PopupWidget.Builder builder = new PopupWidget.Builder(status.title()).setResizable(false).width(460);
+        builder.addRow("What Happens", readOnlyButton("The Old Data Is Moved To A Separate Archive"));
+        builder.addRow("New Workspace", readOnlyButton("ReSync Starts Clean After The Next Server Restart"));
+        builder.addRow("Original Data", readOnlyButton(status.preservesLegacyData() ? "Preserved" : "Not Preserved"));
+        PopupWidget[] popupRef = new PopupWidget[1];
+        builder.addTitleAction("Archive And Start Fresh", () -> {
+            if (popupRef[0] != null) {
+                popupRef[0].hide();
+            }
+            requestLegacyArchive(status);
+        }, PopupWidget.TitleActionRole.DESTRUCTIVE);
+        popupRef[0] = builder.build();
+        addDrawableChild(popupRef[0]);
+        popupRef[0].show();
+    }
+
+    private void requestLegacyArchive(ReSyncInstallationStatus status) {
+        if (installationActionRunning || status == null || !status.blocksStartup()) {
+            return;
+        }
+        installationActionRunning = true;
+        setStartupState(StudioStartupState.INSTALLING, "Preparing A Clean ReSync Workspace...\nYour Old Data Will Be Preserved",
+            "remotely.png", false);
+        long generation = lifecycleTaskGeneration;
+        if (!submitLifecycleTask(() -> {
+            ReSyncProvisioningService.OperationResult result;
+            try {
+                result = reSyncProvisioningService.archiveLegacyData(serverId, startupServer, status).join();
+            } catch (Exception error) {
+                result = ReSyncProvisioningService.OperationResult.failed(
+                    error.getMessage() == null || error.getMessage().isBlank() ? "Archive Request Failed" : error.getMessage());
+            }
+            ReSyncProvisioningService.OperationResult resolved = result;
+            ScreenManager.getInstance().execute(() -> {
+                if (!lifecycleTaskCurrent(generation)) {
+                    return;
+                }
+                installationActionRunning = false;
+                if (!resolved.success()) {
+                    setStartupState(StudioStartupState.MIGRATION_REQUIRED,
+                        status.title() + "\n" + status.summary() + "\nYour Existing Files Will Stay Untouched",
+                        "stop.png", true);
+                    new Notification("ReSync Data", resolved.failureMessage().isBlank()
+                        ? "Could Not Prepare The Archive" : resolved.failureMessage(), Notification.Type.ERROR);
+                    return;
+                }
+                setStartupState(StudioStartupState.MIGRATION_PREPARED,
+                    "Archive Requested\nRestart The Server To Preserve The Old Data\nAnd Open A Clean ReSync Workspace",
+                    "ReSync.png", false);
+                if (welcomeServerButton != null) {
+                    welcomeServerButton.setVisible(true);
+                }
+            });
+        })) {
+            installationActionRunning = false;
+            setStartupState(StudioStartupState.MIGRATION_REQUIRED,
+                status.title() + "\n" + status.summary(), "stop.png", true);
+        }
+    }
+
+    private void applyInstallationStatusToContentBrowser() {
+        if (studioContentBrowser != null) {
+            studioContentBrowser.setInstallationStatus(installationStatus);
+        }
     }
 
     private void runSetupFlow() {
@@ -8859,6 +9011,122 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         } else {
             populateFallbackPopups();
         }
+    }
+
+    protected void openItemComponentEditor(ItemComponentEditorPanel.Model model) {
+        if (itemComponentEditor == null) {
+            itemComponentEditor = new ItemComponentEditorPanel(this, serverId, "itemComponentEditorPanel");
+        }
+        if (!itemComponentEditor.isOpen()) {
+            suppressItemComponentEditorPeerPanel();
+        }
+        ItemComponentEditorPanel.Model wrapped = new ItemComponentEditorPanel.Model(model.title(), model.material(),
+            model.scope(), model.components(), model.saveAction(), model.onChange(), model.onSave(), () -> {
+                try {
+                    model.onClose().run();
+                } finally {
+                    restoreItemComponentEditorPeerPanel();
+                    updatePositions();
+                }
+            });
+        itemComponentEditor.open(wrapped);
+        updatePositions();
+    }
+
+    private void suppressItemComponentEditorPeerPanel() {
+        SidePanel peer = studioResourcePanel;
+        if (peer == null || peer.isLeftAnchored()) {
+            itemComponentEditorPeerPanel = null;
+            itemComponentEditorPeerWasVisible = false;
+            return;
+        }
+        itemComponentEditorPeerPanel = peer;
+        itemComponentEditorPeerWasVisible = peer.isVisible();
+        peer.onUserVisibilityChanged(visible -> {
+            if (visible && peer == itemComponentEditorPeerPanel && isItemComponentEditorOpen()) {
+                closeItemComponentEditor();
+            }
+        });
+        if (itemComponentEditorPeerWasVisible) {
+            peer.collapse();
+        }
+    }
+
+    private void restoreItemComponentEditorPeerPanel() {
+        SidePanel peer = itemComponentEditorPeerPanel;
+        boolean restore = itemComponentEditorPeerWasVisible;
+        itemComponentEditorPeerPanel = null;
+        itemComponentEditorPeerWasVisible = false;
+        if (restore && peer != null && peer.isAvailable() && !peer.isVisible()) {
+            peer.expand();
+        }
+    }
+
+    protected void closeItemComponentEditor() {
+        if (itemComponentEditor != null && itemComponentEditor.isOpen()) {
+            itemComponentEditor.close();
+        }
+    }
+
+    protected boolean isItemComponentEditorOpen() {
+        return itemComponentEditor != null && itemComponentEditor.isOpen();
+    }
+
+    protected void refreshItemComponentEditorCatalog() {
+        if (itemComponentEditor != null) {
+            itemComponentEditor.refreshCatalog();
+        }
+    }
+
+    private void openComponentBuilderPanel(String builderId) {
+        FlowManager manager = FlowManager.getInstance();
+        JsonObject resource = manager != null
+            ? manager.getJsonResource(serverId, ReSyncResourceType.COMPONENT_BUILDER, builderId) : null;
+        if (resource == null) {
+            new Notification("Component Builder", "Builder Is Still Loading", Notification.Type.ERROR);
+            return;
+        }
+        JsonObject draft = resource.deepCopy();
+        JsonObject scope = draft.has("scope") && draft.get("scope").isJsonObject()
+            ? draft.getAsJsonObject("scope") : defaultComponentBuilderScope();
+        Map<String, Object> components = draft.has("components") && draft.get("components").isJsonObject()
+            ? GSON.fromJson(draft.getAsJsonObject("components"), Map.class) : Map.of();
+        openItemComponentEditor(new ItemComponentEditorPanel.Model(
+            componentBuilderTitle(draft, builderId), "", scope, components, true,
+            ignored -> {}, snapshot -> {
+                draft.add("scope", snapshot.scope());
+                draft.add("components", GSON.toJsonTree(snapshot.components()).getAsJsonObject());
+                DesignerSaveNotifications.SaveTicket ticket = DesignerSaveNotifications.startExact(serverId,
+                    ReSyncResourceType.COMPONENT_BUILDER, builderId, "Component Builder");
+                if (ticket != null) {
+                    manager.saveManagedJsonResource(serverId, ReSyncResourceDragPayload.COMPONENT_BUILDER,
+                        builderId, draft.deepCopy(), ticket);
+                }
+            }, () -> {}));
+    }
+
+    private JsonObject defaultComponentBuilderScope() {
+        JsonObject scope = new JsonObject();
+        scope.addProperty("kind", "dynamic");
+        scope.addProperty("value", "");
+        return scope;
+    }
+
+    private String componentBuilderText(JsonObject object, String key, String fallback) {
+        if (object == null || !object.has(key) || object.get(key).isJsonNull()) {
+            return fallback;
+        }
+        try {
+            String value = object.get(key).getAsString();
+            return value.isBlank() ? fallback : value;
+        } catch (RuntimeException exception) {
+            return fallback;
+        }
+    }
+
+    private String componentBuilderTitle(JsonObject object, String fallback) {
+        String displayName = componentBuilderText(object, "displayName", "");
+        return displayName.isBlank() ? componentBuilderText(object, "name", fallback) : displayName;
     }
 
     private void retainCoreEditor() {
@@ -10814,7 +11082,6 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         ItemSelectorWidget[] selectorRef = new ItemSelectorWidget[1];
         ItemSelectorWidget selector = new ItemSelectorWidget.Builder(this)
             .size(200, 240)
-            .entryHeight(18)
             .dismissOnSelect(true)
             .emptyMessage("No Options")
             .asyncItems(refreshAction, itemSource)
@@ -10869,6 +11136,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
     @Override
     public void close() {
+        closeItemComponentEditor();
         saveActiveStudioViewport();
         if (studioMode && liveStudioFullEditorMode && serverId != null && !serverId.isBlank()) {
             FlowManager manager = FlowManager.getInstance();
@@ -10886,6 +11154,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
     @Override
     public void removed() {
+        closeItemComponentEditor();
         closeLifecycle();
         cleanupCoreWidgetTopology();
         super.removed();
@@ -14978,6 +15247,21 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (activeStudioDocument != null && activeStudioView() == null && paletteStudioPanel != null) {
             renderStudioPanel(paletteStudioPanel, context, mouseX, mouseY, delta);
         }
+        if (itemComponentEditor != null && itemComponentEditor.isPresenting()) {
+            itemComponentEditor.render(context, mouseX, mouseY, delta);
+        }
+    }
+
+    @Override
+    protected boolean isSidePanelActive(SidePanel panel) {
+        if (panel == paletteSidePanel) {
+            return !isItemComponentEditorOpen() && activeStudioDocument != null && activeStudioView() == null
+                && usesStudioPalette(activeStudioDocument);
+        }
+        if (itemComponentEditor != null && panel == itemComponentEditor.sidePanel()) {
+            return itemComponentEditor.isOpen();
+        }
+        return super.isSidePanelActive(panel);
     }
 
     private void renderWires(IDrawContext context, WorldBounds renderBounds, Collection<FlowNodeWidget> visibleNodes) {
@@ -17878,6 +18162,11 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                 && targetTypeRef.isAssignableFrom(sourceTypeRef)) {
                 return true;
             }
+            if (sourceTypeRef != null && targetTypeRef != null
+                && typedInteractionProjection().map(projection -> projection.canConvert(sourceTypeRef, targetTypeRef))
+                    .orElse(false)) {
+                return true;
+            }
             return sourceType != null && targetType != null && sourceType.canConvertTo(targetType);
         }
         if (!legacyCatalogAllowed()) {
@@ -18098,47 +18387,32 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             || !canMutateWidgetStructure(dragPinWidget)) {
             return false;
         }
-        FlowConnection sourceConnection;
         String sourceNodeId;
         String sourcePin;
         String destinationNodeId;
         String destinationPin;
         if (targetIsInput) {
-            sourceConnection = resolveDragSourceConnection();
-            if (sourceConnection == null) {
-                return false;
-            }
-            sourceNodeId = sourceConnection.getSourceNodeId();
-            sourcePin = sourceConnection.getSourcePin();
+            sourceNodeId = dragState.sourceNodeId;
+            sourcePin = dragState.sourcePin;
             destinationNodeId = targetNodeId;
             destinationPin = targetPin;
         } else {
-            sourceConnection = resolveConnectionSource(targetNodeId, targetPin);
-            if (sourceConnection == null) {
-                return false;
-            }
-            sourceNodeId = sourceConnection.getSourceNodeId();
-            sourcePin = sourceConnection.getSourcePin();
+            sourceNodeId = targetNodeId;
+            sourcePin = targetPin;
             destinationNodeId = dragState.sourceNodeId;
             destinationPin = dragState.sourcePin;
         }
-        String finalSourceNodeId = sourceNodeId;
-        String finalSourcePin = sourcePin;
-        String finalDestinationNodeId = destinationNodeId;
-        String finalDestinationPin = destinationPin;
-        GraphConnection newConnection = coreGraphConnection(sourceConnection, finalSourceNodeId, finalSourcePin,
-            finalDestinationNodeId, finalDestinationPin);
-        if (newConnection == null) {
+        CoreWireSource source = coreWireSource(sourceNodeId, sourcePin);
+        GraphEndpoint target = coreEndpoint(null, destinationNodeId, destinationPin, false);
+        if (source == null || target == null) {
             coreOperationUnavailable("Wire Connection");
             refreshCoreProjection();
             return false;
         }
-        String passthroughSourceNodeId = sourceConnection.getEditorSourceNodeId();
-        String passthroughSourcePin = sourceConnection.getEditorSourcePin();
-        NodeInstanceId passthroughNode = passthroughSourceNodeId != null
-            && NodeWidget.isPassthroughOutputPin(passthroughSourcePin) ? coreNodeId(passthroughSourceNodeId) : null;
-        PinId passthroughPin = passthroughSourcePin != null && NodeWidget.isPassthroughOutputPin(passthroughSourcePin)
-            ? corePinId(NodeWidget.passthroughInputPin(passthroughSourcePin)) : null;
+        String finalSourceNodeId = source.endpoint().nodeId().canonicalText();
+        String finalDestinationNodeId = destinationNodeId;
+        String finalDestinationPin = destinationPin;
+        GraphConnection newConnection = new GraphConnection(ConnectionId.interactive(), source.endpoint(), target);
         return commitCoreStructuralMutation("Connection Add", current -> {
             GraphDocument document = coreGraphDocument(current);
             if (document == null) {
@@ -18149,12 +18423,13 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                 finalDestinationPin));
             connections.add(newConnection);
             current.setConnections(connections);
-            if (passthroughNode != null && passthroughPin != null) {
+            if (source.passthroughNode() != null && source.passthroughPin() != null) {
                 List<GraphPassthrough> passthroughs = new ArrayList<>(coreGraphDocument(current).passthroughs());
                 boolean matched = false;
                 for (int index = 0; index < passthroughs.size(); index++) {
                     GraphPassthrough passthrough = passthroughs.get(index);
-                    if (!passthrough.nodeId().equals(passthroughNode) || !passthrough.inputPin().equals(passthroughPin)) {
+                    if (!passthrough.nodeId().equals(source.passthroughNode())
+                        || !passthrough.inputPin().equals(source.passthroughPin())) {
                         continue;
                     }
                     ArrayList<ConnectionId> connectionIds = new ArrayList<>(passthrough.connectionIds());
@@ -18165,13 +18440,14 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                     break;
                 }
                 if (!matched) {
-                    passthroughs.add(new GraphPassthrough(passthroughNode, passthroughPin,
+                    passthroughs.add(new GraphPassthrough(source.passthroughNode(), source.passthroughPin(),
                         List.of(newConnection.connectionId()), OpaqueData.empty()));
                 }
                 current.setPassthroughs(passthroughs);
             }
             return true;
-        }, finalSourceNodeId, finalDestinationNodeId);
+        }, finalSourceNodeId, finalDestinationNodeId,
+            source.passthroughNode() != null ? source.passthroughNode().canonicalText() : null);
     }
 
     private FuzzyWireTarget findFuzzyWireTarget(int wx, int wy) {
@@ -20343,6 +20619,10 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             return true;
         }
         if (handlePopupWidgetMouseScrolled(event)) {
+            return true;
+        }
+        if (itemComponentEditor != null && itemComponentEditor.isOpen()
+            && itemComponentEditor.sidePanel().mouseScrolled(event.retarget(itemComponentEditor.sidePanel(), mouseX, mouseY))) {
             return true;
         }
         if (dragState.isDragging && panFromScroll(horizontalAmount, verticalAmount, event.modifiers().shift())) {

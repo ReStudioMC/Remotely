@@ -277,7 +277,10 @@ public final class ReSyncCatalogPublicationProjection {
 
     synchronized boolean commitHydration(PreparedHydration prepared) {
         Objects.requireNonNull(prepared, "Prepared catalog hydration is required");
-        if (active.get() != prepared.previous() || !Objects.equals(acknowledgedKey.get(), prepared.acknowledgedKey())) {
+        CatalogCacheKey currentAcknowledged = acknowledgedKey.get();
+        if (active.get() != prepared.previous()
+            || (!Objects.equals(currentAcknowledged, prepared.acknowledgedKey())
+                && !Objects.equals(currentAcknowledged, prepared.candidate().publication().key()))) {
             return false;
         }
         Snapshot candidate = prepared.candidate();

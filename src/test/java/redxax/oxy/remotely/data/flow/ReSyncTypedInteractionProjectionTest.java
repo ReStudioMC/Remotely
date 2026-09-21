@@ -1,14 +1,18 @@
 package redxax.oxy.remotely.data.flow;
 
 import org.junit.jupiter.api.Test;
+import redxax.oxy.remotely.flow.data.FlowTypeRef;
 import redxax.oxy.remotely.flow.registry.NodeDefinition;
 import restudio.resync.contract.cache.CatalogProjectionVersion;
+import restudio.resync.flow.cache.CatalogAuthoringPublication;
 import restudio.resync.flow.cache.CatalogCacheKey;
 import restudio.resync.flow.cache.CatalogCacheOpaque;
 import restudio.resync.flow.cache.CatalogCachePublication;
 import restudio.resync.flow.cache.CatalogCachePublicationCodec;
 import restudio.resync.flow.cache.CatalogCacheState;
 import restudio.resync.flow.canonical.CanonicalJson;
+import restudio.resync.flow.catalog.CatalogVersion;
+import restudio.resync.flow.identity.CapabilityId;
 import restudio.resync.flow.identity.ContentHash;
 import restudio.resync.flow.identity.ContractRef;
 import restudio.resync.flow.identity.NodeId;
@@ -16,6 +20,7 @@ import restudio.resync.flow.identity.OwnerId;
 import restudio.resync.flow.identity.ServerId;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -320,6 +325,37 @@ class ReSyncTypedInteractionProjectionTest {
         assertEquals(List.of(expected), first.allDropContributions());
         assertEquals(first.allDropContributions(), reversed.allDropContributions());
         assertEquals(List.of(expected), first.dropContributions(target));
+    }
+
+    @Test
+    void admitsPublishedImplicitConversionEdges() {
+        CatalogCacheKey key = key(16, "6");
+        CatalogCachePublication publication = publication(key, 16, "next", "previous");
+        ReSyncCatalogPublicationProjection catalog = new ReSyncCatalogPublicationProjection(SERVER);
+        CatalogCachePublicationCodec codec = new CatalogCachePublicationCodec();
+        assertTrue(catalog.apply(publication, codec.encodeBytes(publication)));
+        CatalogAuthoringPublication.Entry conversion = new CatalogAuthoringPublication.Entry(
+            CatalogAuthoringPublication.Section.CONVERSIONS,
+            ContractRef.of(new OwnerId("restudio.resync"), new CapabilityId("string-to-number")).canonicalText(),
+            CatalogCacheState.ACTIVE, Set.of(), Set.of(CatalogAuthoringPublication.Section.CONVERSIONS), false,
+            CatalogCacheOpaque.of(CanonicalJson.canonicalBytes(Map.of(
+                "kind", "conversion",
+                "source", named("string"),
+                "target", named("number")))));
+        List<CatalogAuthoringPublication.SectionProjection> sections = new ArrayList<>();
+        for (CatalogAuthoringPublication.Section section : CatalogAuthoringPublication.Section.values()) {
+            sections.add(new CatalogAuthoringPublication.SectionProjection(section, true, true,
+                CatalogCacheState.ACTIVE, section == CatalogAuthoringPublication.Section.CONVERSIONS
+                    ? List.of(conversion) : List.of()));
+        }
+        CatalogAuthoringPublication authoring = new CatalogAuthoringPublication(key.catalogBinding(),
+            new CatalogVersion(1, 0), VERSION, sections, Set.of());
+
+        ReSyncTypedInteractionProjection interaction = ReSyncTypedInteractionProjection.from(
+            catalog.active().orElseThrow(), authoring);
+
+        assertTrue(interaction.canConvert(FlowTypeRef.parse("string"), FlowTypeRef.parse("number")));
+        assertFalse(interaction.canConvert(FlowTypeRef.parse("number"), FlowTypeRef.parse("string")));
     }
 
     private static ReSyncTypedInteractionProjection interactionWithDrops(CatalogCacheKey key, long revision,

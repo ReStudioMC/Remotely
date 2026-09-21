@@ -52,4 +52,5 @@ class CoreOptionCatalogSelectorTest {
         assertSame(availableValue, selected.get());
         assertNull(snapshot.items().getLast().action());
     }
+
 }

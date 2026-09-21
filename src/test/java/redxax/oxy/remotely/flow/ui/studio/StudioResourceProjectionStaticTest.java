@@ -91,6 +91,35 @@ class StudioResourceProjectionStaticTest {
         assertTrue(source.contains("projectMetadataStore.getFromCache(serverId, serverId) != null"));
     }
 
+    @Test
+    void resourceIconsStaySemanticAcrossStudioSurfaces() throws IOException {
+        String studio = Files.readString(Path.of("src/main/java/redxax/oxy/remotely/flow/ui/studio/StudioScreen.java"));
+        String browser = Files.readString(Path.of("src/main/java/redxax/oxy/remotely/flow/ui/studio/ReSyncContentBrowserWidget.java"));
+        String subResources = Files.readString(Path.of("src/main/java/redxax/oxy/remotely/flow/ui/AutomationDefinitionDesignerScreen.java"));
+        String content = Files.readString(Path.of("src/main/java/redxax/oxy/remotely/flow/ui/ContentDesignerScreen.java"));
+        String graph = Files.readString(Path.of("src/main/java/redxax/oxy/remotely/flow/ui/GraphEditorScreen.java"));
+        String marketplace = Files.readString(Path.of("src/main/java/redxax/oxy/remotely/flow/ui/marketplace/ReSyncMarketplaceScreen.java"));
+
+        assertTrue(studio.contains("case AUTOMATION_DOCUMENT_TYPE -> \"resources.png\""));
+        assertTrue(studio.contains("case ReSyncResourceDragPayload.CUSTOM_CONTENT -> \"content.png\""));
+        assertTrue(studio.contains("case ReSyncResourceDragPayload.VARIABLE_DEFINITION -> \"snippets.png\""));
+        assertTrue(studio.contains("case ReSyncResourceDragPayload.SCHEDULE_DEFINITION -> \"calendar.png\""));
+        assertTrue(studio.contains("default -> \"flow.png\""));
+        assertTrue(browser.contains(".addItem(\"New Content\", \"content.png\""));
+        assertTrue(browser.contains(".addItem(\"New Variable\", \"snippets.png\""));
+        assertTrue(browser.contains(".addItem(\"New Schedule\", \"calendar.png\""));
+        assertTrue(browser.contains(".addItem(\"New Flow\", \"flow.png\""));
+        assertTrue(subResources.contains("case AutomationDefinitionDraft.VARIABLE -> \"snippets.png\""));
+        assertTrue(subResources.contains("case AutomationDefinitionDraft.TIMER -> \"history.png\""));
+        assertTrue(subResources.contains("case AutomationDefinitionDraft.SCHEDULE -> \"calendar.png\""));
+        assertTrue(content.contains("return \"content.png\""));
+        assertTrue(content.contains(".iconPath(\"flow.png\")"));
+        assertTrue(graph.contains("return studioMode ? \"ReSync.png\" : \"flow.png\""));
+        assertTrue(marketplace.contains("return \"content.png\""));
+        assertFalse(studio.contains("customContentIconPath"));
+        assertFalse(browser.contains("customContentIconPath"));
+    }
+
     private static String method(String source, String signature) {
         int start = source.indexOf(signature);
         assertTrue(start >= 0);

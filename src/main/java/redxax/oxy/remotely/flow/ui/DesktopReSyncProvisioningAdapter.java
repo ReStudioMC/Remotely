@@ -5,6 +5,9 @@ import restudio.rebase.instance.Instance;
 import restudio.rebase.instance.InstanceState;
 import restudio.rescreen.platform.Async;
 import restudio.rebase.restudio.api.models.ServerModels;
+import restudio.resync.contract.install.ReSyncInstallationStatus;
+
+import java.util.Optional;
 
 public final class DesktopReSyncProvisioningAdapter implements ReSyncProvisioningService.Adapter {
     private final DesktopReSyncProvisioningService delegate = new DesktopReSyncProvisioningService();
@@ -86,6 +89,23 @@ public final class DesktopReSyncProvisioningAdapter implements ReSyncProvisionin
     @Override
     public void clearReleaseCache() {
         delegate.clearReleaseCache();
+    }
+
+    @Override
+    public Async<Optional<ReSyncInstallationStatus>> installationStatus(String serverId,
+                                                                        ServerModels.ClientServerView startupServer) {
+        try {
+            return Async.completed(delegate.installationStatus(serverId, startupServer));
+        } catch (Throwable error) {
+            return Async.failed(error);
+        }
+    }
+
+    @Override
+    public Async<ReSyncProvisioningService.OperationResult> archiveLegacyData(String serverId,
+                                                                              ServerModels.ClientServerView startupServer,
+                                                                              ReSyncInstallationStatus status) {
+        return execute(() -> delegate.archiveLegacyData(serverId, startupServer, status));
     }
 
     private Instance findInstance(String serverId, ServerModels.ClientServerView startupServer) {

@@ -1,6 +1,7 @@
 package redxax.oxy.remotely.flow.ui;
 
 import redxax.oxy.remotely.util.BrowserSafeState;
+import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import redxax.oxy.remotely.data.flow.AutomationDefinitionDraft;
@@ -19,6 +20,7 @@ import redxax.oxy.remotely.flow.ui.studio.ScreenBackedStudioView;
 import redxax.oxy.remotely.flow.ui.studio.StudioSaveProvider;
 import redxax.oxy.remotely.flow.ui.studio.StudioSelectorView;
 import redxax.oxy.remotely.flow.ui.studio.StudioScreen;
+import restudio.rescreen.platform.IDrawContext;
 import restudio.rescreen.ui.core.Screen;
 import restudio.rescreen.ui.core.ScreenManager;
 import restudio.rescreen.ui.rescreen.Container;
@@ -52,10 +54,11 @@ import java.util.Set;
 import java.util.function.Consumer;
 
 public final class AutomationDefinitionDesignerScreen extends ReScreen implements ReSyncStudioView, StudioSaveProvider, StudioSelectorView {
+    private static final Gson GSON = new Gson();
     private static final long REFRESH_INTERVAL = 2000L;
     private static final Set<String> TARGET_TYPES = Set.of("flow", "function", "command");
     private static final List<String> SUBRESOURCE_TYPES = List.of(AutomationDefinitionDraft.VARIABLE,
-        AutomationDefinitionDraft.TIMER, AutomationDefinitionDraft.SCHEDULE);
+        AutomationDefinitionDraft.TIMER, AutomationDefinitionDraft.SCHEDULE, AutomationDefinitionDraft.COMPONENT_BUILDER);
     private static final int HEADER_HEIGHT = 36;
     private static final int NAVIGATION_WIDTH = 258;
     private static final int CONTROL_WIDTH = 150;
@@ -128,6 +131,7 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
     private String mountedFormType;
     private boolean mountedFormCreating;
     private boolean mountedFormHasDocument;
+    private ItemComponentEditorPanel componentEditor;
 
     private AutomationDefinitionDesignerScreen(Screen parent, String serverId, String type, String selectedId,
                                                String folder, Consumer<ReSyncResourceCreator.Result> completion,
@@ -199,7 +203,13 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
 
     @Override
     public String getDesktopAppIconPath() {
-        return AutomationDefinitionDraft.SCHEDULE.equals(type) ? "clock.png" : "graph.png";
+        return switch (type) {
+            case AutomationDefinitionDraft.VARIABLE -> "snippets.png";
+            case AutomationDefinitionDraft.TIMER -> "history.png";
+            case AutomationDefinitionDraft.SCHEDULE -> "calendar.png";
+            case AutomationDefinitionDraft.COMPONENT_BUILDER -> "item.png";
+            default -> "resources.png";
+        };
     }
 
     @Override
@@ -263,10 +273,10 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
 
     private void buildDesignerChrome() {
         buildHeader();
-        navigation = createSidePanel("automation-definition-navigation").collapsible("Automation Definitions").left().animation(false)
+        navigation = createSidePanel("automation-definition-navigation").collapsible("Sub Resources").left().animation(false)
             .y(HEADER_HEIGHT).height(Math.max(100, height - HEADER_HEIGHT - 5)).minWidth(210).maxWidth(380)
             .maxWidthRatio(45).width(NAVIGATION_WIDTH).padding(3).gap(2).scrolling(true).show();
-        navigationSearch = new TextInputWidget.Builder().placeholder("Search Subresources")
+        navigationSearch = new TextInputWidget.Builder().placeholder("Search Sub Resources")
             .size(NAVIGATION_WIDTH - 10, 20).onChange(value -> {
                 navigationFilter = normalize(value);
                 filterNavigation();
@@ -294,6 +304,11 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
         for (String resourceType : SUBRESOURCE_TYPES) {
             Setting group = definitionGroups.get(resourceType);
             group.clearRows();
+            ContextKey creationKey = ContextKey.creation(resourceType);
+            NavigationEntryWidget create = new NavigationEntryWidget("New " + singularName(resourceType),
+                typeDescription(resourceType), "Create", () -> requestNew(resourceType));
+            definitionEntries.put(creationKey, create);
+            addRow(group, "create", 30, create);
             List<Item> categoryItems = itemsByType.getOrDefault(resourceType, List.of());
             if (!categoryItems.isEmpty()) {
                 for (Item item : categoryItems) {
@@ -330,19 +345,23 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
         showDefinition(requestedType, item.id());
     }
 
-    private void requestNew() {
-        if (savePending || creationPending || deletePending || creating) {
+    private void requestNew(String requestedType) {
+        if (!AutomationDefinitionDraft.supports(requestedType) || savePending || creationPending || deletePending
+            || creating && requestedType.equals(type)) {
             return;
         }
-        creationCompletion = null;
-        openNew(descriptor != null && !descriptor.defaultFolder().isBlank() ? descriptor.defaultFolder()
-            : requestedFolder, true);
+        String targetFolder = requestedType.equals(type) && descriptor != null && !descriptor.defaultFolder().isBlank()
+            ? descriptor.defaultFolder() : ReSyncResourceType.defaultFolderFor(requestedType);
+        show(requestedType, null, targetFolder, null, true);
     }
 
     private void show(String requestedType, String selectedId, String targetFolder,
                       Consumer<ReSyncResourceCreator.Result> completion, boolean create) {
         if (!AutomationDefinitionDraft.supports(requestedType) || savePending || creationPending || deletePending) {
             return;
+        }
+        if (componentEditor != null && componentEditor.isOpen()) {
+            componentEditor.close();
         }
         String exactId = selectedId == null ? "" : selectedId.trim();
         String exactFolder = targetFolder == null ? "" : targetFolder;
@@ -383,6 +402,9 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
             openItem(item(exactId), false);
         } else {
             initialSelectedId = exactId.isBlank() ? null : exactId;
+        }
+        if (addAction != null) {
+            addAction.setHint("New " + singularName(type));
         }
         updateNavigationSelection();
         filterNavigation();
@@ -456,6 +478,9 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
                 group.filter(navigationFilter);
                 continue;
             }
+            group.setRowVisibility("create", navigationFilter.isBlank()
+                || normalize("new create " + singularName(resourceType) + " " + pluralName(resourceType))
+                    .contains(navigationFilter));
             for (Item item : categoryItems) {
                 group.setRowVisibility("definition:" + item.id(), navigationFilter.isBlank()
                     || normalize(pluralName(resourceType) + " " + item.searchText()).contains(navigationFilter));
@@ -469,8 +494,11 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
     private void updateNavigationSelection() {
         boolean interactive = !savePending && !creationPending && !deletePending;
         definitionEntries.forEach((key, entry) -> {
-            entry.setSelected(!creating && key.type().equals(type) && key.id().equals(activeId));
-            entry.setActive(interactive && (!key.type().equals(type) || !key.id().equals(activeId) || creating));
+            boolean selected = key.creating()
+                ? creating && key.type().equals(type)
+                : !creating && key.type().equals(type) && key.id().equals(activeId);
+            entry.setSelected(selected);
+            entry.setActive(interactive && !selected);
         });
         if (addAction != null) {
             addAction.setActive(interactive && !creating);
@@ -479,7 +507,7 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
 
     private void buildHeader() {
         header().reset();
-        addAction = headerButton("add.png", "New Definition", this::requestNew);
+        addAction = headerButton("add.png", "New " + singularName(type), () -> requestNew(type));
         primaryAction = headerButton("save.png", "Save Definition", this::requestStudioSave);
         deleteAction = headerButton("delete.png", "Delete Definition", this::showDelete);
         header().addRight(primaryAction);
@@ -560,6 +588,10 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
                 addSection("If The Server Missed A Run", List.of("missedRunPolicy"));
                 addSection("Who This Belongs To", List.of("scope", "persistent"));
             }
+            case AutomationDefinitionDraft.COMPONENT_BUILDER -> {
+                addSection("Applies To", List.of("scopeKind", "scopeValue"));
+                addComponentBuilderSection();
+            }
             default -> {
             }
         }
@@ -597,6 +629,53 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
         }
         section.fitContentHeight();
         workspace.addWidget(section);
+    }
+
+    private void addComponentBuilderSection() {
+        Setting section = new Setting.Builder("Components").build();
+        ReSyncStudioPanelState.disableEntrance(section);
+        AnimatedButton edit = new AnimatedButton.Builder().label("Edit Components").size(CONTROL_WIDTH, 18)
+            .onClick(this::openComponentBuilderEditor).build();
+        formControls.add(edit);
+        MountableButtonWidget row = new MountableButtonWidget.Builder("Item Components")
+            .description(componentBuilderComponentSummary()).iconPath("item.png").addWidget(edit).build();
+        row.setHeight(30);
+        ReSyncStudioPanelState.disableEntrance(row);
+        addRow(section, "components", 30, row);
+        section.fitContentHeight();
+        workspace.addWidget(section);
+    }
+
+    private void openComponentBuilderEditor() {
+        if (document == null || !AutomationDefinitionDraft.COMPONENT_BUILDER.equals(type)) {
+            return;
+        }
+        if (componentEditor == null) {
+            componentEditor = new ItemComponentEditorPanel(this, serverId, "componentBuilderEditorPanel");
+        }
+        JsonObject scope = document.has("scope") && document.get("scope").isJsonObject()
+            ? document.getAsJsonObject("scope") : new JsonObject();
+        Map<String, Object> components = document.has("components") && document.get("components").isJsonObject()
+            ? GSON.fromJson(document.getAsJsonObject("components"), Map.class) : Map.of();
+        String material = "item".equals(AutomationDefinitionDraft.text(type, document, "scopeKind"))
+            ? AutomationDefinitionDraft.text(type, document, "scopeValue") : "";
+        componentEditor.open(new ItemComponentEditorPanel.Model(name(document, currentId()), material, scope,
+            components, false, snapshot -> {
+                document.add("scope", snapshot.scope());
+                document.add("components", GSON.toJsonTree(snapshot.components()).getAsJsonObject());
+                rawValues.put("scopeKind", AutomationDefinitionDraft.text(type, document, "scopeKind"));
+                rawValues.put("scopeValue", AutomationDefinitionDraft.text(type, document, "scopeValue"));
+                draft.markMutation();
+                updateActionState();
+            }, ignored -> {}, this::rebuildForm));
+    }
+
+    private String componentBuilderComponentSummary() {
+        if (document == null || !document.has("components") || !document.get("components").isJsonObject()) {
+            return "No Components";
+        }
+        int count = document.getAsJsonObject("components").size();
+        return count == 1 ? "1 Component" : count + " Components";
     }
 
     private AnimatedWidget fieldControl(String field) {
@@ -706,7 +785,7 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
         if ("targetType".equals(field)) {
             syncTargetChoices();
         }
-        if ("timingMode".equals(field)) {
+        if ("timingMode".equals(field) || "scopeKind".equals(field)) {
             updateConditionalRows();
         }
         updateActionState();
@@ -745,6 +824,12 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
     }
 
     private void updateConditionalRows() {
+        if (AutomationDefinitionDraft.COMPONENT_BUILDER.equals(type)) {
+            setFieldVisible("scopeValue", !"dynamic".equals(raw("scopeKind")));
+            fieldRows.values().stream().map(FieldRow::setting).distinct().forEach(Setting::fitContentHeight);
+            workspace.updateWidgetPositions();
+            return;
+        }
         if (!AutomationDefinitionDraft.SCHEDULE.equals(type)) {
             return;
         }
@@ -1327,6 +1412,10 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
 
     @Override
     public void close() {
+        if (componentEditor != null && componentEditor.isOpen()) {
+            componentEditor.close();
+            return;
+        }
         if (savePending || deletePending || creationPending && !creationQueued) {
             return;
         }
@@ -1351,6 +1440,9 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
 
     @Override
     public void removed() {
+        if (componentEditor != null && componentEditor.isOpen()) {
+            componentEditor.close();
+        }
         restoreContentBrowser();
         if (!disposed) {
             disposed = true;
@@ -1408,6 +1500,14 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
     public void tick() {
         super.tick();
         drainEmbedded();
+    }
+
+    @Override
+    public void renderHandler(IDrawContext context, int mouseX, int mouseY, float delta) {
+        super.renderHandler(context, mouseX, mouseY, delta);
+        if (componentEditor != null && componentEditor.isOpen()) {
+            componentEditor.render(context, mouseX, mouseY, delta);
+        }
     }
 
     @Override
@@ -1990,7 +2090,7 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
     }
 
     private boolean dirty() {
-        return document != null && !rawValues.equals(baselineValues);
+        return document != null && (baselineDocument == null || !document.equals(baselineDocument));
     }
 
     private String currentId() {
@@ -2037,6 +2137,7 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
             case AutomationDefinitionDraft.VARIABLE -> "Variable";
             case AutomationDefinitionDraft.TIMER -> "Timer";
             case AutomationDefinitionDraft.SCHEDULE -> "Schedule";
+            case AutomationDefinitionDraft.COMPONENT_BUILDER -> "Component Builder";
             default -> "Automation";
         };
     }
@@ -2050,7 +2151,8 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
             case AutomationDefinitionDraft.VARIABLE -> "Reusable values that flows can get and set.";
             case AutomationDefinitionDraft.TIMER -> "Named countdowns you start, pause, and check. Use these for minigames, cooldowns, and timed states.";
             case AutomationDefinitionDraft.SCHEDULE -> "Reusable timed jobs that run a Function, Flow, or Command after a delay, at a time, on a repeat, or on a cron pattern.";
-            default -> "Automation Definitions";
+            case AutomationDefinitionDraft.COMPONENT_BUILDER -> "Reusable item component templates for dynamic, category, tag, or item targets.";
+            default -> "Sub Resources";
         };
     }
 
@@ -2084,6 +2186,14 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
                 String target = targetId.isBlank() ? targetType : targetType + " " + targetId;
                 yield target.isBlank() ? timing.isBlank() ? typeDescription(type) : timing
                     : timing.isBlank() ? target : target + " · " + timing;
+            }
+            case AutomationDefinitionDraft.COMPONENT_BUILDER -> {
+                String kind = optionLabel(AutomationDefinitionDraft.text(type, document, "scopeKind"));
+                String value = AutomationDefinitionDraft.text(type, document, "scopeValue");
+                int count = document.has("components") && document.get("components").isJsonObject()
+                    ? document.getAsJsonObject("components").size() : 0;
+                yield (value.isBlank() ? kind : kind + " " + value) + " · " + count
+                    + (count == 1 ? " Component" : " Components");
             }
             default -> typeDescription(type);
         };
@@ -2176,6 +2286,8 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
             case "offlinePolicy" -> "While Offline";
             case "missedRunPolicy" -> "Missed Run";
             case "scope" -> "Scope";
+            case "scopeKind" -> "Applies To";
+            case "scopeValue" -> "Target";
             default -> optionLabel(field);
         };
     }
@@ -2199,6 +2311,8 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
             case "timeZone" -> "Time zone used for calendar times and cron patterns.";
             case "cron" -> "Cron pattern that chooses run times.";
             case "scope" -> "Who owns each live instance. Server is one shared timer. Player is one per player.";
+            case "scopeKind" -> "Choose whether this template applies dynamically or to a category, tag, or item.";
+            case "scopeValue" -> "The category, item tag, or exact item this template supports.";
             case "persistent" -> "Keep the live state after a server restart.";
             case "overlapPolicy" -> "What to do if this schedule wants to fire while a previous run is still going.";
             case "existingTaskPolicy" -> "What to do if this schedule is started again while it is already active.";

@@ -709,13 +709,7 @@ public class ReSyncMarketplaceScreen extends ReScreen {
 
     private String iconFor(FlowManager manager, String type, String id) {
         if (ReSyncResourceDragPayload.CUSTOM_CONTENT.equals(type)) {
-            CustomContentDefinition content = manager.getCustomContentForServer(serverId).get(id);
-            String contentType = content != null && content.getType() != null ? content.getType().toLowerCase(Locale.ROOT) : "";
-            return switch (contentType) {
-                case "armor" -> "armor.png";
-                case "block" -> "block.png";
-                default -> "item.png";
-            };
+            return "content.png";
         }
         return switch (type) {
             case ReSyncResourceDragPayload.FUNCTION -> "json.png";
@@ -727,7 +721,7 @@ public class ReSyncMarketplaceScreen extends ReScreen {
             case ReSyncResourceDragPayload.TRADE_PROFILE -> "trade.png";
             case ReSyncResourceDragPayload.NPC_DEFINITION -> "steve.png";
             case ReSyncResourceDragPayload.LOOT_TABLE -> "resources.png";
-            default -> "graph.png";
+            default -> "flow.png";
         };
     }
 

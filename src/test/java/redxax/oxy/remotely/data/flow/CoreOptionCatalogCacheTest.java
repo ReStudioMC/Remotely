@@ -21,6 +21,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -84,6 +85,24 @@ class CoreOptionCatalogCacheTest {
         assertSame(catalog, snapshot.catalog());
         assertEquals("unavailable", snapshot.status());
         assertEquals("Refresh Failed", snapshot.diagnostic());
+    }
+
+    @Test
+    void interruptedRefreshRemainsRetryableAndKeepsResidentData() {
+        OptionCatalogCache cache = new OptionCatalogCache(OptionCatalogCache.Storage.none());
+        ServerId server = ServerId.deterministic("core-option-retry");
+        ContractRef<CapabilityId> query = ContractRef.of(OwnerId.of("owner"), CapabilityId.of("options"));
+        OptionCatalogCache.CoreKey key = key(server, query);
+        OptionCatalogCache.CompletedCoreCatalog catalog = catalog(key, "retained");
+        store(cache, key, catalog);
+
+        assertTrue(cache.begin(key, true));
+        cache.retry(key);
+
+        OptionCatalogCache.CoreCatalogSnapshot snapshot = cache.coreSnapshot(key);
+        assertSame(catalog, snapshot.catalog());
+        assertEquals("stale", snapshot.status());
+        assertEquals(OptionCatalogCache.CoreAdmission.STARTED, cache.admit(key, false));
     }
 
     @Test
@@ -237,6 +256,23 @@ class CoreOptionCatalogCacheTest {
         assertEquals("unavailable", cache.coreSnapshot(key).status());
         assertFalse(cache.coreSnapshot(key).loading());
         assertEquals(0, cache.coreMetrics().items());
+    }
+
+    @Test
+    void abandonedCoreRequestCanBeReclaimedAfterItsOwnerDeadline() {
+        AtomicLong now = new AtomicLong(1_000L);
+        OptionCatalogCache cache = new OptionCatalogCache(OptionCatalogCache.Storage.none(), now::get);
+        ServerId server = ServerId.deterministic("core-option-abandoned");
+        ContractRef<CapabilityId> query = ContractRef.of(OwnerId.of("owner"), CapabilityId.of("options"));
+        OptionCatalogCache.CoreKey key = key(server, query);
+
+        assertEquals(OptionCatalogCache.CoreAdmission.STARTED, cache.admit(key, false));
+        assertEquals(OptionCatalogCache.CoreAdmission.COALESCED, cache.admit(key, false));
+
+        now.addAndGet(20_000L);
+
+        assertEquals(OptionCatalogCache.CoreAdmission.STARTED, cache.admit(key, false));
+        assertTrue(cache.coreSnapshot(key).loading());
     }
 
     @Test

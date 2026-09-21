@@ -964,7 +964,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
 
     @Override
     public String getDesktopAppIconPath() {
-        return "ReSync.png";
+        return "content.png";
     }
 
     @Override
@@ -1327,17 +1327,6 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             .show();
         contentPanel = contentStudioPanel.sidePanel();
         contentStudioPanel.padding(panelState.padding());
-        attributeDesignerPanel = leftStudioPanel("attributeDesignerPanel")
-            .dismissible("Item Attributes")
-            .hide();
-        attributePanel = attributeDesignerPanel.sidePanel();
-        attributePanel.onUserVisibilityChanged(visible -> {
-            if (!visible) {
-                hideAttributeDesigner();
-            }
-        });
-        attributePanel.minWidth(360).width(420);
-        attributeDesignerPanel.padding(panelState.padding());
     }
 
     public static void handleAttributeValidationErrorsForServer(String serverId, List<Map<String, Object>> errors) {
@@ -1792,14 +1781,14 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     private void addLogicRows(Container container, String type, int rowWidth) {
         MountableButtonWidget selectedRow = new MountableButtonWidget.Builder(eventTitle(selectedBranch))
             .description(actionSummary(selectedBranch))
-            .iconPath("graph.png")
+            .iconPath("flow.png")
             .addButton(new SquareButtonWidget.Builder().imagePath("search.png").hint("Focus").entranceAnimation(false).onClick(() -> focusContentBranch(selectedBranch)).build())
             .build();
         insertContentPanelWidget(container, selectedRow);
         for (CustomContentGraphAdapter.TriggerDescriptor trigger : CustomContentGraphAdapter.triggersForType(type)) {
             MountableButtonWidget row = new MountableButtonWidget.Builder(eventTitle(trigger.pin()))
                 .description((trigger.pin().equals(selectedBranch) ? "Selected" : "Open") + " | " + actionSummary(trigger.pin()))
-                .iconPath("graph.png")
+                .iconPath("flow.png")
                 .onClick(() -> {
                     selectedBranch = trigger.pin();
                     focusContentBranch(selectedBranch);
@@ -1979,7 +1968,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             .build());
         insertContentPanelWidget(container, new MountableButtonWidget.Builder("Events")
             .description(CustomContentGraphAdapter.getEnabledTriggerBranches(graph).size() + " Enabled | " + branchActionCount(selectedBranch) + " Actions")
-            .iconPath("graph.png")
+            .iconPath("flow.png")
             .build());
         insertContentPanelWidget(container, new MountableButtonWidget.Builder("State")
             .description(saveState(definition))
@@ -2015,7 +2004,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         MountableButtonWidget componentsRow = new MountableButtonWidget.Builder("Components")
             .description(componentCountSummary(visibleComponents))
             .iconPath("item.png")
-            .addButton(new SquareButtonWidget.Builder().imagePath("graph.png").hint("Edit Attributes").entranceAnimation(false).onClick(this::openAttributeDesigner).build())
+            .addButton(new SquareButtonWidget.Builder().imagePath("edit.png").hint("Edit Components").entranceAnimation(false).onClick(this::openAttributeDesigner).build())
             .build();
         componentsRow.setSize(rowWidth, 30);
         return componentsRow;
@@ -2722,11 +2711,19 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             studioScreen.setStudioContentBrowserTemporarilyHidden(true);
             attributeDesignerHidContentBrowser = true;
         }
-        if (attributeDesignerPanel != null) {
-            attributeDesignerPanel.show();
-        }
-        updatePositions();
-        refreshAttributeDesigner(false);
+        openItemComponentEditor(new ItemComponentEditorPanel.Model("Item Components", projection.material(), null,
+            activeAttributeComponents, false, snapshot -> {
+                Map<String, Object> next = snapshot.components();
+                Set<String> ids = new LinkedHashSet<>(activeAttributeComponents.keySet());
+                ids.addAll(next.keySet());
+                for (String id : ids) {
+                    if (!Objects.equals(activeAttributeComponents.get(id), next.get(id))
+                        || activeAttributeComponents.containsKey(id) != next.containsKey(id)) {
+                        editedAttributeComponents.add(id);
+                    }
+                }
+                commitAttributeDesignerDraft(next);
+            }, ignored -> {}, this::finishAttributeDesigner));
     }
 
     private void refreshAttributeDesigner() {
@@ -2761,7 +2758,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             activeAttributeComponents = initialAttributeComponents(projection);
         }
         int rowWidth = attributeRowWidth();
-        MountableButtonWidget header = new MountableButtonWidget.Builder("Item Attributes")
+        MountableButtonWidget header = new MountableButtonWidget.Builder("Item Components")
             .description(attributeDesignerSummary(projection))
             .iconPath("item.png")
             .addButton(new SquareButtonWidget.Builder().imagePath("close.png").hint("Close").entranceAnimation(false).onClick(this::hideAttributeDesigner).build())
@@ -2771,7 +2768,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         insertAttributePanelWidget(container, header);
         TextInputWidget search = new TextInputWidget.Builder()
             .text(activeAttributeQuery)
-            .placeholder("Attribute Name")
+            .placeholder("Component Name")
             .forcePlaceholder(false)
             .size(Math.max(120, rowWidth - 8), 18)
             .build();
@@ -2863,6 +2860,14 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     }
 
     private void hideAttributeDesigner() {
+        if (isItemComponentEditorOpen()) {
+            closeItemComponentEditor();
+            return;
+        }
+        finishAttributeDesigner();
+    }
+
+    private void finishAttributeDesigner() {
         closeStudioSelector();
         setFocusedWidget(null);
         if (attributePanel != null) {
@@ -2906,8 +2911,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         int count = activeAttributeComponents != null ? activeAttributeComponents.size() : 0;
         String source = projection != null ? projection.schemaSource() : ATTRIBUTE_SCHEMA_SOURCE;
         boolean loaded = hasAttributeCatalog(source);
-        String material = projection != null && !projection.material().isBlank() ? projection.material() : "material";
-        return material + " | " + (count == 1 ? "1 Attribute" : count + " Attributes") + " | " + (loaded ? "Synced" : "Syncing");
+        String target = projection != null && !projection.material().isBlank() ? projection.material() : "Material";
+        return target + " | " + (count == 1 ? "1 Component" : count + " Components") + " | " + (loaded ? "Synced" : "Syncing");
     }
 
     private DropDownWidget<String> panelDropdown(List<String> choices, String selected, Consumer<String> onChange) {
@@ -2977,9 +2982,9 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         String material = projection != null ? projection.material() : "";
         List<OptionCatalogItem> available = availableComponents(displayComponents, catalog, query, material);
         ensureSelectedAttribute(displayComponents, active);
-        insertAttributePanelWidget(container, attributeSectionHeader("Current Attributes", active.isEmpty() ? "None" : active.size() + " Total", rowWidth));
+        insertAttributePanelWidget(container, attributeSectionHeader("Current Components", active.isEmpty() ? "None" : active.size() + " Total", rowWidth));
         if (active.isEmpty()) {
-            insertAttributePanelWidget(container, attributeStatusRow("No Attributes", "Choose Component", rowWidth, false));
+            insertAttributePanelWidget(container, attributeStatusRow("No Components", "Choose Component", rowWidth, false));
         }
         for (String id : active) {
             addAttributeComponentBlock(container, displayComponents, id, catalog.get(id), rowWidth);

@@ -6,8 +6,11 @@ import redxax.oxy.remotely.host.ApplicationHost;
 import redxax.oxy.remotely.host.ApplicationHostRegistry;
 import restudio.rescreen.platform.Async;
 import restudio.rebase.restudio.api.models.ServerModels;
+import restudio.resync.contract.install.ReSyncInstallationStatus;
 
 import java.util.Locale;
+import java.util.Optional;
+import java.util.UUID;
 
 public final class ReSyncProvisioningService {
     public static final int RESYNC_PORT = 12441;
@@ -18,6 +21,7 @@ public final class ReSyncProvisioningService {
         SETUP,
         SECURE_CONNECTION_REPAIR,
         SERVER_STOPPED,
+        MIGRATION_REQUIRED,
         READY
     }
 
@@ -86,6 +90,16 @@ public final class ReSyncProvisioningService {
         }
 
         default void clearReleaseCache() {
+        }
+
+        default Async<Optional<ReSyncInstallationStatus>> installationStatus(String serverId,
+                                                                               ServerModels.ClientServerView startupServer) {
+            return Async.completed(Optional.empty());
+        }
+
+        default Async<OperationResult> archiveLegacyData(String serverId, ServerModels.ClientServerView startupServer,
+                                                         ReSyncInstallationStatus status) {
+            return Async.completed(OperationResult.failed("Legacy Data Archiving Is Unavailable"));
         }
     }
 
@@ -182,6 +196,42 @@ public final class ReSyncProvisioningService {
         if (adapter != null) {
             adapter.clearReleaseCache();
         }
+    }
+
+    public Async<Optional<ReSyncInstallationStatus>> installationStatus(String serverId,
+                                                                         ServerModels.ClientServerView startupServer) {
+        Adapter adapter = adapter();
+        if (adapter != null) {
+            return adapter.installationStatus(serverId, startupServer);
+        }
+        FlowManager manager = FlowManager.getInstance();
+        RemotelyServerApi api = manager == null ? null : manager.getApiClient();
+        if (api == null || serverId == null || serverId.isBlank()) {
+            return Async.completed(Optional.empty());
+        }
+        return api.getFileContent(serverId, ReSyncInstallationStatus.FILE_PATH)
+            .thenApply(content -> Optional.of(ReSyncInstallationStatus.decode(content)))
+            .exceptionally(ignored -> Optional.empty());
+    }
+
+    public Async<OperationResult> archiveLegacyData(String serverId, ServerModels.ClientServerView startupServer,
+                                                    ReSyncInstallationStatus status) {
+        if (status == null || !status.blocksStartup()
+            || !ReSyncInstallationStatus.ARCHIVE_MARKER_PATH.equals(status.markerPath())) {
+            return Async.completed(OperationResult.failed("ReSync Is Not Waiting For Legacy Data Archiving"));
+        }
+        Adapter adapter = adapter();
+        if (adapter != null) {
+            return adapter.archiveLegacyData(serverId, startupServer, status);
+        }
+        FlowManager manager = FlowManager.getInstance();
+        RemotelyServerApi api = manager == null ? null : manager.getApiClient();
+        if (api == null || serverId == null || serverId.isBlank()) {
+            return Async.completed(OperationResult.failed("Server Files Are Unavailable"));
+        }
+        return api.writeFile(serverId, status.markerPath(), UUID.randomUUID() + "\n")
+            .thenApply(ignored -> OperationResult.successful())
+            .exceptionally(error -> OperationResult.failed(errorMessage(error)));
     }
 
     private Async<OperationResult> provision(String serverId, boolean update) {

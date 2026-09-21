@@ -9,6 +9,7 @@ import restudio.resync.flow.cache.CatalogAuthoringPublicationCodec;
 import restudio.resync.flow.cache.CatalogPublicationReceipt;
 import restudio.resync.flow.identity.ServerId;
 
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Predicate;
@@ -27,6 +28,7 @@ public final class ReSyncCatalogPublicationReceiptHandler {
     private final ReSyncCatalogPublicationProjection projection;
     private final ReSyncCatalogAuthoringProjection authoringProjection;
     private final ReSyncCatalogPublicationCache durableCache;
+    private final List<String> authoringCapabilities;
     private final CatalogAuthoringPublicationCodec authoringCodec = new CatalogAuthoringPublicationCodec();
     private volatile boolean authoringRequired;
     private long cachePersistenceSequence;
@@ -43,11 +45,20 @@ public final class ReSyncCatalogPublicationReceiptHandler {
                                                   ReSyncCatalogPublicationProjection projection,
                                                   ReSyncCatalogAuthoringProjection authoringProjection,
                                                   ReSyncCatalogPublicationCache durableCache) {
+        this(expectedServerId, expectedSessionKey, projection, authoringProjection, durableCache, List.of());
+    }
+
+    public ReSyncCatalogPublicationReceiptHandler(ServerId expectedServerId, String expectedSessionKey,
+                                                  ReSyncCatalogPublicationProjection projection,
+                                                  ReSyncCatalogAuthoringProjection authoringProjection,
+                                                  ReSyncCatalogPublicationCache durableCache,
+                                                  List<String> authoringCapabilities) {
         this.expectedServerId = Objects.requireNonNull(expectedServerId, "Expected server ID is required");
         this.expectedSessionKey = requireSessionKey(expectedSessionKey);
         this.projection = Objects.requireNonNull(projection, "Catalog publication projection is required");
         this.authoringProjection = authoringProjection;
         this.durableCache = durableCache;
+        this.authoringCapabilities = authoringCapabilities == null ? List.of() : List.copyOf(authoringCapabilities);
         this.authoringRequired = false;
     }
 
@@ -178,7 +189,7 @@ public final class ReSyncCatalogPublicationReceiptHandler {
                 return Application.readOnly(READ_ONLY_STALE);
             }
         }
-        persist(node.candidate());
+        persist(node.candidate(), prepared.authoring() == null ? null : prepared.authoring().candidate());
         return Application.applied(node.candidate());
     }
 
@@ -211,7 +222,8 @@ public final class ReSyncCatalogPublicationReceiptHandler {
         return null;
     }
 
-    private void persist(ReSyncCatalogPublicationProjection.Snapshot snapshot) {
+    private void persist(ReSyncCatalogPublicationProjection.Snapshot snapshot,
+                         ReSyncCatalogAuthoringProjection.Snapshot authoring) {
         if (durableCache == null) {
             return;
         }
@@ -221,7 +233,7 @@ public final class ReSyncCatalogPublicationReceiptHandler {
         Async<CachePersistence> reportedCompletion = Async.pending();
         cachePersistenceCompletion = reportedCompletion;
         Async<ReSyncCatalogPublicationCache.Persistence> completion = durableCache.storeAsync(
-            expectedServerId, snapshot);
+            expectedServerId, snapshot, authoring, authoring == null ? List.of() : authoringCapabilities);
         completion.whenComplete((result, failure) -> reportedCompletion.complete(completePersistence(sequence,
             publication.key(), publication.revision(), result, failure)));
     }

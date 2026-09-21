@@ -95,6 +95,7 @@ public class ReSyncProjectMetadata {
         ensureFolder("Content/Recipes", "Content", 3);
         ensureFolder("Content/Advancements", "Content", 4);
         ensureFolder("Content/Dialogs", "Content", 5);
+        ensureFolder("Content/Component Builders", "Content", 6);
         ensureFolder("GUIs", "", 2);
         ensureFolder("Customization", "", 3);
         ensureFolder("Customization/Chat", "Customization", 0);

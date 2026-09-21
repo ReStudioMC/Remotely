@@ -227,7 +227,7 @@ final class HostedResourceOverviewProvider implements ResourceOverviewProvider {
             case DELETE -> ResourceMarketplaceProvider.Action.DELETE;
             case DOWNLOAD_LATEST -> state.mode() == Mode.REPLACEMENT
                     ? ResourceMarketplaceProvider.Action.CHANGE_MODPACK : ResourceMarketplaceProvider.Action.UPDATE;
-            case INSTALL -> state.mode() == Mode.REPLACEMENT
+            case INSTALL, INSTALL_INCOMPATIBLE -> state.mode() == Mode.REPLACEMENT
                     ? ResourceMarketplaceProvider.Action.CHANGE_MODPACK : ResourceMarketplaceProvider.Action.INSTALL;
         };
         return new ResourceOverviewContext.ActionRequest(mappedAction, card, mappedVersion, mappedFile);

@@ -9,6 +9,7 @@ import redxax.oxy.remotely.flow.ui.ReSyncProvisioningService;
 import redxax.oxy.remotely.host.ApplicationHost;
 import redxax.oxy.remotely.host.ApplicationHostRegistry;
 import restudio.rescreen.platform.Async;
+import restudio.resync.contract.install.ReSyncInstallationStatus;
 import restudio.rescreen.platform.http.HttpRequest;
 import restudio.rescreen.platform.http.HttpResponse;
 import restudio.rescreen.platform.http.HttpTransport;
@@ -20,6 +21,8 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.UUID;
 import java.util.Set;
 
 public final class BrowserReSyncProvisioningAdapter implements ReSyncProvisioningService.Adapter {
@@ -162,13 +165,7 @@ public final class BrowserReSyncProvisioningAdapter implements ReSyncProvisionin
                         if (!isCurrent(fence)) {
                             return staleResult();
                         }
-                        ReSyncFlowClient client = manager.existingFlowClient(serverId);
-                        if (client == null) {
-                            return unavailable("ReSync Endpoint Unreachable. Check That The Server And ReSync Are Running",
-                                RemotelyServerApi.ReSyncReadinessReason.UPSTREAM_UNREACHABLE,
-                                ReSyncProvisioningService.StartupStatus.LOADING, fence);
-                        }
-                        return awaitConnection(manager, client, serverId, fence);
+                        return awaitConnection(manager, serverId, fence);
                     });
                 });
             }).exceptionally(ignored -> {
@@ -193,6 +190,38 @@ public final class BrowserReSyncProvisioningAdapter implements ReSyncProvisionin
             if (installed == null || installed.isBlank()) return Async.completed(false);
             return latestVersion().thenApply(latest -> isCurrent(fence) && newer(latest, installed));
         }).exceptionally(ignored -> false);
+    }
+
+    @Override
+    public Async<Optional<ReSyncInstallationStatus>> installationStatus(String serverId,
+                                                                        ServerModels.ClientServerView startupServer) {
+        String canonicalServerId = ReSyncServerIdentity.from(serverId, startupServer).serverId();
+        RemotelyServerApi api = api(FlowManager.getInstance());
+        if (api == null || canonicalServerId.isBlank()) {
+            return Async.completed(Optional.empty());
+        }
+        return api.getFileContent(canonicalServerId, ReSyncInstallationStatus.FILE_PATH)
+            .thenApply(content -> Optional.of(ReSyncInstallationStatus.decode(content)))
+            .exceptionally(ignored -> Optional.empty());
+    }
+
+    @Override
+    public Async<ReSyncProvisioningService.OperationResult> archiveLegacyData(String serverId,
+                                                                              ServerModels.ClientServerView startupServer,
+                                                                              ReSyncInstallationStatus status) {
+        String canonicalServerId = ReSyncServerIdentity.from(serverId, startupServer).serverId();
+        RemotelyServerApi api = api(FlowManager.getInstance());
+        if (api == null || canonicalServerId.isBlank()) {
+            return Async.completed(ReSyncProvisioningService.OperationResult.failed("Server Files Are Unavailable"));
+        }
+        if (status == null || !status.blocksStartup()
+            || !ReSyncInstallationStatus.ARCHIVE_MARKER_PATH.equals(status.markerPath())) {
+            return Async.completed(ReSyncProvisioningService.OperationResult.failed(
+                "ReSync Is Not Waiting For Legacy Data Archiving"));
+        }
+        return api.writeFile(canonicalServerId, status.markerPath(), UUID.randomUUID() + "\n")
+            .thenApply(ignored -> ReSyncProvisioningService.OperationResult.successful())
+            .exceptionally(error -> ReSyncProvisioningService.OperationResult.failed(errorMessage(error)));
     }
 
     @Override
@@ -408,7 +437,6 @@ public final class BrowserReSyncProvisioningAdapter implements ReSyncProvisionin
     }
 
     private Async<ReSyncProvisioningService.StartupProbeResult> awaitConnection(FlowManager manager,
-                                                                                  ReSyncFlowClient client,
                                                                                   String serverId,
                                                                                   LifecycleFence fence) {
         return manager.awaitFlowClientConnected(serverId, true).thenApply(readiness -> {
@@ -438,10 +466,16 @@ public final class BrowserReSyncProvisioningAdapter implements ReSyncProvisionin
                     ReSyncProvisioningService.StartupStatus.LOADING, false, false,
                     RemotelyServerApi.ReSyncReadinessReason.NONE, "");
             }
-            ReSyncFlowClient failureClient = resolvedClient == null ? client : resolvedClient;
+            ReSyncFlowClient failureClient = resolvedClient;
+            if (failureClient == null) {
+                return unavailableResult("ReSync Endpoint Unreachable. Check That The Server And ReSync Are Running",
+                    RemotelyServerApi.ReSyncReadinessReason.UPSTREAM_UNREACHABLE,
+                    ReSyncProvisioningService.StartupStatus.LOADING, fence);
+            }
             RemotelyServerApi.ReSyncReadinessReason reasonCode = switch (failureClient.connectionFailure()) {
-                case PROTOCOL_MISMATCH, RUNTIME_VERSION_MISMATCH, HANDSHAKE_REJECTED, ACCESS_DENIED ->
+                case PROTOCOL_MISMATCH, RUNTIME_VERSION_MISMATCH, HANDSHAKE_REJECTED ->
                     RemotelyServerApi.ReSyncReadinessReason.PROTOCOL_INCOMPATIBLE;
+                case ACCESS_DENIED -> RemotelyServerApi.ReSyncReadinessReason.CREDENTIAL_UNAVAILABLE;
                 case ENDPOINT_UNREACHABLE, NONE -> RemotelyServerApi.ReSyncReadinessReason.UPSTREAM_UNREACHABLE;
             };
             if (failureClient.connectionFailure() == ReSyncFlowClient.ConnectionFailure.NONE) {

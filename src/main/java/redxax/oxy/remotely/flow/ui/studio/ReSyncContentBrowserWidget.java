@@ -59,6 +59,7 @@ import restudio.rescreen.ui.widgets.SquareButtonWidget;
 import restudio.rescreen.ui.widgets.TextInputWidget;
 import restudio.rescreen.util.Notification;
 import restudio.rescreen.util.Identifier;
+import restudio.resync.contract.install.ReSyncInstallationStatus;
 
 import java.lang.ref.WeakReference;
 import java.util.ArrayDeque;
@@ -121,6 +122,7 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
     private final SquareButtonWidget marketplaceButton;
     private final SquareButtonWidget permissionsButton;
     private final SquareButtonWidget updateButton;
+    private final SquareButtonWidget installationStatusButton;
     private ItemSelectorWidget createSelector;
     private ItemSelectorWidget createContentSelector;
     private AssetBrowserSnapshot lastAssetBrowserSnapshot;
@@ -146,6 +148,7 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
     private boolean temporarilyHidden;
     private boolean shortcutFocused;
     private volatile boolean disposed;
+    private ReSyncInstallationStatus installationStatus;
     private final Set<String> pendingDeleteKeys = BrowserSafeState.set();
     private final Set<String> pendingDeleteFolders = BrowserSafeState.set();
 
@@ -616,10 +619,17 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             .onClick(screen::updateReSyncFromContentBrowser)
             .build();
         updateButton.setVisible(false);
+        installationStatusButton = new SquareButtonWidget.Builder()
+            .imagePath("info.png")
+            .size(STUDIO_CONTENT_BROWSER_TOOL_SIZE, STUDIO_CONTENT_BROWSER_TOOL_SIZE)
+            .hint("ReSync Data Status")
+            .onClick(() -> screen.showReSyncInstallationStatus(installationStatus))
+            .build();
+        installationStatusButton.setVisible(false);
         SquareButtonWidget switchBrowser = new SquareButtonWidget.Builder()
             .imagePath("resources.png")
             .size(STUDIO_CONTENT_BROWSER_TOOL_SIZE, STUDIO_CONTENT_BROWSER_TOOL_SIZE)
-            .hint("Variables")
+            .hint("Sub Resources")
             .onClick(() -> screen.openDefinitions(AutomationDefinitionDraft.VARIABLE))
             .build();
         browser = new CompactWorkspaceBrowserWidget(
@@ -635,12 +645,13 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             false,
             SidePanel.Anchor.LEFT,
             updateButton,
+            installationStatusButton,
             switchBrowser,
             permissionsButton,
             marketplaceButton,
             createButton
         );
-        sidePanel = browser.sidePanel();
+        sidePanel = browser.sidePanel().renderedByOwner();
         sidePanel.collapsible("Content Browser");
         searchInput = browser.searchInput();
         treeContainer = browser.treeContainer();
@@ -676,6 +687,14 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
 
     public SidePanel sidePanel() {
         return sidePanel;
+    }
+
+    public void setInstallationStatus(ReSyncInstallationStatus status) {
+        installationStatus = status;
+        installationStatusButton.setVisible(status != null);
+        installationStatusButton.setIcon(Identifier.icon(status != null && status.blocksStartup() ? "stop.png" : "info.png"));
+        installationStatusButton.setHint(status == null ? "ReSync Data Status" : status.title());
+        browser.layout();
     }
 
     public int visibleLayoutWidth() {
@@ -1578,11 +1597,8 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
     private List<BrowserResource> browserResources(List<ReSyncProjectMetadata.ResourceEntry> resources,
                                                    Map<String, Boolean> activations) {
         List<BrowserResource> snapshots = new ArrayList<>(resources.size());
-        FlowManager manager = FlowManager.getInstance();
         for (ReSyncProjectMetadata.ResourceEntry resource : resources) {
-            String iconPath = ReSyncResourceDragPayload.CUSTOM_CONTENT.equals(resource.getType())
-                ? customContentIconPath(manager != null ? manager.getCustomContentType(screen.studioServerId(), resource.getId()) : "")
-                : screen.studioResourceIconPath(resource.getType(), resource.getId());
+            String iconPath = screen.studioResourceIconPath(resource.getType(), resource.getId());
             snapshots.add(new BrowserResource(resource.getType(), resource.getId(), resource.getDisplayName(), resource.getPath(),
                 resource.getSortOrder(), iconPath, resourceEnabled(resource, activations)));
         }
@@ -2022,14 +2038,15 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
     private ItemSelectorWidget.Builder addCreateSelectorItems(ItemSelectorWidget.Builder builder, String targetFolder) {
         return builder
             .addItem("New Folder", "folder.png", "Create Folder", "folder directory", () -> showCreateResourcePopup(ReSyncResourceDragPayload.FOLDER, targetFolder))
-            .addItem("New Flow", "graph.png", "Create Flow", "flow graph", () -> showCreateResourcePopup(ReSyncResourceDragPayload.FLOW, targetFolder))
+            .addItem("New Flow", "flow.png", "Create Flow", "flow graph", () -> showCreateResourcePopup(ReSyncResourceDragPayload.FLOW, targetFolder))
             .addItem("New Function", "json.png", "Create Function", "function mcfunction", () -> showCreateResourcePopup(ReSyncResourceDragPayload.FUNCTION, targetFolder))
             .addItem("New Command", "terminal.png", "Create Command", "command terminal", () -> showCreateResourcePopup(ReSyncResourceDragPayload.COMMAND, targetFolder))
-            .addItem("New Content", "resources.png", "Create Content", "content item block armor", () -> showCreateResourcePopup(ReSyncResourceDragPayload.CUSTOM_CONTENT, targetFolder))
+            .addItem("New Content", "content.png", "Create Content", "content item block armor", () -> showCreateResourcePopup(ReSyncResourceDragPayload.CUSTOM_CONTENT, targetFolder))
             .addItem("New GUI", "fullPanel.png", "Create GUI", "gui interface inventory", () -> showCreateResourcePopup(ReSyncResourceDragPayload.GUI, targetFolder))
             .addItem("New Scoreboard", "panel.png", "Create Scoreboard", "scoreboard sidebar", () -> showCreateResourcePopup(ReSyncResourceDragPayload.SCOREBOARD, targetFolder))
             .addItem("New Tab", "topPanel.png", "Create Tab", "tab player list", () -> showCreateResourcePopup(ReSyncResourceDragPayload.TAB, targetFolder))
             .addItem("New Chat", "chat.png", "Create Chat", "chat format", () -> showCreateResourcePopup(ReSyncResourceDragPayload.CHAT, targetFolder))
+            .addItem("New Component Builder", "item.png", "Create Component Builder", "item components template", () -> showCreateResourcePopup(ReSyncResourceDragPayload.COMPONENT_BUILDER, targetFolder))
             .addItem("New MOTD", "hi.png", "Create MOTD", "motd server list", () -> showCreateResourcePopup(ReSyncResourceDragPayload.MOTD_PROFILE, targetFolder))
             .addItem("New Message Rule", "edit.png", "Create Message Rule", "message rule", () -> showCreateResourcePopup(ReSyncResourceDragPayload.MESSAGE_RULE, targetFolder))
             .addItem("New Recipe", "crafting.png", "Create Recipe", "recipe crafting", () -> showCreateResourcePopup(ReSyncResourceDragPayload.RECIPE_DEFINITION, targetFolder))
@@ -2039,6 +2056,9 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             .addItem("New NPC", "steve.png", "Create NPC", "npc entity", () -> showCreateResourcePopup(ReSyncResourceDragPayload.NPC_DEFINITION, targetFolder))
             .addItem("New Loot Table", "resources.png", "Create Loot Table", "loot table drops", () -> showCreateResourcePopup(ReSyncResourceDragPayload.LOOT_TABLE, targetFolder))
             .addItem("New Text", "text.png", "Create Text", "text template", () -> showCreateResourcePopup(ReSyncResourceDragPayload.TEXT_TEMPLATE, targetFolder))
+            .addItem("New Variable", "snippets.png", "Create Variable", "variable reusable value", () -> showCreateResourcePopup(ReSyncResourceDragPayload.VARIABLE_DEFINITION, targetFolder))
+            .addItem("New Timer", "history.png", "Create Timer", "timer countdown", () -> showCreateResourcePopup(ReSyncResourceDragPayload.TIMER_DEFINITION, targetFolder))
+            .addItem("New Schedule", "calendar.png", "Create Schedule", "schedule timed job", () -> showCreateResourcePopup(ReSyncResourceDragPayload.SCHEDULE_DEFINITION, targetFolder))
             .addItem("New World", "earth.png", "Create World", "world level", () -> showCreateWorldPopup(targetFolder))
             .addItem("Import Worlds", "download.png", "Import Worlds", "import existing worlds", () -> {
                 FlowManager manager = FlowManager.getInstance();
@@ -2399,7 +2419,7 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
                         new ScreenBackedStudioView(screen, new ContentDesignerScreen(screen.studioServerId(), graph, screen)));
                 }
             }
-            case ReSyncResourceDragPayload.CHAT, ReSyncResourceDragPayload.MOTD_PROFILE, ReSyncResourceDragPayload.MESSAGE_RULE,
+            case ReSyncResourceDragPayload.CHAT, ReSyncResourceDragPayload.COMPONENT_BUILDER, ReSyncResourceDragPayload.MOTD_PROFILE, ReSyncResourceDragPayload.MESSAGE_RULE,
                  ReSyncResourceDragPayload.RECIPE_DEFINITION, ReSyncResourceDragPayload.TEXT_TEMPLATE,
                  ReSyncResourceDragPayload.VARIABLE_DEFINITION, ReSyncResourceDragPayload.TIMER_DEFINITION,
                  ReSyncResourceDragPayload.SCHEDULE_DEFINITION -> {
@@ -2557,7 +2577,7 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         return switch (resource.getType()) {
             case ReSyncResourceDragPayload.FLOW, ReSyncResourceDragPayload.FUNCTION, ReSyncResourceDragPayload.COMMAND,
                  ReSyncResourceDragPayload.CUSTOM_CONTENT, ReSyncResourceDragPayload.GUI, ReSyncResourceDragPayload.SCOREBOARD,
-                 ReSyncResourceDragPayload.TAB, ReSyncResourceDragPayload.CHAT, ReSyncResourceDragPayload.MOTD_PROFILE,
+                 ReSyncResourceDragPayload.TAB, ReSyncResourceDragPayload.CHAT, ReSyncResourceDragPayload.COMPONENT_BUILDER, ReSyncResourceDragPayload.MOTD_PROFILE,
                  ReSyncResourceDragPayload.MESSAGE_RULE, ReSyncResourceDragPayload.RECIPE_DEFINITION,
                  ReSyncResourceDragPayload.TEXT_TEMPLATE, ReSyncResourceDragPayload.ADVANCEMENT_TREE,
                  ReSyncResourceDragPayload.DIALOG, ReSyncResourceDragPayload.TRADE_PROFILE,
@@ -2581,7 +2601,7 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         return selectedResources(selection).stream().allMatch(resource -> switch (resource.getType()) {
             case ReSyncResourceDragPayload.FLOW, ReSyncResourceDragPayload.FUNCTION, ReSyncResourceDragPayload.COMMAND,
                  ReSyncResourceDragPayload.CUSTOM_CONTENT, ReSyncResourceDragPayload.GUI, ReSyncResourceDragPayload.SCOREBOARD,
-                 ReSyncResourceDragPayload.TAB, ReSyncResourceDragPayload.CHAT, ReSyncResourceDragPayload.MOTD_PROFILE,
+                 ReSyncResourceDragPayload.TAB, ReSyncResourceDragPayload.CHAT, ReSyncResourceDragPayload.COMPONENT_BUILDER, ReSyncResourceDragPayload.MOTD_PROFILE,
                  ReSyncResourceDragPayload.MESSAGE_RULE, ReSyncResourceDragPayload.RECIPE_DEFINITION,
                  ReSyncResourceDragPayload.TEXT_TEMPLATE, ReSyncResourceDragPayload.ADVANCEMENT_TREE,
                  ReSyncResourceDragPayload.DIALOG, ReSyncResourceDragPayload.TRADE_PROFILE,
@@ -3048,7 +3068,7 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             case ReSyncResourceDragPayload.GUI -> manager.renameGui(screen.studioServerId(), oldId, newId);
             case ReSyncResourceDragPayload.SCOREBOARD -> manager.renameScoreboard(screen.studioServerId(), oldId, newId);
             case ReSyncResourceDragPayload.TAB -> manager.renameTab(screen.studioServerId(), oldId, newId);
-            case ReSyncResourceDragPayload.CHAT, ReSyncResourceDragPayload.MOTD_PROFILE, ReSyncResourceDragPayload.MESSAGE_RULE,
+            case ReSyncResourceDragPayload.CHAT, ReSyncResourceDragPayload.COMPONENT_BUILDER, ReSyncResourceDragPayload.MOTD_PROFILE, ReSyncResourceDragPayload.MESSAGE_RULE,
                  ReSyncResourceDragPayload.RECIPE_DEFINITION, ReSyncResourceDragPayload.TEXT_TEMPLATE, ReSyncResourceDragPayload.ADVANCEMENT_TREE,
                  ReSyncResourceDragPayload.DIALOG, ReSyncResourceDragPayload.TRADE_PROFILE, ReSyncResourceDragPayload.NPC_DEFINITION,
                  ReSyncResourceDragPayload.LOOT_TABLE, ReSyncResourceDragPayload.VARIABLE_DEFINITION,
@@ -3079,7 +3099,7 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         if (manager == null || !canDelete(selection)) return;
         List<ReSyncProjectMetadata.ResourceEntry> resources = selectedResources(selection);
         if (resources.stream().anyMatch(resource -> AutomationDefinitionDraft.supports(resource.getType()))) {
-            new Notification("Delete", "This Folder Contains Automation Definitions. Delete Them From Their Type Screen First", Notification.Type.WARN);
+            new Notification("Delete", "This Folder Contains Sub Resources. Delete Them From Their Type Screen First", Notification.Type.WARN);
             return;
         }
         List<ReSyncProjectMetadata.ResourceEntry> worlds = resources.stream().filter(resource -> ReSyncResourceDragPayload.WORLD.equals(resource.getType())).toList();
@@ -3386,16 +3406,6 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
     private String iconPathFor(ReSyncProjectMetadata.ResourceEntry resource) {
         String iconPath = resourceIconPaths.get(resource.key());
         return iconPath != null ? iconPath : screen.studioResourceIconPath(resource.getType(), resource.getId());
-    }
-
-    private String customContentIconPath(String contentType) {
-        return switch (contentType != null ? contentType.toLowerCase(Locale.ROOT) : "") {
-            case "armor" -> "armor.png";
-            case "block" -> "block.png";
-            case "item" -> "item.png";
-            case "projectile" -> "item.png";
-            default -> "item.png";
-        };
     }
 
     private void layoutContainersIfDirty() {

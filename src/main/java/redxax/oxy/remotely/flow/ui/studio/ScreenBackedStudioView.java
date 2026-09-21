@@ -65,6 +65,11 @@ public class ScreenBackedStudioView implements ReSyncStudioView, ReSyncCollabora
         return initialized;
     }
 
+    public boolean ownsSidePanels() {
+        init();
+        return screen instanceof ReScreen reScreen && !reScreen.getSidePanels().isEmpty();
+    }
+
     public void applyEditorError(EditorError error) {
         clearEditorError();
         if (screen instanceof ReSyncEditorDiagnosticView diagnosticView) {
@@ -151,6 +156,26 @@ public class ScreenBackedStudioView implements ReSyncStudioView, ReSyncCollabora
             return buttons;
         }
         return ReSyncStudioView.super.headerButtons();
+    }
+
+    @Override
+    public StudioPanel.Placement preferredPanelPlacement() {
+        init();
+        return screen instanceof ReSyncStudioView view ? view.preferredPanelPlacement() : ReSyncStudioView.super.preferredPanelPlacement();
+    }
+
+    @Override
+    public boolean hasPanel() {
+        init();
+        return !ownsSidePanels() && screen instanceof ReSyncStudioView view && view.hasPanel();
+    }
+
+    @Override
+    public void configurePanel(StudioPanel panel) {
+        init();
+        if (!ownsSidePanels() && screen instanceof ReSyncStudioView view) {
+            view.configurePanel(panel);
+        }
     }
 
     @Override

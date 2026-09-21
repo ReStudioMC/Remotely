@@ -8,6 +8,9 @@ import redxax.oxy.remotely.flow.data.ScoreboardDefinition;
 import redxax.oxy.remotely.flow.data.TabDefinition;
 import redxax.oxy.remotely.flow.ui.studio.StudioScreen;
 import restudio.rescreen.theme.ThemeManager;
+import restudio.rescreen.platform.input.ReModifierState;
+import restudio.rescreen.platform.input.ReMouseButton;
+import restudio.rescreen.platform.input.ReMouseEvent;
 import restudio.rescreen.ui.core.Screen;
 import restudio.rescreen.ui.rescreen.SidePanel;
 
@@ -15,7 +18,9 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DesignerPanelAnimationTest {
     @BeforeEach
@@ -62,7 +67,7 @@ class DesignerPanelAnimationTest {
 
             set(inspector, "animatedWidth", 240.0F);
             updateLayout(designer, false);
-            assertNotEquals(initialWidth, value(designer, "previewWidth", Integer.class));
+            assertEquals(initialWidth - 240, value(designer, "previewWidth", Integer.class));
 
             designer.header().offset(0, designer.header().getOffsetY() == 0 ? -designer.header().headerSize : 0);
             updateLayout(designer, false);
@@ -100,6 +105,44 @@ class DesignerPanelAnimationTest {
             tab.removed();
             advancement.removed();
         }
+    }
+
+    @Test
+    void scoreboardAndTabSeamsCloseTheirInspectors() throws Exception {
+        ScoreboardDesignerScreen scoreboard = new ScoreboardDesignerScreen(new ScoreboardDefinition("test", "Test"));
+        TabDesignerScreen tab = new TabDesignerScreen(new TabDefinition("test"));
+        try {
+            scoreboard.resize(1000, 700);
+            scoreboard.init();
+            tab.resize(1000, 700);
+            tab.init();
+
+            SidePanel scoreboardPanel = value(scoreboard, "inspectorPanel", SidePanel.class);
+            SidePanel tabPanel = value(tab, "inspectorPanel", SidePanel.class);
+            assertEquals(0f, scoreboardPanel.getAnimatedWidth());
+            assertEquals(0f, tabPanel.getAnimatedWidth());
+            assertSeamCloses(scoreboard, scoreboardPanel);
+            assertSeamCloses(tab, tabPanel);
+        } finally {
+            scoreboard.removed();
+            tab.removed();
+        }
+    }
+
+    private static void assertSeamCloses(StudioScreen designer, SidePanel panel) {
+        panel.animation(false);
+        int seamX = designer.getWidth() - panel.getConfiguredWidth();
+        ReMouseEvent press = mouse(ReMouseEvent.Action.PRESSED, seamX, designer.getHeight() / 2.0);
+        ReMouseEvent release = mouse(ReMouseEvent.Action.RELEASED, seamX, designer.getHeight() / 2.0);
+
+        assertTrue(designer.mouseClicked(press));
+        assertTrue(designer.mouseReleased(release));
+        assertTrue(panel.isCollapsed());
+        assertFalse(panel.isVisible());
+    }
+
+    private static ReMouseEvent mouse(ReMouseEvent.Action action, double x, double y) {
+        return new ReMouseEvent(null, null, 0, ReModifierState.none(), action, x, y, 0, 0, ReMouseButton.LEFT, 0, 1);
     }
 
     private static void updateLayout(Object designer, boolean force) throws Exception {

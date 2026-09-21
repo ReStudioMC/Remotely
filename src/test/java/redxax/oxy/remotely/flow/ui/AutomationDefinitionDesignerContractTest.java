@@ -22,6 +22,7 @@ import redxax.oxy.remotely.flow.ui.studio.ScreenBackedStudioView;
 import redxax.oxy.remotely.flow.ui.studio.StudioPanel;
 import redxax.oxy.remotely.flow.ui.studio.StudioScreen;
 import redxax.oxy.remotely.test.TestDrawContext;
+import redxax.oxy.remotely.util.BrowserSafeState;
 import restudio.rescreen.config.Config;
 import restudio.rescreen.platform.input.ReModifierState;
 import restudio.rescreen.platform.input.ReMouseButton;
@@ -166,7 +167,26 @@ class AutomationDefinitionDesignerContractTest {
         assertSame(view, host.activeView());
         assertSame(designer, ((ScreenBackedStudioView) host.activeView()).screen());
         assertEquals(1, host.documentCount());
+        assertEquals("Sub Resources", host.activeTitle());
         assertEquals(AutomationDefinitionDraft.SCHEDULE, value(designer, "type", String.class));
+    }
+
+    @Test
+    void navigationOffersExplicitCreationForEveryDefinitionType() throws Exception {
+        AutomationDefinitionDesignerScreen screen = designer(AutomationDefinitionDraft.VARIABLE, null);
+        mountWithoutRefresh(screen);
+        Map<?, ?> entries = value(screen, "definitionEntries", Map.class);
+        List<String> labels = entries.values().stream().map(MountableButtonWidget.class::cast)
+            .map(MountableButtonWidget::getMessage).toList();
+
+        assertTrue(labels.contains("New Variable"));
+        assertTrue(labels.contains("New Timer"));
+        assertTrue(labels.contains("New Schedule"));
+
+        invoke(screen, "requestNew", new Class<?>[]{String.class}, AutomationDefinitionDraft.TIMER);
+
+        assertEquals(AutomationDefinitionDraft.TIMER, value(screen, "type", String.class));
+        assertTrue(value(screen, "creating", Boolean.class));
     }
 
     @Test
@@ -840,7 +860,7 @@ class AutomationDefinitionDesignerContractTest {
             () -> true, () -> valueUnchecked(screen, "document", JsonObject.class).toString());
         long lifecycle = value(screen, "lifecycle", Long.class);
         Object acknowledgement = saveAcknowledgement(7L, lifecycle, lease,
-            new AtomicReference<>(value(screen, "document", JsonObject.class).toString()),
+            new BrowserSafeState.ReferenceValue<>(value(screen, "document", JsonObject.class).toString()),
             Map.copyOf(values(screen, "rawValues")), () -> continued.set(true));
         set(screen, "saveSequence", 7L);
         set(screen, "savePending", true);
@@ -1068,12 +1088,12 @@ class AutomationDefinitionDesignerContractTest {
     }
 
     private static Object saveAcknowledgement(long sequence, long lifecycle, FlowManager.ResourceReadLease lease,
-                                              AtomicReference<String> authoritative,
+                                              BrowserSafeState.ReferenceValue<String> authoritative,
                                               Map<String, String> submittedValues, Runnable afterSave)
         throws Exception {
         Class<?> type = Class.forName(AutomationDefinitionDesignerScreen.class.getName() + "$SaveAcknowledgement");
         Constructor<?> constructor = type.getDeclaredConstructor(long.class, long.class,
-            FlowManager.ResourceReadLease.class, AtomicReference.class, Map.class, Runnable.class);
+            FlowManager.ResourceReadLease.class, BrowserSafeState.ReferenceValue.class, Map.class, Runnable.class);
         constructor.setAccessible(true);
         return constructor.newInstance(sequence, lifecycle, lease, authoritative, submittedValues, afterSave);
     }
@@ -1111,7 +1131,7 @@ class AutomationDefinitionDesignerContractTest {
     private static void restoreFlowManager(FlowManager manager) throws Exception {
         Field field = FlowManager.class.getDeclaredField("INSTANCE");
         field.setAccessible(true);
-        ((AtomicReference<FlowManager>) field.get(null)).set(manager);
+        ((BrowserSafeState.ReferenceValue<FlowManager>) field.get(null)).set(manager);
     }
 
     private static void restoreNodeRegistry(NodeRegistry registry) throws Exception {
@@ -1245,6 +1265,10 @@ class AutomationDefinitionDesignerContractTest {
 
         private int documentCount() {
             return studioDocuments.size();
+        }
+
+        private String activeTitle() {
+            return activeStudioDocument != null ? activeStudioDocument.title() : "";
         }
     }
 

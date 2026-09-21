@@ -2033,8 +2033,8 @@ public final class DesktopServerHost implements ServerScreenHost {
             return Async.failed(new IllegalStateException("Server Is Unavailable"));
         }
         InstanceManager instances = Rebase.get().getInstanceManager();
-        if (("duplicate".equals(normalized) || "trash".equals(normalized) || "delete".equals(normalized))
-                && !canMutateStandalone(instance)) {
+        if (("duplicate".equals(normalized) && !canMutateStandalone(instance))
+                || (("trash".equals(normalized) || "delete".equals(normalized)) && !canDeleteStandalone(instance))) {
             return Async.failed(new UnsupportedOperationException("Server Ownership Does Not Allow This Action"));
         }
         return switch (normalized) {
@@ -2687,7 +2687,7 @@ public final class DesktopServerHost implements ServerScreenHost {
     @Override
     public void deleteServer(Screen current, ServerModels.ClientServerView server) {
         Instance instance = resolve(server);
-        if (!canMutateStandalone(instance)) {
+        if (!canDeleteStandalone(instance)) {
             unavailable(Action.DELETE_SERVER);
             return;
         }
@@ -2711,6 +2711,31 @@ public final class DesktopServerHost implements ServerScreenHost {
         }
         DesktopNetworkManager manager = DesktopNetworkAccess.manager(client);
         return manager == null ? client.getNetworkManager() == null : manager.getNetworkForInstance(instance.getInstanceId()).isEmpty();
+    }
+
+    private boolean canDeleteStandalone(Instance instance) {
+        if (instance == null || instance.getState() == InstanceState.INSTALLING) {
+            return false;
+        }
+        BackendConfig config = instance.getBackendConfig();
+        String type = config == null ? null : config.type;
+        if (type != null && !type.isBlank() && !"LOCAL".equalsIgnoreCase(type) && !"SSH".equalsIgnoreCase(type)) {
+            return false;
+        }
+        DesktopNetworkManager manager = DesktopNetworkAccess.manager(client);
+        return manager == null ? client.getNetworkManager() == null : manager.getNetworkForInstance(instance.getInstanceId()).isEmpty();
+    }
+
+    @Override
+    public ActionAvailability serverActionAvailability(ServerModels.ClientServerView server, Action action) {
+        Instance instance = resolve(server);
+        return switch (action) {
+            case DUPLICATE_SERVER -> canMutateStandalone(instance)
+                    ? ActionAvailability.enabled() : ActionAvailability.disabled("Server Duplication Is Unavailable");
+            case DELETE_SERVER -> canDeleteStandalone(instance)
+                    ? ActionAvailability.enabled() : ActionAvailability.disabled("Server Deletion Is Unavailable");
+            default -> ServerScreenHost.super.serverActionAvailability(server, action);
+        };
     }
 
     private static boolean isVelocityProxy(Instance instance) {

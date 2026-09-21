@@ -30,10 +30,12 @@ import restudio.resync.flow.protocol.OptionPage;
 import restudio.resync.flow.protocol.ProtocolBody;
 import restudio.resync.flow.protocol.ProtocolEnvelope;
 import restudio.resync.flow.protocol.ProtocolEnvelopeCodec;
+import restudio.resync.flow.protocol.ProtocolRejectionCode;
 import restudio.resync.flow.resource.ResourcePayloadCodecs;
 import restudio.resync.flow.type.TypeExpr;
 import restudio.resync.flow.type.TypeReference;
 import restudio.resync.flow.type.TypedValue;
+import redxax.oxy.remotely.worldgen.WorldGenManager;
 
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
@@ -146,6 +148,32 @@ class ReSyncFlowClientOptionTransportTest {
             assertEquals(before, protocolEnvelopeCount(transport));
             assertEquals(0, pendingCoreOptionRequestCount(client));
         } finally {
+            client.shutdown();
+        }
+    }
+
+    @Test
+    void optionQueryUsesItsAuthenticatedEpochWhileWorldGenStateIsUnavailable(@TempDir Path tempDirectory)
+        throws Exception {
+        ScriptedReSyncTransport transport = new ScriptedReSyncTransport();
+        ReSyncFlowClient client = connected(transport, publication(), tempDirectory.resolve("option-read-epoch-cache.json"));
+        try {
+            WorldGenManager.getInstance().clearCache(SERVER.canonicalText());
+            assertEquals(0L, WorldGenManager.getInstance().authorityEpoch(SERVER.canonicalText()));
+
+            OptionCatalogLoader.CoreRequest request = automaticRequest(client, "resources");
+            assertTrue(OptionCatalogLoader.refresh(client, request));
+            ProtocolEnvelope<Map<String, Object>> envelope = lastEnvelope(transport);
+            transport.receiveEnvelope(response(envelope,
+                page(request, "available", null, true, 1L, request.source().invalidationKey()),
+                request.authorityEpoch()), 3);
+            ReSyncFlowClientTestHarness.drain(client);
+
+            OptionCatalogLoader.CoreSnapshot snapshot = OptionCatalogLoader.snapshot(client, request);
+            assertEquals("available", snapshot.status());
+            assertEquals("available", snapshot.items().getFirst().label());
+        } finally {
+            WorldGenManager.getInstance().clearCache(SERVER.canonicalText());
             client.shutdown();
         }
     }
@@ -287,7 +315,7 @@ class ReSyncFlowClientOptionTransportTest {
     }
 
     @Test
-    void rejectionAndWrongAuthorityFailTheCorrelatedRequest(@TempDir Path tempDirectory) throws Exception {
+    void retryableRejectionReleasesTheCorrelatedRequestAndWrongAuthorityFailsIt(@TempDir Path tempDirectory) throws Exception {
         ScriptedReSyncTransport transport = new ScriptedReSyncTransport();
         ReSyncFlowClient client = connected(transport, publication(), tempDirectory.resolve("rejection-cache.json"));
         try {
@@ -296,7 +324,8 @@ class ReSyncFlowClientOptionTransportTest {
             ProtocolEnvelope<Map<String, Object>> rejectedRequest = lastEnvelope(transport);
             transport.receiveEnvelope(rejection(rejectedRequest, request.authorityEpoch()), 3);
             ReSyncFlowClientTestHarness.drain(client);
-            assertEquals("unavailable", OptionCatalogCache.getInstance().coreSnapshot(request.key()).status());
+            assertEquals("missing", OptionCatalogCache.getInstance().coreSnapshot(request.key()).status());
+            assertFalse(OptionCatalogCache.getInstance().coreSnapshot(request.key()).loading());
 
             assertTrue(client.requestCoreOptionCatalog(request, true));
             ProtocolEnvelope<Map<String, Object>> wrongAuthorityRequest = lastEnvelope(transport);
@@ -305,6 +334,31 @@ class ReSyncFlowClientOptionTransportTest {
                 request.authorityEpoch() + 1L), 4);
             ReSyncFlowClientTestHarness.drain(client);
             assertEquals("unavailable", OptionCatalogCache.getInstance().coreSnapshot(request.key()).status());
+        } finally {
+            client.shutdown();
+        }
+    }
+
+    @Test
+    void exactPublicationResponseSettlesDuringTransientCatalogReconciliation(@TempDir Path tempDirectory)
+        throws Exception {
+        ScriptedReSyncTransport transport = new ScriptedReSyncTransport();
+        ReSyncFlowClient client = connected(transport, publication(), tempDirectory.resolve("reconciliation-cache.json"));
+        try {
+            OptionCatalogLoader.CoreRequest request = automaticRequest(client, "resources");
+            assertTrue(client.requestCoreOptionCatalog(request, true));
+            ProtocolEnvelope<Map<String, Object>> pending = lastEnvelope(transport);
+            setCatalogAuthority(client, ReSyncFlowClient.CatalogAuthority.TYPED_RECONCILIATION);
+
+            transport.receiveEnvelope(response(pending,
+                page(request, "retained", null, true, 2L, request.source().invalidationKey()),
+                request.authorityEpoch()), 3);
+            ReSyncFlowClientTestHarness.drain(client);
+
+            OptionCatalogCache.CoreCatalogSnapshot snapshot = OptionCatalogCache.getInstance()
+                .coreSnapshot(request.key());
+            assertEquals("available", snapshot.status());
+            assertEquals("retained", snapshot.catalog().items().getFirst().label());
         } finally {
             client.shutdown();
         }
@@ -640,6 +694,14 @@ class ReSyncFlowClientOptionTransportTest {
 
     private static ProtocolEnvelope<Map<String, Object>> rejection(ProtocolEnvelope<Map<String, Object>> request,
                                                                     long authorityEpoch) {
+        Map<String, Object> values = Map.of(
+            "rejectionCode", ProtocolRejectionCode.RESOURCE_READ_UNAVAILABLE.wireValue(),
+            "rejectionMessage", "Category catalog unavailable",
+            "requestId", request.requestId().toString(),
+            "correlationId", request.correlationId().toString(),
+            "traceId", request.traceId().toString(),
+            "operation", request.operation().canonicalText()
+        );
         return new ProtocolEnvelope<>(
             ProtocolEnvelope.Kind.RESPONSE,
             request.contractVersion(),
@@ -666,8 +728,8 @@ class ReSyncFlowClientOptionTransportTest {
             0L,
             ProtocolEnvelope.Status.REJECTED,
             List.of(),
-            Map.of(),
-            new ProtocolBody.ControlResponse("resource.rejection", Map.of("message", "Rejected"))
+            Map.of("rejectionCode", values.get("rejectionCode"), "rejectionMessage", values.get("rejectionMessage")),
+            new ProtocolBody.ControlResponse("resource.rejection", values)
         );
     }
 
@@ -743,6 +805,13 @@ class ReSyncFlowClientOptionTransportTest {
         field.setAccessible(true);
         Object value = field.get(client);
         return value instanceof Map<?, ?> sequences ? sequences.size() : -1;
+    }
+
+    private static void setCatalogAuthority(ReSyncFlowClient client, ReSyncFlowClient.CatalogAuthority authority)
+        throws Exception {
+        Field field = ReSyncFlowClient.class.getDeclaredField("catalogAuthority");
+        field.setAccessible(true);
+        field.set(client, authority);
     }
 
     private static OptionCatalogCache.CoreCatalogSnapshot awaitCoreOptionStatus(ReSyncFlowClient client,

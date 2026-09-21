@@ -1256,6 +1256,10 @@ public interface ServerScreenHost {
         return ActionAvailability.disabled(label + " Is Unavailable");
     }
 
+    default ActionAvailability serverActionAvailability(ServerModels.ClientServerView server, Action action) {
+        return managerAction(action, server);
+    }
+
     default void openGlobalTerminal(Screen current) {
         unavailable(Action.GLOBAL_TERMINAL);
     }

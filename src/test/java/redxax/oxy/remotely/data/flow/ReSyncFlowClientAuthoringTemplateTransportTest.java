@@ -40,6 +40,7 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -89,6 +90,34 @@ class ReSyncFlowClientAuthoringTemplateTransportTest {
             assertEquals(publication.withAuthoringPublication(null), awaitCatalogPublication(client));
             assertTrue(client.activeCatalogAuthoringPublication().isEmpty());
             assertTrue(client.activeCatalogAuthoringChecksum().isEmpty());
+        } finally {
+            client.shutdown();
+        }
+    }
+
+    @Test
+    void cacheHydrationRestoresCapabilityBoundAuthoringWithoutANetworkPublication(@TempDir Path tempDirectory) {
+        Path cachePath = tempDirectory.resolve("catalog-publication-cache.json");
+        CatalogCachePublication publication = publication(true);
+        CatalogCachePublication nodePublication = publication.withAuthoringPublication(null);
+        ReSyncCatalogPublicationProjection nodeProjection = new ReSyncCatalogPublicationProjection(SERVER);
+        ReSyncCatalogAuthoringProjection authoringProjection = new ReSyncCatalogAuthoringProjection(SERVER);
+        assertTrue(nodeProjection.apply(nodePublication, new CatalogCachePublicationCodec().encodeBytes(nodePublication)));
+        CatalogAuthoringPublication authoring = publication.authoringPublication();
+        assertTrue(authoringProjection.apply(publication.key(), publication.revision(), authoring,
+            new CatalogAuthoringPublicationCodec().encodeBytes(authoring)));
+        List<String> capabilities = new ArrayList<>(ReSyncProtocolContract.FLOW_CONTRACT.clientCapabilities());
+        capabilities.add("restudio.resync/catalog_authoring");
+        ReSyncCatalogPublicationCache cache = new ReSyncCatalogPublicationCache(
+            DesktopReSyncStorage.fromKey(cachePath));
+        assertTrue(cache.storeAsync(SERVER, nodeProjection.active().orElseThrow(),
+            authoringProjection.active().orElseThrow(), capabilities).join().stored());
+
+        ReSyncFlowClient client = new ReSyncFlowClient(SERVER.canonicalText(), new NoopTransport(), null,
+            new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(cachePath)));
+        try {
+            assertEquals(nodePublication, awaitCatalogPublication(client));
+            assertEquals(authoring, awaitAuthoringPublication(client));
         } finally {
             client.shutdown();
         }
@@ -367,6 +396,18 @@ class ReSyncFlowClientAuthoringTemplateTransportTest {
             LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
         }
         throw new AssertionError("Catalog publication cache was not hydrated");
+    }
+
+    private static CatalogAuthoringPublication awaitAuthoringPublication(ReSyncFlowClient client) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (System.nanoTime() < deadline) {
+            Optional<CatalogAuthoringPublication> active = client.activeCatalogAuthoringPublication();
+            if (active.isPresent()) {
+                return active.orElseThrow();
+            }
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+        }
+        throw new AssertionError("Catalog authoring cache was not hydrated");
     }
 
     private static void addContract(JsonObject root) {

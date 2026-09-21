@@ -22,6 +22,7 @@ public final class FlowDataType {
     public static final FlowDataType SCOREBOARD_ID = new FlowDataType("scoreboard_id", STRING, 0x3E8BFF, "Scoreboard");
     public static final FlowDataType TAB_ID = new FlowDataType("tab_id", STRING, 0x61B5FF, "Tab List");
     public static final FlowDataType CHAT_ID = new FlowDataType("chat_id", STRING, 0x5CC8FF, "Chat Profile");
+    public static final FlowDataType COMPONENT_BUILDER_ID = new FlowDataType("component_builder_id", STRING, 0x35D9C7, "Component Builder");
     public static final FlowDataType MOTD_PROFILE_ID = new FlowDataType("motd_profile_id", STRING, 0xE066FF, "MOTD Profile");
     public static final FlowDataType MESSAGE_RULE_ID = new FlowDataType("message_rule_id", STRING, 0xB96BFF, "Message Rule");
     public static final FlowDataType RECIPE_ID = new FlowDataType("recipe_id", STRING, 0x71C76F, "Recipe");

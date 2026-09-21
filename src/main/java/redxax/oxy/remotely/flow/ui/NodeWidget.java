@@ -34,6 +34,7 @@ import restudio.resync.flow.identity.OwnerId;
 import restudio.resync.flow.identity.ResourceTypeId;
 import restudio.resync.flow.identity.ServerId;
 import restudio.resync.flow.identity.ServerResourceLocator;
+import restudio.resync.flow.inspector.InspectorOptionSource;
 import restudio.resync.flow.canonical.CanonicalJson;
 import restudio.resync.flow.type.TypeReference;
 import redxax.oxy.remotely.worldgen.WorldGenManager;
@@ -86,6 +87,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -544,6 +546,18 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
 
         refreshFunctionParameterButton();
         initializeDefinition();
+    }
+
+    public void configureEditAction(String hint, Runnable action) {
+        openFunctionButton.setMessage("E");
+        openFunctionButton.setHint(hint == null || hint.isBlank() ? "Edit" : hint);
+        openFunctionButton.setAction(action);
+        openFunctionButton.visible = action != null;
+        invalidateChildLayout();
+    }
+
+    public String inputResourceId(String pin) {
+        return resourceId(presentationInputValue(pin));
     }
 
     protected final void refreshFunctionParameterButton() {
@@ -1311,7 +1325,6 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
             BrowserSafeState.ReferenceValue<ItemSelectorWidget> selector = new BrowserSafeState.ReferenceValue<>();
             ItemSelectorWidget.Builder selectorBuilder = new ItemSelectorWidget.Builder(screen)
                 .size(180, 220)
-                .entryHeight(18)
                 .dismissOnSelect(true)
                 .onClose(() -> screen.remove(selector.get()));
             boolean catalogBacked = input.getOptionsSource() != null && !input.getOptionsSource().isBlank();
@@ -1338,26 +1351,24 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
             .entranceAnimation(false)
             .build();
         button.setAction(() -> {
-            OptionCatalogLoader.CoreRequest request = coreOptionRequest(input.getOptionSourceRef()).orElse(null);
             var screen = ScreenManager.getInstance().getCurrentScreen();
-            if (request == null || screen == null) {
-                new Notification("Options", "Option Source Unavailable", Notification.Type.WARN);
+            if (screen == null) {
                 return;
             }
             BrowserSafeState.ReferenceValue<ItemSelectorWidget> selector = new BrowserSafeState.ReferenceValue<>();
             selector.set(new ItemSelectorWidget.Builder(screen)
                 .size(180, 220)
-                .entryHeight(18)
                 .dismissOnSelect(true)
-                .asyncItems(OptionCatalogSelector.refreshAction(request), () -> OptionCatalogSelector.snapshot(request,
-                    () -> corePinValue(input), value -> {
-                        if (!validCoreOption(input, request, value)) {
+                .asyncItems(() -> refreshCoreOption(input.getOptionSourceRef()),
+                    () -> coreOptionSnapshot(input.getOptionSourceRef(), () -> corePinValue(input), value -> {
+                        CoreOptionSelection selection = coreOptionSelection(input.getOptionSourceRef()).orElse(null);
+                        if (selection == null || !validCoreOption(input, selection.request(), value)) {
                             new Notification("Options", "Typed Option Is Incompatible", Notification.Type.ERROR);
                             return;
                         }
                         button.setMessage(typedValueLabel(value));
                         applyCoreTypedNodeValue(input, value);
-                    }, "No Options"))
+                    }))
                 .onClose(() -> screen.remove(selector.get()))
                 .build());
             selector.get().setSelectedItem(typedValueLabel(corePinValue(input)));
@@ -1379,20 +1390,19 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
             .entranceAnimation(false)
             .build();
         button.setAction(() -> {
-            OptionCatalogLoader.CoreRequest request = coreOptionRequest(field.optionSource()).orElse(null);
             var screen = ScreenManager.getInstance().getCurrentScreen();
-            if (request == null || screen == null || original == null) {
-                new Notification("Options", "Option Source Unavailable", Notification.Type.WARN);
+            if (screen == null || original == null) {
                 return;
             }
             BrowserSafeState.ReferenceValue<ItemSelectorWidget> selector = new BrowserSafeState.ReferenceValue<>();
             selector.set(new ItemSelectorWidget.Builder(screen)
                 .size(220, 240)
-                .entryHeight(18)
                 .dismissOnSelect(true)
-                .asyncItems(OptionCatalogSelector.refreshAction(request), () -> OptionCatalogSelector.snapshot(request,
-                    () -> exactValue.get() != null ? exactValue.get() : original.typedValue(), value -> {
-                        if (!validCoreOption(original.type(), request, value)) {
+                .asyncItems(() -> refreshCoreOption(field.optionSource()),
+                    () -> coreOptionSnapshot(field.optionSource(),
+                        () -> exactValue.get() != null ? exactValue.get() : original.typedValue(), value -> {
+                        CoreOptionSelection selection = coreOptionSelection(field.optionSource()).orElse(null);
+                        if (selection == null || !validCoreOption(original.type(), selection.request(), value)) {
                             new Notification("Options", "Typed Option Is Incompatible", Notification.Type.ERROR);
                             return;
                         }
@@ -1400,7 +1410,7 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
                         state.set(null);
                         dirty.set(true);
                         button.setMessage(typedValueLabel(value));
-                    }, "No Options"))
+                    }))
                 .onClose(() -> screen.remove(selector.get()))
                 .build());
             selector.get().setSelectedItem(typedValueLabel(original.typedValue()));
@@ -1410,8 +1420,46 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
         return button;
     }
 
-    private Optional<OptionCatalogLoader.CoreRequest> coreOptionRequest(ContractRef<InspectorFieldId> source) {
-        return OptionCatalogLoader.automaticCoreRequest(catalogServerId(), source, coreResource, Map.of(), Map.of(), "");
+    private Optional<CoreOptionSelection> coreOptionSelection(ContractRef<InspectorFieldId> source) {
+        ReSyncFlowClient client = catalogFlowClient(false);
+        if (client == null || source == null) {
+            return Optional.empty();
+        }
+        return client.activeOptionSource(source)
+            .flatMap(optionSource -> {
+                OptionCatalogLoader.CoreQueryValues values = coreOptionQueryValues(optionSource);
+                return OptionCatalogLoader.automaticCoreRequest(client, source, coreResource,
+                    values.context(), values.dependencies(), "")
+                    .map(request -> new CoreOptionSelection(client, request));
+            });
+    }
+
+    private void refreshCoreOption(ContractRef<InspectorFieldId> source) {
+        coreOptionSelection(source).ifPresent(selection ->
+            OptionCatalogLoader.refresh(selection.client(), selection.request()));
+    }
+
+    private ItemSelectorWidget.AsyncItemSnapshot coreOptionSnapshot(ContractRef<InspectorFieldId> source,
+        Supplier<TypedValue> selectedSupplier, Consumer<TypedValue> onSelected) {
+        CoreOptionSelection selection = coreOptionSelection(source).orElse(null);
+        return selection == null
+            ? new ItemSelectorWidget.AsyncItemSnapshot(List.of(), false, "Options Unavailable")
+            : OptionCatalogSelector.snapshot(OptionCatalogLoader.snapshot(selection.client(), selection.request()),
+                selectedSupplier, onSelected, "No Options");
+    }
+
+    private OptionCatalogLoader.CoreQueryValues coreOptionQueryValues(InspectorOptionSource source) {
+        Map<String, TypedValue> pinValues = new LinkedHashMap<>();
+        for (NodeDefinition.PinDefinition input : inputs) {
+            TypedValue value = corePinValue(input);
+            if (input != null && input.getId() != null && value != null && value.state() != TypedValue.State.ABSENT) {
+                pinValues.put(input.getId().canonicalText(), value);
+            }
+        }
+        return OptionCatalogLoader.automaticValues(source, node != null ? node.getType() : "", pinValues);
+    }
+
+    private record CoreOptionSelection(ReSyncFlowClient client, OptionCatalogLoader.CoreRequest request) {
     }
 
     private boolean validCoreOption(NodeDefinition.PinDefinition input, OptionCatalogLoader.CoreRequest request,
@@ -3784,6 +3832,9 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
         int rightColumnWidth = getRightColumnWidth();
         int contentWidth = leftColumnWidth + rightColumnWidth + (leftColumnWidth > 0 && rightColumnWidth > 0 ? COLUMN_GAP : 0);
         int contentHeight = Math.max(getInputsContentHeight(), getOutputsContentHeight());
+        if (definition == null) {
+            contentHeight = Math.max(contentHeight, ITextRenderer.fontHeight + 4);
+        }
         int bottomRows = Math.max(addInputButtons.size(), addBranchButton != null && addBranchButton.visible ? 1 : 0);
         if (bottomRows > 0) {
             contentHeight += bottomRows * ROW_HEIGHT + (contentHeight > 0 ? bottomRows : bottomRows - 1) * ROW_SPACING;

@@ -78,6 +78,7 @@ import restudio.resync.flow.cache.CatalogCacheKey;
 import restudio.resync.flow.cache.CatalogCachePublication;
 import restudio.resync.flow.cache.CatalogCachePublicationCodec;
 import restudio.resync.flow.cache.CatalogAuthoringPublication;
+import restudio.resync.flow.cache.CatalogAuthoringPublicationCodec;
 import restudio.resync.flow.cache.CatalogPublicationReceipt;
 import restudio.resync.flow.cache.CatalogPublicationReceiptPacket;
 import restudio.resync.flow.cache.CatalogPublicationChunkPacket;
@@ -103,6 +104,7 @@ import restudio.resync.flow.identity.OwnerId;
 import restudio.resync.flow.identity.OperationId;
 import restudio.resync.flow.identity.ResourceTypeId;
 import restudio.resync.flow.identity.ServerId;
+import restudio.resync.flow.inspector.InspectorOptionSource;
 import restudio.resync.flow.protocol.ProtocolEnvelope;
 import restudio.resync.flow.protocol.ProtocolEnvelopeCodec;
 import restudio.resync.flow.protocol.ProtocolRejectionCode;
@@ -698,6 +700,9 @@ public class ReSyncFlowClient {
     private TaskScheduler.ScheduledTask heartbeatTask;
     private TaskScheduler.ScheduledTask reconnectTask;
     private int reconnectGeneration = -1;
+    private final BrowserSafeState.IntegerValue consecutiveReconnectFailures = new BrowserSafeState.IntegerValue();
+    private final BrowserSafeState.BooleanValue frameOpeningFailureHandled = new BrowserSafeState.BooleanValue();
+    private final BrowserSafeState.BooleanValue terminalFrameDisconnectPublished = new BrowserSafeState.BooleanValue();
     private TaskScheduler.ScheduledTask connectTimeoutTask;
     private int connectTimeoutGeneration = -1;
     private final Object connectTimeoutLock = new Object();
@@ -707,6 +712,7 @@ public class ReSyncFlowClient {
     private static final int MAX_TYPED_DOCUMENT_REPLAY_ATTEMPTS = 5;
     private static final int MAX_CORE_OPTION_INVALIDATION_SCOPES = 4096;
     private static final int RECONNECT_DELAY_SECONDS = 3;
+    private static final int MAX_TRANSIENT_RECONNECT_FAILURES = 4;
     private static final int CONNECT_TIMEOUT_SECONDS = 10;
     private static final int LEGACY_DELETE_TIMEOUT_SECONDS = 30;
     private volatile boolean shutdownRequested = false;
@@ -775,38 +781,7 @@ public class ReSyncFlowClient {
     }
 
     public ReSyncFlowClient(String serverId, RemotelyServerApi apiClient, String directWsUrl, String directApiKey, RemotelyClient client) {
-        this.serverId = serverId;
-        this.catalogPublicationCache = ReSyncCatalogPublicationCache.deferred();
-        this.catalogPublicationProjection = ReSyncCatalogPublicationProjection.forConfiguredServerId(serverId,
-            catalogPublicationCache);
-        this.catalogAuthoringProjection = ReSyncCatalogAuthoringProjection.forConfiguredServerId(serverId);
-        this.apiClient = apiClient;
-        this.directWsUrl = directWsUrl;
-        this.directApiKey = directApiKey;
-        this.client = client;
-        this.frameTransport = null;
-        this.framePeerServerId = Optional.empty();
-        this.worldGenProtocolHandler = new WorldGenProtocolHandler(serverId, gson, this::trackGenericJob,
-            this::worldGenAuthorityEpoch, this::acceptWorldGenAuthorityTransitionEpoch);
-        this.stableClientId = stableClientId(serverId);
-        this.catalogPublicationReceiptHandler = catalogPublicationProjection.expectedServerId()
-            .map(expected -> new ReSyncCatalogPublicationReceiptHandler(expected, stableClientId,
-                catalogPublicationProjection, catalogAuthoringProjection, catalogPublicationCache))
-            .orElse(null);
-        this.collaboration = new ReSyncCollaborationClient(gson, stableClientId);
-        this.collaboration.bindMutationAdmission(() -> !shutdownRequested);
-        this.collaboration.setListenerDelivery(this::submitCurrentConnectionCallback);
-        bindCollaborationChannel();
-        this.workspaces = new ReSyncWorkspaceClient(gson, collaboration);
-        this.workspaces.bindLifecycleAdmission(() -> !shutdownRequested);
-        this.workspaces.bindMutationAdmission(() -> !shutdownRequested && catalogAuthorityAllowsWorkspacePublication());
-        this.workspaceSource = bindWorkspaceChannel();
-        for (ReSyncResourceType type : ReSyncResourceType.values()) {
-            pendingOpenResources.put(type, BrowserSafeState.set());
-        }
-        configureHeartbeatScheduler();
-        scheduleCatalogCacheHydration(0);
-        refreshCatalogAuthority();
+        this(serverId, apiClient, directWsUrl, directApiKey, client, null, ReSyncCatalogPublicationCache.deferred());
     }
 
     public ReSyncFlowClient(String serverId, ReSyncFrameTransport frameTransport, RemotelyClient client) {
@@ -815,24 +790,31 @@ public class ReSyncFlowClient {
 
     public ReSyncFlowClient(String serverId, ReSyncFrameTransport frameTransport, RemotelyClient client,
                             ReSyncCatalogPublicationCache catalogPublicationCache) {
+        this(serverId, null, null, "bridge", client, frameTransport, catalogPublicationCache);
+    }
+
+    private ReSyncFlowClient(String serverId, RemotelyServerApi apiClient, String directWsUrl, String directApiKey,
+                             RemotelyClient client, ReSyncFrameTransport frameTransport,
+                             ReSyncCatalogPublicationCache catalogPublicationCache) {
         this.serverId = serverId;
         this.catalogPublicationCache = Objects.requireNonNull(catalogPublicationCache, "Catalog publication cache is required");
         this.catalogPublicationProjection = ReSyncCatalogPublicationProjection.forConfiguredServerId(serverId,
             catalogPublicationCache);
         this.catalogAuthoringProjection = ReSyncCatalogAuthoringProjection.forConfiguredServerId(serverId);
-        this.apiClient = null;
-        this.directWsUrl = null;
-        this.directApiKey = null;
+        this.apiClient = apiClient;
+        this.directWsUrl = directWsUrl;
+        this.directApiKey = directApiKey;
         this.client = client;
-        this.frameTransport = Objects.requireNonNull(frameTransport, "Frame transport is required");
-        this.framePeerServerId = Objects.requireNonNull(frameTransport.peerServerId(),
-            "Frame transport peer server identity is required");
+        this.frameTransport = frameTransport;
+        this.framePeerServerId = frameTransport == null ? Optional.empty()
+            : Objects.requireNonNull(frameTransport.peerServerId(), "Frame transport peer server identity is required");
         this.worldGenProtocolHandler = new WorldGenProtocolHandler(serverId, gson, this::trackGenericJob,
             this::worldGenAuthorityEpoch, this::acceptWorldGenAuthorityTransitionEpoch);
         this.stableClientId = stableClientId(serverId);
         this.catalogPublicationReceiptHandler = catalogPublicationProjection.expectedServerId()
             .map(expected -> new ReSyncCatalogPublicationReceiptHandler(expected, stableClientId,
-                catalogPublicationProjection, catalogAuthoringProjection, catalogPublicationCache))
+                catalogPublicationProjection, catalogAuthoringProjection, catalogPublicationCache,
+                clientCapabilities()))
             .orElse(null);
         this.collaboration = new ReSyncCollaborationClient(gson, stableClientId);
         this.collaboration.bindMutationAdmission(() -> !shutdownRequested);
@@ -860,7 +842,8 @@ public class ReSyncFlowClient {
                             ReSyncFlowClientContext context, TaskScheduler scheduler, Clock clock,
                             ReSyncIdentityProvider identityProvider, ReSyncCredentialProvider credentialProvider,
                             boolean ownsScheduler) {
-        this(serverId, frameTransport, hostClient(), catalogCache(context));
+        this(serverId, null, null, apiKey, hostClient(), Objects.requireNonNull(frameTransport, "Frame transport is required"),
+            catalogCache(context));
     }
 
     public ReSyncFlowClient(String serverId, RemotelyServerApi apiClient, String directWsUrl, String directApiKey,
@@ -875,10 +858,15 @@ public class ReSyncFlowClient {
                             ReSyncFlowClientContext context, TaskScheduler scheduler, Clock clock,
                             ReSyncFrameTransportFactory transportFactory, ReSyncIdentityProvider identityProvider,
                             ReSyncCredentialProvider credentialProvider, boolean ownsScheduler) {
-        this(serverId, apiClient, directWsUrl, directApiKey, hostClient());
-        if (transportFactory != null && directWsUrl != null && !directWsUrl.isBlank() && this.frameTransport == null) {
-            transportFactory.create(directWsUrl);
+        this(serverId, apiClient, directWsUrl, directApiKey, hostClient(), createTransport(transportFactory, directWsUrl),
+            catalogCache(context));
+    }
+
+    private static ReSyncFrameTransport createTransport(ReSyncFrameTransportFactory factory, String endpoint) {
+        if (factory == null || endpoint == null || endpoint.isBlank()) {
+            return null;
         }
+        return Objects.requireNonNull(factory.create(endpoint), "Frame transport factory returned no transport");
     }
 
     private static RemotelyClient hostClient() {
@@ -932,11 +920,15 @@ public class ReSyncFlowClient {
                         return;
                     }
                     ReSyncCatalogPublicationProjection.PreparedHydration prepared = hydration.orElseThrow();
+                    ReSyncCatalogPublicationCache.CachedPublication cachedPublication = cached.orElseThrow();
+                    ReSyncCatalogAuthoringProjection.Prepared preparedAuthoring =
+                        prepareCachedAuthoring(cachedPublication);
                     TypedInteractionState interaction;
                     try {
                         ReSyncCatalogPublicationProjection.Snapshot candidate = prepared.candidate();
                         interaction = new TypedInteractionState(candidate.publication().key(),
-                            ReSyncTypedInteractionProjection.from(candidate));
+                            ReSyncTypedInteractionProjection.from(candidate,
+                                preparedAuthoring != null ? preparedAuthoring.candidate().publication() : null));
                     } catch (RuntimeException exception) {
                         logger().operation("Catalog Publication").with("reason", exception.getMessage())
                             .warn("Could not prepare typed interaction catalog");
@@ -953,15 +945,23 @@ public class ReSyncFlowClient {
                             synchronized (catalogAuthoringProjection) {
                                 ReSyncCatalogAuthoringProjection.Snapshot previousAuthoring =
                                     catalogAuthoringProjection.active().orElse(null);
+                                CatalogCacheKey previousAcknowledged =
+                                    catalogPublicationProjection.acknowledgedKey().orElse(null);
                                 try {
                                     if (!catalogPublicationProjection.commitHydration(prepared)) {
                                         return;
                                     }
-                                    catalogAuthoringProjection.clear();
+                                    if (preparedAuthoring == null) {
+                                        catalogAuthoringProjection.clear();
+                                    } else if (!catalogAuthoringProjection.commitPrepared(preparedAuthoring)) {
+                                        catalogPublicationProjection.restorePrepared(prepared.previous(),
+                                            previousAcknowledged);
+                                        return;
+                                    }
                                 } catch (RuntimeException | Error exception) {
                                     catalogAuthoringProjection.restorePrepared(previousAuthoring);
                                     catalogPublicationProjection.restorePrepared(prepared.previous(),
-                                        prepared.acknowledgedKey());
+                                        previousAcknowledged);
                                     return;
                                 }
                             }
@@ -970,9 +970,36 @@ public class ReSyncFlowClient {
                         refreshCatalogAuthority();
                     }
                 } finally {
-                    catalogCacheHydration.compareAndSet(load, null);
+                    if (catalogCacheHydration.compareAndSet(load, null)) {
+                        continueCatalogPublicationAfterHydration(expectedGeneration);
+                    }
                 }
             });
+    }
+
+    private ReSyncCatalogAuthoringProjection.Prepared prepareCachedAuthoring(
+        ReSyncCatalogPublicationCache.CachedPublication cached) {
+        List<String> capabilities = clientCapabilities().stream().distinct().sorted().toList();
+        CatalogAuthoringPublication authoring = cached.authoringPublication();
+        if (authoring == null || !cached.authoringCapabilities().equals(capabilities)) {
+            return null;
+        }
+        byte[] authoringBytes = new CatalogAuthoringPublicationCodec().encodeBytes(authoring);
+        return catalogAuthoringProjection.prepare(cached.key(), cached.publication().revision(), authoring,
+            authoringBytes).orElse(null);
+    }
+
+    private void continueCatalogPublicationAfterHydration(int expectedGeneration) {
+        if (shutdownRequested || !authenticated.get() || activeTransportGeneration != expectedGeneration
+            || !typedCatalogAuthorityAdvertised) {
+            return;
+        }
+        boolean fullSnapshot = catalogPublicationProjection.active().isEmpty()
+            || catalogPublicationProjection.acknowledgedKey().isEmpty()
+            || catalogAuthoringAdvertised && activeAuthoringSnapshot().isEmpty();
+        if (fullSnapshot) {
+            ensureCatalogPublication(true);
+        }
     }
 
     private FlowManager.ServerConnectionToken captureUiToken(FlowManager manager) {
@@ -1151,7 +1178,14 @@ public class ReSyncFlowClient {
         if (isConnectedState()) {
             return ReadinessState.READY;
         }
-        if (connecting.get()) {
+        ConnectionFailure failure = connectionFailure();
+        if (failure == ConnectionFailure.PROTOCOL_MISMATCH || failure == ConnectionFailure.RUNTIME_VERSION_MISMATCH) {
+            return ReadinessState.INCOMPATIBLE;
+        }
+        if (isConnected()) {
+            return ReadinessState.WAITING_FOR_REGISTRY;
+        }
+        if (connectionState() == ConnectionState.CONNECTING) {
             return ReadinessState.CONNECTING;
         }
         return ReadinessState.DISCONNECTED;
@@ -1221,6 +1255,21 @@ public class ReSyncFlowClient {
         return activeCatalogAuthoringChecksum();
     }
 
+    public Optional<InspectorOptionSource> activeOptionSource(ContractRef<InspectorFieldId> sourceReference) {
+        if (sourceReference == null) {
+            return Optional.empty();
+        }
+        try {
+            return activeAuthoringSnapshot().flatMap(snapshot ->
+                AdvertisedOptionSourceResolver.resolve(snapshot.publication(), sourceReference)
+                    .map(AdvertisedOptionSourceResolver.Resolved::source));
+        } catch (RuntimeException exception) {
+            logger().operation("Option Source").with("source", sourceReference.canonicalText())
+                .with("reason", exception.getMessage()).warn("Could not resolve advertised option source");
+            return Optional.empty();
+        }
+    }
+
     public Optional<CatalogAuthoringPublication> catalogAuthoringPublication() {
         return activeCatalogAuthoringPublication();
     }
@@ -1267,9 +1316,10 @@ public class ReSyncFlowClient {
                 return Optional.of(new OptionCatalogLoader.CoreRequest(protocolServerId(), resolved.reference(),
                     resolved.source(), queryResource, context, dependencies, search, snapshot.publication().binding(),
                     snapshot.publication().contractVersion(), snapshot.checksum(), snapshot.revision(),
-                    authorityEpochForTypedEnvelope()));
+                    optionQueryAuthorityEpoch()));
             } catch (RuntimeException exception) {
-                logger().operation("Option Source").warn("Rejected invalid advertised option source");
+                logger().operation("Option Source").with("source", sourceReference.canonicalText())
+                    .with("reason", exception.getMessage()).warn("Rejected invalid advertised option source");
                 return Optional.empty();
             }
         }
@@ -1312,14 +1362,21 @@ public class ReSyncFlowClient {
                 cache.fail(request.key(), "The option query could not be sent");
                 return OptionCatalogLoader.CoreRequestOutcome.REJECTED;
             }
+            logger().operation("Option Query").with("source", request.sourceReference().canonicalText())
+                .with("requestId", pending.requestId()).with("generation", generation)
+                .debug("Option catalog query dispatched");
             return OptionCatalogLoader.CoreRequestOutcome.STARTED;
         }
     }
 
     private boolean currentCoreOptionRequest(OptionCatalogLoader.CoreRequest request) {
-        if (request == null || shutdownRequested || !catalogAuthoringAdvertised || !optionQueriesAdvertised
-            || catalogAuthority != CatalogAuthority.TYPED_PUBLICATION || !typedMutationAuthorityReady()
-            || request.authorityEpoch() != handshakeAuthorityEpoch) {
+        return !shutdownRequested && catalogAuthoringAdvertised && optionQueriesAdvertised
+            && catalogAuthority == CatalogAuthority.TYPED_PUBLICATION && optionQueryAuthorityReady()
+            && currentCoreOptionPublication(request);
+    }
+
+    private boolean currentCoreOptionPublication(OptionCatalogLoader.CoreRequest request) {
+        if (request == null || request.authorityEpoch() != handshakeAuthorityEpoch) {
             return false;
         }
         synchronized (catalogLifecycleLock) {
@@ -1409,7 +1466,7 @@ public class ReSyncFlowClient {
             return false;
         }
         try {
-            heartbeatScheduler.schedule(() -> failCoreOptionRequest(pending, "Option catalog request timed out"), Duration.ofSeconds(TYPED_RESOURCE_RESPONSE_TIMEOUT_SECONDS));
+            heartbeatScheduler.schedule(() -> failCoreOptionRequest(pending, "Option catalog request timed out", true), Duration.ofSeconds(TYPED_RESOURCE_RESPONSE_TIMEOUT_SECONDS));
         } catch (RuntimeException exception) {
             failCoreOptionRequest(pending, "Option catalog request could not be monitored");
             return false;
@@ -2193,8 +2250,30 @@ public class ReSyncFlowClient {
         if (shutdownRequested) {
             return Async.completed(null);
         }
-        if (frameTransport == null || !frameTransport.isOpen()) {
+        if (frameTransport == null) {
             notifyError("ReSyncUnavailable");
+            return Async.completed(null);
+        }
+        if (!frameTransport.isOpen()) {
+            ReSyncFrameTransport.State state = frameTransport.state();
+            if (state == ReSyncFrameTransport.State.CONNECTING) {
+                return Async.completed(null);
+            }
+            if (!frameTransport.reconnectable() && state != ReSyncFrameTransport.State.NEW) {
+                connectionFailure.set(ConnectionFailure.ENDPOINT_UNREACHABLE);
+                notifyConnectionError("ReSync Endpoint Unreachable");
+                return Async.completed(null);
+            }
+            frameTransport.setOpenHandler(() -> submitConnectionEvent(this::connectFrameTransport));
+            frameTransport.setCloseReasonHandler(this::observeFrameTransportCloseReason);
+            frameTransport.setCloseHandler(this::handleFrameTransportOpeningFailure);
+            frameTransport.setErrorHandler(error -> handleFrameTransportOpeningFailure());
+            frameOpeningFailureHandled.set(false);
+            try {
+                frameTransport.connect();
+            } catch (RuntimeException error) {
+                handleFrameTransportOpeningFailure();
+            }
             return Async.completed(null);
         }
         Async<Void> cleanup = connectionCleanupCompletion;
@@ -2202,6 +2281,83 @@ public class ReSyncFlowClient {
             return deferFrameTransportConnect(cleanup);
         }
         return startFrameTransportConnection();
+    }
+
+    private void handleFrameTransportOpeningFailure() {
+        if (shutdownRequested || frameTransport == null || frameTransport.isOpen()) {
+            return;
+        }
+        if (!frameOpeningFailureHandled.compareAndSet(false, true)) {
+            return;
+        }
+        connectionFailure.compareAndSet(ConnectionFailure.NONE, ConnectionFailure.ENDPOINT_UNREACHABLE);
+        connecting.set(false);
+        if (!beginFrameRecovery(currentConnectionGeneration())) {
+            publishTerminalFrameDisconnect(frameConnectionFailureMessage(), true);
+        }
+    }
+
+    private boolean beginFrameRecovery(int generation) {
+        if (shutdownRequested || frameTransport == null || !frameTransport.reconnectable()
+            || !isRetryableConnectionFailure()) {
+            return false;
+        }
+        int failures = consecutiveReconnectFailures.incrementAndGet();
+        if (failures > MAX_TRANSIENT_RECONNECT_FAILURES) {
+            return false;
+        }
+        scheduleReconnect(generation, reconnectDelay(failures));
+        return isReconnectPending();
+    }
+
+    private boolean isRetryableConnectionFailure() {
+        ConnectionFailure failure = connectionFailure();
+        return failure == ConnectionFailure.NONE || failure == ConnectionFailure.ENDPOINT_UNREACHABLE
+            || failure == ConnectionFailure.HANDSHAKE_REJECTED;
+    }
+
+    private Duration reconnectDelay(int failures) {
+        return switch (failures) {
+            case 1 -> Duration.ofMillis(250L);
+            case 2 -> Duration.ofSeconds(1L);
+            case 3 -> Duration.ofSeconds(3L);
+            default -> Duration.ofSeconds(5L);
+        };
+    }
+
+    private String frameConnectionFailureMessage() {
+        return switch (connectionFailure()) {
+            case ACCESS_DENIED -> "ReSync Access Denied";
+            case PROTOCOL_MISMATCH -> "ReSync Protocol Mismatch. Update ReSync And Remotely";
+            case RUNTIME_VERSION_MISMATCH -> "ReSync Runtime Version Mismatch. Update ReSync And Remotely";
+            case HANDSHAKE_REJECTED -> "ReSync Connection Rejected";
+            default -> "ReSync Endpoint Unreachable";
+        };
+    }
+
+    private void publishTerminalFrameDisconnect(String message, boolean showError) {
+        if (!terminalFrameDisconnectPublished.compareAndSet(false, true)) {
+            return;
+        }
+        notifyFlowManagerDisconnected();
+        runLifecycleListener("disconnect listener", disconnectListener);
+        if (showError) {
+            notifyConnectionError(message);
+        }
+    }
+
+    private void observeFrameTransportCloseReason(String reason) {
+        String text = reason == null ? "" : reason;
+        if (text.contains("Ticket Expired") || text.contains("Access Denied") || text.contains("Unauthorized")) {
+            connectionFailure.set(ConnectionFailure.ACCESS_DENIED);
+        } else if (text.contains("Protocol") || text.contains("Invalid ReSync Frame")
+            || text.contains("Binary Protocol Required")) {
+            connectionFailure.set(ConnectionFailure.PROTOCOL_MISMATCH);
+        } else if (text.contains("Version")) {
+            connectionFailure.set(ConnectionFailure.RUNTIME_VERSION_MISMATCH);
+        } else if (text.contains("Upstream") || text.contains("Unavailable") || text.contains("Send Failed")) {
+            connectionFailure.set(ConnectionFailure.ENDPOINT_UNREACHABLE);
+        }
     }
 
     private Async<Void> deferFrameTransportConnect(Async<Void> cleanup) {
@@ -2298,12 +2454,17 @@ public class ReSyncFlowClient {
         lastFullNodeRegistryRequestAt = 0L;
         scheduleConnectTimeout(generation);
         frameTransport.setFrameHandler(data -> handleBinaryMessage(data, generation));
+        frameTransport.setOpenHandler(() -> {});
+        frameTransport.setCloseReasonHandler(this::observeFrameTransportCloseReason);
+        frameTransport.setErrorHandler(error -> failConnectionAttempt("ReSync Endpoint Unreachable", generation));
         frameTransport.setCloseHandler(() -> {
             synchronized (connectionCleanupLock) {
                 ConnectionRetirement retirement = retireConnectionGeneration(generation, "frame_transport_closed");
                 if (!retirement.retired()) {
                     return;
                 }
+                connectionFailure.compareAndSet(ConnectionFailure.NONE, ConnectionFailure.ENDPOINT_UNREACHABLE);
+                boolean recovering = beginFrameRecovery(generation + 1);
                 submitConnectionCleanup(retirement.source(), () -> {
                 authenticated.set(false);
                 clearCatalogPublication("CATALOG_PUBLICATION_DISCONNECTED");
@@ -2312,7 +2473,6 @@ public class ReSyncFlowClient {
                 playerTrackingSubscribed = false;
                 playerControlCapabilities = null;
                  failPendingConnectionRequests("ReSync Disconnected", true);
-                 notifyFlowManagerDisconnected();
                 failPlayerControlRequests("ReSync Disconnected");
                 cancelConnectTimeout(generation);
                 nodeRegistrySynced = false;
@@ -2321,11 +2481,13 @@ public class ReSyncFlowClient {
                 OptionCatalogCache.getInstance().markServerStale(serverId);
                 stopHeartbeat();
                 connecting.set(false);
-                runLifecycleListener("disconnect listener", disconnectListener);
+                if (!recovering) {
+                    publishTerminalFrameDisconnect(frameConnectionFailureMessage(), frameTransport.reconnectable());
+                }
                 });
             }
         });
-        this.apiKey = "bridge";
+        this.apiKey = directApiKey == null || directApiKey.isBlank() ? "bridge" : directApiKey;
         sendHandshake(generation);
         return Async.completed(null);
     }
@@ -3912,7 +4074,7 @@ public class ReSyncFlowClient {
             ConnectionSource source = inboundSource.get();
             if (source == null || source != connectionSource(generation) || !source.accepts(generation)
                 || !isConnectionReadyGeneration(generation) || !catalogAuthoringAdvertised || !optionQueriesAdvertised
-                || catalogAuthority != CatalogAuthority.TYPED_PUBLICATION || !typedMutationAuthorityReady()) {
+                || catalogAuthority != CatalogAuthority.TYPED_PUBLICATION || !optionQueryAuthorityReady()) {
                 return;
             }
             synchronized (catalogLifecycleLock) {
@@ -3929,7 +4091,7 @@ public class ReSyncFlowClient {
                 Set<OptionCatalogCache.CoreKey> invalidated = OptionCatalogCache.getInstance().invalidate(invalidation,
                     snapshot.publication().binding(), snapshot.publication().contractVersion(), snapshot.checksum(),
                     snapshot.revision(), envelope.authorityEpoch());
-                for (PendingCoreOptionRequest pending : pendingCoreOptionRequests.values()) {
+                for (PendingCoreOptionRequest pending : List.copyOf(pendingCoreOptionRequests.values())) {
                     if (invalidated.contains(pending.request().key())
                         && pendingCoreOptionRequests.remove(pending.requestId(), pending)) {
                         retired.add(pending);
@@ -3952,7 +4114,7 @@ public class ReSyncFlowClient {
             || !OPTION_QUERY_OPERATION.equals(envelope.operation()) || !OPTION_PAGE_TYPE.equals(envelope.payloadType())
             || !OPTION_QUERY_CAPABILITIES.equals(envelope.capabilities()) || envelope.resource() != null
             || envelope.revision() != 0L
-            || envelope.authorityEpoch() != handshakeAuthorityEpoch || !acceptAuthorityEpoch(envelope.authorityEpoch())
+            || !acceptOptionQueryAuthorityEpoch(envelope.authorityEpoch())
             || envelope.mutationId() != null || envelope.canonicalPayload() != null || envelope.payloadHash() != null
             || envelope.deleted() || !snapshot.publication().contractVersion().equals(envelope.selectedVersion())
             || !snapshot.publication().binding().catalogChecksum().equals(envelope.catalogChecksum())
@@ -4008,8 +4170,8 @@ public class ReSyncFlowClient {
             if (!pending.matchesGeneration(generation, source)) {
                 return;
             }
-            if (!pending.matchesResponse(envelope) || !acceptAuthorityEpoch(envelope.authorityEpoch())
-                || !currentCoreOptionRequest(pending.request())) {
+            if (!pending.matchesResponse(envelope) || !acceptOptionQueryAuthorityEpoch(envelope.authorityEpoch())
+                || !currentCoreOptionPublication(pending.request())) {
                 failCoreOptionRequest(pending, "The server returned an invalid option catalog response");
                 return;
             }
@@ -4018,6 +4180,9 @@ public class ReSyncFlowClient {
             try {
                 PendingCoreOptionRequest next = pending.accept(page);
                 if (page.complete()) {
+                    logger().operation("Option Query").with("source", pending.request().sourceReference().canonicalText())
+                        .with("requestId", pending.requestId()).with("items", next.items().size())
+                        .debug("Option catalog query completed");
                     settleCoreOptionRequest(pending, next.completeCatalog());
                     return;
                 }
@@ -4047,7 +4212,12 @@ public class ReSyncFlowClient {
                 failCoreOptionRequest(pending, "The server returned an invalid option query rejection");
                 return;
             }
-            failCoreOptionRequest(pending, rejectionMessage(envelope));
+            String diagnostic = rejectionMessage(envelope);
+            boolean retryable = rejectionRetryable(envelope);
+            logger().operation("Option Query").with("source", pending.request().sourceReference().canonicalText())
+                .with("requestId", pending.requestId()).with("retryable", retryable)
+                .with("reason", diagnostic).warn("Option catalog query was rejected");
+            failCoreOptionRequest(pending, diagnostic, retryable);
         }
     }
 
@@ -4058,9 +4228,8 @@ public class ReSyncFlowClient {
                 return false;
             }
             cancelPendingSend(pending.requestId().toString());
-            if (!currentCoreOptionRequest(pending.request())) {
-                OptionCatalogCache.getInstance().fail(pending.request().key(),
-                    "The catalog publication changed before the option query completed");
+            if (!currentCoreOptionPublication(pending.request())) {
+                OptionCatalogCache.getInstance().retry(pending.request().key());
                 return false;
             }
             try {
@@ -4075,12 +4244,21 @@ public class ReSyncFlowClient {
     }
 
     private boolean failCoreOptionRequest(PendingCoreOptionRequest pending, String diagnostic) {
+        return failCoreOptionRequest(pending, diagnostic, false);
+    }
+
+    private boolean failCoreOptionRequest(PendingCoreOptionRequest pending, String diagnostic, boolean retryable) {
         synchronized (coreOptionDispatchLock) {
             if (pending == null || !pendingCoreOptionRequests.remove(pending.requestId(), pending)) {
                 return false;
             }
             cancelPendingSend(pending.requestId().toString());
-            OptionCatalogCache.getInstance().fail(pending.request().key(), diagnostic);
+            OptionCatalogCache cache = OptionCatalogCache.getInstance();
+            if (retryable) {
+                cache.retry(pending.request().key());
+            } else {
+                cache.fail(pending.request().key(), diagnostic);
+            }
             return true;
         }
     }
@@ -4088,7 +4266,7 @@ public class ReSyncFlowClient {
     private List<PendingCoreOptionRequest> retirePendingCoreOptionRequests(String diagnostic) {
         List<PendingCoreOptionRequest> retired = new ArrayList<>();
         OptionCatalogCache cache = OptionCatalogCache.getInstance();
-        for (PendingCoreOptionRequest pending : pendingCoreOptionRequests.values()) {
+        for (PendingCoreOptionRequest pending : List.copyOf(pendingCoreOptionRequests.values())) {
             if (pendingCoreOptionRequests.remove(pending.requestId(), pending)) {
                 cache.fail(pending.request().key(), diagnostic);
                 retired.add(pending);
@@ -4101,7 +4279,7 @@ public class ReSyncFlowClient {
         ReSyncCatalogAuthoringProjection.Snapshot publication, long authorityEpoch, String diagnostic) {
         List<PendingCoreOptionRequest> retired = new ArrayList<>();
         OptionCatalogCache cache = OptionCatalogCache.getInstance();
-        for (PendingCoreOptionRequest pending : pendingCoreOptionRequests.values()) {
+        for (PendingCoreOptionRequest pending : List.copyOf(pendingCoreOptionRequests.values())) {
             OptionCatalogCache.CoreKey key = pending.request().key();
             boolean current = key.catalogBinding().equals(publication.publication().binding())
                 && key.publicationContractVersion().equals(publication.publication().contractVersion())
@@ -6995,6 +7173,21 @@ public class ReSyncFlowClient {
             && WorldGenManager.getInstance().authorityEpoch(serverId) == handshakeAuthorityEpoch;
     }
 
+    private boolean optionQueryAuthorityReady() {
+        return authorityEpochAdvertised && authorityEpochEstablished && handshakeAuthorityEpoch > 0L;
+    }
+
+    private long optionQueryAuthorityEpoch() {
+        if (!optionQueryAuthorityReady()) {
+            throw new IllegalStateException("The established authority epoch is required for option queries");
+        }
+        return handshakeAuthorityEpoch;
+    }
+
+    private boolean acceptOptionQueryAuthorityEpoch(long authorityEpoch) {
+        return optionQueryAuthorityReady() && authorityEpoch == handshakeAuthorityEpoch;
+    }
+
     private String typedMutationAuthorityFailure() {
         if (!authorityEpochAdvertised) {
             return "The connected ReSync server did not advertise an authority epoch; the typed request was not sent.";
@@ -7284,7 +7477,7 @@ public class ReSyncFlowClient {
             boolean publicationRefreshRequired = !acknowledgedCatalogPublicationKey
                 || (catalogAuthoringAdvertised && activeAuthoringSnapshot().isEmpty());
             if (!runStartupStep(generation, "catalog publication",
-                () -> ensureCatalogPublication(publicationRefreshRequired))) {
+                () -> ensureCatalogPublicationAfterHydration(publicationRefreshRequired))) {
                 return;
             }
         } else if (legacyCompatibilityProven) {
@@ -7295,7 +7488,8 @@ public class ReSyncFlowClient {
         } else {
             if (!runStartupStep(generation, "catalog reconciliation",
                 () -> beginTypedReconciliation("CATALOG_PUBLICATION_RECONCILIATION_REQUIRED"))
-                || !runStartupStep(generation, "catalog publication", () -> ensureCatalogPublication(true))) {
+                || !runStartupStep(generation, "catalog publication",
+                    () -> ensureCatalogPublicationAfterHydration(true))) {
                 return;
             }
         }
@@ -7452,7 +7646,8 @@ public class ReSyncFlowClient {
     }
 
     private boolean sessionHydrationReady() {
-        return legacyReadCompatibilityAllowed() || typedMutationAuthorityReady();
+        return legacyReadCompatibilityAllowed()
+            || catalogAuthority == CatalogAuthority.TYPED_PUBLICATION && typedMutationAuthorityReady();
     }
 
     private void refreshRetainedStudio(int generation) {
@@ -8014,6 +8209,10 @@ public class ReSyncFlowClient {
             authenticated.set(true);
             connecting.set(false);
             connectionFailure.set(ConnectionFailure.NONE);
+            consecutiveReconnectFailures.set(0);
+            frameOpeningFailureHandled.set(false);
+            terminalFrameDisconnectPublished.set(false);
+            cancelReconnectTask();
             startupSubscriptionGeneration = generation;
             observeHandshakeStage(generation, HandshakeStage.AUTHENTICATED, "startup_subscriptions_pending");
             return true;
@@ -8126,22 +8325,37 @@ public class ReSyncFlowClient {
                 if (!retirement.retired()) {
                     return;
                 }
+                connectionFailure.set(ConnectionFailure.ENDPOINT_UNREACHABLE);
+                boolean recovering = frameTransport != null && beginFrameRecovery(generation + 1);
                 submitConnectionCleanup(retirement.source(), () -> {
                 try {
                     if (retirement.socket() != null) {
                         ReSyncDirectSockets.connector.close(retirement.socket());
                     }
+                    if (frameTransport != null) {
+                        try {
+                            frameTransport.close();
+                        } catch (RuntimeException error) {
+                            logger().operation("Connect").error("Could not close timed out ReSync transport", error);
+                        }
+                    }
                      disconnectCollaboration("Connection Timed Out", generation);
                      notifyPluginChannelsUnavailable();
                      PendingConnectionFailures failures = failPendingConnectionRequests("ReSync Connection Timed Out", true);
-                     notifyFlowManagerDisconnected();
                      if (frameTransport == null) {
+                        notifyFlowManagerDisconnected();
                         scheduleReconnect(generation + 1);
                      }
+                    if (!recovering && frameTransport != null) {
+                        publishTerminalFrameDisconnect("ReSync Connection Timed Out",
+                            !failures.saveMutations() && !failures.resourceDeletes());
+                    }
                      if (failures.saveMutations() || failures.resourceDeletes()) {
                          return;
-                     }
-                    notifyError("ReSync Connection Timed Out");
+                    }
+                    if (!recovering && frameTransport == null) {
+                        notifyError("ReSync Connection Timed Out");
+                    }
                 } finally {
                     connecting.set(false);
                 }
@@ -8578,7 +8792,11 @@ public class ReSyncFlowClient {
             ReSyncTypedInteractionProjection interaction = null;
             if (application.ready()) {
                 try {
-                    interaction = ReSyncTypedInteractionProjection.from(application.node().candidate());
+                    CatalogAuthoringPublication authoring = application.authoring() != null
+                        ? application.authoring().candidate().publication()
+                        : application.previousAuthoring() != null
+                            ? application.previousAuthoring().publication() : null;
+                    interaction = ReSyncTypedInteractionProjection.from(application.node().candidate(), authoring);
                 } catch (ReSyncTypedInteractionProjection.ValidationException exception) {
                     application = ReSyncCatalogPublicationReceiptHandler.PreparedApplication.rejected(
                         publication.key(), publication.revision(), exception.diagnostic());
@@ -10818,9 +11036,30 @@ public class ReSyncFlowClient {
                 && request.catalogBinding().catalogChecksum().equals(envelope.catalogChecksum())
                 && request.catalogBinding().bindingManifestHash().equals(envelope.bindingManifestHash())
                 && envelope.editability() == null && envelope.fallbackReason() == null && envelope.sequence() == 0L
-                && envelope.unknown().isEmpty()
                 && envelope.body() instanceof ProtocolBody.ControlResponse response
-                && RESOURCE_REJECTION_ACTION.equals(response.action());
+                && RESOURCE_REJECTION_ACTION.equals(response.action())
+                && matchesRejectionUnknown(envelope.unknown(), response.values())
+                && matchesRejectionValues(response.values());
+        }
+
+        private boolean matchesRejectionValues(Map<String, Object> values) {
+            if (values == null || values.size() != 6) {
+                return false;
+            }
+            Object rejectionCode = values.get("rejectionCode");
+            Object rejectionMessage = values.get("rejectionMessage");
+            return requestId.toString().equals(values.get("requestId"))
+                && correlationId.toString().equals(values.get("correlationId"))
+                && traceId.toString().equals(values.get("traceId"))
+                && OPTION_QUERY_OPERATION.canonicalText().equals(values.get("operation"))
+                && rejectionCode instanceof String code && !code.isBlank()
+                && rejectionMessage instanceof String message && !message.isBlank();
+        }
+
+        private boolean matchesRejectionUnknown(Map<String, Object> unknown, Map<String, Object> values) {
+            return unknown != null && unknown.size() == 2
+                && Objects.equals(unknown.get("rejectionCode"), values.get("rejectionCode"))
+                && Objects.equals(unknown.get("rejectionMessage"), values.get("rejectionMessage"));
         }
 
         private PendingCoreOptionRequest accept(OptionPage page) {
@@ -12929,6 +13168,11 @@ public class ReSyncFlowClient {
 
     boolean ensureCatalogPublication(boolean fullSnapshot) {
         return requestCatalogAcquisition(fullSnapshot, false);
+    }
+
+    private boolean ensureCatalogPublicationAfterHydration(boolean fullSnapshot) {
+        Async<?> hydration = catalogCacheHydration.get();
+        return hydration != null || ensureCatalogPublication(fullSnapshot);
     }
 
     private boolean requestCatalogAcquisition(boolean fullSnapshot, boolean explicitRefresh) {
@@ -17324,7 +17568,7 @@ public class ReSyncFlowClient {
     }
 
     private void failPendingCoreOptionRequests(String message) {
-        for (PendingCoreOptionRequest pending : pendingCoreOptionRequests.values()) {
+        for (PendingCoreOptionRequest pending : List.copyOf(pendingCoreOptionRequests.values())) {
             failCoreOptionRequest(pending, message);
         }
     }
@@ -18650,6 +18894,10 @@ public class ReSyncFlowClient {
     }
 
     private synchronized void scheduleReconnect(int generation) {
+        scheduleReconnect(generation, Duration.ofSeconds(RECONNECT_DELAY_SECONDS));
+    }
+
+    private synchronized void scheduleReconnect(int generation, Duration delay) {
         if (shutdownRequested || connectionGeneration.get() != generation) {
             return;
         }
@@ -18661,14 +18909,21 @@ public class ReSyncFlowClient {
         }
         reconnectGeneration = generation;
         reconnectTask = heartbeatScheduler.schedule(() -> {
+            synchronized (ReSyncFlowClient.this) {
+                if (reconnectGeneration != generation) {
+                    return;
+                }
+                reconnectTask = null;
+                reconnectGeneration = -1;
+            }
             if (!shutdownRequested && connectionGeneration.get() == generation) {
                 ensureConnected();
             }
-        }, java.time.Duration.ofSeconds(RECONNECT_DELAY_SECONDS));
+        }, delay);
     }
 
     public synchronized boolean isReconnectPending() {
-        return reconnectTask != null && !reconnectTask.isCancelled();
+        return reconnectGeneration >= 0 && reconnectTask != null && !reconnectTask.isCancelled();
     }
 
     private boolean notifyConnectionErrorUnlessRetrying(String message) {
@@ -18733,6 +18988,7 @@ public class ReSyncFlowClient {
             if (!retirement.retired()) {
                 return;
             }
+            boolean recovering = frameTransport != null && beginFrameRecovery(generation + 1);
             submitConnectionCleanup(retirement.source(), () -> {
             authenticated.set(false);
             clearCatalogPublication("CATALOG_PUBLICATION_CONNECTION_FAILED");
@@ -18743,9 +18999,15 @@ public class ReSyncFlowClient {
             nodeRegistrySynced = false;
             cancelNodeRegistryTimeout();
              failPendingConnectionRequests(message, true);
-             notifyFlowManagerDisconnected();
             if (frameTransport != null) {
-                notifyConnectionError(message);
+                try {
+                    frameTransport.close();
+                } catch (RuntimeException error) {
+                    logger().operation("Connect").error("Could not close failed ReSync transport", error);
+                }
+                if (!recovering) {
+                    publishTerminalFrameDisconnect(message, true);
+                }
                 connecting.set(false);
                 return;
             }
@@ -19190,7 +19452,9 @@ public class ReSyncFlowClient {
         }
         if (frameTransport != null && activeTransportGeneration < 0) {
             Async<Void> deferred = deferredFrameConnect.get();
-            return deferred != null && !deferred.isDone() ? ConnectionState.CONNECTING : ConnectionState.DISCONNECTED;
+            return deferred != null && !deferred.isDone() || isReconnectPending()
+                || frameTransport.state() == ReSyncFrameTransport.State.CONNECTING
+                ? ConnectionState.CONNECTING : ConnectionState.DISCONNECTED;
         }
         return connecting.get() || isReconnectPending() ? ConnectionState.CONNECTING : ConnectionState.DISCONNECTED;
     }
