@@ -6,11 +6,17 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import redxax.oxy.remotely.DesktopRemotelyServerApi;
+import redxax.oxy.remotely.RemotelyClient;
+import redxax.oxy.remotely.RemotelyComposition;
+import redxax.oxy.remotely.host.ApplicationHost;
+import redxax.oxy.remotely.host.ApplicationHostRegistry;
 import redxax.oxy.remotely.util.BrowserSafeState;
 import redxax.oxy.remotely.util.DesktopTaskIdentities;
 import restudio.rebase.restudio.api.ReStudioApiClient;
 import restudio.rebase.restudio.api.models.ServerModels;
+import restudio.rescreen.game.MinecraftGameAssets;
 import restudio.rescreen.platform.Async;
+import restudio.rescreen.ui.core.Screen;
 import restudio.resync.flow.identity.ServerId;
 
 import java.lang.reflect.Field;
@@ -201,6 +207,34 @@ class ReSyncFlowClientConnectionLifecycleTest {
         client.connect().join();
 
         assertEquals(0, requests.get());
+    }
+
+    @Test
+    void browserShutdownDoesNotWaitForCallbackExecutorTermination() throws Exception {
+        ApplicationHost previousHost = ApplicationHostRegistry.current();
+        RemotelyClient previousClient = RemotelyClient.INSTANCE;
+        RemotelyClient browserClient = new RemotelyClient(RemotelyComposition.browser(new BrowserHost()).build());
+        ReSyncFlowClient client = new ReSyncFlowClient(TEST_SERVER.canonicalText(), new TestTransport(), browserClient);
+        Field callbacksField = ReSyncFlowClient.class.getDeclaredField("connectionCallbacks");
+        callbacksField.setAccessible(true);
+        BoundedTransportExecutor callbacks = (BoundedTransportExecutor) callbacksField.get(client);
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        callbacks.offer(-1, 1L, BoundedTransportExecutor.Priority.STANDARD, null, () -> {
+            entered.countDown();
+            await(release);
+        });
+        assertTrue(entered.await(2, TimeUnit.SECONDS));
+        CompletableFuture<Void> shutdown = CompletableFuture.runAsync(client::shutdown);
+
+        try {
+            shutdown.get(2, TimeUnit.SECONDS);
+            assertTrue(client.shutdownCompletion().isDone());
+        } finally {
+            release.countDown();
+            ApplicationHostRegistry.install(previousHost);
+            RemotelyClient.INSTANCE = previousClient;
+        }
     }
 
     @Test
@@ -980,6 +1014,59 @@ class ReSyncFlowClientConnectionLifecycleTest {
 
         @Override
         public void onResync(String reason) {
+        }
+    }
+
+    private static final class BrowserHost implements ApplicationHost {
+        @Override
+        public void setScreen(Screen screen) {
+        }
+
+        @Override
+        public Screen getCurrentScreen() {
+            return null;
+        }
+
+        @Override
+        public void ensureTextRenderer() {
+        }
+
+        @Override
+        public MinecraftGameAssets getGameAssets() {
+            return MinecraftGameAssets.EMPTY;
+        }
+
+        @Override
+        public Object getFontIdentifier(String namespace, String path) {
+            return null;
+        }
+
+        @Override
+        public void openParentScreen(Screen currentScreen, Object parent) {
+        }
+
+        @Override
+        public void setClipboard(String text) {
+        }
+
+        @Override
+        public boolean shouldCloseRootScreen() {
+            return false;
+        }
+
+        @Override
+        public String getGameVersion() {
+            return "";
+        }
+
+        @Override
+        public String getGameUserName() {
+            return "";
+        }
+
+        @Override
+        public String getGameUUID() {
+            return "";
         }
     }
 }

@@ -7,6 +7,7 @@ import redxax.oxy.remotely.util.BrowserSafeState;
 import redxax.oxy.remotely.util.TaskIdentities;
 import redxax.oxy.remotely.util.TaskSchedulers;
 import redxax.oxy.remotely.RemotelyClient;
+import redxax.oxy.remotely.RemotelyComposition;
 import redxax.oxy.remotely.RemotelyServerApi;
 import redxax.oxy.remotely.collaboration.CollaborationService;
 import redxax.oxy.remotely.config.RemotelyConfigStore;
@@ -19049,6 +19050,7 @@ public class ReSyncFlowClient {
 
     public void shutdown() {
         logger().operation("Disconnect").info("Closing ReSync WebSocket");
+        boolean browser = runsInBrowser();
         Async<Void> completion;
         boolean owner;
         synchronized (shutdownLock) {
@@ -19076,12 +19078,15 @@ public class ReSyncFlowClient {
             }
         }
         if (!owner) {
+            if (browser) {
+                return;
+            }
             if (!onConnectionLifecycleThread() || completion.isDone()) {
                 awaitShutdownCompletion(completion);
             }
             return;
         }
-        boolean callbackInitiated = Boolean.TRUE.equals(inConnectionCallback.get());
+        boolean callbackInitiated = !browser && Boolean.TRUE.equals(inConnectionCallback.get());
         Throwable failure = null;
         ConnectionRetirement retirement = ConnectionRetirement.unchanged();
         Async<Void> drained = null;
@@ -19092,7 +19097,7 @@ public class ReSyncFlowClient {
                 if (retirement.source() != null) {
                     retirement.source().cancelCallbacks();
                 }
-                if (!onConnectionLifecycleThread()) {
+                if (!browser && !onConnectionLifecycleThread()) {
                     drained = submitConnectionDrain();
                 }
             }
@@ -19136,9 +19141,17 @@ public class ReSyncFlowClient {
             }
             completion = shutdownCompletion;
         }
+        if (runsInBrowser() && !completion.isDone()) {
+            return;
+        }
         if (!onConnectionLifecycleThread() || completion.isDone()) {
             awaitShutdownCompletion(completion);
         }
+    }
+
+    private boolean runsInBrowser() {
+        return client != null && client.getComposition() != null
+            && client.getComposition().environment() == RemotelyComposition.Environment.BROWSER;
     }
 
     private void finalizeShutdown(Async<Void> completion, Throwable failure) {
@@ -19275,7 +19288,9 @@ public class ReSyncFlowClient {
         failure = runShutdownStep(failure, triggerUpdatePreparations::shutdownNow);
         failure = runShutdownStep(failure, resourcePreparations::shutdownNow);
         failure = runShutdownStep(failure, connectionEvents::shutdownNow);
-        if (!deferCallbackExecutor) {
+        if (runsInBrowser()) {
+            failure = runShutdownStep(failure, () -> connectionCallbacks.shutdownNow());
+        } else if (!deferCallbackExecutor) {
             Async<Void> callbackDrain;
             try {
                 callbackDrain = submitConnectionCallbackDrain();
