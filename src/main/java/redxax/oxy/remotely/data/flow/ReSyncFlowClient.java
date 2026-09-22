@@ -68,6 +68,7 @@ import restudio.rescreen.config.Config;
 import restudio.rescreen.platform.Clock;
 import restudio.rescreen.platform.TaskScheduler;
 import restudio.rescreen.ui.core.ScreenManager;
+import restudio.rescreen.util.JsonTreeParser;
 import restudio.rescreen.ui.core.Screen;
 import restudio.rescreen.util.Notification;
 import restudio.resync.contract.canonical.CanonicalUuids;
@@ -7339,7 +7340,7 @@ public class ReSyncFlowClient {
                 return;
             } else {
                 try {
-                    JsonElement parsedCapabilities = JsonParser.parseString(capabilitiesJson);
+                    JsonElement parsedCapabilities = JsonTreeParser.parse(capabilitiesJson);
                     if (!parsedCapabilities.isJsonObject()) {
                         protocolError("Invalid handshake capabilities envelope");
                         return;
