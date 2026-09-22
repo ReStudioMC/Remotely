@@ -42,6 +42,13 @@ public final class NodeRegistrySnapshotJson {
             snapshot.setRegistryChecksum(text(json, "registryChecksum", null));
         }
         snapshot.setGeneratedAt(longValue(json, "generatedAt", snapshot.getGeneratedAt()));
+        snapshot.setCatalogGeneration(longValue(json, "catalogGeneration", snapshot.getCatalogGeneration()));
+        snapshot.setCatalogChecksum(text(json, "catalogChecksum", snapshot.getCatalogChecksum()));
+        snapshot.setCatalogProjectionIdentity(text(json, "catalogProjectionIdentity", snapshot.getCatalogProjectionIdentity()));
+        snapshot.setDropContributions(objectList(json.get("dropContributions")));
+        snapshot.setFunctionBoundaries(objectList(json.get("functionBoundaries")));
+        snapshot.setCatalogMetadata(objectValues(json.get("catalogMetadata")));
+        snapshot.setOpaqueData(objectValues(json.get("opaqueData")));
         snapshot.setNodeIds(strings(json.get("nodeIds")));
         snapshot.setPlugins(plugins(json.get("plugins")));
         snapshot.setRemovedPlugins(strings(json.get("removedPlugins")));
@@ -75,6 +82,7 @@ public final class NodeRegistrySnapshotJson {
         payload.setVersion(text(json, "version", null));
         payload.setDescription(text(json, "description", null));
         payload.setChecksum(text(json, "checksum", null));
+        payload.setOpaqueData(objectValues(json.get("opaqueData")));
         payload.setNodes(nodes(json.get("nodes")));
         return payload;
     }
@@ -483,6 +491,19 @@ public final class NodeRegistrySnapshotJson {
     private static Map<String, Object> objectValues(JsonElement value) {
         Map<String, Object> result = objectValuesOrNull(value);
         return result != null ? result : new LinkedHashMap<>();
+    }
+
+    private static List<Map<String, Object>> objectList(JsonElement value) {
+        List<Map<String, Object>> result = new ArrayList<>();
+        if (value == null || !value.isJsonArray()) {
+            return result;
+        }
+        for (JsonElement item : value.getAsJsonArray()) {
+            if (item.isJsonObject()) {
+                result.add(objectValues(item));
+            }
+        }
+        return result;
     }
 
     private static Map<String, Object> objectValuesOrNull(JsonElement value) {

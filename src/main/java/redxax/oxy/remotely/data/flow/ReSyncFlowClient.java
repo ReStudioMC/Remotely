@@ -16,9 +16,9 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
 import redxax.oxy.remotely.flow.data.FlowDataType;
 import redxax.oxy.remotely.flow.data.FlowGraph;
+import redxax.oxy.remotely.flow.data.FlowJson;
 import redxax.oxy.remotely.flow.data.FlowSerializer;
 import redxax.oxy.remotely.flow.data.FlowTypeRef;
 import redxax.oxy.remotely.flow.data.CustomContentGraphAdapter;
@@ -36,6 +36,7 @@ import redxax.oxy.remotely.flow.registry.NodeRegistry;
 import redxax.oxy.remotely.flow.sync.NodePluginPayload;
 import redxax.oxy.remotely.flow.sync.NodeRegistryRequest;
 import redxax.oxy.remotely.flow.sync.NodeRegistrySnapshot;
+import redxax.oxy.remotely.flow.sync.NodeRegistrySnapshotJson;
 import redxax.oxy.remotely.flow.sync.OptionCatalogSnapshot;
 import redxax.oxy.remotely.flow.ui.FlowEditorScreen;
 import redxax.oxy.remotely.flow.ui.FlowGraphDesignerScreen;
@@ -53,6 +54,7 @@ import redxax.oxy.remotely.flow.ui.TabDesignerScreen;
 import redxax.oxy.remotely.flow.ui.TradeDesignerScreen;
 import redxax.oxy.remotely.flow.ui.ReSyncResourceDropCapabilities;
 import redxax.oxy.remotely.data.flow.player.PlayerTrackingUpdate;
+import redxax.oxy.remotely.data.flow.player.PlayerTrackingJson;
 import redxax.oxy.remotely.data.flow.world.WorldChannelMessage;
 import redxax.oxy.remotely.data.integrations.luckperms.ReSyncLuckPermsClient;
 import redxax.oxy.remotely.worldgen.WorldGenManager;
@@ -9329,7 +9331,7 @@ public class ReSyncFlowClient {
                 }
                 return;
             }
-            PlayerTrackingUpdate update = gson.fromJson(json, PlayerTrackingUpdate.class);
+            PlayerTrackingUpdate update = PlayerTrackingJson.read(envelope);
             if (update == null) {
                 return;
             }
@@ -9344,7 +9346,18 @@ public class ReSyncFlowClient {
     private void handleWorldManagementMessage(byte[] data) {
         try {
             String json = new String(data, StandardCharsets.UTF_8);
-            WorldChannelMessage message = gson.fromJson(json, WorldChannelMessage.class);
+            JsonElement parsed = JsonTreeParser.parse(json);
+            if (!parsed.isJsonObject()) {
+                return;
+            }
+            JsonObject root = parsed.getAsJsonObject();
+            WorldChannelMessage message = new WorldChannelMessage(
+                FlowJson.string(root, "type", ""),
+                FlowJson.string(root, "action", ""),
+                FlowJson.bool(root, "success", false),
+                FlowJson.string(root, "message", ""),
+                root.get("data"),
+                FlowJson.longValue(root, "timestamp", 0L));
             if (message == null) {
                 return;
             }
@@ -9598,7 +9611,7 @@ public class ReSyncFlowClient {
                 if (value.isJsonObject()) {
                     state = value.getAsJsonObject();
                 } else if (value.isJsonPrimitive() && value.getAsJsonPrimitive().isString()) {
-                    JsonElement parsed = JsonParser.parseString(value.getAsString());
+                    JsonElement parsed = JsonTreeParser.parse(value.getAsString());
                     if (parsed.isJsonObject()) {
                         state = parsed.getAsJsonObject();
                     }
@@ -9608,7 +9621,7 @@ public class ReSyncFlowClient {
         }
         if (state == null && diagnostic != null && !diagnostic.isBlank()) {
             try {
-                JsonElement parsed = JsonParser.parseString(diagnostic);
+                JsonElement parsed = JsonTreeParser.parse(diagnostic);
                 if (parsed.isJsonObject()) {
                     state = parsed.getAsJsonObject();
                 }
@@ -9645,16 +9658,25 @@ public class ReSyncFlowClient {
             return null;
         }
         try {
-            TriggerBinding[] decoded = gson.fromJson(value, TriggerBinding[].class);
-            if (decoded == null) {
-                return null;
-            }
-            if (decoded.length > MAX_TRIGGER_BINDINGS) {
+            if (value.getAsJsonArray().size() > MAX_TRIGGER_BINDINGS) {
                 return null;
             }
             Set<String> identities = new HashSet<>();
-            List<TriggerBinding> result = new ArrayList<>(decoded.length);
-            for (TriggerBinding binding : decoded) {
+            List<TriggerBinding> result = new ArrayList<>(value.getAsJsonArray().size());
+            for (JsonElement encoded : value.getAsJsonArray()) {
+                if (!encoded.isJsonObject()) {
+                    return null;
+                }
+                JsonObject object = encoded.getAsJsonObject();
+                TriggerType triggerType;
+                try {
+                    triggerType = TriggerType.valueOf(FlowJson.string(object, "type", ""));
+                } catch (IllegalArgumentException exception) {
+                    return null;
+                }
+                TriggerBinding binding = new TriggerBinding(FlowJson.string(object, "id", ""),
+                    FlowJson.string(object, "flowId", ""), triggerType,
+                    FlowJson.string(object, "context", null));
                 if (binding == null || binding.getId() == null || binding.getId().isBlank()
                     || binding.getFlowId() == null || binding.getFlowId().isBlank() || binding.getType() == null
                     || binding.getId().length() > MAX_TRIGGER_BINDING_TEXT
@@ -9779,7 +9801,7 @@ public class ReSyncFlowClient {
             return messages.isEmpty() ? raw : String.join("\n", messages);
         }
         try {
-            JsonElement parsed = JsonParser.parseString(raw.substring(start, end + 1));
+            JsonElement parsed = JsonTreeParser.parse(raw.substring(start, end + 1));
             if (!parsed.isJsonArray()) {
                 return raw;
             }
@@ -9877,7 +9899,7 @@ public class ReSyncFlowClient {
         String json = readRemainingJson(buffer);
         JsonObject object;
         try {
-            JsonElement parsed = JsonParser.parseString(json);
+            JsonElement parsed = JsonTreeParser.parse(json);
             object = parsed.isJsonObject() ? parsed.getAsJsonObject() : null;
         } catch (RuntimeException exception) {
             object = null;
@@ -9890,13 +9912,7 @@ public class ReSyncFlowClient {
             handleCoreResourceEvent(json, deleted, generation);
             return;
         }
-        ResourceEvent event;
-        try {
-            event = gson.fromJson(json, ResourceEvent.class);
-        } catch (RuntimeException exception) {
-            protocolError("Invalid resource event");
-            return;
-        }
+        ResourceEvent event = resourceEvent(object);
         if (event == null || event.type() == null || event.resourceId() == null) {
             return;
         }
@@ -9944,7 +9960,8 @@ public class ReSyncFlowClient {
     private void handleCoreResourceEvent(String json, boolean deletedPacket, int generation) {
         CoreResourceEvent event;
         try {
-            event = gson.fromJson(json, CoreResourceEvent.class);
+            JsonElement parsed = JsonTreeParser.parse(json);
+            event = parsed.isJsonObject() ? decodeCoreResourceEvent(parsed.getAsJsonObject()) : null;
         } catch (RuntimeException exception) {
             protocolError("Invalid Core resource event");
             return;
@@ -10053,7 +10070,8 @@ public class ReSyncFlowClient {
     private void handleResourceActivationResult(ByteBuffer buffer) {
         ResourceActivationResult result;
         try {
-            result = gson.fromJson(readRemainingJson(buffer), ResourceActivationResult.class);
+            JsonElement parsed = JsonTreeParser.parse(readRemainingJson(buffer));
+            result = parsed.isJsonObject() ? resourceActivationResult(parsed.getAsJsonObject()) : null;
         } catch (RuntimeException exception) {
             protocolError("Invalid resource update result");
             return;
@@ -10203,9 +10221,29 @@ public class ReSyncFlowClient {
                                  ReSyncCollaborationClient.Identity author, long changedAt, long authorityEpoch) {
     }
 
+    private ResourceEvent resourceEvent(JsonObject object) {
+        JsonObject encodedAuthor = FlowJson.object(object, "author");
+        ReSyncCollaborationClient.Identity author = encodedAuthor == null ? null
+            : new ReSyncCollaborationClient.Identity(FlowJson.string(encodedAuthor, "subjectId", ""),
+                FlowJson.string(encodedAuthor, "displayName", "Collaborator"),
+                FlowJson.string(encodedAuthor, "avatar", ""), FlowJson.string(encodedAuthor, "source", ""));
+        return new ResourceEvent(FlowJson.string(object, "type", null),
+            FlowJson.string(object, "resourceId", null), FlowJson.string(object, "payload", null),
+            FlowJson.string(object, "authorSessionId", ""), author,
+            FlowJson.longValue(object, "changedAt", 0L), FlowJson.longValue(object, "authorityEpoch", 0L));
+    }
+
     private record CoreResourceEvent(String type, String resourceId, long revision, String mutationId,
                                      boolean deleted, String activationState, String canonicalEnvelope,
                                      String author, long changedAt) {
+    }
+
+    private CoreResourceEvent decodeCoreResourceEvent(JsonObject object) {
+        return new CoreResourceEvent(FlowJson.string(object, "type", null),
+            FlowJson.string(object, "resourceId", null), FlowJson.longValue(object, "revision", 0L),
+            FlowJson.string(object, "mutationId", null), FlowJson.bool(object, "deleted", false),
+            FlowJson.string(object, "activationState", null), FlowJson.string(object, "canonicalEnvelope", null),
+            FlowJson.string(object, "author", ""), FlowJson.longValue(object, "changedAt", 0L));
     }
 
     private static final class PendingLegacyDelete {
@@ -11293,6 +11331,14 @@ public class ReSyncFlowClient {
                                             boolean editorError, long authorityEpoch) {
     }
 
+    private ResourceActivationResult resourceActivationResult(JsonObject object) {
+        return new ResourceActivationResult(FlowJson.bool(object, "success", false),
+            FlowJson.string(object, "type", null), FlowJson.string(object, "resourceId", null),
+            FlowJson.bool(object, "enabled", false), FlowJson.string(object, "requestId", null),
+            FlowJson.string(object, "message", ""), FlowJson.bool(object, "editorError", false),
+            FlowJson.longValue(object, "authorityEpoch", 0L));
+    }
+
     private record CoreActivationApplication(PendingResourceActivation pending) {
     }
 
@@ -11510,7 +11556,7 @@ public class ReSyncFlowClient {
             return 0L;
         }
         try {
-            JsonElement parsed = JsonParser.parseString(json);
+            JsonElement parsed = JsonTreeParser.parse(json);
             if (!parsed.isJsonObject()) {
                 return 0L;
             }
@@ -11531,7 +11577,7 @@ public class ReSyncFlowClient {
             return 0L;
         }
         try {
-            JsonElement parsed = JsonParser.parseString(json);
+            JsonElement parsed = JsonTreeParser.parse(json);
             if (!parsed.isJsonObject()) {
                 return 0L;
             }
@@ -11796,7 +11842,7 @@ public class ReSyncFlowClient {
             return;
         }
         String sessionId = root.has("sessionId") && !root.get("sessionId").isJsonNull() ? root.get("sessionId").getAsString() : "";
-        CustomContentDefinition definition = gson.fromJson(root.get("definition"), CustomContentDefinition.class);
+        CustomContentDefinition definition = FlowJson.customContent(root.getAsJsonObject("definition"));
         if (definition == null) {
             return;
         }
@@ -11829,7 +11875,7 @@ public class ReSyncFlowClient {
         if (root == null || !root.has("content") || !root.get("content").isJsonObject()) {
             return;
         }
-        CustomContentDefinition content = gson.fromJson(root.get("content"), CustomContentDefinition.class);
+        CustomContentDefinition content = FlowJson.customContent(root.getAsJsonObject("content"));
         if (content == null || content.getId() == null || content.getId().isBlank()) {
             return;
         }
@@ -11947,7 +11993,7 @@ public class ReSyncFlowClient {
             return "Flow request failed";
         }
         try {
-            JsonElement parsed = JsonParser.parseString(raw);
+            JsonElement parsed = JsonTreeParser.parse(raw);
             if (parsed.isJsonObject()) {
                 JsonObject object = parsed.getAsJsonObject();
                 String code = stringField(object, "errorCode");
@@ -11979,7 +12025,7 @@ public class ReSyncFlowClient {
             return "";
         }
         try {
-            return flowErrorRequestId(JsonParser.parseString(raw));
+            return flowErrorRequestId(JsonTreeParser.parse(raw));
         } catch (RuntimeException ignored) {
             return "";
         }
@@ -12276,12 +12322,12 @@ public class ReSyncFlowClient {
         buffer.get(jsonBytes);
         String json = new String(jsonBytes, StandardCharsets.UTF_8);
         try {
-            JsonElement parsed = JsonParser.parseString(json);
+            JsonElement parsed = JsonTreeParser.parse(json);
             if (!parsed.isJsonObject()) {
                 return;
             }
             JsonObject root = parsed.getAsJsonObject();
-            NodeRegistrySnapshot snapshot = gson.fromJson(root, NodeRegistrySnapshot.class);
+            NodeRegistrySnapshot snapshot = NodeRegistrySnapshotJson.read(root);
             if (snapshot == null) {
                 return;
             }
@@ -13140,7 +13186,8 @@ public class ReSyncFlowClient {
         byte[] jsonBytes = new byte[buffer.remaining()];
         buffer.get(jsonBytes);
         try {
-            OptionCatalogSnapshot payload = gson.fromJson(new String(jsonBytes, StandardCharsets.UTF_8), OptionCatalogSnapshot.class);
+            JsonElement parsed = JsonTreeParser.parse(new String(jsonBytes, StandardCharsets.UTF_8));
+            OptionCatalogSnapshot payload = parsed.isJsonObject() ? FlowJson.optionCatalog(parsed.getAsJsonObject()) : null;
             if (payload != null && !payload.getSourceId().isBlank()) {
                 if (payload.getVersion() > OptionCatalogSnapshot.CURRENT_VERSION) {
                     protocolError("Unsupported option catalog version: " + payload.getVersion());
@@ -15858,7 +15905,7 @@ public class ReSyncFlowClient {
         request.put("requestId", requestId);
         request.put("graphId", graphId);
         if (graph != null) {
-            request.put("graph", JsonParser.parseString(FlowSerializer.serialize(graph)));
+            request.put("graph", JsonTreeParser.parse(FlowSerializer.serialize(graph)));
         }
         request.put("name", name != null && !name.isBlank() ? name : "Fixture");
         request.put("inputs", inputs != null ? inputs : Map.of());
@@ -17941,7 +17988,7 @@ public class ReSyncFlowClient {
             payload.addProperty("projectId", projectId);
         }
         if (draftProject != null) {
-            payload.add("draftProject", JsonParser.parseString(WorldGenSerializer.serializeProject(draftProject)));
+            payload.add("draftProject", JsonTreeParser.parse(WorldGenSerializer.serializeProject(draftProject)));
         }
         payload.addProperty("previewId", previewId);
         payload.addProperty("environment", environment != null && !environment.isBlank() ? environment : "NORMAL");
@@ -17960,7 +18007,7 @@ public class ReSyncFlowClient {
         }
         JsonElement draft = null;
         if (serializedDraftProject != null && !serializedDraftProject.isBlank()) {
-            draft = JsonParser.parseString(serializedDraftProject);
+            draft = JsonTreeParser.parse(serializedDraftProject);
             if (!draft.isJsonObject()) {
                 throw new IllegalArgumentException("World Generation preview project must be a JSON object");
             }
@@ -18067,7 +18114,7 @@ public class ReSyncFlowClient {
         }
         JsonElement parsed;
         try {
-            parsed = JsonParser.parseString(json);
+            parsed = JsonTreeParser.parse(json);
         } catch (RuntimeException exception) {
             throw new IllegalArgumentException("WorldGen mutation JSON is invalid", exception);
         }
@@ -18425,7 +18472,7 @@ public class ReSyncFlowClient {
             authorityEpochForTypedEnvelope());
         envelope.addProperty(ReSyncProtocolContract.FLOW_TRIGGER_UPDATE_REQUEST_ID_FIELD, requestId);
         envelope.add(ReSyncProtocolContract.FLOW_TRIGGER_UPDATE_BINDINGS_FIELD,
-            JsonParser.parseString(requireCanonicalTriggerBindings(canonicalBindings)));
+            JsonTreeParser.parse(requireCanonicalTriggerBindings(canonicalBindings)));
         if (expectedBindingEpoch > 0L || expectedBindingHash != null) {
             if (expectedBindingEpoch < 1L || expectedBindingHash == null || expectedBindingHash.isBlank()) {
                 throw new IllegalArgumentException("Expected trigger binding state is incomplete");
@@ -18467,7 +18514,7 @@ public class ReSyncFlowClient {
             throw new IllegalArgumentException("Trigger bindings exceed the encoded frame limit");
         }
         String canonical = CanonicalJson.canonicalizeJson(source);
-        JsonElement parsed = JsonParser.parseString(canonical);
+        JsonElement parsed = JsonTreeParser.parse(canonical);
         if (!parsed.isJsonArray() || parsed.getAsJsonArray().size() > MAX_TRIGGER_BINDINGS
             || !validTriggerBindingArray(parsed.getAsJsonArray()) || !canonical.equals(value)) {
             throw new IllegalArgumentException("Trigger bindings must be canonical JSON array data");
@@ -18480,7 +18527,7 @@ public class ReSyncFlowClient {
 
     private String triggerBindingsHash(String canonicalBindings) {
         String exact = requireCanonicalTriggerBindings(canonicalBindings);
-        JsonArray array = JsonParser.parseString(exact).getAsJsonArray();
+        JsonArray array = JsonTreeParser.parse(exact).getAsJsonArray();
         List<Map<String, Object>> values = new ArrayList<>();
         for (JsonElement element : array) {
             JsonObject binding = element != null && element.isJsonObject() ? element.getAsJsonObject() : new JsonObject();
@@ -19643,7 +19690,7 @@ public class ReSyncFlowClient {
             return "global";
         }
         try {
-            JsonElement parsed = JsonParser.parseString(new String(payload, 1, payload.length - 1, StandardCharsets.UTF_8));
+            JsonElement parsed = JsonTreeParser.parse(new String(payload, 1, payload.length - 1, StandardCharsets.UTF_8));
             if (!parsed.isJsonObject()) {
                 return "global";
             }

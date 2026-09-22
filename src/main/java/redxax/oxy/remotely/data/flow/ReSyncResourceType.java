@@ -3,7 +3,7 @@ package redxax.oxy.remotely.data.flow;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import redxax.oxy.remotely.flow.data.FlowGraph;
-import redxax.oxy.remotely.flow.data.FlowSerializer;
+import redxax.oxy.remotely.flow.data.FlowJson;
 import redxax.oxy.remotely.flow.data.CustomContentDefinition;
 import redxax.oxy.remotely.flow.data.GuiDefinition;
 import redxax.oxy.remotely.flow.data.ReSyncProjectMetadata;
@@ -39,7 +39,7 @@ public enum ReSyncResourceType {
     ),
 
     GUI(
-            item -> FlowSerializer.serializeGui((GuiDefinition) item), FlowSerializer::deserializeGui,
+            item -> FlowJson.write(FlowJson.gui((GuiDefinition) item)), json -> FlowJson.gui(FlowJson.parse(json).getAsJsonObject()),
             (item, newId) -> {
                 GuiDefinition gui = (GuiDefinition) item;
                 String oldId = gui.getId();
@@ -56,7 +56,7 @@ public enum ReSyncResourceType {
     ),
 
     SCOREBOARD(
-            item -> FlowSerializer.serializeScoreboard((ScoreboardDefinition) item), FlowSerializer::deserializeScoreboard,
+            item -> FlowJson.write(FlowJson.scoreboard((ScoreboardDefinition) item)), json -> FlowJson.scoreboard(FlowJson.parse(json).getAsJsonObject()),
             (item, newId) -> {
                 ScoreboardDefinition sb = (ScoreboardDefinition) item;
                 String oldId = sb.getId();
@@ -76,14 +76,14 @@ public enum ReSyncResourceType {
     ),
 
     TAB(
-            item -> FlowSerializer.serializeTab((TabDefinition) item), FlowSerializer::deserializeTab,
+            item -> FlowJson.write(FlowJson.tab((TabDefinition) item)), json -> FlowJson.tab(FlowJson.parse(json).getAsJsonObject()),
             (item, newId) -> ((TabDefinition) item).setId(newId),
             item -> ((TabDefinition) item).getId(),
             item -> ((TabDefinition) item).getId()
     ),
 
     CUSTOM_CONTENT(
-            item -> FlowSerializer.serializeCustomContent((CustomContentDefinition) item), FlowSerializer::deserializeCustomContent,
+            item -> FlowJson.write(FlowJson.customContent((CustomContentDefinition) item)), json -> FlowJson.customContent(FlowJson.parse(json).getAsJsonObject()),
             (item, newId) -> ((CustomContentDefinition) item).setId(newId),
             item -> ((CustomContentDefinition) item).getId(),
             item -> {
@@ -93,7 +93,8 @@ public enum ReSyncResourceType {
     ),
 
     PROJECT_METADATA(
-            item -> new Gson().toJson(item instanceof ProjectMetadataSnapshot snapshot ? snapshot.materialize() : item), json -> new Gson().fromJson(json, ReSyncProjectMetadata.class),
+            item -> FlowJson.write(FlowJson.projectMetadata(item instanceof ProjectMetadataSnapshot snapshot ? snapshot.materialize() : (ReSyncProjectMetadata) item)),
+            json -> FlowJson.projectMetadata(FlowJson.parse(json).getAsJsonObject()),
             (item, newId) -> ((ReSyncProjectMetadata) item).setServerId(newId),
             item -> item instanceof ProjectMetadataSnapshot snapshot ? snapshot.serverId() : ((ReSyncProjectMetadata) item).getServerId() == null || ((ReSyncProjectMetadata) item).getServerId().isBlank() ? "project" : ((ReSyncProjectMetadata) item).getServerId(),
             item -> "Project"
@@ -299,11 +300,11 @@ public enum ReSyncResourceType {
         FlowGraph graph = (FlowGraph) item;
         graph.setResourceType(type);
         graph.setFunction("function".equals(type));
-        return FlowSerializer.serialize(graph);
+        return FlowJson.write(FlowJson.graph(graph));
     }
 
     private static Object deserializeGraph(String json, String type) {
-        FlowGraph graph = FlowSerializer.deserialize(json);
+        FlowGraph graph = FlowJson.graph(FlowJson.parse(json).getAsJsonObject());
         if (graph != null) {
             graph.setResourceType(type);
             graph.setFunction("function".equals(type));

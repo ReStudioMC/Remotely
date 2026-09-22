@@ -6,6 +6,11 @@ import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
 import restudio.rescreen.util.JsonTreeParser;
+import restudio.resync.flow.identity.ContractRef;
+import restudio.resync.flow.identity.OwnerId;
+import restudio.resync.flow.identity.ResourceTypeId;
+import restudio.resync.flow.identity.ServerId;
+import restudio.resync.flow.identity.ServerResourceLocator;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -132,8 +137,8 @@ public final class FlowJson {
     }
 
     public static OptionCatalogSnapshot optionCatalog(JsonObject json) {
-        OptionCatalogSnapshot snapshot = new OptionCatalogSnapshot(); snapshot.setVersion(integer(json, "version", OptionCatalogSnapshot.CURRENT_VERSION)); snapshot.setSourceId(string(json, "sourceId", "")); snapshot.setContextKey(string(json, "contextKey", "")); snapshot.setRevision(string(json, "revision", "")); snapshot.setSequence(longValue(json, "sequence", 0)); snapshot.setValues(stringList(json, "values"));
-        List<OptionCatalogItem> items = new ArrayList<>(); array(json, "items").forEach(value -> { if (!value.isJsonObject()) return; JsonObject encoded = value.getAsJsonObject(); OptionCatalogItem item = new OptionCatalogItem(); item.setValue(string(encoded, "value", "")); item.setLabel(string(encoded, "label", item.getValue())); item.setDescription(string(encoded, "description", "")); item.setIcon(string(encoded, "icon", "")); item.setGroup(string(encoded, "group", "")); item.setMetadata(map(encoded.get("metadata"))); items.add(item); }); snapshot.setItems(items); snapshot.setStatus(string(json, "status", "available")); snapshot.setDiagnostic(string(json, "diagnostic", "")); return snapshot;
+        OptionCatalogSnapshot snapshot = new OptionCatalogSnapshot(); snapshot.setVersion(integer(json, "version", OptionCatalogSnapshot.CURRENT_VERSION)); snapshot.setServerId(string(json, "serverId", "")); snapshot.setOwnerId(string(json, "ownerId", "")); snapshot.setResourceTypeId(string(json, "resourceTypeId", "")); snapshot.setSourceId(string(json, "sourceId", "")); snapshot.setContextKey(string(json, "contextKey", "")); snapshot.setRevision(string(json, "revision", "")); snapshot.setSequence(longValue(json, "sequence", 0)); snapshot.setValues(stringList(json, "values"));
+        List<OptionCatalogItem> items = new ArrayList<>(); array(json, "items").forEach(value -> { if (!value.isJsonObject()) return; JsonObject encoded = value.getAsJsonObject(); OptionCatalogItem item = new OptionCatalogItem(); String resourceServerId = string(encoded, "resourceServerId", ""); String resourceOwnerId = string(encoded, "resourceOwnerId", ""); String resourceTypeId = string(encoded, "resourceTypeId", ""); String resourceId = string(encoded, "resourceId", ""); if (!resourceServerId.isBlank() || !resourceOwnerId.isBlank() || !resourceTypeId.isBlank() || !resourceId.isBlank()) item.setResource(new ServerResourceLocator(ServerId.parseCanonicalText(resourceServerId), ContractRef.of(OwnerId.of(resourceOwnerId), ResourceTypeId.of(resourceTypeId)), resourceId)); else item.setValue(string(encoded, "value", "")); item.setLabel(string(encoded, "label", item.getValue())); item.setDescription(string(encoded, "description", "")); item.setIcon(string(encoded, "icon", "")); item.setGroup(string(encoded, "group", "")); item.setMetadata(map(encoded.get("metadata"))); items.add(item); }); snapshot.setItems(items); snapshot.setStatus(string(json, "status", "available")); snapshot.setDiagnostic(string(json, "diagnostic", "")); return snapshot;
     }
 
     public static JsonElement value(Object value) {
@@ -204,7 +209,7 @@ public final class FlowJson {
 
     private static Map<String, Object> map(JsonElement value) { Map<String, Object> map = new LinkedHashMap<>(); if (value != null && value.isJsonObject()) value.getAsJsonObject().entrySet().forEach(entry -> map.put(entry.getKey(), FlowJson.value(entry.getValue()))); return map; }
     private static JsonArray strings(List<String> values) { JsonArray array = new JsonArray(); if (values != null) values.forEach(array::add); return array; }
-    private static List<String> stringList(JsonObject json, String key) { List<String> values = new ArrayList<>(); array(json, key).forEach(value -> { if (!value.isJsonNull()) values.add(value.getAsString()); }); return values; }
+    public static List<String> stringList(JsonObject json, String key) { List<String> values = new ArrayList<>(); array(json, key).forEach(value -> { if (!value.isJsonNull()) values.add(value.getAsString()); }); return values; }
     private static void put(JsonObject json, String key, String value) { if (value != null) json.addProperty(key, value); }
     private static void put(JsonObject json, String key, Number value) { if (value != null) json.addProperty(key, value); }
     private static void put(JsonObject json, String key, Boolean value) { if (value != null) json.addProperty(key, value); }

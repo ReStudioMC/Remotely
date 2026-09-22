@@ -4,12 +4,12 @@ import java.time.Duration;
 import redxax.oxy.remotely.util.BrowserWork;
 import restudio.rescreen.platform.Async;
 import redxax.oxy.remotely.util.BrowserSafeState;
-import com.google.gson.Gson;
 import redxax.oxy.remotely.data.flow.world.WorldChannelMessage;
 import redxax.oxy.remotely.data.flow.world.WorldDashboardEntry;
 import redxax.oxy.remotely.data.flow.world.WorldInventoryGroup;
 import redxax.oxy.remotely.data.flow.world.WorldMapSnapshot;
 import redxax.oxy.remotely.data.flow.world.WorldOperationResult;
+import redxax.oxy.remotely.data.flow.world.WorldProtocolJson;
 import redxax.oxy.remotely.data.flow.world.WorldProfileSettings;
 import redxax.oxy.remotely.data.flow.world.WorldRegistryEntry;
 import redxax.oxy.remotely.data.flow.world.WorldSnapshot;
@@ -28,7 +28,6 @@ import java.util.Map;
 
 public class ReSyncWorldService {
     private static final long SAVE_TIMEOUT_SECONDS = 30L;
-    private final Gson gson;
     private final Map<String, WorldSnapshot> worldSnapshotCache = BrowserSafeState.map();
     private final Map<String, WorldMapSnapshot> worldMapSnapshotCache = BrowserSafeState.map();
     private final Map<String, WorldOperationResult> worldOperationCache = BrowserSafeState.map();
@@ -40,7 +39,6 @@ public class ReSyncWorldService {
     private final BrowserSafeState.LongValue saveSequences = new BrowserSafeState.LongValue();
 
     public ReSyncWorldService() {
-        this.gson = new Gson();
     }
 
     public Map<String, WorldRegistryEntry> getWorldsForServer(String serverId) {
@@ -127,7 +125,7 @@ public class ReSyncWorldService {
         String action = message.getAction() == null ? "" : message.getAction();
         WorldOperationResult operationResult = null;
         if ("snapshot".equalsIgnoreCase(action) && message.getData() != null) {
-            WorldSnapshot snapshot = gson.fromJson(message.getData(), WorldSnapshot.class);
+            WorldSnapshot snapshot = WorldProtocolJson.readSnapshot(message.getData());
             if (snapshot != null) {
                 worldSnapshotCache.put(serverId, snapshot);
                 flowManager.refreshStudioWorlds(serverId);
@@ -135,7 +133,7 @@ public class ReSyncWorldService {
             return;
         }
         if ("mapSnapshot".equalsIgnoreCase(action) && message.getData() != null) {
-            WorldMapSnapshot snapshot = gson.fromJson(message.getData(), WorldMapSnapshot.class);
+            WorldMapSnapshot snapshot = WorldProtocolJson.readMapSnapshot(message.getData());
             PendingWorldMapRequest request = pendingWorldMapRequests.remove(serverId);
             String worldName = request != null ? request.worldName() : null;
             if (snapshot != null && worldName != null && !worldName.isBlank()) {
@@ -424,28 +422,13 @@ public class ReSyncWorldService {
         String action = result.getAction() == null ? "" : result.getAction().trim().toLowerCase(Locale.ROOT);
         switch (action) {
             case "createinventorygroup", "updateinventorygroup" ->
-                upsertSnapshotInventoryGroup(snapshot, convertWorldResultData(result, "group", WorldInventoryGroup.class));
+                upsertSnapshotInventoryGroup(snapshot, WorldProtocolJson.readInventoryGroup(result.getData().get("group")));
             case "deleteinventorygroup" -> removeSnapshotInventoryGroup(snapshot, resultDataText(result, "groupId"));
             case "createworld", "loadworld", "unloadworld" ->
-                upsertSnapshotWorld(snapshot, convertWorldResultData(result, "world", WorldRegistryEntry.class));
+                upsertSnapshotWorld(snapshot, WorldProtocolJson.readWorld(result.getData().get("world")));
             case "deleteworld" -> removeSnapshotWorld(snapshot, resultDataText(result, "worldName", result.getWorldName()));
             default -> {
             }
-        }
-    }
-
-    private <T> T convertWorldResultData(WorldOperationResult result, String key, Class<T> type) {
-        if (result == null || result.getData() == null || key == null || key.isBlank() || type == null) {
-            return null;
-        }
-        Object value = result.getData().get(key);
-        if (value == null) {
-            return null;
-        }
-        try {
-            return gson.fromJson(gson.toJson(value), type);
-        } catch (Exception ignored) {
-            return null;
         }
     }
 
@@ -528,7 +511,7 @@ public class ReSyncWorldService {
             return null;
         }
         try {
-            WorldOperationResult result = gson.fromJson(message.getData(), WorldOperationResult.class);
+            WorldOperationResult result = WorldProtocolJson.readOperationResult(message.getData());
             if (result != null) {
                 worldOperationCache.put(serverId, result);
             }

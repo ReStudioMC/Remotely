@@ -1,29 +1,40 @@
 package redxax.oxy.remotely.data.flow;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
 import redxax.oxy.remotely.collaboration.CollaborationService;
+import redxax.oxy.remotely.flow.data.FlowJson;
+import restudio.rescreen.util.JsonTreeParser;
 
+import java.util.ArrayList;
 import java.util.List;
 
 public final class ReSyncCollaborationClient extends CollaborationService {
-    private final Gson gson;
-
     public ReSyncCollaborationClient(Gson gson, String clientId) {
         super(clientId);
-        this.gson = gson;
     }
 
     public boolean applySnapshot(String json) {
-        Snapshot snapshot;
+        JsonObject root;
         try {
-            snapshot = gson.fromJson(json, Snapshot.class);
+            JsonElement parsed = JsonTreeParser.parse(json);
+            root = parsed.isJsonObject() ? parsed.getAsJsonObject() : null;
         } catch (RuntimeException exception) {
             return false;
         }
-        return acceptSnapshot(snapshot != null ? snapshot.selfSessionId() : "",
-            snapshot != null ? snapshot.selfIdentity() : null,
-            snapshot != null ? snapshot.selfSessionIds() : List.of(),
-            snapshot != null ? snapshot.collaborators() : List.of());
+        if (root == null) {
+            return false;
+        }
+        List<String> selfSessionIds = FlowJson.stringList(root, "selfSessionIds");
+        List<Presence> collaborators = new ArrayList<>();
+        FlowJson.array(root, "collaborators").forEach(value -> {
+            if (value.isJsonObject()) {
+                collaborators.add(presence(value.getAsJsonObject()));
+            }
+        });
+        return acceptSnapshot(FlowJson.string(root, "selfSessionId", ""), identity(FlowJson.object(root, "selfIdentity")),
+            selfSessionIds, collaborators);
     }
 
     public void applyResourceChange(ResourceChange change) {
@@ -31,15 +42,36 @@ public final class ReSyncCollaborationClient extends CollaborationService {
     }
 
     public boolean applyMessage(String json) {
-        Message message;
+        JsonObject root;
         try {
-            message = gson.fromJson(json, Message.class);
+            JsonElement parsed = JsonTreeParser.parse(json);
+            root = parsed.isJsonObject() ? parsed.getAsJsonObject() : null;
         } catch (RuntimeException exception) {
             return false;
         }
-        return acceptMessage(message);
+        if (root == null) {
+            return false;
+        }
+        return acceptMessage(new Message(FlowJson.string(root, "id", ""),
+            FlowJson.string(root, "authorSessionId", ""), identity(FlowJson.object(root, "author")),
+            FlowJson.string(root, "resourceType", ""), FlowJson.string(root, "resourceId", ""),
+            FlowJson.integer(root, "color", 0), FlowJson.string(root, "message", ""),
+            FlowJson.longValue(root, "sentAt", 0L)));
     }
 
-    private record Snapshot(String selfSessionId, Identity selfIdentity, List<String> selfSessionIds, List<Presence> collaborators) {
+    private Presence presence(JsonObject root) {
+        return new Presence(FlowJson.string(root, "sessionId", ""), FlowJson.string(root, "clientId", ""),
+            identity(FlowJson.object(root, "identity")), FlowJson.string(root, "resourceType", ""),
+            FlowJson.string(root, "resourceId", ""), FlowJson.string(root, "viewId", ""),
+            FlowJson.decimal(root, "x", 0.0), FlowJson.decimal(root, "y", 0.0),
+            FlowJson.bool(root, "active", false), FlowJson.bool(root, "typing", false),
+            FlowJson.integer(root, "color", 0), FlowJson.bool(root, "customColor", false),
+            FlowJson.longValue(root, "updatedAt", 0L));
+    }
+
+    private Identity identity(JsonObject root) {
+        return root == null ? null : new Identity(FlowJson.string(root, "subjectId", ""),
+            FlowJson.string(root, "displayName", "Collaborator"), FlowJson.string(root, "avatar", ""),
+            FlowJson.string(root, "source", ""));
     }
 }

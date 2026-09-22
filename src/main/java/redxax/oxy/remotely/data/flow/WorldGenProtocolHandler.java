@@ -8,14 +8,15 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
 import redxax.oxy.remotely.worldgen.WorldGenManager;
 import redxax.oxy.remotely.worldgen.data.WorldGenProject;
 import redxax.oxy.remotely.worldgen.data.WorldGenSerializer;
 import redxax.oxy.remotely.worldgen.registry.WorldGenNodeDefinition;
+import redxax.oxy.remotely.worldgen.registry.WorldGenNodeDefinitionJson;
 import restudio.rescreen.logging.LogSource;
 import restudio.rescreen.logging.LogTypes;
 import restudio.rescreen.logging.ReLog;
+import restudio.rescreen.util.JsonTreeParser;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -205,13 +206,7 @@ final class WorldGenProtocolHandler {
             tracePacket((byte) 0x25, envelope, "dropped", "registry_nodes_not_array", 0);
             return;
         }
-        List<WorldGenNodeDefinition> definitions = new ArrayList<>();
-        for (JsonElement element : nodes.getAsJsonArray()) {
-            WorldGenNodeDefinition definition = gson.fromJson(element, WorldGenNodeDefinition.class);
-            if (definition != null) {
-                definitions.add(definition);
-            }
-        }
+        List<WorldGenNodeDefinition> definitions = WorldGenNodeDefinitionJson.readList(nodes);
         JsonElement capabilities = snapshot.get("capabilities");
         Object capabilitySnapshot = capabilities == null || capabilities.isJsonNull()
             ? null : gson.fromJson(capabilities, Object.class);
@@ -366,7 +361,7 @@ final class WorldGenProtocolHandler {
     }
 
     private Envelope envelope(String json, long startedAt) {
-        JsonElement root = JsonParser.parseString(json);
+        JsonElement root = JsonTreeParser.parse(json);
         Metadata metadata = metadata(root);
         return new Envelope(root, metadata.authorityEpoch, metadata.epochPresent, metadata.epochValid,
             metadata.revision, metadata.revisionPresent, metadata.revisionValid, startedAt);
