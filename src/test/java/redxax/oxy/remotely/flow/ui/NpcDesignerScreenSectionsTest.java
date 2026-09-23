@@ -11,6 +11,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class NpcDesignerScreenSectionsTest {
     private ThemeManager.Snapshot theme;
@@ -30,14 +31,35 @@ class NpcDesignerScreenSectionsTest {
     void groupsCurrentNpcFieldsWithoutLegacySpawnFields() {
         JsonObject resource = new JsonObject();
         resource.addProperty("entityType", "player");
+        resource.addProperty("ai", true);
         TestNpcDesigner designer = new TestNpcDesigner(new StudioScreen(), resource);
         try {
             assertEquals(List.of("NPC", "Skin", "Interaction", "Hooks"), designer.sectionTitles());
-            assertEquals(List.of("displayName", "entityType", "ai", "gravity", "invulnerable", "followPlayer", "followRange"), designer.sectionFields("NPC"));
+            assertEquals(List.of("displayName", "entityType", "gravity", "invulnerable", "followPlayer", "followRange"), designer.sectionFields("NPC"));
             assertEquals(List.of("skin.username"), designer.sectionFields("Skin"));
             assertEquals(List.of("dialog", "tradeProfile", "lootTable"), designer.sectionFields("Interaction"));
             assertEquals(List.of("hooks.spawnAction", "hooks.interactAction", "hooks.rightClickAction", "hooks.leftClickAction", "hooks.damageAction", "hooks.deathAction", "hooks.despawnAction"), designer.sectionFields("Hooks"));
             assertFalse(designer.fields().stream().anyMatch(field -> field.startsWith("spawnMode") || field.startsWith("location.")));
+            designer.sanitizeLegacyResourceFields();
+            assertFalse(resource.get("ai").getAsBoolean());
+        } finally {
+            designer.closed();
+        }
+    }
+
+    @Test
+    void selectingPlayerClearsAiAndHidesItsControl() {
+        JsonObject resource = new JsonObject();
+        resource.addProperty("entityType", "zombie");
+        resource.addProperty("ai", true);
+        TestNpcDesigner designer = new TestNpcDesigner(new StudioScreen(), resource);
+        try {
+            assertTrue(designer.sectionFields("NPC").contains("ai"));
+            designer.applyEntityTypeSelection("entityType", "player");
+            assertFalse(resource.get("ai").getAsBoolean());
+            assertFalse(designer.sectionFields("NPC").contains("ai"));
+            designer.applyEntityTypeSelection("entityType", "zombie");
+            assertTrue(designer.sectionFields("NPC").contains("ai"));
         } finally {
             designer.closed();
         }

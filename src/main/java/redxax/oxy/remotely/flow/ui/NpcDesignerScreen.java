@@ -102,6 +102,13 @@ public class NpcDesignerScreen extends FocusedJsonResourceDesignerScreen {
     }
 
     @Override
+    protected void sanitizeLegacyResourceFields() {
+        if (npcPlayerEntityType()) {
+            resource.addProperty("ai", false);
+        }
+    }
+
+    @Override
     protected AnimatedWidget customFieldRow(String field, String label, int rowWidth) {
         if ("followRange".equals(field)) {
             return npcFollowRangeSliderRow(label, rowWidth);
@@ -320,6 +327,9 @@ public class NpcDesignerScreen extends FocusedJsonResourceDesignerScreen {
             return;
         }
         putJsonText(field, value);
+        if ("minecraft:player".equals(normalizedNpcEntityType(value))) {
+            putJsonPathText("ai", "false");
+        }
         reloadFields();
     }
 
@@ -529,7 +539,11 @@ public class NpcDesignerScreen extends FocusedJsonResourceDesignerScreen {
     }
 
     protected String normalizedNpcEntityType() {
-        String entityType = jsonPathText("entityType").trim();
+        return normalizedNpcEntityType(jsonPathText("entityType"));
+    }
+
+    private String normalizedNpcEntityType(String value) {
+        String entityType = value.trim();
         if (entityType.isBlank()) {
             entityType = "villager";
         }
@@ -565,6 +579,7 @@ public class NpcDesignerScreen extends FocusedJsonResourceDesignerScreen {
             "hooks.rightClickAction", "hooks.leftClickAction", "hooks.damageAction", "hooks.deathAction", "hooks.despawnAction"
         ));
         if (npcPlayerEntityType()) {
+            fields.remove("ai");
             fields.add(2, "skin.username");
         }
         return fields;
