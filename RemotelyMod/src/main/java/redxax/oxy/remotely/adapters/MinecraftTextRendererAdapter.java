@@ -16,6 +16,7 @@ import net.minecraft.resources.Identifier;
 //#if MC < 1.21.11 && MC < 26.1
 //$$ import net.minecraft.resources.ResourceLocation;
 //#endif
+import restudio.rescreen.debug.RenderProfiler;
 import restudio.rescreen.platform.IDrawContext;
 import restudio.rescreen.platform.ITextRenderer;
 import restudio.rescreen.render.TextRenderer;
@@ -35,13 +36,13 @@ public class MinecraftTextRendererAdapter implements ITextRenderer {
 
     @Override
     public void draw(IDrawContext ctx, String text, int x, int y, int color, boolean shadow) {
-        if (!(ctx instanceof MinecraftDrawContextAdapter mcCtx)) return;
+        if (ctx == null || !(RenderProfiler.unwrap(ctx) instanceof MinecraftDrawContextAdapter mcCtx)) return;
         mcCtx.drawText(text, x, y, color, shadow);
     }
 
     @Override
     public void drawStyled(IDrawContext ctx, Object text, int x, int y, int color, boolean shadow) {
-        if (!(ctx instanceof MinecraftDrawContextAdapter mcCtx)) return;
+        if (ctx == null || !(RenderProfiler.unwrap(ctx) instanceof MinecraftDrawContextAdapter mcCtx)) return;
         mcCtx.drawStyledText(text, x, y, color, shadow);
     }
 
@@ -51,7 +52,7 @@ public class MinecraftTextRendererAdapter implements ITextRenderer {
     }
 
     public void drawRichText(IDrawContext ctx, String text, int x, int y, int color, boolean shadow) {
-        if (!(ctx instanceof MinecraftDrawContextAdapter mcCtx)) return;
+        if (ctx == null || !(RenderProfiler.unwrap(ctx) instanceof MinecraftDrawContextAdapter mcCtx)) return;
         try {
             mcCtx.drawStyledText(toNative(richText(text), Style.EMPTY), x, y, color, shadow);
         } catch (Exception ignored) {
