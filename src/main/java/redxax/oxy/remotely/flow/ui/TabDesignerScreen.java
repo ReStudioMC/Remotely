@@ -153,7 +153,7 @@ public class TabDesignerScreen extends StudioScreen implements DesktopWindowBeha
             if (tab == null) {
                 throw new IllegalStateException("Tab Is Unavailable");
             }
-            if (ReSyncCollaborationDocuments.to(document, TabDefinition.class) == null) {
+            if (ReSyncCollaborationDocuments.tab(document) == null) {
                 throw new IllegalArgumentException("Collaboration Document Is Invalid");
             }
             applyCollaborationDocument(document, patches);
@@ -192,7 +192,7 @@ public class TabDesignerScreen extends StudioScreen implements DesktopWindowBeha
     }
 
     private void restoreCollaborationDocument(JsonObject document) {
-        TabDefinition incoming = ReSyncCollaborationDocuments.to(document, TabDefinition.class);
+        TabDefinition incoming = ReSyncCollaborationDocuments.tab(document);
         ReSyncCollaborationDocuments.copy(tab, incoming);
         buildInspectorPanel();
         refreshPreviewText();

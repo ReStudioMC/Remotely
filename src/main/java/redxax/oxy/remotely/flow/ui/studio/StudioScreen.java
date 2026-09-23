@@ -95,17 +95,37 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.Map;
 import java.util.function.BiPredicate;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 
+import static restudio.rescreen.config.Config.deltaTime;
 import static restudio.rescreen.render.TextRenderer.tr;
 
 public class StudioScreen extends StudioInfiniteScreen {
     private static final BrowserWork.Executor STUDIO_RESOURCE_OPENS = BrowserWork.executor();
+    private final Map<String, CursorPosition> studioCursorPositions = new HashMap<>();
+    private String studioCursorDocumentKey;
+
+    private static final class CursorPosition {
+        private double x;
+        private double y;
+        private boolean initialized;
+
+        private void moveTo(double targetX, double targetY) {
+            if (!initialized) {
+                x = targetX;
+                y = targetY;
+                initialized = true;
+            }
+            double factor = 1.0 - Math.exp(-22.0 * Math.max(0.0F, deltaTime));
+            x += (targetX - x) * factor;
+            y += (targetY - y) * factor;
+        }
+    }
+
     protected boolean studioMode;
     protected TabsManager studioTabsManager;
     protected ReSyncContentBrowserWidget studioContentBrowser;
@@ -227,15 +247,6 @@ public class StudioScreen extends StudioInfiniteScreen {
 
     private record StudioPanelSaveIntent(String serverId, ReSyncResourceType type, String id,
                                          DesignerSaveNotifications.SaveTicket ticket, Consumer<Object> mutation) {
-    }
-
-    protected static class CommandBindingContext {
-        public CommandBindingContext() {
-        }
-
-        public String command;
-        public List<String> subcommands;
-        public Boolean structured;
     }
 
     @Override
@@ -891,6 +902,7 @@ public class StudioScreen extends StudioInfiniteScreen {
     @Override
     public void tick() {
         super.tick();
+        if (studioContentBrowser != null) studioContentBrowser.tick();
         updateStudioTabStates();
         drainCoreOpenIntents();
         ReSyncStudioView activeView = activeStudioView();
@@ -2276,7 +2288,7 @@ public class StudioScreen extends StudioInfiniteScreen {
             if (!lease.isCurrent()) {
                 return null;
             }
-            ReSyncProjectMetadata metadata = gson.fromJson(lease.materialize(), ReSyncProjectMetadata.class);
+            ReSyncProjectMetadata metadata = (ReSyncProjectMetadata) ReSyncResourceType.PROJECT_METADATA.deserialize(lease.materialize());
             return lease.isCurrent() ? metadata : null;
         } catch (RuntimeException ignored) {
             return null;
@@ -2285,6 +2297,18 @@ public class StudioScreen extends StudioInfiniteScreen {
 
     private void hydrateStudioTypedResources(FlowManager manager, ReSyncResourceType type,
                                              Map<String, ReSyncProjectMetadata.ResourceEntry> resources) {
+        boolean missingPresentation = false;
+        for (ReSyncProjectMetadata.ResourceEntry resource : resources.values()) {
+            if (resource != null && type.typeId().equals(resource.getType())
+                && (resource.getDisplayName() == null || resource.getDisplayName().isBlank()
+                || resource.getPath() == null || resource.getPath().isBlank())) {
+                missingPresentation = true;
+                break;
+            }
+        }
+        if (!missingPresentation) {
+            return;
+        }
         Map<?, ?> typed = studioTypedResources(manager, type);
         for (Map.Entry<?, ?> item : typed.entrySet()) {
             String id = studioTypedResourceId(type, item.getKey(), item.getValue());
@@ -3582,7 +3606,7 @@ public class StudioScreen extends StudioInfiniteScreen {
         String trimmed = context.trim();
         if (trimmed.startsWith("{")) {
             try {
-                CommandBindingContext decoded = gson.fromJson(trimmed, CommandBindingContext.class);
+                CommandBindingContext decoded = CommandBindingContext.fromJson(trimmed);
                 if (decoded != null) {
                     parsed.command = normalizeCommandLabel(decoded.command);
                     parsed.subcommands = decoded.subcommands != null ? decoded.subcommands : new ArrayList<>();
@@ -3603,7 +3627,7 @@ public class StudioScreen extends StudioInfiniteScreen {
         command.command = normalizeCommandLabel(command.command);
         command.subcommands = command.subcommands != null ? command.subcommands : new ArrayList<>();
         command.structured = command.structured != null && command.structured;
-        return command.subcommands.isEmpty() && !command.structured ? command.command : gson.toJson(command);
+        return command.subcommands.isEmpty() && !command.structured ? command.command : command.toJson();
     }
 
     protected String normalizeCommandLabel(String label) {
@@ -4787,18 +4811,29 @@ public class StudioScreen extends StudioInfiniteScreen {
     private void renderRemoteCursors(IDrawContext context, ReSyncCollaborationClient collaboration,
                                      List<ReSyncCollaborationClient.Presence> collaborators) {
         if (activeStudioDocument == null || rendersWorkspaceCursors()) {
+            studioCursorPositions.clear();
+            studioCursorDocumentKey = null;
             return;
         }
+        if (!Objects.equals(studioCursorDocumentKey, activeStudioDocument.key())) {
+            studioCursorPositions.clear();
+            studioCursorDocumentKey = activeStudioDocument.key();
+        }
+        Set<String> activeSessions = new HashSet<>();
         for (ReSyncCollaborationClient.Presence presence : collaborators) {
             if (collaboration.isSelf(presence) || !presence.active() || presence.identity() == null
                 || !Objects.equals(activeStudioDocument.type(), presence.resourceType())
                 || !Objects.equals(activeStudioDocument.id(), presence.resourceId())) {
                 continue;
             }
-            int cursorX = Math.clamp((int) Math.round(presence.x() * width), 0, Math.max(0, width - 1));
-            int cursorY = Math.clamp((int) Math.round(presence.y() * height), 0, Math.max(0, height - 1));
+            activeSessions.add(presence.sessionId());
+            CursorPosition position = studioCursorPositions.computeIfAbsent(presence.sessionId(), ignored -> new CursorPosition());
+            position.moveTo(presence.x(), presence.y());
+            int cursorX = Math.clamp((int) Math.round(position.x * width), 0, Math.max(0, width - 1));
+            int cursorY = Math.clamp((int) Math.round(position.y * height), 0, Math.max(0, height - 1));
             renderCollaborationCursor(context, presence, cursorX, cursorY);
         }
+        studioCursorPositions.keySet().retainAll(activeSessions);
     }
 
     protected boolean rendersWorkspaceCursors() {

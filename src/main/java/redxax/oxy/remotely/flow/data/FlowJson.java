@@ -29,6 +29,21 @@ public final class FlowJson {
         return JsonTreeParser.write(value);
     }
 
+    public static JsonObject trigger(TriggerBinding binding) {
+        JsonObject json = new JsonObject();
+        put(json, "id", binding.getId());
+        put(json, "flowId", binding.getFlowId());
+        put(json, "type", binding.getType() == null ? null : binding.getType().name());
+        put(json, "context", binding.getContext());
+        return json;
+    }
+
+    public static TriggerBinding trigger(JsonObject json) {
+        String type = string(json, "type", null);
+        return new TriggerBinding(string(json, "id", null), string(json, "flowId", null),
+            type == null ? null : TriggerType.valueOf(type), string(json, "context", null));
+    }
+
     public static JsonObject graph(FlowGraph value) {
         FlowGraph graph = value == null ? new FlowGraph() : value;
         JsonObject json = new JsonObject();
@@ -70,15 +85,41 @@ public final class FlowJson {
     }
 
     public static JsonObject gui(GuiDefinition value) {
-        GuiDefinition gui = value == null ? new GuiDefinition() : value; JsonObject json = new JsonObject();
-        put(json, "id", gui.getId()); put(json, "enabled", gui.isEnabled()); put(json, "title", gui.getTitle()); put(json, "rows", gui.getRows()); put(json, "extendToPlayerInventory", gui.isExtendToPlayerInventory());
-        JsonArray elements = new JsonArray(); if (gui.getElements() != null) gui.getElements().forEach(element -> elements.add(guiElement(element))); json.add("elements", elements); return json;
+        GuiDefinition gui = value == null ? new GuiDefinition() : value;
+        JsonObject json = new JsonObject();
+        put(json, "id", gui.getId());
+        put(json, "enabled", gui.isEnabled());
+        put(json, "title", gui.getTitle());
+        put(json, "rows", gui.getRows());
+        put(json, "extendToPlayerInventory", gui.isExtendToPlayerInventory());
+        JsonArray elements = new JsonArray();
+        if (gui.getElements() != null) gui.getElements().forEach(element -> elements.add(guiElement(element)));
+        json.add("elements", elements);
+        put(json, "clickSound", gui.getClickSound());
+        put(json, "openFlowId", gui.getOpenFlowId());
+        put(json, "closeFlowId", gui.getCloseFlowId());
+        put(json, "updateIntervalTicks", gui.getUpdateIntervalTicks());
+        put(json, "updateFlowId", gui.getUpdateFlowId());
+        return json;
     }
 
     public static GuiDefinition gui(JsonObject json) {
-        GuiDefinition gui = new GuiDefinition(); if (json == null) return gui;
-        gui.setId(string(json, "id", null)); gui.setEnabled(bool(json, "enabled", true)); gui.setTitle(string(json, "title", null)); gui.setRows(integer(json, "rows", 0)); gui.setExtendToPlayerInventory(bool(json, "extendToPlayerInventory", false));
-        List<GuiElement> elements = new ArrayList<>(); array(json, "elements").forEach(value -> { if (value.isJsonObject()) elements.add(guiElement(value.getAsJsonObject())); }); gui.setElements(elements); return gui;
+        GuiDefinition gui = new GuiDefinition();
+        if (json == null) return gui;
+        gui.setId(string(json, "id", null));
+        gui.setEnabled(bool(json, "enabled", true));
+        gui.setTitle(string(json, "title", null));
+        gui.setRows(integer(json, "rows", 0));
+        gui.setExtendToPlayerInventory(bool(json, "extendToPlayerInventory", false));
+        List<GuiElement> elements = new ArrayList<>();
+        array(json, "elements").forEach(value -> { if (value.isJsonObject()) elements.add(guiElement(value.getAsJsonObject())); });
+        gui.setElements(elements);
+        gui.setClickSound(string(json, "clickSound", null));
+        gui.setOpenFlowId(string(json, "openFlowId", null));
+        gui.setCloseFlowId(string(json, "closeFlowId", null));
+        gui.setUpdateIntervalTicks(integer(json, "updateIntervalTicks", 0));
+        gui.setUpdateFlowId(string(json, "updateFlowId", null));
+        return gui;
     }
 
     public static JsonObject scoreboard(ScoreboardDefinition value) {
@@ -186,21 +227,45 @@ public final class FlowJson {
 
     private static JsonObject node(FlowNode value) { JsonObject json = new JsonObject(); put(json, "type", value.getType()); put(json, "version", value.getVersion()); put(json, "x", value.getX()); put(json, "y", value.getY()); json.add("inputValues", FlowJson.value(value.getInputValues())); return json; }
     private static FlowNode node(JsonObject json) { FlowNode value = new FlowNode(); value.setType(string(json, "type", null)); value.setVersion(integer(json, "version", FlowNode.CURRENT_VERSION)); value.setX(decimal(json, "x", 0)); value.setY(decimal(json, "y", 0)); value.setInputValues(map(json.get("inputValues"))); return value; }
-    private static JsonObject connection(FlowConnection value) { JsonObject json = new JsonObject(); put(json, "sourceNodeId", value.getSourceNodeId()); put(json, "sourcePin", value.getSourcePin()); put(json, "targetNodeId", value.getTargetNodeId()); put(json, "targetPin", value.getTargetPin()); put(json, "editorSourceNodeId", value.getEditorSourceNodeId()); put(json, "editorSourcePin", value.getEditorSourcePin()); return json; }
-    private static FlowConnection connection(JsonObject json) { FlowConnection value = new FlowConnection(string(json, "sourceNodeId", null), string(json, "sourcePin", null), string(json, "targetNodeId", null), string(json, "targetPin", null)); value.setEditorSourceNodeId(string(json, "editorSourceNodeId", null)); value.setEditorSourcePin(string(json, "editorSourcePin", null)); return value; }
+    private static JsonObject connection(FlowConnection value) { JsonObject json = new JsonObject(); put(json, "sourceNodeId", value.getSourceNodeId()); put(json, "sourcePin", value.getSourcePin()); put(json, "sourcePinId", value.getSourcePinId()); put(json, "sourcePinDisplayName", value.getSourcePinDisplayName()); put(json, "targetNodeId", value.getTargetNodeId()); put(json, "targetPin", value.getTargetPin()); put(json, "targetPinId", value.getTargetPinId()); put(json, "targetPinDisplayName", value.getTargetPinDisplayName()); put(json, "editorSourceNodeId", value.getEditorSourceNodeId()); put(json, "editorSourcePin", value.getEditorSourcePin()); put(json, "editorSourcePinId", value.getEditorSourcePinId()); put(json, "editorSourcePinDisplayName", value.getEditorSourcePinDisplayName()); return json; }
+    private static FlowConnection connection(JsonObject json) { FlowConnection value = new FlowConnection(string(json, "sourceNodeId", null), string(json, "sourcePin", null), string(json, "targetNodeId", null), string(json, "targetPin", null)); value.setEditorSourceNodeId(string(json, "editorSourceNodeId", null)); value.setEditorSourcePin(string(json, "editorSourcePin", null)); value.setSourcePinId(string(json, "sourcePinId", value.getSourcePinId())); value.setTargetPinId(string(json, "targetPinId", value.getTargetPinId())); value.setEditorSourcePinId(string(json, "editorSourcePinId", value.getEditorSourcePinId())); value.setSourcePinDisplayName(string(json, "sourcePinDisplayName", null)); value.setTargetPinDisplayName(string(json, "targetPinDisplayName", null)); value.setEditorSourcePinDisplayName(string(json, "editorSourcePinDisplayName", null)); return value; }
     private static JsonObject variable(FlowVariable value) { JsonObject json = new JsonObject(); put(json, "name", value.getName()); put(json, "type", value.getType()); json.add("initialValue", FlowJson.value(value.getInitialValue())); put(json, "scope", value.getScope()); put(json, "lifetime", value.getLifetime()); put(json, "owner", value.getOwner()); put(json, "absencePolicy", value.getAbsencePolicy()); put(json, "concurrencyPolicy", value.getConcurrencyPolicy()); return json; }
     private static FlowVariable variable(JsonObject json) { FlowVariable value = new FlowVariable(string(json, "name", null), string(json, "type", null), FlowJson.value(json.get("initialValue"))); value.setScope(string(json, "scope", "local")); value.setLifetime(string(json, "lifetime", "execution")); value.setOwner(string(json, "owner", "graph")); value.setAbsencePolicy(string(json, "absencePolicy", "use_default")); value.setConcurrencyPolicy(string(json, "concurrencyPolicy", "isolated")); return value; }
-    private static JsonObject parameter(FlowGraph.FunctionParameter value) { JsonObject json = new JsonObject(); put(json, "name", value.getName()); put(json, "type", value.getType() == null ? null : value.getType().getId()); json.add("typeRef", typeRef(value.getTypeRef())); put(json, "widget", value.getWidget()); put(json, "optionsSource", value.getOptionsSource()); put(json, "defaultValue", value.getDefaultValue()); return json; }
-    private static FlowGraph.FunctionParameter parameter(JsonObject json) { FlowGraph.FunctionParameter value = new FlowGraph.FunctionParameter(); value.setName(string(json, "name", "")); value.setType(FlowDataType.fromString(string(json, "type", "any"))); JsonObject ref = object(json, "typeRef"); if (ref != null) value.setTypeRef(typeRef(ref)); value.setWidget(string(json, "widget", "")); value.setOptionsSource(string(json, "optionsSource", "")); value.setDefaultValue(string(json, "defaultValue", "")); return value; }
+    private static JsonObject parameter(FlowGraph.FunctionParameter value) { JsonObject json = new JsonObject(); put(json, "parameterId", value.getParameterId()); put(json, "displayName", value.getDisplayName()); put(json, "name", value.getName()); put(json, "type", value.getType() == null ? null : value.getType().getId()); json.add("typeRef", typeRef(value.getTypeRef())); put(json, "widget", value.getWidget()); put(json, "optionsSource", value.getOptionsSource()); put(json, "defaultValue", value.getDefaultValue()); return json; }
+    private static FlowGraph.FunctionParameter parameter(JsonObject json) { FlowGraph.FunctionParameter value = new FlowGraph.FunctionParameter(); value.setName(string(json, "name", "")); value.setParameterId(string(json, "parameterId", null)); value.setDisplayName(string(json, "displayName", null)); value.setType(FlowDataType.fromString(string(json, "type", "any"))); JsonObject ref = object(json, "typeRef"); if (ref != null) value.setTypeRef(typeRef(ref)); value.setWidget(string(json, "widget", "")); value.setOptionsSource(string(json, "optionsSource", "")); value.setDefaultValue(string(json, "defaultValue", "")); return value; }
     private static JsonObject typeRef(FlowTypeRef value) { FlowTypeRef ref = value == null ? FlowTypeRef.simple("any") : value; JsonObject json = new JsonObject(); put(json, "typeId", ref.getTypeId()); JsonArray arguments = new JsonArray(); ref.getArguments().forEach(argument -> arguments.add(typeRef(argument))); json.add("arguments", arguments); return json; }
     private static FlowTypeRef typeRef(JsonObject json) { List<FlowTypeRef> arguments = new ArrayList<>(); array(json, "arguments").forEach(value -> { if (value.isJsonObject()) arguments.add(typeRef(value.getAsJsonObject())); }); return new FlowTypeRef(string(json, "typeId", "any"), arguments); }
-    private static JsonObject passthrough(FlowGraph.EditorPassthrough value) { JsonObject json = new JsonObject(); put(json, "nodeId", value.getNodeId()); put(json, "inputPin", value.getInputPin()); return json; }
-    private static FlowGraph.EditorPassthrough passthrough(JsonObject json) { return new FlowGraph.EditorPassthrough(string(json, "nodeId", ""), string(json, "inputPin", "")); }
+    private static JsonObject passthrough(FlowGraph.EditorPassthrough value) { JsonObject json = new JsonObject(); put(json, "nodeId", value.getNodeId()); put(json, "inputPin", value.getInputPin()); put(json, "inputPinId", value.getInputPinId()); put(json, "inputPinDisplayName", value.getInputPinDisplayName()); return json; }
+    private static FlowGraph.EditorPassthrough passthrough(JsonObject json) { FlowGraph.EditorPassthrough value = new FlowGraph.EditorPassthrough(string(json, "nodeId", ""), string(json, "inputPin", "")); value.setInputPinId(string(json, "inputPinId", value.getInputPinId())); value.setInputPinDisplayName(string(json, "inputPinDisplayName", null)); return value; }
 
     private static JsonObject guiElement(GuiElement value) { JsonObject json = new JsonObject(); JsonArray slots = new JsonArray(); value.getSlots().forEach(slots::add); json.add("slots", slots); json.add("visual", visual(value.getVisual())); put(json, "flowId", value.getFlowId()); put(json, "openGuiId", value.getOpenGuiId()); put(json, "command", value.getCommand()); if (value.getAction() != null) json.add("action", value.getAction().deepCopy()); return json; }
     private static GuiElement guiElement(JsonObject json) { GuiElement value = new GuiElement(); List<Integer> slots = new ArrayList<>(); array(json, "slots").forEach(slot -> slots.add(slot.getAsInt())); value.setSlots(slots); JsonObject visual = object(json, "visual"); value.setVisual(visual == null ? new Visual() : visual(visual)); value.setFlowId(string(json, "flowId", null)); value.setOpenGuiId(string(json, "openGuiId", null)); value.setCommand(string(json, "command", null)); JsonElement action = json.get("action"); value.setAction(action != null && action.isJsonObject() ? action.getAsJsonObject().deepCopy() : null); return value; }
-    private static JsonObject visual(Visual value) { Visual visual = value == null ? new Visual() : value; JsonObject json = new JsonObject(); put(json, "material", visual.getMaterial()); put(json, "modelData", visual.getModelData()); put(json, "presetReference", visual.getPresetReference()); json.add("lore", strings(visual.getLore())); put(json, "name", visual.getName()); return json; }
-    private static Visual visual(JsonObject json) { Visual value = new Visual(); value.setMaterial(string(json, "material", null)); value.setModelData(json.has("modelData") && !json.get("modelData").isJsonNull() ? json.get("modelData").getAsInt() : null); value.setPresetReference(string(json, "presetReference", null)); value.setLore(stringList(json, "lore")); value.setName(string(json, "name", null)); return value; }
+    private static JsonObject visual(Visual value) {
+        Visual visual = value == null ? new Visual() : value;
+        JsonObject json = new JsonObject();
+        put(json, "material", visual.getMaterial());
+        put(json, "modelData", visual.getModelData());
+        put(json, "presetReference", visual.getPresetReference());
+        json.add("lore", strings(visual.getLore()));
+        put(json, "name", visual.getName());
+        put(json, "enchanted", visual.isEnchanted());
+        json.add("itemFlags", strings(visual.getItemFlags()));
+        put(json, "headTexture", visual.getHeadTexture());
+        return json;
+    }
+
+    private static Visual visual(JsonObject json) {
+        Visual value = new Visual();
+        value.setMaterial(string(json, "material", null));
+        value.setModelData(json.has("modelData") && !json.get("modelData").isJsonNull() ? json.get("modelData").getAsInt() : null);
+        value.setPresetReference(string(json, "presetReference", null));
+        value.setLore(stringList(json, "lore"));
+        value.setName(string(json, "name", null));
+        value.setEnchanted(bool(json, "enchanted", false));
+        value.setItemFlags(stringList(json, "itemFlags"));
+        value.setHeadTexture(string(json, "headTexture", null));
+        return value;
+    }
 
     private static JsonObject ability(CustomAbilityBinding value) { JsonObject json = new JsonObject(); put(json, "id", value.getId()); put(json, "trigger", value.getTrigger()); put(json, "flowId", value.getFlowId()); put(json, "enabled", value.isEnabled()); json.add("rule", rule(value.getRule())); return json; }
     private static CustomAbilityBinding ability(JsonObject json) { CustomAbilityBinding value = new CustomAbilityBinding(string(json, "id", null), string(json, "trigger", null), string(json, "flowId", null)); value.setEnabled(bool(json, "enabled", true)); JsonObject rule = object(json, "rule"); value.setRule(rule == null ? new CustomTriggerRule() : rule(rule)); return value; }

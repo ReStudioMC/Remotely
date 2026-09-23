@@ -1946,7 +1946,7 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
 
     protected int dynamicCodeFieldHeight(String field) {
         String value = jsonPathText(field);
-        int lines = value == null || value.isBlank() ? 4 : Math.clamp(value.split("\\R", -1).length, 4, 10);
+        int lines = value == null || value.isBlank() ? 4 : Math.clamp(resourceLineCount(value), 4, 10);
         return Math.clamp(lines * 18 + 28, 100, 208);
     }
 
@@ -1994,7 +1994,7 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
             .dismissOnSelect(true)
             .emptyMessage("No Items")
             .asyncItems(() -> ItemOptionCatalog.refresh(serverId),
-                () -> ItemOptionCatalog.selectorSnapshot(serverId, () -> jsonPathText(field), value -> applyRecipeItemSelection(field, value), true))
+                ItemOptionCatalog.selectorSource(serverId, () -> jsonPathText(field), value -> applyRecipeItemSelection(field, value), true))
             .build();
         showStudioSelector(selector, recipeItemSelectorLabel(selected), mouseX, mouseY);
     }
@@ -2492,7 +2492,7 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
         if (deferResourceMutation(() -> putMotdText(value))) {
             return;
         }
-        String[] lines = (value == null ? "" : value).split("\\R", -1);
+        String[] lines = splitResourceLines(value);
         String line1 = lines.length > 0 ? lines[0] : "";
         String line2 = lines.length > 1 ? lines[1] : "";
         if (line1.isBlank()) {
@@ -2522,8 +2522,59 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     }
 
     protected String firstMotdLine(String value) {
-        String[] lines = (value == null ? "" : value).split("\\R", -1);
-        return lines.length > 0 ? lines[0] : "";
+        return firstResourceLine(value);
+    }
+
+    static String firstResourceLine(String value) {
+        if (value == null) {
+            return "";
+        }
+        for (int index = 0; index < value.length(); index++) {
+            if (resourceLineBreakLength(value, index) > 0) {
+                return value.substring(0, index);
+            }
+        }
+        return value;
+    }
+
+    static int resourceLineCount(String value) {
+        if (value == null || value.isEmpty()) {
+            return 1;
+        }
+        int lines = 1;
+        for (int index = 0; index < value.length(); index++) {
+            int length = resourceLineBreakLength(value, index);
+            if (length > 0) {
+                lines++;
+                index += length - 1;
+            }
+        }
+        return lines;
+    }
+
+    static String[] splitResourceLines(String value) {
+        String text = value == null ? "" : value;
+        List<String> lines = new ArrayList<>();
+        int start = 0;
+        for (int index = 0; index < text.length(); index++) {
+            int length = resourceLineBreakLength(text, index);
+            if (length > 0) {
+                lines.add(text.substring(start, index));
+                index += length - 1;
+                start = index + 1;
+            }
+        }
+        lines.add(text.substring(start));
+        return lines.toArray(String[]::new);
+    }
+
+    private static int resourceLineBreakLength(String value, int index) {
+        char current = value.charAt(index);
+        if (current == '\r') {
+            return index + 1 < value.length() && value.charAt(index + 1) == '\n' ? 2 : 1;
+        }
+        return current == '\n' || current == '\u000B' || current == '\f' || current == '\u0085'
+            || current == '\u2028' || current == '\u2029' ? 1 : 0;
     }
 
     protected void putTemplateText(String value) {
@@ -2555,7 +2606,7 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
         }
         JsonArray array = new JsonArray();
         if (value != null) {
-            for (String line : value.split("\\R", -1)) {
+            for (String line : splitResourceLines(value)) {
                 String trimmed = line.trim();
                 if (!trimmed.isBlank()) {
                     array.add(trimmed);

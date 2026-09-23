@@ -1,6 +1,5 @@
 package redxax.oxy.remotely.flow.ui;
 
-import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import redxax.oxy.remotely.data.flow.FlowManager;
@@ -10,6 +9,7 @@ import redxax.oxy.remotely.data.flow.world.WorldInventoryGroup;
 import redxax.oxy.remotely.data.flow.world.WorldOperationResult;
 import redxax.oxy.remotely.data.flow.world.WorldProfileSettings;
 import redxax.oxy.remotely.data.flow.world.WorldRegistryEntry;
+import redxax.oxy.remotely.data.flow.world.WorldRegistryJson;
 import redxax.oxy.remotely.flow.data.ReSyncResourceDragPayload;
 import redxax.oxy.remotely.flow.data.FlowWorkspaceDocument;
 import redxax.oxy.remotely.flow.ui.studio.ReSyncCollaborativeView;
@@ -44,6 +44,7 @@ import restudio.rescreen.ui.widgets.SquareButtonWidget;
 import restudio.rescreen.ui.widgets.TextInputWidget;
 import restudio.rescreen.ui.widgets.TitledRowWidget;
 import restudio.rescreen.ui.widgets.ToggleWidget;
+import restudio.rescreen.util.JsonTreeParser;
 import restudio.rescreen.util.Notification;
 import restudio.resync.flow.workspace.WorkspacePatch;
 
@@ -63,7 +64,6 @@ import java.util.function.Function;
 import static restudio.rescreen.config.Config.desktopMode;
 
 public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBehaviorProvider, StudioHeaderProvider, StudioSelectorView, WorldStudioDocumentView, ReSyncCollaborativeView {
-    private static final Gson GSON = new Gson();
     private static final List<String> DIFFICULTY_OPTIONS = List.of("PEACEFUL", "EASY", "NORMAL", "HARD");
     private static final List<String> GAME_MODE_OPTIONS = List.of("SURVIVAL", "CREATIVE", "ADVENTURE", "SPECTATOR");
     private static final List<String> EDITABLE_WORLD_FIELDS = List.of(
@@ -93,6 +93,9 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
     private boolean worldHistoryReady;
     private boolean applyingWorldDocument;
     private boolean initialized;
+    private WorldRegistryEntry encodedWorld;
+    private long encodedWorldUpdatedAt;
+    private JsonObject encodedWorldDocument;
     private int x;
     private int y;
     private int width;
@@ -105,7 +108,7 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
         if (world == null) {
             return null;
         }
-        JsonObject document = GSON.toJsonTree(world).getAsJsonObject();
+        JsonObject document = encodedWorldDocument(world);
         if (detailForm == null) {
             return document;
         }
@@ -184,7 +187,7 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
         JsonObject document = null;
         if (failure == null) {
             try {
-                document = GSON.fromJson(projection.payload(), JsonObject.class);
+                document = parseWorldDocument(projection.payload());
                 if (document == null) {
                     failure = new IllegalStateException("Collaboration Snapshot Is Empty");
                 }
@@ -233,7 +236,8 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
         worldDraft.markMutation();
         applyingWorldDocument = true;
         try {
-            manager.applyCollaborativeWorld(serverId, GSON.fromJson(semanticDocument, WorldRegistryEntry.class));
+            manager.applyCollaborativeWorld(serverId, decodeWorldDocument(semanticDocument));
+            invalidateEncodedWorld();
             refreshDetails();
         } finally {
             applyingWorldDocument = false;
@@ -246,12 +250,9 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
             return;
         }
         historyRebase.request(patches, copiedPatches -> snapshot -> {
-            JsonObject rebased = GSON.fromJson(GSON.toJson(snapshot), JsonObject.class);
-            if (rebased == null) {
-                rebased = new JsonObject();
-            }
+            JsonObject rebased = snapshot == null ? new JsonObject() : snapshot.deepCopy();
             FlowWorkspaceDocument.apply(rebased, copiedPatches);
-            return GSON.fromJson(GSON.toJson(rebased), JsonObject.class);
+            return rebased.deepCopy();
         });
     }
 
@@ -264,6 +265,44 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
     private JsonObject worldDocumentSnapshot() {
         JsonObject document = collaborationDocument();
         return document != null ? document.deepCopy() : new JsonObject();
+    }
+
+    static JsonObject encodeWorldDocument(WorldRegistryEntry world) {
+        return WorldRegistryJson.write(world);
+    }
+
+    static JsonObject parseWorldDocument(String payload) {
+        JsonElement parsed = JsonTreeParser.parse(payload);
+        if (!parsed.isJsonObject()) {
+            throw new IllegalArgumentException("World Document Must Be An Object");
+        }
+        return parsed.getAsJsonObject();
+    }
+
+    static WorldRegistryEntry decodeWorldDocument(JsonObject document) {
+        return WorldRegistryJson.read(document);
+    }
+
+    static void preserveUneditedProfileSettings(WorldProfileSettings source, WorldProfileSettings target) {
+        if (source == null || target == null) {
+            return;
+        }
+        target.setEntryFeeEnabled(source.isEntryFeeEnabled());
+        target.setEntryFee(source.getEntryFee());
+    }
+
+    private JsonObject encodedWorldDocument(WorldRegistryEntry world) {
+        if (world != encodedWorld || encodedWorldDocument == null || world.getUpdatedAt() != encodedWorldUpdatedAt) {
+            encodedWorld = world;
+            encodedWorldUpdatedAt = world.getUpdatedAt();
+            encodedWorldDocument = encodeWorldDocument(world);
+        }
+        return encodedWorldDocument.deepCopy();
+    }
+
+    private void invalidateEncodedWorld() {
+        encodedWorld = null;
+        encodedWorldDocument = null;
     }
 
     private JsonObject editableWorldDocument(JsonObject document) {
@@ -305,7 +344,8 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
             editableWorldDocument(current), editableWorldDocument(semanticSnapshot)));
         applyingWorldDocument = true;
         try {
-            manager.applyCollaborativeWorld(serverId, GSON.fromJson(restored, WorldRegistryEntry.class));
+            manager.applyCollaborativeWorld(serverId, decodeWorldDocument(restored));
+            invalidateEncodedWorld();
             detailForm = null;
             refreshDetails();
         } finally {
@@ -341,8 +381,8 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
         this.host = parent instanceof StudioScreen screen ? screen : null;
         this.detailPane = new Container("world-detail", 0, 0, 300, 100);
         this.detailPane.layout(new ManagedLayout()).columns(1).padding(5).scrolling(true).backgroundDrawing(true);
-        this.worldDraft = new VersionedEditorDraft<>(new JsonObject(), JsonObject::toString,
-            payload -> GSON.fromJson(payload, JsonObject.class), (previous, replacement) -> {}, failure -> {},
+        this.worldDraft = new VersionedEditorDraft<>(new JsonObject(), JsonTreeParser::write,
+            WorldDesignerScreen::parseWorldDocument, (previous, replacement) -> {}, failure -> {},
             () -> new Notification("Editor Busy", "Try Again", Notification.Type.WARN));
         this.historyRebase = new HistoryRebaseCoordinator<>(worldHistory,
             () -> serverId + ":" + worldName, () -> collaborationLifecycle,
@@ -573,7 +613,7 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
         if (detailForm != null && worldName.equalsIgnoreCase(detailForm.worldName)) {
             boolean replaceDraft = applyingWorldDocument || !hasUnsavedChanges();
             boolean authoritativeChange = replaceDraft && !editableWorldDocument(worldDocumentSnapshot())
-                .equals(editableWorldDocument(GSON.toJsonTree(world).getAsJsonObject()));
+                .equals(editableWorldDocument(encodedWorldDocument(world)));
             detailForm.update(world, replaceDraft);
             if (authoritativeChange && !applyingWorldDocument && worldHistoryReady) {
                 worldHistory.clear();
@@ -1096,6 +1136,7 @@ public class WorldDesignerScreen extends StudioScreen implements DesktopWindowBe
             return;
         }
         WorldProfileSettings profile = new WorldProfileSettings();
+        preserveUneditedProfileSettings(world.getProfileSettings(), profile);
         profile.setAlias(alias.getText());
         profile.setHidden(hidden.getValue());
         profile.setAccessPermission(accessPermission.getText());

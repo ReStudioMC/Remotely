@@ -104,7 +104,7 @@ public class TabStudioPreviewView implements ReSyncStudioView, ReSyncCollaborati
             if (tab == null) {
                 throw new IllegalStateException("Tab Preview Is Unavailable");
             }
-            if (ReSyncCollaborationDocuments.to(document, TabDefinition.class) == null) {
+            if (ReSyncCollaborationDocuments.tab(document) == null) {
                 throw new IllegalArgumentException("Collaboration Document Is Invalid");
             }
             applyCollaborationDocument(document, patches);
@@ -122,7 +122,7 @@ public class TabStudioPreviewView implements ReSyncStudioView, ReSyncCollaborati
         if (tab == null) {
             return;
         }
-        ReSyncCollaborationDocuments.copy(tab, ReSyncCollaborationDocuments.to(document, TabDefinition.class));
+        ReSyncCollaborationDocuments.copy(tab, ReSyncCollaborationDocuments.tab(document));
     }
 
     @Override

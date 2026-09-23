@@ -184,6 +184,7 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
     private int lastWidth = -1;
     private int lastHeight = -1;
     private int lastInspectorWidth = -1;
+    private int lastStudioLeftWidth = -1;
     private boolean closingRequested;
     private boolean closeCompleted;
     private boolean studioCloseNotified;
@@ -270,7 +271,7 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
             if (gui == null) {
                 throw new IllegalStateException("GUI Is Unavailable");
             }
-            if (ReSyncCollaborationDocuments.to(document, GuiDefinition.class) == null) {
+            if (ReSyncCollaborationDocuments.gui(document) == null) {
                 throw new IllegalArgumentException("Collaboration Document Is Invalid");
             }
             applyCollaborationDocument(document, patches);
@@ -285,7 +286,7 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
             return;
         }
         guiDraft.markMutation();
-        GuiDefinition incoming = ReSyncCollaborationDocuments.to(document, GuiDefinition.class);
+        GuiDefinition incoming = ReSyncCollaborationDocuments.gui(document);
         if (incoming == null) {
             return;
         }
@@ -324,9 +325,9 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
                 document = new JsonObject();
             }
             FlowWorkspaceDocument.apply(document, copiedPatches);
-            GuiDefinition rebased = ReSyncCollaborationDocuments.to(document, GuiDefinition.class);
+            GuiDefinition rebased = ReSyncCollaborationDocuments.gui(document);
             JsonObject serialized = gson.fromJson(gson.toJson(ReSyncCollaborationDocuments.from(rebased)), JsonObject.class);
-            GuiDefinition stable = ReSyncCollaborationDocuments.to(serialized, GuiDefinition.class);
+            GuiDefinition stable = ReSyncCollaborationDocuments.gui(serialized);
             return new GuiSnapshot(stable.getTitle(), stable.getRows(), stable.isExtendToPlayerInventory(),
                 stable.getElements(), snapshot.selectedIndex,
                 snapshot.placementTemplate != null ? snapshot.placementTemplate.copy() : null);
@@ -593,7 +594,6 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
         int topHeightScaled = Math.round(topHeight * guiScale);
         Identifier textureId = gameAssets.getImageId(textureReference);
         drawGuiTexture(context, gameAssets, textureReference, textureId, guiBackgroundX, guiBackgroundY, guiBackgroundWidth, topHeightScaled, 0, 0, GUI_TEXTURE_WIDTH, topHeight);
-
         int bottomY = guiBackgroundY + topHeightScaled;
         int bottomHeightScaled = Math.round(GUI_PLAYER_INV_HEIGHT * guiScale);
         drawGuiTexture(context, gameAssets, textureReference, textureId, guiBackgroundX, bottomY, guiBackgroundWidth, bottomHeightScaled, 0, GUI_BOTTOM_TEXTURE_Y, GUI_TEXTURE_WIDTH, GUI_PLAYER_INV_HEIGHT);
@@ -973,7 +973,7 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
             .dismissOnSelect(false)
             .emptyMessage("No items")
             .asyncItems(OptionCatalogSelector.refreshAction(serverId, MATERIAL_OPTIONS_SOURCE),
-                () -> OptionCatalogSelector.snapshot(serverId, MATERIAL_OPTIONS_SOURCE, Map.of(), this::materialOptions,
+                OptionCatalogSelector.legacySource(serverId, MATERIAL_OPTIONS_SOURCE, this::materialOptions,
                     () -> selectedElement != null && selectedElement.getVisual() != null ? selectedElement.getVisual().getMaterial() : "",
                     this::applyMaterial, "No Items"))
             .build();
@@ -2069,12 +2069,16 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
 
     private void updateLayout(boolean force) {
         int inspectorWidth = inspectorPanel != null ? inspectorPanel.layoutWidth(0) : 0;
-        if (!force && width == lastWidth && height == lastHeight && inspectorWidth == lastInspectorWidth) {
+        int studioLeftWidth = parent instanceof StudioScreen studio
+            ? studio.studioContentBrowserWidth() : studioContentBrowserWidth();
+        if (!force && width == lastWidth && height == lastHeight
+            && inspectorWidth == lastInspectorWidth && studioLeftWidth == lastStudioLeftWidth) {
             return;
         }
         lastWidth = width;
         lastHeight = height;
         lastInspectorWidth = inspectorWidth;
+        lastStudioLeftWidth = studioLeftWidth;
 
         int contentTop = header().headerSize + 5;
         int contentHeight = Math.max(120, height - contentTop - PANEL_PADDING);
@@ -2086,7 +2090,7 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
         }
 
         int rightWidth = inspectorWidth;
-        int availableWidth = width - rightWidth - PANEL_PADDING * 2;
+        int availableWidth = width - studioLeftWidth - rightWidth - PANEL_PADDING * 2;
         int centerWidth = Math.max(120, availableWidth);
         slotSize = SLOT_BASE_SIZE;
         guiScale = 1f;
@@ -2096,7 +2100,7 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
         int topHeight = GUI_TOP_MARGIN + rows * SLOT_BASE_SIZE;
         guiBackgroundHeight = topHeight + GUI_PLAYER_INV_HEIGHT;
 
-        int gridX = PANEL_PADDING + Math.max(0, (centerWidth - guiBackgroundWidth) / 2);
+        int gridX = studioLeftWidth + PANEL_PADDING + Math.max(0, (centerWidth - guiBackgroundWidth) / 2);
         int gridY = contentTop + Math.max(0, (contentHeight - guiBackgroundHeight) / 2) - 14;
 
         guiBackgroundX = gridX;

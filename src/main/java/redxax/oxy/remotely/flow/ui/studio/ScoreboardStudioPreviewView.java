@@ -104,7 +104,7 @@ public class ScoreboardStudioPreviewView implements ReSyncStudioView, ReSyncColl
             if (scoreboard == null) {
                 throw new IllegalStateException("Scoreboard Preview Is Unavailable");
             }
-            if (ReSyncCollaborationDocuments.to(document, ScoreboardDefinition.class) == null) {
+            if (ReSyncCollaborationDocuments.scoreboard(document) == null) {
                 throw new IllegalArgumentException("Collaboration Document Is Invalid");
             }
             applyCollaborationDocument(document, patches);
@@ -122,7 +122,7 @@ public class ScoreboardStudioPreviewView implements ReSyncStudioView, ReSyncColl
         if (scoreboard == null) {
             return;
         }
-        ReSyncCollaborationDocuments.copy(scoreboard, ReSyncCollaborationDocuments.to(document, ScoreboardDefinition.class));
+        ReSyncCollaborationDocuments.copy(scoreboard, ReSyncCollaborationDocuments.scoreboard(document));
     }
 
     @Override

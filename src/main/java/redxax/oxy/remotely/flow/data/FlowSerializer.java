@@ -1,11 +1,9 @@
 package redxax.oxy.remotely.flow.data;
 
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
+import restudio.rescreen.util.JsonTreeParser;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -24,13 +22,9 @@ public class FlowSerializer {
         return GRAPH_PROPERTIES;
     }
 
-    private static final Gson gson = new GsonBuilder()
-            .setPrettyPrinting()
-            .create();
-
     public static String serialize(FlowGraph graph) {
         JsonObject object = toJsonObject(graph);
-        return gson.toJson(object);
+        return JsonTreeParser.write(object);
     }
 
     public static JsonObject toJsonObject(FlowGraph graph) {
@@ -47,7 +41,7 @@ public class FlowSerializer {
         if (adaptLegacy) {
             adaptLegacyFunctionParameterIds(graph);
         }
-        JsonObject object = gson.toJsonTree(graph).getAsJsonObject();
+        JsonObject object = FlowJson.graph(graph);
         mergeOpaque(object, graph.peekOpaqueProperties());
         writeNodeProperties(graph, object);
         writeConnectionProperties(graph, object, adaptLegacy);
@@ -58,12 +52,12 @@ public class FlowSerializer {
     }
 
     public static FlowGraph deserialize(String json) {
-        JsonObject object = JsonParser.parseString(json).getAsJsonObject();
+        JsonObject object = JsonTreeParser.parse(json).getAsJsonObject();
         return deserialize(object);
     }
 
     public static FlowGraph deserialize(JsonObject object) {
-        FlowGraph graph = gson.fromJson(object, FlowGraph.class);
+        FlowGraph graph = FlowJson.graph(object);
         graph.setOpaqueProperties(unknownProperties(object, GRAPH_PROPERTIES));
         readNodeProperties(graph, object);
         readConnectionProperties(graph, object);
@@ -79,40 +73,40 @@ public class FlowSerializer {
     }
 
     public static String serializeGui(GuiDefinition gui) {
-        return gson.toJson(gui);
+        return JsonTreeParser.write(FlowJson.gui(gui));
     }
 
     public static GuiDefinition deserializeGui(String json) {
-        return gson.fromJson(json, GuiDefinition.class);
+        return FlowJson.gui(JsonTreeParser.parse(json).getAsJsonObject());
     }
 
     public static String serializeScoreboard(ScoreboardDefinition scoreboard) {
-        return gson.toJson(scoreboard);
+        return JsonTreeParser.write(FlowJson.scoreboard(scoreboard));
     }
 
     public static ScoreboardDefinition deserializeScoreboard(String json) {
-        return gson.fromJson(json, ScoreboardDefinition.class);
+        return FlowJson.scoreboard(JsonTreeParser.parse(json).getAsJsonObject());
     }
 
     public static String serializeTab(TabDefinition tab) {
-        return gson.toJson(tab);
+        return JsonTreeParser.write(FlowJson.tab(tab));
     }
 
     public static TabDefinition deserializeTab(String json) {
-        return gson.fromJson(json, TabDefinition.class);
+        return FlowJson.tab(JsonTreeParser.parse(json).getAsJsonObject());
     }
 
     public static String serializeCustomContent(CustomContentDefinition content) {
-        JsonObject object = gson.toJsonTree(content).getAsJsonObject();
+        JsonObject object = FlowJson.customContent(content);
         if (content.getGraph() != null) {
             object.add("graph", toJsonObject(content.getGraph()));
         }
-        return gson.toJson(object);
+        return JsonTreeParser.write(object);
     }
 
     public static CustomContentDefinition deserializeCustomContent(String json) {
-        JsonObject object = JsonParser.parseString(json).getAsJsonObject();
-        CustomContentDefinition content = gson.fromJson(object, CustomContentDefinition.class);
+        JsonObject object = JsonTreeParser.parse(json).getAsJsonObject();
+        CustomContentDefinition content = FlowJson.customContent(object);
         JsonElement graph = object.get("graph");
         if (graph != null && graph.isJsonObject()) {
             content.setGraph(deserialize(graph.getAsJsonObject()));

@@ -57,6 +57,9 @@ import restudio.rescreen.ui.widgets.RowWidget;
 import restudio.rescreen.ui.widgets.TitledRowWidget;
 import restudio.rescreen.ui.widgets.SquareButtonWidget;
 import restudio.rescreen.ui.widgets.TextInputWidget;
+import restudio.rescreen.logging.LogSource;
+import restudio.rescreen.logging.LogTypes;
+import restudio.rescreen.logging.ReLog;
 import restudio.rescreen.ui.widgets.ToggleWidget;
 import restudio.rescreen.util.Notification;
 import restudio.resync.flow.workspace.WorkspacePatch;
@@ -136,6 +139,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     private long contentPanelDiffRequestVersion;
     private String contentPanelKey = "";
     private boolean contentPanelRefreshPending;
+    private boolean contentPanelPreparationPending;
     private boolean contentPanelStructurePending;
     private List<AnimatedWidget> collectingAttributeEditorWidgets;
     private MountableButtonWidget attributeHeaderWidget;
@@ -665,11 +669,16 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
                 if (!flowManager.saveCustomContent(serverId, content, ticket, expected)) {
                     DesignerSaveNotifications.failExact(ticket, "Content Save Rejected");
                 }
-            } catch (RuntimeException exception) {
+            } catch (RuntimeException | Error exception) {
+                ReLog.logger(LogTypes.FLOW).source(LogSource.server(serverId, serverId))
+                    .component(ContentDesignerScreen.class).operation("Content Save").error(String.valueOf(exception));
                 DesignerSaveNotifications.failExact(ticket, exception.getMessage() == null ? "Content Save Failed" : exception.getMessage());
             }
         });
-        if (!accepted && pendingContentSave == save) pendingContentSave = null;
+        if (!accepted) {
+            if (pendingContentSave == save) pendingContentSave = null;
+            DesignerSaveNotifications.failExact(ticket, "Content Save Busy");
+        }
         return accepted;
     }
 
@@ -692,7 +701,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             try {
                 CoreGraphUiProjection.ProjectionResult projection = new CoreGraphUiProjection().projectEditorSnapshot(snapshot);
                 applied = projection.complete() && Boolean.TRUE.equals(action.apply(projection.graph()));
-            } catch (RuntimeException exception) {
+            } catch (RuntimeException | Error exception) {
                 applied = false;
             }
             boolean result = applied;
@@ -1283,6 +1292,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         contentPanelRequestVersion++;
         contentPanelDiffs = new ArrayDeque<>();
         contentPanelRefreshPending = false;
+        contentPanelPreparationPending = false;
         contentPanelStructurePending = false;
         closeStudioSelector();
         hideAttributeDesigner();
@@ -1299,6 +1309,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         contentPanelRequestVersion++;
         contentPanelDiffs = new ArrayDeque<>();
         contentPanelRefreshPending = false;
+        contentPanelPreparationPending = false;
         contentPanelStructurePending = false;
         closeStudioSelector();
         restoreAttributeDesignerContentBrowser();
@@ -1347,6 +1358,16 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         if (contentPanel == null) {
             return;
         }
+        if (contentCoreSession == null) {
+            contentPanelRefreshPending = true;
+            return;
+        }
+        if (contentPanelPreparationPending) {
+            contentPanelRefreshPending = true;
+            return;
+        }
+        contentPanelPreparationPending = true;
+        contentPanelRefreshPending = false;
         long requestVersion = ++contentPanelRequestVersion;
         long generation = workspaceSnapshotGeneration();
         long mutationVersion = workspaceMutationVersion();
@@ -1374,6 +1395,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
                 createAttributeProjection(definition)));
             return true;
         }, applied -> {
+            contentPanelPreparationPending = false;
             ContentPanelSnapshot snapshot = prepared.get();
             if (!applied || !OPEN_SCREENS.contains(this) || snapshot == null
                 || snapshot.generation() != workspaceSnapshotGeneration()
@@ -1384,10 +1406,10 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
                 contentPanelRefreshPending = true;
                 return;
             }
-            contentPanelRefreshPending = false;
             applyContentPanel(snapshot);
-        });
+        }, false);
         if (!submitted) {
+            contentPanelPreparationPending = false;
             contentPanelRefreshPending = true;
         }
     }
@@ -1598,7 +1620,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     }
 
     private void drainContentPanelDiffs() {
-        if (contentPanelRefreshPending && contentPanelDiffs.isEmpty()) {
+        if (contentPanelRefreshPending && contentCoreSession != null
+            && !contentPanelPreparationPending && contentPanelDiffs.isEmpty()) {
             contentPanelRefreshPending = false;
             refreshContentPanel();
             return;

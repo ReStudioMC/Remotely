@@ -2427,7 +2427,7 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
             .dismissOnSelect(true)
             .emptyMessage("No Items")
             .asyncItems(() -> ItemOptionCatalog.refresh(serverId),
-                () -> ItemOptionCatalog.selectorSnapshot(serverId, selectedSupplier, onSelected, false))
+                ItemOptionCatalog.selectorSource(serverId, selectedSupplier, onSelected, false))
             .onClose(() -> closeActiveSearchSelector(selectorRef[0]));
         ItemSelectorWidget selector = builder.build();
         selectorRef[0] = selector;

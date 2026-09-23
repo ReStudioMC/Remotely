@@ -156,7 +156,7 @@ public class ScoreboardDesignerScreen extends StudioScreen implements DesktopWin
             if (scoreboard == null) {
                 throw new IllegalStateException("Scoreboard Is Unavailable");
             }
-            if (ReSyncCollaborationDocuments.to(document, ScoreboardDefinition.class) == null) {
+            if (ReSyncCollaborationDocuments.scoreboard(document) == null) {
                 throw new IllegalArgumentException("Collaboration Document Is Invalid");
             }
             applyCollaborationDocument(document, patches);
@@ -195,7 +195,7 @@ public class ScoreboardDesignerScreen extends StudioScreen implements DesktopWin
     }
 
     private void restoreCollaborationDocument(JsonObject document) {
-        ScoreboardDefinition incoming = ReSyncCollaborationDocuments.to(document, ScoreboardDefinition.class);
+        ScoreboardDefinition incoming = ReSyncCollaborationDocuments.scoreboard(document);
         ReSyncCollaborationDocuments.copy(scoreboard, incoming);
         buildInspectorPanel();
         refreshPreviewText();

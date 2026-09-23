@@ -107,7 +107,7 @@ public class GuiStudioPreviewView implements ReSyncStudioView, ReSyncCollaborati
             if (gui == null) {
                 throw new IllegalStateException("GUI Preview Is Unavailable");
             }
-            if (ReSyncCollaborationDocuments.to(document, GuiDefinition.class) == null) {
+            if (ReSyncCollaborationDocuments.gui(document) == null) {
                 throw new IllegalArgumentException("Collaboration Document Is Invalid");
             }
             applyCollaborationDocument(document, patches);
@@ -125,7 +125,7 @@ public class GuiStudioPreviewView implements ReSyncStudioView, ReSyncCollaborati
         if (gui == null) {
             return;
         }
-        ReSyncCollaborationDocuments.copy(gui, ReSyncCollaborationDocuments.to(document, GuiDefinition.class));
+        ReSyncCollaborationDocuments.copy(gui, ReSyncCollaborationDocuments.gui(document));
     }
 
     @Override
