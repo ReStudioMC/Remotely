@@ -73,7 +73,7 @@ final class BrowserGlobalSettingsProviders {
                 PackContentSettingsProvider.unavailable("Pack Content Refreshes Automatically For Open Server Workspaces."),
                 JavaSettingsProvider.browser("Remotely"),
                 LspSettingsProvider.browser(config),
-                MinecraftAssetsSettingsProvider.browser(config),
+                new BrowserMinecraftAssetsSettingsProvider(config),
                 "The Browser Always Uses The Integrated File Explorer.",
                 BackupSettingsProvider.unavailable(true, "Backup Storage Requires Local Filesystem Access."),
                 browserPresetSettings(),

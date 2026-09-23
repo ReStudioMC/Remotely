@@ -4,30 +4,26 @@ import redxax.oxy.remotely.collaboration.CollaborationService;
 import redxax.oxy.remotely.data.flow.ReSyncIdentityProvider;
 import redxax.oxy.remotely.util.NameUuid;
 
+import java.util.UUID;
+
 public final class BrowserReSyncIdentityProvider implements ReSyncIdentityProvider {
+    private final String connectionIdentity = UUID.randomUUID().toString();
     public BrowserReSyncIdentityProvider(BrowserLaunchSession.Metadata metadata) {
     }
 
     @Override
     public String clientId(String serverId) {
         String server = serverId == null || serverId.isBlank() ? "default" : serverId.trim();
-        return "remotely-web-" + NameUuid.from(identitySeed() + ':' + server);
+        return "remotely-web-" + NameUuid.from(connectionIdentity + ':' + server);
     }
 
     @Override
     public CollaborationService.Identity collaborationIdentity(String fallbackClientId) {
-        String subject = metadata().grantId();
+        String subject = metadata().subjectId();
         if (subject == null || subject.isBlank()) subject = fallbackClientId;
         if (subject == null || subject.isBlank()) subject = "remotely-web";
         subject = sanitize(subject);
         return new CollaborationService.Identity(subject, "Browser Collaborator", "", "restudio-web");
-    }
-
-    private String identitySeed() {
-        BrowserLaunchSession.Metadata metadata = metadata();
-        if (metadata.grantId() != null && !metadata.grantId().isBlank()) return metadata.grantId().trim();
-        if (metadata.audience() != null && !metadata.audience().isBlank()) return metadata.audience().trim();
-        return "remotely-web";
     }
 
     private BrowserLaunchSession.Metadata metadata() {

@@ -370,6 +370,9 @@ val buildBrowserSsh by tasks.registering(Exec::class) {
 }
 
 tasks.register<Sync>("browserDist") {
+    filePermissions {
+        unix("0644")
+    }
     val distribution = layout.buildDirectory.dir("generated/teavm/remotely")
     val atlasDirectory = layout.buildDirectory.dir("generated/icon-atlas")
     dependsOn(tasks.named("generateJavaScript"), verifyBrowserGraph, buildBrowserSsh, tasks.named("verifyIconAtlas"))

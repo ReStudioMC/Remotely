@@ -324,7 +324,7 @@ public final class BrowserReSyncProvisioningAdapter implements ReSyncProvisionin
     private LifecycleFence captureFence(String serverId) {
         BrowserLaunchSession.Metadata session = BrowserLaunchSession.metadata();
         return new LifecycleFence(lifecycleGeneration, operationGeneration, serverId,
-            currentSubjectId(session), BrowserLaunchSession.ticket(), BrowserLaunchSession.authenticated());
+            currentSubjectId(session), BrowserLaunchSession.authorityKey(), BrowserLaunchSession.authenticated());
     }
 
     private boolean isCurrent(LifecycleFence fence) {
@@ -338,7 +338,7 @@ public final class BrowserReSyncProvisioningAdapter implements ReSyncProvisionin
         }
         BrowserLaunchSession.Metadata session = BrowserLaunchSession.metadata();
         return fence.authenticated() == BrowserLaunchSession.authenticated()
-            && Objects.equals(fence.ticket(), BrowserLaunchSession.ticket())
+            && Objects.equals(fence.authorityKey(), BrowserLaunchSession.authorityKey())
             && Objects.equals(fence.subjectId(), currentSubjectId(session));
     }
 
@@ -364,7 +364,7 @@ public final class BrowserReSyncProvisioningAdapter implements ReSyncProvisionin
             return false;
         }
         ReSyncConnectionManager.ReSyncConnectionProfile profile = manager.reSyncConnectionProfile(serverId);
-        return profile != null && Objects.equals(profile.apiKey(), fence.ticket())
+        return profile != null && Objects.equals(profile.apiKey(), fence.authorityKey())
             && Objects.equals(profile.wsUrl(), BrowserLaunchSession.reSyncUrl(serverId));
     }
 
@@ -399,7 +399,7 @@ public final class BrowserReSyncProvisioningAdapter implements ReSyncProvisionin
     }
 
     private record LifecycleFence(long lifecycleGeneration, long operationGeneration, String serverId,
-                                  String subjectId, String ticket, boolean authenticated) {
+                                  String subjectId, String authorityKey, boolean authenticated) {
     }
 
     private RemotelyServerApi api(FlowManager manager) {

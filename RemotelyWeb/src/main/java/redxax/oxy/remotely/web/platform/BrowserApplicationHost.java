@@ -14,9 +14,9 @@ import redxax.oxy.remotely.data.flow.ReSyncFlowClientFactory;
 import redxax.oxy.remotely.data.flow.ReSyncLuckPermsProvider;
 import redxax.oxy.remotely.data.flow.ReSyncNotificationLevel;
 import redxax.oxy.remotely.data.integrations.luckperms.ReSyncLuckPermsClient;
-import redxax.oxy.remotely.flow.ui.GraphEditorScreen;
 import redxax.oxy.remotely.flow.ui.ReSyncProvisioningService;
 import restudio.rescreen.game.MinecraftGameAssets;
+import restudio.rescreen.platform.browser.BrowserMinecraftGameAssets;
 import restudio.rescreen.platform.browser.BrowserClipboardHandler;
 import restudio.rescreen.platform.browser.BrowserHostActionHandler;
 import restudio.rescreen.platform.browser.BrowserTextRenderer;
@@ -39,9 +39,11 @@ import java.util.function.Consumer;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.BooleanSupplier;
 
 public final class BrowserApplicationHost implements ApplicationHost {
     private final ScreenManager screenManager = ScreenManager.getInstance();
+    private final BrowserMinecraftGameAssets gameAssets = new BrowserMinecraftGameAssets();
     private final BrowserClipboardHandler clipboardHandler;
     private final BrowserHostActionHandler hostActionHandler;
     private final BrowserReSyncLuckPermsProvider luckPermsProvider = new BrowserReSyncLuckPermsProvider();
@@ -55,7 +57,7 @@ public final class BrowserApplicationHost implements ApplicationHost {
     private String reSyncServerContext = "";
     private ServerModels.ClientServerView reSyncStartupServer;
     private String reSyncLoaderHint = "";
-    private String reSyncSessionSubjectId = "";
+    private String reSyncSessionAuthority = "";
     private boolean reSyncSessionAuthenticated;
     private boolean reSyncPreparationActive;
     private Async<ReSyncProvisioningService.StartupProbeResult> reSyncPreparation;
@@ -72,11 +74,15 @@ public final class BrowserApplicationHost implements ApplicationHost {
         clipboardHandler = new BrowserClipboardHandler(canvasId);
         hostActionHandler = new BrowserHostActionHandler(canvasId);
         this.metadata = metadata;
-        reSyncSessionSubjectId = sessionSubject(metadata);
+        reSyncSessionAuthority = BrowserLaunchSession.authorityKey();
         reSyncSessionAuthenticated = BrowserLaunchSession.authenticated();
         BrowserLaunchSession.addAuthStateListener(reSyncAuthStateListener);
         BrowserLaunchSession.addTicketListener(reSyncTicketListener);
         BrowserLaunchSession.addSessionExpiryListener(reSyncSessionExpiryListener);
+    }
+
+    public void setMinecraftAssetsEnabled(BooleanSupplier enabled) {
+        gameAssets.enabled(enabled);
     }
 
     public void setHttpTransport(HttpTransport httpTransport) {
@@ -98,6 +104,9 @@ public final class BrowserApplicationHost implements ApplicationHost {
 
     public void activateReSyncServerContext(String serverId) {
         String value = ReSyncServerIdentity.of(serverId).serverId();
+        if (!value.isBlank() && Objects.equals(reSyncServerContext, value)) {
+            return;
+        }
         cancelReSyncPreparation();
         if (!Objects.equals(reSyncServerContext, value) || value.isBlank()) {
             reSyncStartupServer = null;
@@ -116,40 +125,26 @@ public final class BrowserApplicationHost implements ApplicationHost {
     }
 
     private void invalidateReSyncAuthentication() {
-        reSyncSessionSubjectId = sessionSubject(BrowserLaunchSession.metadata());
+        reSyncSessionAuthority = BrowserLaunchSession.authorityKey();
         reSyncSessionAuthenticated = BrowserLaunchSession.authenticated();
         invalidateReSyncSession();
     }
 
     private void rotateReSyncTicket() {
-        BrowserLaunchSession.Metadata session = BrowserLaunchSession.metadata();
-        String subjectId = sessionSubject(session);
+        String authority = BrowserLaunchSession.authorityKey();
         boolean authenticated = BrowserLaunchSession.authenticated();
-        boolean resume = reSyncSessionAuthenticated && authenticated && reSyncPreparationActive
-            && !reSyncServerContext.isBlank() && Objects.equals(reSyncSessionSubjectId, subjectId);
-        String serverId = reSyncServerContext;
-        ServerModels.ClientServerView startupServer = reSyncStartupServer;
-        String loaderHint = reSyncLoaderHint;
-        reSyncSessionSubjectId = subjectId;
-        reSyncSessionAuthenticated = authenticated;
-        if (!resume) {
-            invalidateReSyncSession();
+        if (reSyncSessionAuthenticated && authenticated && Objects.equals(reSyncSessionAuthority, authority)) {
+            FlowManager manager = FlowManager.getInstance();
+            if (manager != null && !reSyncServerContext.isBlank()) {
+                var flowClient = manager.existingFlowClient(reSyncServerContext);
+                if (flowClient != null) manager.withCurrentFlowClientNow(reSyncServerContext, flowClient,
+                    current -> current.renewRelaySession(BrowserLaunchSession.ticket()));
+            }
             return;
         }
-        Async<ReSyncProvisioningService.StartupProbeResult> continuation = reSyncPreparation;
-        Async<ReSyncProvisioningService.StartupProbeResult> previousSource = reSyncPreparationSource;
-        reSyncPreparationSource = null;
-        if (previousSource != null && !previousSource.isDone()) {
-            previousSource.cancel();
-        }
-        reSyncContextGeneration = nextGeneration(reSyncContextGeneration);
-        BrowserReSyncProvisioningAdapter adapter = provisioningAdapter;
-        if (adapter != null) {
-            adapter.invalidateSession();
-        }
-        reSyncProbePending.put(serverId, true);
-        startReSyncPreparation(serverId, startupServer, loaderHint,
-            continuation == null || continuation.isDone() ? Async.pending() : continuation);
+        reSyncSessionAuthority = authority;
+        reSyncSessionAuthenticated = authenticated;
+        invalidateReSyncSession();
     }
 
     private void invalidateReSyncSession() {
@@ -203,9 +198,6 @@ public final class BrowserApplicationHost implements ApplicationHost {
 
     @Override
     public void setScreen(Screen screen) {
-        if (screenManager.getCurrentScreen() instanceof GraphEditorScreen) {
-            activateReSyncServerContext("");
-        }
         screenManager.setScreen(screen);
     }
 
@@ -235,7 +227,7 @@ public final class BrowserApplicationHost implements ApplicationHost {
 
     @Override
     public MinecraftGameAssets getGameAssets() {
-        return MinecraftGameAssets.EMPTY;
+        return gameAssets;
     }
 
     @Override
@@ -403,7 +395,7 @@ public final class BrowserApplicationHost implements ApplicationHost {
             reSyncServerContext = "";
             reSyncStartupServer = null;
             reSyncLoaderHint = "";
-            reSyncSessionSubjectId = "";
+            reSyncSessionAuthority = "";
             reSyncSessionAuthenticated = false;
             reSyncPreparationActive = false;
             reSyncPreparation = null;
@@ -440,14 +432,14 @@ public final class BrowserApplicationHost implements ApplicationHost {
                 String endpoint = BrowserLaunchSession.reSyncUrl(identity.serverId());
                 String ticket = BrowserLaunchSession.ticket();
                 return endpoint == null || endpoint.isBlank() || ticket == null || ticket.isBlank() ? null
-                    : new ReSyncConnectionManager.ReSyncConnectionProfile(endpoint, ticket);
+                    : new ReSyncConnectionManager.ReSyncConnectionProfile(endpoint, BrowserLaunchSession.authorityKey());
             }
 
             @Override
             public boolean connectionAllowed(ReSyncServerIdentity identity, ReSyncConnectionManager.ReSyncConnectionProfile profile) {
                 return identity != null && identity.present() && BrowserLaunchSession.authenticated()
                     && profile != null && Objects.equals(profile.wsUrl(), BrowserLaunchSession.reSyncUrl(identity.serverId()))
-                    && Objects.equals(profile.apiKey(), BrowserLaunchSession.ticket());
+                    && Objects.equals(profile.apiKey(), BrowserLaunchSession.authorityKey());
             }
 
             @Override
@@ -484,6 +476,9 @@ public final class BrowserApplicationHost implements ApplicationHost {
         if (actualServerId.isBlank()) {
             return Async.completed(new ReSyncProvisioningService.StartupProbeResult(
                 ReSyncProvisioningService.StartupStatus.NOT_SUPPORTED, false, false));
+        }
+        if (Objects.equals(reSyncServerContext, actualServerId) && reSyncPreparation != null && !reSyncPreparation.isDone()) {
+            return reSyncPreparation;
         }
         activateReSyncServerContext(actualServerId);
         reSyncStartupServer = server;
@@ -571,9 +566,7 @@ public final class BrowserApplicationHost implements ApplicationHost {
         return next <= 0L ? 1L : next;
     }
 
-    private String sessionSubject(BrowserLaunchSession.Metadata session) {
-        return session == null || session.subjectId() == null ? "" : session.subjectId().trim();
-    }
+
 
     @Override
     public FlowManagerUiAdapter flowManagerUiAdapter() {

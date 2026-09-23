@@ -796,7 +796,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         MinecraftAssetsSettingsProvider.Settings minecraftAssetSettings =
                 configStore() instanceof MinecraftAssetsSettingsProvider.Settings settings ? settings : null;
         IconCustomizerWidget popup = IconCustomizerWidget.selecting("Icon Customizer", icons, tints,
-                application.getGameAssets(), MinecraftAssetsSettingsProvider.browser(minecraftAssetSettings), selection -> {
+                application.getGameAssets(), new BrowserMinecraftAssetsSettingsProvider(minecraftAssetSettings), selection -> {
             if (!isCurrent(context)) return;
             ServerIconProvider.Customization customization = new ServerIconProvider.Customization(selection.image(), selection.tint(), selection.rendered());
             iconManager.customizeIcon(server, host, customization, guardedCompletion).whenComplete((ignored, failure) -> execute(() -> {

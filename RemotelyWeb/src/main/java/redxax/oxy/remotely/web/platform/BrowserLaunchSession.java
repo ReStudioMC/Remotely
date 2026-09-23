@@ -20,6 +20,8 @@ public final class BrowserLaunchSession {
     private static int nextRequestId = 1;
     private static long requestGeneration = 1;
     private static Metadata activeSession;
+    private static long authorityGeneration;
+    private static String authorityKey = "";
     private static String demoLeaseExpiresAt = "";
     private static Set<String> demoEditablePaths = Set.of();
     private static boolean renewalInFlight;
@@ -45,7 +47,7 @@ public final class BrowserLaunchSession {
         advanceRequestGeneration();
         clearCallbacks();
         boolean wasAuthenticated = authenticated();
-        activeSession = null;
+        installSession(null);
         demoLeaseExpiresAt = "";
         demoEditablePaths = Set.of();
         renewalInFlight = false;
@@ -116,15 +118,15 @@ public final class BrowserLaunchSession {
             String resolvedEmail = resolveAccountValue(email, previous.email(), accountChanged);
             String resolvedAvatarUrl = resolveAccountValue(avatarUrl, previous.avatarUrl(), accountChanged);
             String resolvedSessionLabel = resolveAccountValue(sessionLabel, previous.sessionLabel(), accountChanged);
-            activeSession = new Metadata(grantId, ticket, audience, Set.copyOf(scopeSet), assignedNode, expiresAt,
-                    resolvedSubjectId, resolvedUsername, resolvedDisplayName, resolvedEmail, resolvedAvatarUrl, resolvedSessionLabel);
+            installSession(new Metadata(grantId, ticket, audience, Set.copyOf(scopeSet), assignedNode, expiresAt,
+                    resolvedSubjectId, resolvedUsername, resolvedDisplayName, resolvedEmail, resolvedAvatarUrl, resolvedSessionLabel));
             persistAccountMetadata(resolvedSubjectId, resolvedUsername, resolvedDisplayName, resolvedEmail, resolvedAvatarUrl, resolvedSessionLabel);
             removeCallback(requestId);
             scheduleRenewal(expiresAt);
             if (!ticket.equals(previousTicket)) {
                 notifyTicketChanged();
             }
-            if (!authenticated || accountChanged) {
+            if (!authenticated || accountChanged || !previous.sameAuthority(activeSession)) {
                 notifyAuthStateChanged();
             }
             callback.ready(activeSession);
@@ -152,7 +154,7 @@ public final class BrowserLaunchSession {
             return;
         }
         boolean changed = activeSession != null;
-        activeSession = null;
+        installSession(null);
         if (changed) {
             notifyAuthStateChanged();
         }
@@ -196,6 +198,19 @@ public final class BrowserLaunchSession {
     public static Metadata metadata() {
         Metadata session = activeSession;
         return session == null ? durableMetadata() : session;
+    }
+
+    public static String authorityKey() {
+        return authorityKey;
+    }
+
+    private static void installSession(Metadata session) {
+        if (session == null) {
+            authorityKey = "";
+        } else if (activeSession == null || !activeSession.sameAuthority(session)) {
+            authorityKey = "browser-session-" + ++authorityGeneration;
+        }
+        activeSession = session;
     }
 
     public static String ticket() {
@@ -325,8 +340,8 @@ public final class BrowserLaunchSession {
             persistAccountMetadata(resolvedSubjectId, resolvedUsername, resolvedDisplayName, resolvedEmail, resolvedAvatarUrl, resolvedSessionLabel);
             return;
         }
-        activeSession = new Metadata(previous.grantId(), previous.ticket(), previous.audience(), previous.scopes(), previous.assignedNode(), previous.expiresAt(),
-                resolvedSubjectId, resolvedUsername, resolvedDisplayName, resolvedEmail, resolvedAvatarUrl, resolvedSessionLabel);
+        installSession(new Metadata(previous.grantId(), previous.ticket(), previous.audience(), previous.scopes(), previous.assignedNode(), previous.expiresAt(),
+                resolvedSubjectId, resolvedUsername, resolvedDisplayName, resolvedEmail, resolvedAvatarUrl, resolvedSessionLabel));
         persistAccountMetadata(resolvedSubjectId, resolvedUsername, resolvedDisplayName, resolvedEmail, resolvedAvatarUrl, resolvedSessionLabel);
         if (accountChanged) {
             notifyAuthStateChanged();
@@ -347,8 +362,8 @@ public final class BrowserLaunchSession {
             persistAccountMetadata(resolvedSubjectId, resolvedUsername, resolvedDisplayName, resolvedEmail, resolvedAvatarUrl, resolvedSessionLabel);
             return;
         }
-        activeSession = new Metadata(previous.grantId(), previous.ticket(), previous.audience(), previous.scopes(), previous.assignedNode(), previous.expiresAt(),
-                resolvedSubjectId, resolvedUsername, resolvedDisplayName, resolvedEmail, resolvedAvatarUrl, resolvedSessionLabel);
+        installSession(new Metadata(previous.grantId(), previous.ticket(), previous.audience(), previous.scopes(), previous.assignedNode(), previous.expiresAt(),
+                resolvedSubjectId, resolvedUsername, resolvedDisplayName, resolvedEmail, resolvedAvatarUrl, resolvedSessionLabel));
         persistAccountMetadata(resolvedSubjectId, resolvedUsername, resolvedDisplayName, resolvedEmail, resolvedAvatarUrl, resolvedSessionLabel);
         if (accountChanged) {
             notifyAuthStateChanged();
@@ -390,7 +405,7 @@ public final class BrowserLaunchSession {
         advanceRequestGeneration();
         clearCallbacks();
         boolean authenticated = authenticated();
-        activeSession = null;
+        installSession(null);
         demoLeaseExpiresAt = "";
         demoEditablePaths = Set.of();
         renewalInFlight = false;
@@ -899,6 +914,11 @@ public final class BrowserLaunchSession {
             email = email == null ? "" : email;
             avatarUrl = avatarUrl == null ? "" : avatarUrl;
             sessionLabel = sessionLabel == null ? "" : sessionLabel;
+        }
+
+        public boolean sameAuthority(Metadata other) {
+            return other != null && subjectId.equals(other.subjectId()) && audience.equals(other.audience())
+                && assignedNode.equals(other.assignedNode()) && scopes.equals(other.scopes());
         }
 
         public boolean demo() {

@@ -118,6 +118,7 @@ public final class RemotelyBrowserComposition {
             config = new BrowserRemotelyConfigStore();
             Config.setConfigManager(config);
             config.apply();
+            host.setMinecraftAssetsEnabled(config::enabled);
             ApplicationHostRegistry.install(host);
             browserWorldMapProvider = new BrowserWorldMapProvider();
             WorldMapProvider.install(browserWorldMapProvider);
