@@ -350,11 +350,6 @@ public class ServerConfigurationScreen extends ReScreen {
 
         settingsScreen = new SettingsScreen(parent, configurationUi.title(), settingsByTab, this::saveConfiguration, combinedCleanup) {
             @Override
-            protected int getEntryMaxWidth() {
-                return 760;
-            }
-
-            @Override
             public void removed() {
                 settingsCleanup.run();
                 super.removed();

@@ -1,5 +1,7 @@
 package redxax.oxy.remotely.ui.server;
 
+import restudio.rebase.instance.InstanceState;
+import restudio.rebase.ui.widgets.LifecycleButtonWidget;
 import redxax.oxy.remotely.network.NetworkAdoptionReport;
 import redxax.oxy.remotely.RemotelyClient;
 import redxax.oxy.remotely.RemotelyComposition;
@@ -1026,6 +1028,9 @@ public class ServerManagerScreen extends DesktopShellScreen {
             toKeep.add(createButton);
         }
 
+        String gridContext = "remotely:" + browserHostKey(tabData);
+        if ("RESTUDIO_MARKER".equals(tabData)) gridContext += ":" + accountKey(serverHost().accountIdentity());
+        toKeep = desktopWidgets(targetContainer, config, gridContext, this::desktopWidgetKey, toKeep);
         contextMenuRequestGeneration++;
         targetContainer.replaceWidgets(toKeep);
         if (tab == tabs().getActiveTab()) {
@@ -1115,7 +1120,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
                 loadServersForCurrentTab();
             }, "Keep Every Server");
         }
-        showContextMenu(groupWidget.getX(), groupWidget.getY() + groupWidget.getHeight(), builder);
+        showDesktopContextMenu(groupWidget.getX(), groupWidget.getY() + groupWidget.getHeight(), builder);
     }
 
     private String activeServerGroupContext() {
@@ -1194,6 +1199,31 @@ public class ServerManagerScreen extends DesktopShellScreen {
         if (isCreate || info == null) {
             return widget;
         }
+        widget.setDetails(() -> widget.getItem().version, () -> widget.getItem().loader);
+        Identifier filesIcon = Identifier.icon("explorer.png");
+        Identifier settingsIcon = Identifier.icon("edit.png");
+        LifecycleButtonWidget lifecycle = new LifecycleButtonWidget(this,
+                () -> setServerPower(widget.getItem(), !isServerActive(widget.getItem())), "Server")
+                .lifecycleAction(LifecycleButtonWidget.Operation.START, () -> setServerPower(widget.getItem(), true))
+                .lifecycleAction(LifecycleButtonWidget.Operation.STOP, () -> setServerPower(widget.getItem(), false));
+        widget.addTileAction(lifecycle.tileStyle(), () -> {
+            InstanceState state = switch (serverHost().state(widget.getItem())) {
+                case STARTING -> InstanceState.STARTING;
+                case RUNNING -> InstanceState.RUNNING;
+                case STOPPING -> InstanceState.STOPPING;
+                case CRASHED -> InstanceState.CRASHED;
+                case INSTALLING -> InstanceState.INSTALLING;
+                default -> InstanceState.STOPPED;
+            };
+            lifecycle.update(state);
+            lifecycle.setActive(state != InstanceState.STOPPING && state != InstanceState.INSTALLING);
+        });
+        widget.addTileAction(() -> "File Explorer", () -> filesIcon,
+                () -> serverHost().serverActionAvailability(widget.getItem(), ServerScreenHost.Action.FILE_EXPLORER).available(),
+                () -> serverHost().openFileExplorer(this, widget.getItem()));
+        widget.addTileAction(() -> "Server Settings", () -> settingsIcon,
+                () -> !serverHost().isPanel(widget.getItem()) && serverHost().serverActionAvailability(widget.getItem(), ServerScreenHost.Action.SERVER_CONFIGURATION).available(),
+                () -> serverHost().openServerConfiguration(this, widget.getItem()));
         iconManager.loadIconIdAsync(iconValue, widget::setIcon);
         iconManager.loadRemoteIconAsync(iconValue, () -> iconManager.loadIconIdAsync(iconValue, widget::setIcon));
         return widget;
@@ -1485,7 +1515,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
             }, "Show Deletion Options", ThemeManager.getAccent("danger"));
         }
         builder.addIconItem("Customize Icon", "shades.png", () -> host.openIconCustomizer(this, server, remoteHost, this::loadServersForCurrentTab), "");
-        showContextMenu(widget.getX() + widget.getWidth() + 4, widget.getY() + 24, builder);
+        showDesktopContextMenu(widget.getX() + widget.getWidth() + 4, widget.getY() + 24, builder);
     }
 
     private ServerScreenHost.NetworkView networkForServer(ServerModels.ClientServerView server) {
@@ -2057,7 +2087,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
         if (selected.stream().allMatch(this::canDuplicateServer)) {
             builder.addHeaderButton("copy.png", () -> currentSelectedServerInstances().stream().filter(this::canDuplicateServer).forEach(this::duplicateInstance), "Duplicate Selected");
         }
-        showContextMenu(anchor.getX() + anchor.getWidth() + 4, anchor.getY() + 24, builder);
+        showDesktopContextMenu(anchor.getX() + anchor.getWidth() + 4, anchor.getY() + 24, builder);
     }
 
     private boolean isServerActive(ServerModels.ClientServerView instance) {
@@ -3089,8 +3119,13 @@ public class ServerManagerScreen extends DesktopShellScreen {
     @Override
     public boolean mouseClicked(ReMouseEvent event) {
         if (activeContainer != null) {
-            groupWidgets(activeContainer.getWidgets().stream()).filter(DesktopGroupWidget::isExpanded)
-                    .filter(group -> !group.isMouseOver(event.x(), event.y())).forEach(group -> group.setExpanded(false));
+            DesktopLayout layout = activeContainer.getLayout() instanceof DesktopLayout desktop ? desktop : null;
+            boolean iconGesture = layout != null && layout.startsIconGesture(activeContainer, event);
+            if (!iconGesture) {
+                groupWidgets(activeContainer.getWidgets().stream()).filter(DesktopGroupWidget::isExpanded)
+                        .filter(group -> layout == null ? !group.isMouseOver(event.x(), event.y()) : !layout.isScreenMouseOver(activeContainer, group, event))
+                        .forEach(group -> group.setExpanded(false));
+            }
         }
         if (isMouseOverServerManagerContextMenu(event.x(), event.y())) {
             serverManagerContextMenuPressed = true;
