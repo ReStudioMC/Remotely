@@ -1,6 +1,9 @@
 package redxax.oxy.remotely.flow.ui;
 
 import restudio.rescreen.platform.Async;
+import restudio.rescreen.logging.LogSource;
+import restudio.rescreen.logging.LogTypes;
+import restudio.rescreen.logging.ReLog;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -82,7 +85,14 @@ public final class AsyncTaskWorker implements AutoCloseable {
             cancel = closed;
             if (!operation.isDone()) active.add(operation);
         }
-        operation.whenComplete((ignored, failure) -> finish(operation));
+        operation.whenComplete((ignored, failure) -> {
+            if (failure != null) {
+                ReLog.logger(LogTypes.FLOW).source(LogSource.application("Remotely"))
+                    .component(AsyncTaskWorker.class).operation("Async Task")
+                    .error(String.valueOf(failure));
+            }
+            finish(operation);
+        });
         if (cancel && !operation.isDone()) operation.cancel();
     }
 
