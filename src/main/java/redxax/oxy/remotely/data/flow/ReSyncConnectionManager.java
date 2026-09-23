@@ -2141,10 +2141,6 @@ public class ReSyncConnectionManager {
     }
 
     private void startProfileFlight(ProfileFlight flight) {
-        if (flight.target.apiManaged() && flight.target.instance() == null) {
-            finishProfileFlight(flight, new ProfileRead(null, null, true), false);
-            return;
-        }
         try {
             flight.timeout = profileTimeoutExecutor.schedule(
                 () -> finishProfileFlight(flight, new ProfileRead(null, "ReSyncProfileResolutionTimedOut", false),

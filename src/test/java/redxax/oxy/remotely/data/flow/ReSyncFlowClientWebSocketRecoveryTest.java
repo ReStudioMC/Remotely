@@ -15,7 +15,6 @@ import java.util.ArrayDeque;
 import java.util.List;
 import java.util.Optional;
 import java.util.Queue;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -24,7 +23,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ReSyncFlowClientWebSocketRecoveryTest {
@@ -90,26 +88,20 @@ class ReSyncFlowClientWebSocketRecoveryTest {
     }
 
     @Test
-    void exhaustedWebSocketRecoveryPublishesOneTerminalFailure() throws Exception {
+    void prolongedWebSocketOutageRecoversAfterBackendStartup() throws Exception {
         RecoveringTransport transport = new RecoveringTransport();
         ReSyncFlowClient client = new ReSyncFlowClient(TEST_SERVER.canonicalText(), transport, null);
-        CountDownLatch disconnected = new CountDownLatch(1);
-        CountDownLatch errored = new CountDownLatch(1);
         AtomicInteger disconnects = new AtomicInteger();
         AtomicInteger errors = new AtomicInteger();
-        client.setDisconnectListener(() -> {
-            disconnects.incrementAndGet();
-            disconnected.countDown();
-        });
-        client.setErrorListener((nodeId, message) -> {
-            errors.incrementAndGet();
-            errored.countDown();
-        });
+        AtomicInteger connections = new AtomicInteger();
+        client.setConnectionListener(connections::incrementAndGet);
+        client.setDisconnectListener(disconnects::incrementAndGet);
+        client.setErrorListener((nodeId, message) -> errors.incrementAndGet());
 
         try {
             client.connect().join();
             transport.receive(handshakeFrame());
-            await(() -> client.connectionState() == ReSyncFlowClient.ConnectionState.CONNECTED);
+            await(() -> connections.get() == 1);
 
             transport.disconnect();
             for (Duration delay : List.of(Duration.ofMillis(250L), Duration.ofSeconds(1L),
@@ -118,13 +110,20 @@ class ReSyncFlowClientWebSocketRecoveryTest {
                 scheduler.run(delay);
                 transport.failOpening();
             }
+            await(() -> scheduler.has(Duration.ofSeconds(5L)));
+            assertEquals(ReSyncFlowClient.ConnectionState.CONNECTING, client.connectionState());
+            assertEquals(0, disconnects.get());
+            assertEquals(0, errors.get());
 
-            assertTrue(disconnected.await(2, TimeUnit.SECONDS));
-            assertTrue(errored.await(2, TimeUnit.SECONDS));
-            assertEquals(ReSyncFlowClient.ConnectionState.DISCONNECTED, client.connectionState());
-            assertEquals(1, disconnects.get());
-            assertEquals(1, errors.get());
-            assertFalse(client.isReconnectPending());
+            scheduler.run(Duration.ofSeconds(5L));
+            transport.open();
+            await(() -> transport.handshakeRequests() == 2);
+            transport.receive(handshakeFrame());
+            await(() -> connections.get() == 2);
+
+            assertEquals(ReSyncFlowClient.ConnectionState.CONNECTED, client.connectionState());
+            assertEquals(0, disconnects.get());
+            assertEquals(0, errors.get());
         } finally {
             client.shutdown();
         }

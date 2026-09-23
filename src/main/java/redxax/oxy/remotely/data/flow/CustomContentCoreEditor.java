@@ -1,5 +1,7 @@
 package redxax.oxy.remotely.data.flow;
 
+import restudio.resync.flow.workspace.CoreGraphWorkspacePatch;
+
 import com.google.gson.JsonElement;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;

@@ -37,7 +37,6 @@ class StudioResourceProjectionStaticTest {
         String explicitRebuild = method(source, "public void rebuild()");
         String schedule = method(source, "private void scheduleRebuild(long metadataStamp, RemotePath revealPath, int attempt)");
         String preparation = method(source, "private void prepareRebuild(BrowserRebuildRequest request)");
-        String decorationRevision = method(source, "static long nextDecorationRevision(");
         String application = method(source, "private void applyPreparedRebuild(PreparedBrowserRebuild prepared)");
         String publication = method(source, "private void publishPreparedRebuild(PreparedBrowserRebuild prepared)");
 
@@ -46,12 +45,7 @@ class StudioResourceProjectionStaticTest {
         assertTrue(explicitRebuild.contains("failedProjectMetadataStamp = Long.MIN_VALUE;"));
         assertTrue(explicitRebuild.contains("failedDecorationRevision = Long.MIN_VALUE;"));
         assertTrue(tick.contains("if (lastProjectMetadataStamp != metadataStamp) scheduleRebuild(metadataStamp)"));
-        assertTrue(tick.contains("long collaborationRevision = collaborationRevision()"));
-        assertTrue(tick.contains("if (lastCollaborationRevision != collaborationRevision)"));
-        assertTrue(tick.contains("collaborationDecorationRevision = nextDecorationRevision("));
         assertTrue(tick.contains("scheduleRebuild(metadataStamp)"));
-        assertTrue(decorationRevision.contains("previousActivityRevision == activityRevision"));
-        assertTrue(decorationRevision.contains("decorationRevision + 1L"));
         assertTrue(source.contains("private record AssetBrowserSnapshot(List<String> folders, List<String> resources, long collaborationRevision)"));
         assertTrue(schedule.contains("long collaborationRevision = collaborationDecorationRevision;"));
         assertTrue(schedule.contains("scheduledProjectMetadataStamp == metadataStamp && scheduledDecorationRevision == collaborationRevision"));

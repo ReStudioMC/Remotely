@@ -7,6 +7,7 @@ import redxax.oxy.remotely.data.flow.ReSyncResourceType;
 import redxax.oxy.remotely.flow.data.FlowGraph;
 import redxax.oxy.remotely.flow.data.FlowNode;
 import redxax.oxy.remotely.test.TestDrawContext;
+import redxax.oxy.remotely.util.BrowserSafeState;
 import restudio.rescreen.theme.ThemeManager;
 import restudio.rescreen.ui.core.Screen;
 import restudio.resync.flow.catalog.CatalogVersion;
@@ -31,11 +32,10 @@ import java.util.Collection;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -438,7 +438,7 @@ class GraphEditorCoreRenderContinuityTest {
     private static void awaitProjectionBuild(GraphEditorScreen editor) throws Exception {
         Field field = GraphEditorScreen.class.getDeclaredField("coreProjectionBuildResults");
         field.setAccessible(true);
-        ConcurrentLinkedQueue<?> result = (ConcurrentLinkedQueue<?>) field.get(editor);
+        Queue<?> result = (Queue<?>) field.get(editor);
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3L);
         while (result.peek() == null && System.nanoTime() < deadline) {
             LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1L));
@@ -460,7 +460,7 @@ class GraphEditorCoreRenderContinuityTest {
     private static void awaitPreparedRenderBuild(LifecycleEditor editor) throws Exception {
         Field field = GraphEditorScreen.class.getDeclaredField("graphRenderBuildResult");
         field.setAccessible(true);
-        AtomicReference<?> result = (AtomicReference<?>) field.get(editor);
+        BrowserSafeState.ReferenceValue<?> result = (BrowserSafeState.ReferenceValue<?>) field.get(editor);
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3L);
         while (result.get() == null && System.nanoTime() < deadline) {
             LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1L));

@@ -8,6 +8,7 @@ import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonNull;
 import com.google.gson.JsonParser;
 import redxax.oxy.remotely.host.ApplicationHost;
 import redxax.oxy.remotely.RemotelyClient;
@@ -24,6 +25,7 @@ import redxax.oxy.remotely.data.flow.world.WorldRegistryEntry;
 import redxax.oxy.remotely.data.flow.world.WorldSnapshot;
 import redxax.oxy.remotely.data.player.model.UnifiedPlayer;
 import redxax.oxy.remotely.flow.data.FlowGraph;
+import redxax.oxy.remotely.flow.data.FlowJson;
 import redxax.oxy.remotely.flow.data.FlowSerializer;
 import redxax.oxy.remotely.flow.data.FlowConnection;
 import redxax.oxy.remotely.flow.data.FlowDataType;
@@ -281,6 +283,28 @@ public class FlowManager {
     }
 
     private record CreationJournal(int schemaVersion, long generation, List<CreationJournalEntry> entries) {
+        private JsonObject json() {
+            JsonObject json = new JsonObject();
+            json.addProperty("schemaVersion", schemaVersion);
+            json.addProperty("generation", generation);
+            JsonArray rows = new JsonArray();
+            entries.forEach(entry -> rows.add(entry == null ? JsonNull.INSTANCE : entry.json()));
+            json.add("entries", rows);
+            return json;
+        }
+
+        private static CreationJournal read(String serialized) {
+            JsonObject json = FlowJson.parse(serialized).getAsJsonObject();
+            List<CreationJournalEntry> entries = null;
+            if (json.has("entries") && !json.get("entries").isJsonNull()) {
+                entries = new ArrayList<>();
+                for (JsonElement entry : json.getAsJsonArray("entries")) {
+                    entries.add(entry.isJsonNull() ? null : CreationJournalEntry.read(entry.getAsJsonObject()));
+                }
+            }
+            return new CreationJournal(json.has("schemaVersion") ? json.get("schemaVersion").getAsInt() : 0,
+                json.has("generation") ? json.get("generation").getAsLong() : 0L, entries);
+        }
     }
 
     private record CreationJournalCandidate(CreationJournal journal) {
@@ -300,6 +324,94 @@ public class FlowManager {
                                         long sequence, String resumePhase, long commandGraphBaseRevision,
                                         String commandGraphBaseHash, long commandGraphBaseGeneration,
                                         String corePayloadKind) {
+        private JsonObject json() {
+            JsonObject json = new JsonObject();
+            if (serverId != null) json.addProperty("serverId", serverId);
+            if (resourceType != null) json.addProperty("resourceType", resourceType);
+            if (id != null) json.addProperty("id", id);
+            if (resourceTemplate != null) json.addProperty("resourceTemplate", resourceTemplate);
+            if (payloadJson != null) json.addProperty("payloadJson", payloadJson);
+            if (locator != null) json.addProperty("locator", locator);
+            if (payloadHash != null) json.addProperty("payloadHash", payloadHash);
+            if (payloadRequestId != null) json.addProperty("payloadRequestId", payloadRequestId);
+            if (payloadMutationId != null) json.addProperty("payloadMutationId", payloadMutationId);
+            if (metadataRequestId != null) json.addProperty("metadataRequestId", metadataRequestId);
+            if (metadataMutationId != null) json.addProperty("metadataMutationId", metadataMutationId);
+            if (metadataType != null) json.addProperty("metadataType", metadataType);
+            if (metadataId != null) json.addProperty("metadataId", metadataId);
+            if (metadataName != null) json.addProperty("metadataName", metadataName);
+            if (metadataPath != null) json.addProperty("metadataPath", metadataPath);
+            if (metadataParentPath != null) json.addProperty("metadataParentPath", metadataParentPath);
+            json.addProperty("metadataSortOrder", metadataSortOrder);
+            json.addProperty("folder", folder);
+            if (commandContext != null) json.addProperty("commandContext", commandContext);
+            if (commandGraphJson != null) json.addProperty("commandGraphJson", commandGraphJson);
+            if (commandGraphHash != null) json.addProperty("commandGraphHash", commandGraphHash);
+            if (commandGraphRequestId != null) json.addProperty("commandGraphRequestId", commandGraphRequestId);
+            if (commandGraphMutationId != null) json.addProperty("commandGraphMutationId", commandGraphMutationId);
+            if (triggerRequestId != null) json.addProperty("triggerRequestId", triggerRequestId);
+            if (triggerBindingsJson != null) json.addProperty("triggerBindingsJson", triggerBindingsJson);
+            if (triggerBindingsHash != null) json.addProperty("triggerBindingsHash", triggerBindingsHash);
+            json.addProperty("triggerExpectedBindingEpoch", triggerExpectedBindingEpoch);
+            if (triggerExpectedBindingHash != null) json.addProperty("triggerExpectedBindingHash", triggerExpectedBindingHash);
+            json.addProperty("commandGraphCommitted", commandGraphCommitted);
+            json.addProperty("triggerCommitted", triggerCommitted);
+            if (phase != null) json.addProperty("phase", phase);
+            if (payloadSettlement != null) json.addProperty("payloadSettlement", payloadSettlement);
+            json.addProperty("payloadCommitted", payloadCommitted);
+            json.addProperty("attempts", attempts);
+            json.addProperty("sequence", sequence);
+            if (resumePhase != null) json.addProperty("resumePhase", resumePhase);
+            json.addProperty("commandGraphBaseRevision", commandGraphBaseRevision);
+            if (commandGraphBaseHash != null) json.addProperty("commandGraphBaseHash", commandGraphBaseHash);
+            json.addProperty("commandGraphBaseGeneration", commandGraphBaseGeneration);
+            if (corePayloadKind != null) json.addProperty("corePayloadKind", corePayloadKind);
+            return json;
+        }
+
+        private static CreationJournalEntry read(JsonObject json) {
+            return new CreationJournalEntry(
+                json.has("serverId") && !json.get("serverId").isJsonNull() ? json.get("serverId").getAsString() : null,
+                json.has("resourceType") && !json.get("resourceType").isJsonNull() ? json.get("resourceType").getAsString() : null,
+                json.has("id") && !json.get("id").isJsonNull() ? json.get("id").getAsString() : null,
+                json.has("resourceTemplate") && !json.get("resourceTemplate").isJsonNull() ? json.get("resourceTemplate").getAsString() : null,
+                json.has("payloadJson") && !json.get("payloadJson").isJsonNull() ? json.get("payloadJson").getAsString() : null,
+                json.has("locator") && !json.get("locator").isJsonNull() ? json.get("locator").getAsString() : null,
+                json.has("payloadHash") && !json.get("payloadHash").isJsonNull() ? json.get("payloadHash").getAsString() : null,
+                json.has("payloadRequestId") && !json.get("payloadRequestId").isJsonNull() ? json.get("payloadRequestId").getAsString() : null,
+                json.has("payloadMutationId") && !json.get("payloadMutationId").isJsonNull() ? json.get("payloadMutationId").getAsString() : null,
+                json.has("metadataRequestId") && !json.get("metadataRequestId").isJsonNull() ? json.get("metadataRequestId").getAsString() : null,
+                json.has("metadataMutationId") && !json.get("metadataMutationId").isJsonNull() ? json.get("metadataMutationId").getAsString() : null,
+                json.has("metadataType") && !json.get("metadataType").isJsonNull() ? json.get("metadataType").getAsString() : null,
+                json.has("metadataId") && !json.get("metadataId").isJsonNull() ? json.get("metadataId").getAsString() : null,
+                json.has("metadataName") && !json.get("metadataName").isJsonNull() ? json.get("metadataName").getAsString() : null,
+                json.has("metadataPath") && !json.get("metadataPath").isJsonNull() ? json.get("metadataPath").getAsString() : null,
+                json.has("metadataParentPath") && !json.get("metadataParentPath").isJsonNull() ? json.get("metadataParentPath").getAsString() : null,
+                json.has("metadataSortOrder") && !json.get("metadataSortOrder").isJsonNull() ? json.get("metadataSortOrder").getAsInt() : 0,
+                json.has("folder") && !json.get("folder").isJsonNull() ? json.get("folder").getAsBoolean() : false,
+                json.has("commandContext") && !json.get("commandContext").isJsonNull() ? json.get("commandContext").getAsString() : null,
+                json.has("commandGraphJson") && !json.get("commandGraphJson").isJsonNull() ? json.get("commandGraphJson").getAsString() : null,
+                json.has("commandGraphHash") && !json.get("commandGraphHash").isJsonNull() ? json.get("commandGraphHash").getAsString() : null,
+                json.has("commandGraphRequestId") && !json.get("commandGraphRequestId").isJsonNull() ? json.get("commandGraphRequestId").getAsString() : null,
+                json.has("commandGraphMutationId") && !json.get("commandGraphMutationId").isJsonNull() ? json.get("commandGraphMutationId").getAsString() : null,
+                json.has("triggerRequestId") && !json.get("triggerRequestId").isJsonNull() ? json.get("triggerRequestId").getAsString() : null,
+                json.has("triggerBindingsJson") && !json.get("triggerBindingsJson").isJsonNull() ? json.get("triggerBindingsJson").getAsString() : null,
+                json.has("triggerBindingsHash") && !json.get("triggerBindingsHash").isJsonNull() ? json.get("triggerBindingsHash").getAsString() : null,
+                json.has("triggerExpectedBindingEpoch") && !json.get("triggerExpectedBindingEpoch").isJsonNull() ? json.get("triggerExpectedBindingEpoch").getAsLong() : 0L,
+                json.has("triggerExpectedBindingHash") && !json.get("triggerExpectedBindingHash").isJsonNull() ? json.get("triggerExpectedBindingHash").getAsString() : null,
+                json.has("commandGraphCommitted") && !json.get("commandGraphCommitted").isJsonNull() ? json.get("commandGraphCommitted").getAsBoolean() : false,
+                json.has("triggerCommitted") && !json.get("triggerCommitted").isJsonNull() ? json.get("triggerCommitted").getAsBoolean() : false,
+                json.has("phase") && !json.get("phase").isJsonNull() ? json.get("phase").getAsString() : null,
+                json.has("payloadSettlement") && !json.get("payloadSettlement").isJsonNull() ? json.get("payloadSettlement").getAsString() : null,
+                json.has("payloadCommitted") && !json.get("payloadCommitted").isJsonNull() ? json.get("payloadCommitted").getAsBoolean() : false,
+                json.has("attempts") && !json.get("attempts").isJsonNull() ? json.get("attempts").getAsInt() : 0,
+                json.has("sequence") && !json.get("sequence").isJsonNull() ? json.get("sequence").getAsLong() : 0L,
+                json.has("resumePhase") && !json.get("resumePhase").isJsonNull() ? json.get("resumePhase").getAsString() : null,
+                json.has("commandGraphBaseRevision") && !json.get("commandGraphBaseRevision").isJsonNull() ? json.get("commandGraphBaseRevision").getAsLong() : 0L,
+                json.has("commandGraphBaseHash") && !json.get("commandGraphBaseHash").isJsonNull() ? json.get("commandGraphBaseHash").getAsString() : null,
+                json.has("commandGraphBaseGeneration") && !json.get("commandGraphBaseGeneration").isJsonNull() ? json.get("commandGraphBaseGeneration").getAsLong() : 0L,
+                json.has("corePayloadKind") && !json.get("corePayloadKind").isJsonNull() ? json.get("corePayloadKind").getAsString() : null);
+        }
     }
 
     private static final class CreationTransaction {
@@ -3902,7 +4014,7 @@ public class FlowManager {
             return null;
         }
         try {
-            CreationJournal journal = gson.fromJson(serialized, CreationJournal.class);
+            CreationJournal journal = CreationJournal.read(serialized);
             if (journal == null || journal.generation() < 0L
                 || journal.schemaVersion() < MIN_CREATION_JOURNAL_SCHEMA_VERSION
                 || journal.schemaVersion() > CREATION_JOURNAL_SCHEMA_VERSION || journal.entries() == null
@@ -4659,7 +4771,7 @@ public class FlowManager {
             }
         };
         try (Writer writer = new OutputStreamWriter(bounded, StandardCharsets.UTF_8)) {
-            gson.toJson(journal, writer);
+            gson.toJson(journal.json(), writer);
             writer.flush();
             return output.toByteArray();
         } catch (IOException | RuntimeException exception) {
@@ -6049,7 +6161,11 @@ public class FlowManager {
             if (parsed.getAsJsonArray().size() > MAX_CREATION_TRIGGER_BINDINGS) {
                 return null;
             }
-            TriggerBinding[] decoded = gson.fromJson(parsed, TriggerBinding[].class);
+            TriggerBinding[] decoded = new TriggerBinding[parsed.getAsJsonArray().size()];
+            for (int index = 0; index < decoded.length; index++) {
+                JsonElement entry = parsed.getAsJsonArray().get(index);
+                decoded[index] = entry.isJsonNull() ? null : FlowJson.trigger(entry.getAsJsonObject());
+            }
             if (decoded == null) {
                 return null;
             }
@@ -7122,8 +7238,9 @@ public class FlowManager {
             || !estimatedCreationTriggerBytesWithinLimit(source)) {
             throw new IllegalArgumentException("Trigger bindings exceed the protocol limit");
         }
-        String canonical = CanonicalJson.canonicalizeJson(gson.toJson(source)
-            .getBytes(StandardCharsets.UTF_8));
+        JsonArray encoded = new JsonArray();
+        source.forEach(binding -> encoded.add(FlowJson.trigger(binding)));
+        String canonical = CanonicalJson.canonicalizeJson(FlowJson.write(encoded).getBytes(StandardCharsets.UTF_8));
         if (!creationTriggerFieldWithinLimit(canonical)) {
             throw new IllegalArgumentException("Trigger bindings exceed the protocol limit");
         }
@@ -9109,10 +9226,7 @@ public class FlowManager {
             return false;
         }
         try {
-            return session.catalogBinding().equals(publication.binding())
-                && session.activeAuthoringChecksum().equals(checksum)
-                && catalogCapabilities(publication).containsAll(session.authoringCapabilities())
-                && publication.advertisedEditCapabilities().containsAll(session.editCapabilities());
+            return session.matchesPublication(publication, checksum);
         } catch (RuntimeException exception) {
             return false;
         }
@@ -10096,11 +10210,11 @@ public class FlowManager {
                     return;
                 }
                 Async<Boolean> save = switch (listing.type) {
-                    case "FLOW" -> saveMarketplaceFlow(serverId, gson.fromJson(payloadJson, FlowGraph.class));
-                    case "UI" -> saveMarketplaceGui(serverId, gson.fromJson(payloadJson, GuiDefinition.class));
-                    case "TAB_LIST" -> saveMarketplaceTab(serverId, gson.fromJson(payloadJson, TabDefinition.class));
-                    case "SCOREBOARD" -> saveMarketplaceScoreboard(serverId, gson.fromJson(payloadJson, ScoreboardDefinition.class));
-                    case "CUSTOM_CONTENT", "RESYNC_CONTENT" -> saveMarketplaceFlow(serverId, gson.fromJson(payloadJson, FlowGraph.class));
+                    case "FLOW" -> saveMarketplaceFlow(serverId, FlowJson.graph(FlowJson.parse(payloadJson).getAsJsonObject()));
+                    case "UI" -> saveMarketplaceGui(serverId, (GuiDefinition) ReSyncResourceType.GUI.deserialize(payloadJson));
+                    case "TAB_LIST" -> saveMarketplaceTab(serverId, (TabDefinition) ReSyncResourceType.TAB.deserialize(payloadJson));
+                    case "SCOREBOARD" -> saveMarketplaceScoreboard(serverId, (ScoreboardDefinition) ReSyncResourceType.SCOREBOARD.deserialize(payloadJson));
+                    case "CUSTOM_CONTENT", "RESYNC_CONTENT" -> saveMarketplaceFlow(serverId, FlowJson.graph(FlowJson.parse(payloadJson).getAsJsonObject()));
                     default -> Async.completed(false);
                 };
                 save.whenComplete((saved, failure) -> result.complete(failure == null && Boolean.TRUE.equals(saved)));
@@ -10319,7 +10433,7 @@ public class FlowManager {
     private Async<Boolean> importMarketplaceBundleAsset(String serverId, String type, String id, String displayName, JsonElement payload) {
         return switch (type) {
             case ReSyncResourceDragPayload.COMMAND -> {
-                FlowGraph graph = gson.fromJson(payload, FlowGraph.class);
+                FlowGraph graph = FlowJson.graph(payload.getAsJsonObject());
                 if (graph != null) {
                     graph.setId(id);
                     yield saveMarketplaceFlow(serverId, graph).thenApply(saved -> {
@@ -10332,7 +10446,7 @@ public class FlowManager {
                 yield Async.completed(false);
             }
             case ReSyncResourceDragPayload.FLOW, ReSyncResourceDragPayload.FUNCTION -> {
-                FlowGraph graph = gson.fromJson(payload, FlowGraph.class);
+                FlowGraph graph = FlowJson.graph(payload.getAsJsonObject());
                 if (graph != null) {
                     graph.setId(id);
                     yield saveMarketplaceFlow(serverId, graph);
@@ -10340,7 +10454,7 @@ public class FlowManager {
                 yield Async.completed(false);
             }
             case ReSyncResourceDragPayload.CUSTOM_CONTENT -> {
-                CustomContentDefinition content = gson.fromJson(payload, CustomContentDefinition.class);
+                CustomContentDefinition content = (CustomContentDefinition) ReSyncResourceType.CUSTOM_CONTENT.deserialize(FlowJson.write(payload));
                 if (content != null) {
                     content.setId(id);
                     yield saveMarketplaceCustomContent(serverId, content);
@@ -10348,7 +10462,7 @@ public class FlowManager {
                 yield Async.completed(false);
             }
             case ReSyncResourceDragPayload.GUI -> {
-                GuiDefinition gui = gson.fromJson(payload, GuiDefinition.class);
+                GuiDefinition gui = (GuiDefinition) ReSyncResourceType.GUI.deserialize(FlowJson.write(payload));
                 if (gui != null) {
                     gui.setId(id);
                     yield saveMarketplaceGui(serverId, gui);
@@ -10356,7 +10470,7 @@ public class FlowManager {
                 yield Async.completed(false);
             }
             case ReSyncResourceDragPayload.SCOREBOARD -> {
-                ScoreboardDefinition scoreboard = gson.fromJson(payload, ScoreboardDefinition.class);
+                ScoreboardDefinition scoreboard = (ScoreboardDefinition) ReSyncResourceType.SCOREBOARD.deserialize(FlowJson.write(payload));
                 if (scoreboard != null) {
                     scoreboard.setId(id);
                     yield saveMarketplaceScoreboard(serverId, scoreboard);
@@ -10364,7 +10478,7 @@ public class FlowManager {
                 yield Async.completed(false);
             }
             case ReSyncResourceDragPayload.TAB -> {
-                TabDefinition tab = gson.fromJson(payload, TabDefinition.class);
+                TabDefinition tab = (TabDefinition) ReSyncResourceType.TAB.deserialize(FlowJson.write(payload));
                 if (tab != null) {
                     tab.setId(id);
                     yield saveMarketplaceTab(serverId, tab);
@@ -12954,6 +13068,13 @@ public class FlowManager {
             ^ membershipRevision;
     }
 
+    public long projectBrowserStamp(String serverId) {
+        String actualServerId = serverId != null ? serverId : "";
+        long presentation = currentProjectMetadataSnapshot(actualServerId).browserPresentationStamp();
+        long membershipRevision = projectMembershipRevisions.getOrDefault(actualServerId, 0L);
+        return Long.rotateLeft(presentation, 1) ^ membershipRevision;
+    }
+
     public void saveProjectMetadata(ProjectMetadataEdit edit, boolean refreshWorkspace) {
         if (edit == null || edit.serverId == null || edit.serverId.isBlank()) return;
         persistProjectMetadata(edit.serverId, edit.editor.freeze());
@@ -12996,7 +13117,7 @@ public class FlowManager {
         String actualServerId = serverId != null ? serverId : "";
         SyncedResourceCache.SnapshotLease<ProjectMetadataSnapshot> lease = projectMetadataStore.snapshotLease(actualServerId, actualServerId);
         return lease != null ? new ResourceReadLease(actualServerId, ReSyncResourceType.PROJECT_METADATA.typeId(), actualServerId,
-            "", lease::isCurrent, () -> lease.serialize(snapshot -> gson.toJson(snapshot.materialize())), null) : null;
+            "", lease::isCurrent, () -> lease.serialize(ReSyncResourceType.PROJECT_METADATA::serialize), null) : null;
     }
 
     public ReSyncProjectMetadata.ResourceEntry getProjectResource(String serverId, String type, String id) {
@@ -14055,7 +14176,7 @@ public class FlowManager {
                 if (source == null) {
                     yield false;
                 }
-                CustomContentDefinition copy = gson.fromJson(gson.toJson(source), CustomContentDefinition.class);
+                CustomContentDefinition copy = (CustomContentDefinition) ReSyncResourceType.CUSTOM_CONTENT.deserialize(ReSyncResourceType.CUSTOM_CONTENT.serialize(source));
                 applyCustomContentIdentity(copy, targetId);
                 saveCustomContent(serverId, copy);
                 yield true;
@@ -14065,7 +14186,7 @@ public class FlowManager {
                 if (source == null) {
                     yield false;
                 }
-                GuiDefinition copy = gson.fromJson(gson.toJson(source), GuiDefinition.class);
+                GuiDefinition copy = (GuiDefinition) ReSyncResourceType.GUI.deserialize(ReSyncResourceType.GUI.serialize(source));
                 ReSyncResourceType.GUI.applyRename(copy, targetId);
                 saveGui(serverId, copy);
                 yield true;
@@ -14075,7 +14196,7 @@ public class FlowManager {
                 if (source == null) {
                     yield false;
                 }
-                ScoreboardDefinition copy = gson.fromJson(gson.toJson(source), ScoreboardDefinition.class);
+                ScoreboardDefinition copy = (ScoreboardDefinition) ReSyncResourceType.SCOREBOARD.deserialize(ReSyncResourceType.SCOREBOARD.serialize(source));
                 ReSyncResourceType.SCOREBOARD.applyRename(copy, targetId);
                 saveScoreboard(serverId, copy);
                 yield true;
@@ -14500,7 +14621,7 @@ public class FlowManager {
 
     private <T> void collectSerializedFunctionReferences(List<FunctionReference> references, ReSyncResourceType type, Map<String, T> resources, String functionId) {
         for (Map.Entry<String, T> entry : resources.entrySet()) {
-            JsonElement serialized = gson.toJsonTree(entry.getValue());
+            JsonElement serialized = FlowJson.parse(type.serialize(entry.getValue()));
             for (String location : FunctionReferenceAnalyzer.findJsonReferences(serialized, functionId)) {
                 references.add(new FunctionReference(type.typeId(), entry.getKey(), location));
             }
@@ -14510,7 +14631,7 @@ public class FlowManager {
     private <T> int refactorSerializedFunctionReferences(String serverId, ReSyncResourceType type, Map<String, T> resources, String oldFunctionId, String newFunctionId) {
         int replacements = 0;
         for (T resource : resources.values()) {
-            JsonElement serialized = gson.toJsonTree(resource);
+            JsonElement serialized = FlowJson.parse(type.serialize(resource));
             int changed = FunctionReferenceAnalyzer.replaceJsonReferences(serialized, oldFunctionId, newFunctionId);
             if (changed == 0) {
                 continue;
@@ -15958,7 +16079,7 @@ public class FlowManager {
     }
 
     private CustomContentDefinition detachedCustomContent(CustomContentDefinition content) {
-        return content != null ? gson.fromJson(gson.toJson(content), CustomContentDefinition.class) : null;
+        return content != null ? (CustomContentDefinition) ReSyncResourceType.CUSTOM_CONTENT.deserialize(ReSyncResourceType.CUSTOM_CONTENT.serialize(content)) : null;
     }
 
     private ReSyncProjectMetadata detachedProjectMetadata(ReSyncProjectMetadata metadata) {

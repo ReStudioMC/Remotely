@@ -1,7 +1,9 @@
 package redxax.oxy.remotely.flow.ui.studio;
 
 import org.junit.jupiter.api.Test;
+import redxax.oxy.remotely.data.flow.ReSyncCollaborationClient;
 import restudio.rebase.backend.RemotePath;
+import restudio.rescreen.util.Identifier;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -17,6 +19,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -498,9 +501,22 @@ class ReSyncContentBrowserRebuildGenerationTest {
     }
 
     @Test
-    void collaborationActivityAdvancesDecorationOnlyWhenActivityChanges() {
-        assertEquals(8L, ReSyncContentBrowserWidget.nextDecorationRevision(4L, 5L, 7L));
-        assertEquals(7L, ReSyncContentBrowserWidget.nextDecorationRevision(5L, 5L, 7L));
+    void collaboratorDecorationTracksTargetColorAndAvatarWithoutCursorOrTyping() {
+        ReSyncCollaborationClient.Identity identity = new ReSyncCollaborationClient.Identity("peer", "Peer", "", "test");
+        ReSyncCollaborationClient.Presence initial = new ReSyncCollaborationClient.Presence("session", "client", identity,
+            "flow", "A", "editor", 0.1, 0.2, true, false, 0xFF336699, true, 1L);
+        ReSyncCollaborationClient.Presence moved = new ReSyncCollaborationClient.Presence("session", "client", identity,
+            "flow", "A", "editor", 0.8, 0.9, true, true, 0xFF336699, true, 2L);
+        ReSyncCollaborationClient.Presence switched = new ReSyncCollaborationClient.Presence("session", "client", identity,
+            "flow", "B", "editor", 0.8, 0.9, true, true, 0xFF336699, true, 3L);
+        Identifier avatar = Identifier.icon("steve.png");
+        var first = ReSyncContentBrowserWidget.BrowserEditor.from(initial, initial.color(), avatar, 0L);
+
+        assertEquals(first, ReSyncContentBrowserWidget.BrowserEditor.from(moved, moved.color(), avatar, 0L));
+        assertNotEquals(first, ReSyncContentBrowserWidget.BrowserEditor.from(switched, switched.color(), avatar, 0L));
+        assertNotEquals(first, ReSyncContentBrowserWidget.BrowserEditor.from(initial, 0xFF995522, avatar, 0L));
+        assertNotEquals(first, ReSyncContentBrowserWidget.BrowserEditor.from(initial, initial.color(), Identifier.icon("alex.png"), 0L));
+        assertNotEquals(first, ReSyncContentBrowserWidget.BrowserEditor.from(initial, initial.color(), avatar, 1L));
     }
 
     private record GenerationValue(long generation, String value) {

@@ -103,6 +103,58 @@ class ReSyncConnectionManagerProfileResolutionTest {
     }
 
     @Test
+    void hostedServerResolutionPreservesThePlatformProfileAcrossReopening() {
+        String serverId = UUID.randomUUID().toString();
+        ReSyncConnectionManager.ReSyncConnectionProfile expected = new ReSyncConnectionManager.ReSyncConnectionProfile(
+            serverId, "wss://browser.test/ws/resync/" + serverId, "browser-authority");
+        AtomicInteger reads = new AtomicInteger();
+        TestConnectionManager manager = new TestConnectionManager(new AtomicReference<>(), identity -> {
+            reads.incrementAndGet();
+            return expected;
+        });
+        ClientServerView view = new ClientServerView();
+        view.identifier = serverId;
+        view.backendType = "RESTUDIO";
+        try {
+            assertEquals(expected, manager.resolveAndStoreProfile(serverId, view).join().profile());
+            assertEquals(expected, manager.getProfile(serverId));
+            assertEquals(expected, manager.resolveAndStoreProfile(serverId, view).join().profile());
+            assertEquals(expected, manager.getProfile(serverId));
+            assertEquals(1, reads.get());
+        } finally {
+            manager.shutdownAll();
+        }
+    }
+
+    @Test
+    void hostedServerResolutionRejectsDeniedPlatformAuthority() {
+        String serverId = UUID.randomUUID().toString();
+        ReSyncConnectionProfileProvider provider = new ReSyncConnectionProfileProvider() {
+            @Override
+            public ReSyncConnectionManager.ReSyncConnectionProfile resolve(ReSyncServerIdentity identity) {
+                return new ReSyncConnectionManager.ReSyncConnectionProfile("wss://browser.test", "denied");
+            }
+
+            @Override
+            public boolean connectionAllowed(ReSyncServerIdentity identity, ReSyncConnectionManager.ReSyncConnectionProfile profile) {
+                return false;
+            }
+        };
+        TestConnectionManager manager = new TestConnectionManager(new AtomicReference<>(), provider);
+        ClientServerView view = new ClientServerView();
+        view.identifier = serverId;
+        view.backendType = "RESTUDIO";
+        try {
+            var resolution = manager.resolveAndStoreProfile(serverId, view).join();
+            assertFalse(resolution.available());
+            assertEquals("ReSyncUnavailable", resolution.issue());
+            assertNull(manager.getProfile(serverId));
+        } finally {
+            manager.shutdownAll();
+        }
+    }
+
+    @Test
     void desktopServerViewResolvesTheInstanceProfileAndCanonicalServerId() {
         TestBackend backend = new TestBackend(CompletableFuture.completedFuture(true),
             "port=8765\napi-key=desktop-key");

@@ -54,6 +54,7 @@ import restudio.rescreen.theme.ThemeColor;
 import restudio.rescreen.theme.ThemeManager;
 import restudio.rescreen.ui.core.Screen;
 import restudio.rescreen.ui.core.Widget;
+import restudio.rescreen.ui.core.WidgetComposite;
 import restudio.rescreen.ui.core.WidgetCleanup;
 import restudio.rescreen.ui.core.ScreenManager;
 import restudio.rescreen.ui.widgets.AnimatedButton;
@@ -97,7 +98,7 @@ import static restudio.rescreen.config.Config.globalMovementSpeed;
 import static restudio.rescreen.config.Config.shadow;
 import static restudio.rescreen.render.TextRenderer.tr;
 
-public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetCleanup {
+public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetCleanup, WidgetComposite {
     public record NodeValueMutation(UUID mutationId, NodeInstanceId nodeId, PinId pinId,
                                     RepeatableElementId elementId, Object value, boolean remove,
                                     TypedValue exactValue) {
@@ -255,6 +256,10 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
     private final Map<String, Widget> inputWidgets = new HashMap<>();
     private final Map<String, String> searchableSelectorValues = new HashMap<>();
     private final Map<String, NodeValueMutation> inputValuePreviews = new LinkedHashMap<>();
+    private final Set<String> deferredInputValues = new LinkedHashSet<>();
+    private boolean reconcilingInputValues;
+    private boolean collaborationChildrenDirty = true;
+    private List<Widget> collaborationChildren = List.of();
     private final List<NodeDefinition.PinDefinition> visibleInputs = new ArrayList<>();
     private final List<NodeDefinition.PinDefinition> visibleOutputs = new ArrayList<>();
     private final Map<String, NodeDefinition.PinDefinition> visibleInputsById = new HashMap<>();
@@ -499,6 +504,7 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
         this.node = node;
         this.graph = graph;
         this.nodeId = nodeId;
+        setCollaborationKey("node:" + nodeId);
         this.serverId = serverId;
         this.coreResource = coreResource;
         this.corePinValues = immutableCorePinValues(corePinValues);
@@ -655,7 +661,7 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
         coreResource = resource;
         corePinValues = safeValues;
         if (definition != null) {
-            rebuildInputWidgets();
+            refreshInputWidgets();
         }
     }
 
@@ -701,6 +707,7 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
             builder.addTitleAction("Apply", () -> applyInspectorDrafts(drafts), PopupWidget.TitleActionRole.PRIMARY);
         }
         PopupWidget popup = builder.build();
+        popup.setCollaborationKey("node:" + nodeId + "/inspector-popup");
         popup.onClose = () -> closeInspectorPopup(popup, screen);
         inspectorPopup = popup;
         inspectorPopupOwner = screen;
@@ -731,6 +738,7 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
             && original.state() != TypedValue.State.OPAQUE
             && (field.optionSource() != null || original.state() != TypedValue.State.LOCATOR);
         Widget editor = inspectorEditor(field, original, editable, dirty, state, exactValue);
+        editor.setCollaborationKey("node:" + nodeId + "/inspector:" + field.id());
         String label = inspectorLabel(parentLabel, "", field.title().isBlank() ? field.id() : field.title());
         if (editable) {
             AnimatedButton nullValue = new AnimatedButton.Builder().label("Null")
@@ -1222,6 +1230,9 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
     }
 
     private void handleInputValueChanged(NodeDefinition.PinDefinition input) {
+        if (reconcilingInputValues) {
+            return;
+        }
         if (nodeValueMutationHandler != null) {
             InputValueProposal proposal = inputValueProposal(input);
             applyCoreNodeValueProposal(input, proposal);
@@ -2265,7 +2276,87 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
         }
         createInputWidgets();
         createOutputWidgets();
+        reconcileInputValues();
         updateSize();
+    }
+
+    private void reconcileInputValues() {
+        if (nodeValueMutationHandler == null && !isCoreWidget()) {
+            return;
+        }
+        deferredInputValues.retainAll(inputWidgets.keySet());
+        for (NodeDefinition.PinDefinition input : inputs) {
+            if (!reconcileInputValue(input)) {
+                deferredInputValues.add(pinId(input));
+            } else {
+                deferredInputValues.remove(pinId(input));
+            }
+        }
+    }
+
+    private boolean reconcileInputValue(NodeDefinition.PinDefinition input) {
+        if (input == null || resourceReferenceInput(input) && exactResourceType(input) == null) {
+            return true;
+        }
+        String pin = pinId(input);
+        Widget widget = inputWidgets.get(pin);
+        if (widget == null) {
+            return true;
+        }
+        CoreRepeatableUiProjection.PinEndpoint endpoint = corePinEndpoint(pin);
+        Widget focused = widget.getFocusedDescendant();
+        if (endpoint != null && inputValuePreviews.containsKey(coreMutationKey(endpoint.pinId(), endpoint.elementId()))
+            || widget.isFocused() || focused != null && focused.isFocused()) {
+            return false;
+        }
+        Object value = presentationInputValue(pin);
+        String text = value != null ? value.toString() : "";
+        reconcilingInputValues = true;
+        try {
+            if (widget instanceof TextInputWidget field) {
+                if (!field.getText().equals(text)) field.setText(text);
+            } else if (widget instanceof TextAreaWidget field) {
+                if (!field.getText().equals(text)) field.setText(text);
+            } else if (widget instanceof ToggleWidget toggle) {
+                toggle.setValue(value instanceof Boolean flag ? flag : Boolean.parseBoolean(text));
+            } else if (widget instanceof SliderWidget slider) {
+                double number = value instanceof Number numeric ? numeric.doubleValue() : 0D;
+                if (!(value instanceof Number) && !text.isBlank()) {
+                    try {
+                        number = Double.parseDouble(text);
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+                if (Double.isFinite(number)) slider.setValue(number);
+            } else if (widget instanceof ColorFieldWidget field) {
+                String color = value != null ? text : "#FFFFFF";
+                if (!field.getColor().equals(color)) field.setColor(color);
+            } else if (widget instanceof DropDownWidget<?> dropdown) {
+                reconcileDropdown(input, dropdown, value);
+            } else if (widget instanceof AnimatedButton button && (resourceReferenceInput(input)
+                || resolveWidgetType(input) == NodeDefinition.WidgetType.SEARCHABLE_LIST)) {
+                if (input.getOptionSourceRef() != null) {
+                    button.setMessage(typedValueLabel(corePinValue(input)));
+                } else {
+                    String selected = resourceId(value);
+                    searchableSelectorValues.put(pin, selected);
+                    button.setMessage(selectorButtonLabel(resolveCatalogItems(input, resolveOptions(input)), selected));
+                }
+            }
+        } finally {
+            reconcilingInputValues = false;
+        }
+        return true;
+    }
+
+    @SuppressWarnings("unchecked")
+    private void reconcileDropdown(NodeDefinition.PinDefinition input, DropDownWidget<?> widget, Object value) {
+        DropDownWidget<String> dropdown = (DropDownWidget<String>) widget;
+        List<String> options = resolveOptions(input);
+        String selected = resolveSelected(options, value, input.getDefaultValue());
+        if (!Objects.equals(selected, dropdown.getSelectedItem()) || !options.equals(dropdown.getItems())) {
+            dropdown.setItems(options, selected);
+        }
     }
 
     private void resetDefinitionPins() {
@@ -3526,8 +3617,58 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
     private void rebuildInputWidgets() {
         inputWidgets.values().forEach(WidgetCleanup::cleanup);
         inputWidgets.clear();
+        deferredInputValues.clear();
         searchableSelectorValues.clear();
         refreshInputWidgets();
+    }
+
+    @Override
+    public List<Widget> getChildWidgets() {
+        if (!collaborationChildrenDirty) {
+            return collaborationChildren;
+        }
+        ensureChildLayout();
+        List<Widget> children = new ArrayList<>();
+        for (NodeDefinition.PinDefinition input : visibleInputs) {
+            addCollaborationChild(children, inputWidgets.get(pinId(input)), "input:" + pinId(input));
+        }
+        for (Map.Entry<String, AnimatedButton> entry : addInputButtons.entrySet()) {
+            addCollaborationChild(children, entry.getValue(), "add:" + entry.getKey());
+        }
+        for (FlowBranch branch : flowBranches) {
+            addCollaborationChild(children, branch.widget, "branch:" + branch.outputName);
+        }
+        addCollaborationChild(children, addBranchButton, "add-branch");
+        addCollaborationChild(children, paramButton, "parameters");
+        addCollaborationChild(children, inspectorButton, "inspector");
+        addCollaborationChild(children, openFunctionButton, "open");
+        addCollaborationChild(children, closeButton, "delete");
+        collaborationChildren = List.copyOf(children);
+        collaborationChildrenDirty = false;
+        return collaborationChildren;
+    }
+
+    private void addCollaborationChild(List<Widget> children, Widget child, String identity) {
+        if (child != null && child.isVisible()) {
+            child.setCollaborationKey("node:" + nodeId + "/" + identity);
+            children.add(child);
+        }
+    }
+
+    @Override
+    public boolean exposesChildScreenOverlays() {
+        return false;
+    }
+
+    @Override
+    public Widget getFocusedDescendant() {
+        for (Widget child : getChildWidgets()) {
+            Widget focused = child.getFocusedDescendant();
+            if (focused != null && focused.isFocused()) {
+                return focused;
+            }
+        }
+        return this;
     }
 
     public static int getPinColor(FlowDataType dataType) {
@@ -4471,6 +4612,9 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
 
     @Override
     public void tick() {
+        if (!deferredInputValues.isEmpty()) {
+            deferredInputValues.removeIf(pin -> reconcileInputValue(findInputDefinition(pin)));
+        }
         super.tick();
         if (selected || hasVisualAccent()) {
             return;
@@ -4653,6 +4797,7 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
     }
 
     private void invalidateChildLayout() {
+        collaborationChildrenDirty = true;
         childLayoutGeneration++;
         appliedChildLayout = null;
     }

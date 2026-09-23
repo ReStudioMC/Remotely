@@ -1,6 +1,12 @@
 package redxax.oxy.remotely.data.flow;
 
+import restudio.resync.flow.workspace.CoreFunctionSourcePatch;
+import restudio.resync.flow.workspace.CoreWorkspaceDocument;
+
 import org.junit.jupiter.api.Test;
+import restudio.resync.flow.cache.CatalogAuthoringPublication;
+import restudio.resync.flow.cache.CatalogCacheState;
+import restudio.resync.contract.cache.CatalogProjectionVersion;
 import restudio.resync.flow.catalog.CatalogVersion;
 import restudio.resync.flow.command.CommandGraphMetadata;
 import restudio.resync.flow.function.FunctionLocator;
@@ -70,6 +76,36 @@ final class CoreGraphEditorSessionTest {
         ContractRef.of(OWNER, ResourceTypeId.of("command")), "session");
     private static final ServerResourceLocator FUNCTION = new ServerResourceLocator(SERVER,
         ContractRef.of(OWNER, ResourceTypeId.of("function")), "session");
+
+    @Test
+    void publicationChecksFollowPermissionReplacementAndRejectChangedAuthority() {
+        List<CatalogAuthoringPublication.SectionProjection> sections = List.of(
+            CatalogAuthoringPublication.Section.TYPES, CatalogAuthoringPublication.Section.EDITORS,
+            CatalogAuthoringPublication.Section.PREVIEWS, CatalogAuthoringPublication.Section.CAPABILITIES)
+            .stream().map(section -> new CatalogAuthoringPublication.SectionProjection(section, true, true,
+                CatalogCacheState.ACTIVE, List.of())).toList();
+        CatalogAuthoringPublication publication = new CatalogAuthoringPublication(BINDING, new CatalogVersion(1, 0),
+            CatalogProjectionVersion.current(), sections, Set.of());
+        ContentHash checksum = ContentHash.of("5".repeat(64));
+        GraphDocument baseline = graph(1, node("main", 0, 0, OpaqueData.empty()), OpaqueData.empty());
+        CoreGraphEditorSession session = new CoreGraphEditorSession(baseline, checksum, Set.of(), Set.of());
+        ContractRef<CapabilityId> denied = ContractRef.of(OWNER, CapabilityId.of("not-advertised"));
+
+        assertTrue(session.matchesPublication(publication, checksum));
+        assertTrue(session.matchesPublication(publication, checksum));
+        assertFalse(session.matchesPublication(publication, ContentHash.of("6".repeat(64))));
+        session.rebasePublication(baseline, checksum, Set.of(denied), Set.of());
+        assertFalse(session.matchesPublication(publication, checksum));
+        assertFalse(session.matchesPublication(publication, checksum));
+        session.rebasePublication(baseline, checksum, Set.of(), Set.of(denied));
+        assertFalse(session.matchesPublication(publication, checksum));
+        session.rebasePublication(baseline, checksum, Set.of(), Set.of());
+        assertTrue(session.matchesPublication(publication, checksum));
+        CatalogAuthoringPublication changed = new CatalogAuthoringPublication(NEXT_BINDING, new CatalogVersion(1, 0),
+            CatalogProjectionVersion.current(), sections, Set.of());
+        assertFalse(session.matchesPublication(changed, checksum));
+        assertTrue(session.matchesPublication(publication, checksum));
+    }
 
     @Test
     void dirtyStateUsesMaintainedMutationVersionsWithoutEncoding() throws IOException {
@@ -384,6 +420,49 @@ final class CoreGraphEditorSessionTest {
         assertEquals(2, session.functionSourceDocument().signature().outputs().size());
         assertTrue(session.canonicalPayloadJson().contains("remoteFuture"));
         assertTrue(session.isDirty());
+    }
+
+    @Test
+    void workspaceFunctionSignatureMergesPeerEditsWithoutChangingTheSavedBaseline() {
+        FunctionSourceDocument baseline = functionSource(1, List.of(parameter("input", true)), List.of(), OpaqueData.empty());
+        CoreGraphEditorSession local = new CoreGraphEditorSession(baseline);
+        CoreGraphEditorSession remote = new CoreGraphEditorSession(baseline);
+        local.setFunctionOutputs(List.of(parameter("result", false)));
+        remote.setFunctionInputs(List.of(parameter("input", true), parameter("peer", false)));
+        CoreWorkspaceDocument base = new CoreWorkspaceDocument(null, baseline);
+        CoreWorkspaceDocument peer = new CoreWorkspaceDocument(null, remote.functionSourceDocument());
+        CoreWorkspaceDocument roundTrip = base.apply(base.diff(peer));
+        assertEquals(peer.encode(), roundTrip.encode());
+        CoreGraphEditorSession.WorkspaceEdit edit = CoreGraphEditorSession.prepareWorkspaceEdit(
+            new CoreWorkspaceDocument(null, local.functionSourceDocument()), base, roundTrip);
+
+        assertTrue(local.applyWorkspaceEdit(edit));
+        assertEquals(2, local.functionSourceDocument().signature().inputs().size());
+        assertEquals(1, local.functionSourceDocument().signature().outputs().size());
+        assertEquals(baseline, local.baselineFunctionSourceDocument());
+        assertEquals(1, local.baselineRevision());
+        assertTrue(local.dirty());
+        assertFalse(local.applyWorkspaceEdit(edit));
+    }
+
+    @Test
+    void preparedWorkspaceEditCannotOverwriteAnInterveningLocalEdit() {
+        GraphNode node = node("main", 0, 0, OpaqueData.empty());
+        GraphDocument baseline = graph(1, node, OpaqueData.empty());
+        CoreGraphEditorSession local = new CoreGraphEditorSession(baseline);
+        CoreGraphEditorSession remote = new CoreGraphEditorSession(baseline);
+        remote.setNodePosition(node.instanceId(), 20, 30);
+        CoreWorkspaceDocument base = new CoreWorkspaceDocument(baseline, null);
+        CoreGraphEditorSession.WorkspaceEdit edit = CoreGraphEditorSession.prepareWorkspaceEdit(base, base,
+            new CoreWorkspaceDocument(remote.graphDocument(), null));
+        local.setNodePosition(node.instanceId(), 40, 50);
+        String retained = local.canonicalPayloadJson();
+
+        assertFalse(local.applyWorkspaceEdit(edit));
+        assertEquals(retained, local.canonicalPayloadJson());
+        assertThrows(IllegalStateException.class, () -> CoreGraphEditorSession.prepareWorkspaceEdit(
+            new CoreWorkspaceDocument(local.graphDocument(), null), base,
+            new CoreWorkspaceDocument(remote.graphDocument(), null)));
     }
 
     private static GraphDocument graph(long revision, GraphNode node, OpaqueData unknown) {

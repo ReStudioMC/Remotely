@@ -6,14 +6,20 @@ import org.junit.jupiter.api.Test;
 import redxax.oxy.remotely.flow.ui.studio.ReSyncStudioPanelState;
 import redxax.oxy.remotely.flow.ui.studio.StudioPanel;
 import restudio.rescreen.theme.ThemeManager;
+import restudio.rescreen.platform.IDrawContext;
 import restudio.rescreen.platform.input.ReModifierState;
 import restudio.rescreen.platform.input.ReMouseButton;
 import restudio.rescreen.platform.input.ReMouseEvent;
 import restudio.rescreen.ui.core.Widget;
+import restudio.rescreen.ui.core.WidgetComposite;
+import restudio.rescreen.ui.collaboration.CollaborativeWidget;
 import restudio.rescreen.ui.rescreen.Container;
 import restudio.rescreen.ui.rescreen.ReScreen;
 import restudio.rescreen.ui.widgets.AnimatedButton;
+import restudio.rescreen.ui.widgets.AnimatedWidget;
+import restudio.rescreen.ui.widgets.ColorFieldWidget;
 import restudio.rescreen.ui.widgets.DropDownWidget;
+import restudio.rescreen.ui.widgets.ItemSelectorWidget;
 import restudio.rescreen.ui.widgets.PopupWidget;
 import restudio.rescreen.ui.widgets.ReorderableWidget;
 import restudio.rescreen.ui.widgets.RowWidget;
@@ -27,10 +33,178 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DesignerCollaborationAuthorityTest {
+    @Test
+    void admittedStateIgnoresCallerMutationAndAcceptsReplacementAtTheSameTimestamp() {
+        ThemeManager.initBrowserDefaults();
+        TestScreen sender = new TestScreen();
+        TestScreen receiver = new TestScreen();
+        CollaborativeWidget.DropDownState first = new CollaborativeWidget.DropDownState(true, 12f, 0);
+        SelectorProbe source = new SelectorProbe(first);
+        SelectorProbe target = new SelectorProbe(null);
+        sender.addDrawableChild(source);
+        receiver.addDrawableChild(target);
+        JsonObject publication = DesignerCollaborationAuthority.widgetStates(sender);
+        DesignerCollaborationAuthority.RemoteWidgetState admitted =
+            new DesignerCollaborationAuthority.RemoteWidgetState(publication, 7L);
+        JsonObject entry = publication.entrySet().iterator().next().getValue().getAsJsonObject();
+        entry.getAsJsonObject("state").addProperty("selected", 1);
+
+        DesignerCollaborationAuthority.applyWidgetStates(receiver, List.of(admitted));
+        assertEquals(first, target.state);
+        DesignerCollaborationAuthority.applyWidgetStates(receiver, List.of(admitted));
+        assertEquals(first, target.state);
+
+        DesignerCollaborationAuthority.RemoteWidgetState replacement =
+            new DesignerCollaborationAuthority.RemoteWidgetState(publication, 7L);
+        DesignerCollaborationAuthority.applyWidgetStates(receiver, List.of(replacement));
+        assertEquals(new CollaborativeWidget.DropDownState(true, 12f, 1), target.state);
+
+        entry.getAsJsonArray("path").remove(0);
+        DesignerCollaborationAuthority.applyWidgetStates(receiver, List.of(replacement));
+        assertEquals(new CollaborativeWidget.DropDownState(true, 12f, 1), target.state);
+        DesignerCollaborationAuthority.applyWidgetStates(receiver, List.of());
+        assertNull(target.state);
+    }
+
+    @Test
+    void retainedStateFollowsRebuiltWidgetsAndLocalFocusAndClearsOnLeave() {
+        ThemeManager.initBrowserDefaults();
+        ExternalContainerScreen sender = new ExternalContainerScreen();
+        ExternalContainerScreen receiver = new ExternalContainerScreen();
+        Container sourceContainer = new Container("source", 0, 0, 200, 200);
+        Container targetContainer = new Container("target", 0, 0, 200, 200);
+        CollaborativeWidget.DropDownState state = new CollaborativeWidget.DropDownState(true, 8f, 1);
+        SelectorProbe source = new SelectorProbe(state);
+        TextInputWidget localInput = input();
+        SelectorProbe target = new SelectorProbe(null, localInput);
+        sourceContainer.addWidget(source);
+        targetContainer.addWidget(target);
+        sender.expose("resource", sourceContainer);
+        receiver.expose("resource", targetContainer);
+        DesignerCollaborationAuthority.RemoteWidgetState admitted = new DesignerCollaborationAuthority.RemoteWidgetState(
+            DesignerCollaborationAuthority.widgetStates(sender), 1L);
+
+        DesignerCollaborationAuthority.applyWidgetStates(receiver, List.of(admitted));
+        assertEquals(state, target.state);
+        localInput.setFocused(true);
+        DesignerCollaborationAuthority.applyWidgetStates(receiver, List.of(admitted));
+        assertNull(target.state);
+        localInput.setFocused(false);
+        DesignerCollaborationAuthority.applyWidgetStates(receiver, List.of(admitted));
+        assertEquals(state, target.state);
+
+        Container rebuiltContainer = new Container("target", 0, 0, 200, 200);
+        SelectorProbe rebuilt = new SelectorProbe(null);
+        rebuiltContainer.addWidget(rebuilt);
+        receiver.expose("resource", rebuiltContainer);
+        DesignerCollaborationAuthority.applyWidgetStates(receiver, List.of(admitted));
+        assertNull(target.state);
+        assertEquals(state, rebuilt.state);
+        DesignerCollaborationAuthority.clearWidgetStates(receiver);
+        assertNull(rebuilt.state);
+        DesignerCollaborationAuthority.applyWidgetStates(receiver, List.of());
+        assertNull(rebuilt.state);
+        DesignerCollaborationAuthority.applyWidgetStates(receiver, List.of(admitted));
+        assertEquals(state, rebuilt.state);
+    }
+
+    @Test
+    void selectorStatePreservesRemotePickerContentAndSelection() {
+        ThemeManager.initBrowserDefaults();
+        TestScreen sender = new TestScreen();
+        TestScreen receiver = new TestScreen();
+        var state = new ItemSelectorWidget.CollaborationState(320, 240, "stone", "Stone", "No Matches", true,
+            42.5f, 24, List.of(new ItemSelectorWidget.CollaborationItem("Stone", "minecraft", "block/stone", "ITEM",
+                "Build With Stone", "rock stone", 7, "Block", true)));
+        SelectorProbe source = new SelectorProbe(state);
+        SelectorProbe target = new SelectorProbe(null);
+        sender.addDrawableChild(source);
+        receiver.addDrawableChild(target);
+
+        JsonObject publication = DesignerCollaborationAuthority.widgetStates(sender);
+        assertFalse(publication.isEmpty());
+        DesignerCollaborationAuthority.applyWidgetStates(receiver,
+            List.of(new DesignerCollaborationAuthority.RemoteWidgetState(publication, 1L)));
+
+        assertEquals(state, target.state);
+    }
+
+    @Test
+    void separatelyPublishedPickerRetainsItsNestedTextSelection() {
+        ThemeManager.initBrowserDefaults();
+        TestScreen sender = new TestScreen();
+        TestScreen receiver = new TestScreen();
+        TextInputWidget sourceInput = input();
+        TextInputWidget remoteInput = input();
+        sourceInput.setText("boolean");
+        sourceInput.selectAll();
+        sourceInput.setFocused(true);
+        var state = new ItemSelectorWidget.CollaborationState(320, 240, "boolean", "", "No Matches", false,
+            0f, 24, List.of());
+        SelectorProbe source = new SelectorProbe(state, sourceInput);
+        SelectorProbe remote = new SelectorProbe(null, remoteInput);
+        sender.addDrawableChild(source);
+        receiver.addDrawableChild(remote);
+
+        JsonObject publication = DesignerCollaborationAuthority.widgetStates(sender, source);
+        assertFalse(publication.toString().contains("\"type\":\"selector\""));
+        DesignerCollaborationAuthority.applyWidgetStates(receiver,
+            List.of(new DesignerCollaborationAuthority.RemoteWidgetState(publication, 1L)));
+
+        assertEquals("boolean", remoteInput.getText());
+    }
+
+    @Test
+    void colorFieldPublishesItsInnerEditAndRestoresTheCommittedValueWhenThePeerLeaves() {
+        ThemeManager.initBrowserDefaults();
+        TestScreen sender = new TestScreen();
+        TestScreen receiver = new TestScreen();
+        ColorFieldWidget source = new ColorFieldWidget(10, 20, 100, 20, "#112233");
+        ColorFieldWidget target = new ColorFieldWidget(50, 70, 120, 20, "#112233");
+        source.setCollaborationKey("field:color");
+        target.setCollaborationKey("field:color");
+        sender.addDrawableChild(source);
+        receiver.addDrawableChild(new AnimatedButton(0, 0, 20, 20, "Other"));
+        receiver.addDrawableChild(target);
+        TextInputWidget sourceInput = (TextInputWidget) source.getChildWidgets().getFirst();
+        TextInputWidget targetInput = (TextInputWidget) target.getChildWidgets().getFirst();
+        sourceInput.setFocused(true);
+        sourceInput.setText("#445566");
+
+        JsonObject publication = DesignerCollaborationAuthority.widgetStates(sender);
+        DesignerCollaborationAuthority.applyWidgetStates(receiver,
+            List.of(new DesignerCollaborationAuthority.RemoteWidgetState(publication, 1L)));
+
+        assertEquals("#445566", targetInput.getText());
+        assertSame(targetInput, DesignerCollaborationAuthority.resolve(receiver,
+            DesignerCollaborationAuthority.path(sender, sourceInput)));
+        DesignerCollaborationAuthority.applyWidgetStates(receiver, List.of());
+        assertEquals("#112233", targetInput.getText());
+    }
+
+    private static final class SelectorProbe extends AnimatedWidget implements CollaborativeWidget, WidgetComposite {
+        private State state;
+        private final List<Widget> children;
+
+        private SelectorProbe(State state, Widget... children) {
+            super(0, 0, 320, 240, "Picker");
+            this.state = state;
+            this.children = List.of(children);
+        }
+
+        @Override public List<Widget> getChildWidgets() { return children; }
+        @Override public boolean hasCollaborationState() { return state != null; }
+        @Override public State captureCollaborationState() { return state; }
+        @Override public void applyCollaborationState(State value) { state = value; }
+        @Override public void clearCollaborationState() { state = null; }
+        @Override protected void drawContent(IDrawContext context, int mouseX, int mouseY) { }
+    }
+
     @Test
     void resolvesPanelFieldsByIdentityAcrossDifferentRowOrders() {
         ThemeManager.initBrowserDefaults();
@@ -132,6 +306,64 @@ class DesignerCollaborationAuthorityTest {
         assertNotNull(pointer);
         assertEquals(160, pointer.x());
         assertEquals(180, pointer.y());
+    }
+
+    @Test
+    void resolvesTheCursorOverAMirroredDropdownWithoutOpeningItLocally() {
+        ThemeManager.initBrowserDefaults();
+        TestScreen sender = new TestScreen();
+        TestScreen receiver = new TestScreen();
+        DropDownWidget<String> source = dropdown();
+        DropDownWidget<String> remote = dropdown();
+        source.setPosition(40, 20);
+        remote.setPosition(200, 80);
+        remote.setWidth(270);
+        sender.addDrawableChild(source);
+        receiver.addDrawableChild(remote);
+        source.onClick(41, 21, 0);
+        DesignerCollaborationAuthority.applyWidgetStates(receiver, List.of(
+            new DesignerCollaborationAuthority.RemoteWidgetState(DesignerCollaborationAuthority.widgetStates(sender), 1)));
+
+        JsonObject state = DesignerCollaborationAuthority.pointer(sender, 130, 47, null);
+        DesignerCollaborationAuthority.Pointer pointer = DesignerCollaborationAuthority.resolvePointer(receiver, state);
+
+        assertTrue(remote.isDropdownVisible());
+        assertFalse(remote.isExpanded());
+        assertNotNull(pointer);
+        assertEquals(335, pointer.x());
+        assertEquals(107, pointer.y());
+    }
+
+    @Test
+    void dropdownOverlayCursorUsesTheReceiverFieldPositionBeyondThePanelViewport() {
+        ThemeManager.initBrowserDefaults();
+        ExternalContainerScreen sender = new ExternalContainerScreen();
+        ExternalContainerScreen receiver = new ExternalContainerScreen();
+        Container sourcePanel = new Container("source", 10, 20, 200, 35);
+        Container remotePanel = new Container("remote", 250, 60, 300, 35);
+        DropDownWidget<String> source = dropdown();
+        DropDownWidget<String> remote = dropdown();
+        sourcePanel.addWidget(source);
+        remotePanel.addWidget(remote);
+        sender.expose("resource", sourcePanel);
+        receiver.expose("resource", remotePanel);
+        source.setPosition(20, 38);
+        source.setWidth(180);
+        remote.setPosition(270, 78);
+        remote.setWidth(240);
+        source.onClick(21, 39, 0);
+        DesignerCollaborationAuthority.applyWidgetStates(receiver, List.of(
+            new DesignerCollaborationAuthority.RemoteWidgetState(DesignerCollaborationAuthority.widgetStates(sender), 1)));
+
+        JsonObject state = DesignerCollaborationAuthority.pointer(sender, 110, 65, null);
+        DesignerCollaborationAuthority.Pointer pointer = DesignerCollaborationAuthority.resolvePointer(receiver, state);
+
+        assertTrue(remote.isDropdownVisible());
+        assertFalse(remote.isExpanded());
+        assertTrue(65 > sourcePanel.getY() + sourcePanel.getHeight());
+        assertNotNull(pointer);
+        assertEquals(390, pointer.x());
+        assertEquals(105, pointer.y());
     }
 
     @Test

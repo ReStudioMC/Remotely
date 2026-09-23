@@ -1,8 +1,13 @@
 package redxax.oxy.remotely.data.flow;
 
+import restudio.resync.flow.workspace.CoreFunctionSourcePatch;
+
+import restudio.resync.flow.workspace.CoreGraphWorkspacePatch;
+
 import restudio.resync.contract.canonical.JsonValue;
 import restudio.resync.contract.identity.IdentityCodec;
 import restudio.resync.flow.authoring.AuthoringTemplatePayload;
+import restudio.resync.flow.cache.CatalogAuthoringPublication;
 import restudio.resync.flow.command.CommandGraphMetadata;
 import restudio.resync.flow.function.FunctionParameterContract;
 import restudio.resync.flow.function.FunctionSignature;
@@ -35,6 +40,7 @@ import restudio.resync.flow.identity.ServerResourceLocator;
 import restudio.resync.flow.protocol.AuthoringTemplateResponse;
 import restudio.resync.flow.type.TypedValue;
 import restudio.resync.flow.workspace.WorkspacePatch;
+import restudio.resync.flow.workspace.CoreWorkspaceDocument;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -53,6 +59,8 @@ public final class CoreGraphEditorSession {
     private ContentHash activeAuthoringChecksum;
     private Set<ContractRef<CapabilityId>> activeAuthoringCapabilities;
     private Set<ContractRef<CapabilityId>> editCapabilities;
+    private CatalogAuthoringPublication checkedPublication;
+    private boolean publicationAccepted;
     private final AuthoringTemplatePayload.Kind templateKind;
     private final Map<String, Object> templateUnknown;
     private GraphDocument graph;
@@ -337,6 +345,23 @@ public final class CoreGraphEditorSession {
         return editCapabilities;
     }
 
+    synchronized boolean matchesPublication(CatalogAuthoringPublication publication, ContentHash checksum) {
+        if (publication == null || activeAuthoringChecksum == null || !activeAuthoringChecksum.equals(checksum)
+            || !catalogBinding().equals(publication.binding())) {
+            return false;
+        }
+        if (checkedPublication != publication) {
+            Set<ContractRef<CapabilityId>> capabilities = publication.capabilities().stream()
+                .filter(entry -> entry != null && entry.editable())
+                .map(CatalogAuthoringPublication.Entry::reference)
+                .collect(Collectors.toUnmodifiableSet());
+            publicationAccepted = capabilities.containsAll(activeAuthoringCapabilities)
+                && publication.advertisedEditCapabilities().containsAll(editCapabilities);
+            checkedPublication = publication;
+        }
+        return publicationAccepted;
+    }
+
     public synchronized AuthoringTemplatePayload.Kind templateKind() {
         return templateKind;
     }
@@ -455,6 +480,49 @@ public final class CoreGraphEditorSession {
     public synchronized CoreGraphEditorSession mutateGraph(UnaryOperator<GraphDocument> mutation) {
         Objects.requireNonNull(mutation, "Graph mutation is required");
         return commitGraph(Objects.requireNonNull(mutation.apply(currentGraph()), "Graph mutation cannot return null"));
+    }
+
+    public static final class WorkspaceEdit {
+        private final CoreWorkspaceDocument expected;
+        private final CoreWorkspaceDocument desired;
+        private final boolean changed;
+
+        private WorkspaceEdit(CoreWorkspaceDocument expected, CoreWorkspaceDocument desired) {
+            if (!expected.document().resource().equals(desired.document().resource())
+                || expected.document().revision() != desired.document().revision()
+                || !expected.document().catalogBinding().equals(desired.document().catalogBinding())) {
+                throw new IllegalArgumentException("Workspace requires the current saved revision and catalog");
+            }
+            this.changed = !expected.diff(desired).isEmpty();
+            this.expected = expected;
+            this.desired = desired;
+        }
+
+        public CoreWorkspaceDocument desired() {
+            return desired;
+        }
+
+        public boolean changed() {
+            return changed;
+        }
+    }
+
+    public static WorkspaceEdit prepareWorkspaceEdit(CoreWorkspaceDocument current, CoreWorkspaceDocument base,
+                                                      CoreWorkspaceDocument latest) {
+        return new WorkspaceEdit(current, base.rebase(current, latest));
+    }
+
+    public synchronized boolean applyWorkspaceEdit(WorkspaceEdit edit) {
+        if (edit == null || graph != edit.expected.graph() || source != edit.expected.source()) {
+            return false;
+        }
+        if (edit.changed) {
+            graph = edit.desired.graph();
+            source = edit.desired.source();
+            mutationVersion = Math.incrementExact(mutationVersion);
+            pushHistory(new State(graph, source, mutationVersion));
+        }
+        return true;
     }
 
     public synchronized CoreGraphEditorSession replaceGraph(GraphDocument desired) {
@@ -985,6 +1053,7 @@ public final class CoreGraphEditorSession {
     private void acceptPublication(ContentHash authoringChecksum,
                                    Collection<ContractRef<CapabilityId>> authoringCapabilities,
                                    Collection<ContractRef<CapabilityId>> editCapabilities) {
+        checkedPublication = null;
         this.activeAuthoringChecksum = Objects.requireNonNull(authoringChecksum,
             "Active authoring checksum is required");
         this.activeAuthoringCapabilities = immutableCapabilities(authoringCapabilities);
@@ -1051,15 +1120,11 @@ public final class CoreGraphEditorSession {
         Objects.requireNonNull(desired, "Desired graph is required");
         requireGraphIdentity(currentGraph(), desired);
         if (kind == Kind.GRAPH) {
-            List<WorkspacePatch<JsonValue>> patches = CoreGraphWorkspacePatch.diff(graph, desired);
-            if (patches.isEmpty()) {
+            CoreGraphWorkspacePatch.Prepared prepared = CoreGraphWorkspacePatch.prepareDiff(graph, desired);
+            if (prepared.patches().isEmpty()) {
                 return this;
             }
-            GraphDocument applied = CoreGraphWorkspacePatch.apply(graph, patches);
-            if (!sameGraph(applied, desired)) {
-                throw new IllegalArgumentException("Graph mutation was not lossless");
-            }
-            graph = applied;
+            graph = prepared.applied();
             mutationVersion = Math.incrementExact(mutationVersion);
             pushHistory(new State(graph, null, mutationVersion));
             return this;
@@ -1071,15 +1136,11 @@ public final class CoreGraphEditorSession {
         requireFunction();
         Objects.requireNonNull(desired, "Desired function source is required");
         requireSourceIdentity(source, desired);
-        CoreFunctionSourcePatch.Patch patches = CoreFunctionSourcePatch.diff(source, desired);
-        if (patches.isEmpty()) {
+        CoreFunctionSourcePatch.Prepared prepared = CoreFunctionSourcePatch.prepareDiff(source, desired);
+        if (prepared.patch().isEmpty()) {
             return this;
         }
-        FunctionSourceDocument applied = CoreFunctionSourcePatch.apply(source, patches);
-        if (!sameSource(applied, desired)) {
-            throw new IllegalArgumentException("Function source mutation was not lossless");
-        }
-        source = applied;
+        source = prepared.applied();
         mutationVersion = Math.incrementExact(mutationVersion);
         pushHistory(new State(null, source, mutationVersion));
         return this;
@@ -1140,16 +1201,6 @@ public final class CoreGraphEditorSession {
         }
         return FunctionSourceDocumentCodec.INSTANCE.encode(left.source()).canonicalText()
             .equals(FunctionSourceDocumentCodec.INSTANCE.encode(right.source()).canonicalText());
-    }
-
-    private static boolean sameGraph(GraphDocument left, GraphDocument right) {
-        return GraphDocumentCodec.INSTANCE.encode(left).canonicalText()
-            .equals(GraphDocumentCodec.INSTANCE.encode(right).canonicalText());
-    }
-
-    private static boolean sameSource(FunctionSourceDocument left, FunctionSourceDocument right) {
-        return FunctionSourceDocumentCodec.INSTANCE.encode(left).canonicalText()
-            .equals(FunctionSourceDocumentCodec.INSTANCE.encode(right).canonicalText());
     }
 
     private GraphDocument currentGraph() {

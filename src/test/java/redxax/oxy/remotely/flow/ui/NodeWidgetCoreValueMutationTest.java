@@ -14,6 +14,8 @@ import redxax.oxy.remotely.flow.data.FlowResourceReference;
 import redxax.oxy.remotely.flow.data.FlowTypeRef;
 import redxax.oxy.remotely.flow.registry.NodeDefinition;
 import redxax.oxy.remotely.test.TestDrawContext;
+import redxax.oxy.remotely.ui.collaboration.DesignerCollaborationAuthority;
+import restudio.rebase.ui.widgets.editor.TextAreaWidget;
 import restudio.rescreen.platform.input.ReKey;
 import restudio.rescreen.platform.input.ReKeyEvent;
 import restudio.rescreen.platform.input.ReKeyLocation;
@@ -21,8 +23,13 @@ import restudio.rescreen.platform.input.ReModifierState;
 import restudio.rescreen.platform.input.ReTextInputEvent;
 import restudio.rescreen.theme.ThemeManager;
 import restudio.rescreen.ui.core.Widget;
+import restudio.rescreen.ui.rescreen.ReScreen;
 import restudio.rescreen.ui.widgets.AnimatedButton;
+import restudio.rescreen.ui.widgets.ColorFieldWidget;
+import restudio.rescreen.ui.widgets.DropDownWidget;
+import restudio.rescreen.ui.widgets.SliderWidget;
 import restudio.rescreen.ui.widgets.TextInputWidget;
+import restudio.rescreen.ui.widgets.ToggleWidget;
 import restudio.resync.flow.cache.CatalogCacheOpaque;
 import restudio.resync.flow.cache.CatalogCachePublication;
 import restudio.resync.flow.cache.CatalogCacheState;
@@ -71,6 +78,102 @@ class NodeWidgetCoreValueMutationTest {
     @BeforeEach
     void initializeTheme() {
         ThemeManager.initBrowserDefaults();
+    }
+
+    @Test
+    void authoritativeRefreshUpdatesEveryLiteralControlWithoutRebuildingOrEchoing() throws Exception {
+        Map<String, Object> before = Map.of("text", "before", "number", 2, "toggle", false, "slider", 3D,
+            "dropdown", "One", "search", "One", "multiline", "before\nline", "color", "#112233");
+        Map<String, Object> after = Map.of("text", "after", "number", 12, "toggle", true, "slider", 31D,
+            "dropdown", "Two", "search", "Two", "multiline", "after\nline", "color", "#445566");
+        FlowNode node = new FlowNode("test:value", 20, 40, new LinkedHashMap<>(before));
+        NodeDefinition.Builder definition = new NodeDefinition.Builder("value", "Value", NodeDefinition.NodeCategory.UTILITY).owner("test");
+        Map<String, NodeDefinition.WidgetType> kinds = Map.of("text", NodeDefinition.WidgetType.TEXT,
+            "number", NodeDefinition.WidgetType.NUMBER, "toggle", NodeDefinition.WidgetType.TOGGLE,
+            "slider", NodeDefinition.WidgetType.SLIDER, "dropdown", NodeDefinition.WidgetType.DROPDOWN,
+            "search", NodeDefinition.WidgetType.SEARCHABLE_LIST, "multiline", NodeDefinition.WidgetType.MULTILINE,
+            "color", NodeDefinition.WidgetType.COLOR);
+        kinds.forEach((name, kind) -> definition.input(new NodeDefinition.PinBuilder(PinId.of(name), name,
+            NodeDefinition.PinType.DATA, NodeDefinition.PinDirection.INPUT, kind == NodeDefinition.WidgetType.TOGGLE
+                ? FlowDataType.BOOLEAN : kind == NodeDefinition.WidgetType.NUMBER || kind == NodeDefinition.WidgetType.SLIDER
+                ? FlowDataType.NUMBER : FlowDataType.STRING).widget(kind).options(List.of("One", "Two")).build()));
+        FlowGraph graph = new FlowGraph();
+        graph.setNodes(new LinkedHashMap<>(Map.of(NODE.canonicalText(), node)));
+        AtomicInteger edits = new AtomicInteger();
+        NodeWidget widget = new NodeWidget(20, 40, node, graph, NODE.canonicalText(), null, null, null,
+            definition.build(), false, false, mutation -> { edits.incrementAndGet(); return true; });
+        Map<?, ?> controls = new LinkedHashMap<>(inputWidgets(widget));
+
+        node.setInputValues(new LinkedHashMap<>(after));
+        widget.configureCoreOptions(new ServerResourceLocator(RESOURCE_SERVER,
+            ContractRef.of(OwnerId.of("test"), ResourceTypeId.of("flow")), "main"), Map.of());
+        widget.refreshInputWidgets();
+
+        for (Map.Entry<?, ?> entry : controls.entrySet()) {
+            assertSame(entry.getValue(), inputWidgets(widget).get(entry.getKey()));
+        }
+        assertEquals("after", ((TextInputWidget) controls.get("text")).getText());
+        assertEquals("12", ((TextInputWidget) controls.get("number")).getText());
+        assertTrue(((ToggleWidget) controls.get("toggle")).getValue());
+        assertEquals(31D, ((SliderWidget) controls.get("slider")).getValue());
+        assertEquals("Two", ((DropDownWidget<?>) controls.get("dropdown")).getSelectedItem());
+        assertEquals("Two", ((AnimatedButton) controls.get("search")).getMessage());
+        assertEquals("after\nline", ((TextAreaWidget) controls.get("multiline")).getText());
+        assertEquals("#445566", ((ColorFieldWidget) controls.get("color")).getColor());
+        assertEquals(0, edits.get());
+    }
+
+    @Test
+    void remoteRefreshWaitsForLocalFocusAndPendingValueSettlement() throws Exception {
+        FlowNode node = stringNode();
+        AtomicReference<NodeWidget.NodeValueMutation> proposal = new AtomicReference<>();
+        NodeWidget widget = stringWidget(node, mutation -> { proposal.set(mutation); return true; });
+        focusInput(widget);
+        TextInputWidget field = stringInput(widget);
+        node.setInputValues(new LinkedHashMap<>(Map.of(PIN.canonicalText(), "remote")));
+        widget.refreshInputWidgets();
+        assertEquals("old", field.getText());
+        field.setFocused(false);
+        widget.tick();
+        assertSame(field, stringInput(widget));
+        assertEquals("remote", field.getText());
+
+        focusInput(widget);
+        assertTrue(widget.textInput(text(widget, 'x')));
+        node.setInputValues(new LinkedHashMap<>(Map.of(PIN.canonicalText(), "new remote")));
+        widget.refreshInputWidgets();
+        field.setFocused(false);
+        widget.tick();
+        assertEquals("remotex", field.getText());
+        node.setInputValues(new LinkedHashMap<>(Map.of(PIN.canonicalText(), proposal.get().value())));
+        widget.commitInputValuePreview(proposal.get());
+        assertFalse(widget.hasInputValuePreview(PIN));
+        assertSame(field, stringInput(widget));
+        assertEquals("remotex", field.getText());
+    }
+
+    @Test
+    void realNodeFieldsPublishAndResolveCollaborationStateBySemanticIdentity() throws Exception {
+        NodeWidget source = stringWidget(stringNode(), mutation -> true);
+        NodeWidget target = stringWidget(stringNode(), mutation -> true);
+        ReScreen sender = new ReScreen() { };
+        ReScreen receiver = new ReScreen() { };
+        sender.addDrawableChild(source);
+        receiver.addDrawableChild(new AnimatedButton.Builder().label("Unrelated").build());
+        receiver.addDrawableChild(target);
+        focusInput(source);
+        assertTrue(source.textInput(text(source, 'x')));
+
+        var publication = DesignerCollaborationAuthority.widgetStates(sender);
+        assertFalse(publication.isEmpty());
+        assertTrue(stringInput(source).getCollaborationKey().contains(PIN.canonicalText()));
+        DesignerCollaborationAuthority.applyWidgetStates(receiver,
+            List.of(new DesignerCollaborationAuthority.RemoteWidgetState(publication, 1L)));
+
+        assertEquals("oldx", stringInput(target).getText());
+        assertSame(stringInput(source), source.getFocusedDescendant());
+        assertSame(stringInput(target), DesignerCollaborationAuthority.resolve(receiver,
+            DesignerCollaborationAuthority.path(sender, stringInput(source))));
     }
 
     @Test

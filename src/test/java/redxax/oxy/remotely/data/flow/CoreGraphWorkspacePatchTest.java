@@ -1,5 +1,7 @@
 package redxax.oxy.remotely.data.flow;
 
+import restudio.resync.flow.workspace.CoreGraphWorkspacePatch;
+
 import org.junit.jupiter.api.Test;
 import restudio.resync.contract.canonical.JsonValue;
 import restudio.resync.contract.canonical.JsonValue.JsonArray;

@@ -3,7 +3,6 @@ package redxax.oxy.remotely.ui.collaboration;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import com.google.gson.Gson;
 import restudio.rescreen.theme.Accent;
 import restudio.rescreen.ui.collaboration.CollaborativeWidget;
 import restudio.rescreen.ui.collaboration.ScreenCollaborationSurface;
@@ -28,14 +27,38 @@ import java.util.Set;
 import java.util.WeakHashMap;
 
 public final class DesignerCollaborationAuthority {
-    private static final Gson GSON = new Gson();
     private static final Map<Screen, Set<AnimatedWidget>> ACCENTED = Collections.synchronizedMap(new WeakHashMap<>());
     private static final Map<Screen, Set<Widget>> STATEFUL = Collections.synchronizedMap(new WeakHashMap<>());
 
     public record RemoteFocus(JsonArray path, int color) {
     }
 
-    public record RemoteWidgetState(JsonObject states, long updatedAt) {
+    public static final class RemoteWidgetState {
+        private final List<TimedState> states;
+        private final long updatedAt;
+
+        public RemoteWidgetState(JsonObject publication, long updatedAt) {
+            this.updatedAt = updatedAt;
+            List<TimedState> decoded = new ArrayList<>();
+            if (publication != null) {
+                for (Map.Entry<String, JsonElement> entry : publication.entrySet()) {
+                    if (!entry.getValue().isJsonObject()) {
+                        continue;
+                    }
+                    JsonObject encoded = entry.getValue().getAsJsonObject();
+                    JsonArray path = encoded.has("path") && encoded.get("path").isJsonArray() ? encoded.getAsJsonArray("path") : null;
+                    JsonObject state = encoded.has("state") && encoded.get("state").isJsonObject() ? encoded.getAsJsonObject("state") : encoded;
+                    String identity = path != null ? path.toString() : "key:" + entry.getKey();
+                    decoded.add(new TimedState(identity, path != null ? decodePath(path) : null, entry.getKey(),
+                        decodeState(state), updatedAt));
+                }
+            }
+            states = List.copyOf(decoded);
+        }
+
+        public long updatedAt() {
+            return updatedAt;
+        }
     }
 
     public record Pointer(int x, int y) {
@@ -57,16 +80,20 @@ public final class DesignerCollaborationAuthority {
     }
 
     public static JsonObject widgetStates(Screen screen) {
+        return widgetStates(screen, null);
+    }
+
+    public static JsonObject widgetStates(Screen screen, Widget publishedSeparately) {
         JsonObject states = new JsonObject();
         if (screen == null) {
             return states;
         }
         Set<Widget> visited = Collections.newSetFromMap(new IdentityHashMap<>());
         for (Widget root : screen.getScreenWidgetRoots()) {
-            collectWidgetStates(screen, root, states, visited);
+            collectWidgetStates(screen, root, states, visited, publishedSeparately);
         }
         for (Widget container : screen.collaborationContainers().values()) {
-            collectWidgetStates(screen, container, states, visited);
+            collectWidgetStates(screen, container, states, visited, publishedSeparately);
         }
         return states;
     }
@@ -78,29 +105,25 @@ public final class DesignerCollaborationAuthority {
         Map<String, TimedState> latest = new LinkedHashMap<>();
         if (remoteStates != null) {
             for (RemoteWidgetState remote : remoteStates) {
-                if (remote == null || remote.states() == null) {
+                if (remote == null) {
                     continue;
                 }
-                for (Map.Entry<String, JsonElement> entry : remote.states().entrySet()) {
-                    if (!entry.getValue().isJsonObject()) {
-                        continue;
-                    }
-                    JsonObject encoded = entry.getValue().getAsJsonObject();
-                    JsonArray path = encoded.has("path") && encoded.get("path").isJsonArray() ? encoded.getAsJsonArray("path") : null;
-                    JsonObject state = encoded.has("state") && encoded.get("state").isJsonObject() ? encoded.getAsJsonObject("state") : encoded;
-                    String identity = path != null ? path.toString() : "key:" + entry.getKey();
-                    TimedState existing = latest.get(identity);
-                    if (existing == null || remote.updatedAt() >= existing.updatedAt()) {
-                        latest.put(identity, new TimedState(path, entry.getKey(), state, remote.updatedAt()));
+                for (TimedState state : remote.states) {
+                    TimedState existing = latest.get(state.identity());
+                    if (existing == null || state.updatedAt() >= existing.updatedAt()) {
+                        latest.put(state.identity(), state);
                     }
                 }
             }
+        }
+        if (latest.isEmpty() && !STATEFUL.containsKey(screen)) {
+            return;
         }
         Widget localFocus = focused(screen);
         Set<Widget> active = Collections.newSetFromMap(new IdentityHashMap<>());
         Map<Widget, TimedState> targets = new IdentityHashMap<>();
         for (TimedState state : latest.values()) {
-            Widget target = state.path() != null ? resolve(screen, state.path()) : findByKey(screen, state.key());
+            Widget target = state.path() != null ? ScreenCollaborationSurface.resolve(screen, state.path()) : findByKey(screen, state.key());
             if (target == null) {
                 continue;
             }
@@ -120,8 +143,7 @@ public final class DesignerCollaborationAuthority {
                 resetWidgetState(target);
                 continue;
             }
-            JsonObject state = entry.getValue().state();
-            CollaborativeWidget.State decoded = decodeState(state);
+            CollaborativeWidget.State decoded = entry.getValue().state();
             if (target instanceof CollaborativeWidget collaborative && decoded != null) {
                 collaborative.applyCollaborationState(decoded);
                 active.add(target);
@@ -165,6 +187,13 @@ public final class DesignerCollaborationAuthority {
         if (target != null && !path.isEmpty()) {
             state.add("path", path);
         }
+        if (target instanceof DropDownWidget<?> dropdown && !path.isEmpty()
+            && dropdown.isMouseOverScreenOverlay(mouseX, mouseY)) {
+            state.addProperty("extended", true);
+            state.addProperty("x", Math.clamp((double) (mouseX - target.getX()) / Math.max(1, target.getWidth()), 0.0, 1.0));
+            state.addProperty("y", mouseY - target.getY());
+            return state;
+        }
         if (pointerContainer != null) {
             JsonArray containerPath = encodePath(pointer.containerPath());
             if (containerPath.isEmpty()) {
@@ -181,14 +210,8 @@ public final class DesignerCollaborationAuthority {
         if (target == null || path.isEmpty()) {
             return state;
         }
-        if (target instanceof DropDownWidget<?> dropdown && dropdown.isExpanded() && mouseY > target.getY() + target.getHeight()) {
-            state.addProperty("extended", true);
-            state.addProperty("x", Math.clamp((double) (mouseX - target.getX()) / Math.max(1, target.getWidth()), 0.0, 1.0));
-            state.addProperty("y", mouseY - target.getY());
-        } else {
-            state.addProperty("x", Math.clamp((double) (mouseX - target.getX()) / Math.max(1, target.getWidth()), 0.0, 1.0));
-            state.addProperty("y", Math.clamp((double) (mouseY - target.getY()) / Math.max(1, target.getHeight()), 0.0, 1.0));
-        }
+        state.addProperty("x", Math.clamp((double) (mouseX - target.getX()) / Math.max(1, target.getWidth()), 0.0, 1.0));
+        state.addProperty("y", Math.clamp((double) (mouseY - target.getY()) / Math.max(1, target.getHeight()), 0.0, 1.0));
         return state;
     }
 
@@ -217,6 +240,10 @@ public final class DesignerCollaborationAuthority {
             if (booleanValue(state.get("extended"))) {
                 pointerX = target.getX() + (int) Math.round(Math.clamp(x, 0.0, 1.0) * target.getWidth());
                 pointerY = target.getY() + (int) Math.round(y);
+                if (target instanceof DropDownWidget<?> dropdown) {
+                    return dropdown.isMouseOverCollaborationOverlay(pointerX, pointerY)
+                        ? new Pointer(pointerX, pointerY) : null;
+                }
             } else {
                 pointerX = target.getX() + (int) Math.round(Math.clamp(x, 0.0, 1.0) * target.getWidth());
                 pointerY = target.getY() + (int) Math.round(Math.clamp(y, 0.0, 1.0) * target.getHeight());
@@ -242,17 +269,16 @@ public final class DesignerCollaborationAuthority {
             return;
         }
         Map<AnimatedWidget, List<Integer>> colors = new LinkedHashMap<>();
-        Widget localFocus = focused(screen);
         for (RemoteFocus focus : focuses) {
             Widget target = focus != null ? resolve(screen, focus.path()) : null;
-            if (!(target instanceof AnimatedWidget animated) || animated.selected || sharesFocus(target, localFocus)) {
+            if (!(target instanceof AnimatedWidget animated)) {
                 continue;
             }
             colors.computeIfAbsent(animated, ignored -> new ArrayList<>()).add(focus.color());
             List<Widget> ancestors = ScreenCollaborationSurface.ancestors(screen, target);
             for (int index = ancestors.size() - 1; index >= 0; index--) {
                 Widget ancestor = ancestors.get(index);
-                if (ancestor instanceof AnimatedWidget owner && ancestor instanceof CollaborativeWidget && !owner.selected && !sharesFocus(owner, localFocus)) {
+                if (ancestor instanceof AnimatedWidget owner && ancestor instanceof CollaborativeWidget) {
                     colors.computeIfAbsent(owner, ignored -> new ArrayList<>()).add(focus.color());
                     break;
                 }
@@ -338,11 +364,12 @@ public final class DesignerCollaborationAuthority {
         return new ScreenCollaborationSurface.Path(containerId, rootIndex, rootIdentity, segments);
     }
 
-    private static void collectWidgetStates(Screen screen, Widget widget, JsonObject states, Set<Widget> visited) {
+    private static void collectWidgetStates(Screen screen, Widget widget, JsonObject states, Set<Widget> visited,
+                                            Widget publishedSeparately) {
         if (widget == null || !widget.isVisible() || !widget.isCollaborationEnabled() || !visited.add(widget)) {
             return;
         }
-        JsonObject state = widget instanceof CollaborativeWidget collaborative && collaborative.hasCollaborationState()
+        JsonObject state = widget != publishedSeparately && widget instanceof CollaborativeWidget collaborative && collaborative.hasCollaborationState()
             ? encodeState(collaborative.captureCollaborationState()) : null;
         if (state != null) {
             JsonArray path = path(screen, widget);
@@ -354,7 +381,7 @@ public final class DesignerCollaborationAuthority {
             }
         }
         for (Widget child : children(widget)) {
-            collectWidgetStates(screen, child, states, visited);
+            collectWidgetStates(screen, child, states, visited, publishedSeparately);
         }
     }
 
@@ -381,7 +408,7 @@ public final class DesignerCollaborationAuthority {
         }
     }
 
-    private static JsonObject encodeState(CollaborativeWidget.State state) {
+    public static JsonObject encodeState(CollaborativeWidget.State state) {
         JsonObject encoded = new JsonObject();
         if (state instanceof CollaborativeWidget.DropDownState dropdown) {
             encoded.addProperty("type", "dropdown");
@@ -408,9 +435,31 @@ public final class DesignerCollaborationAuthority {
             return encoded;
         }
         if (state instanceof ItemSelectorWidget.CollaborationState selector) {
-            JsonObject selectorState = GSON.toJsonTree(selector).getAsJsonObject();
-            selectorState.addProperty("type", "selector");
-            return selectorState;
+            encoded.addProperty("type", "selector");
+            encoded.addProperty("width", selector.width());
+            encoded.addProperty("height", selector.height());
+            encoded.addProperty("query", selector.query());
+            encoded.addProperty("selectedItem", selector.selectedItem());
+            encoded.addProperty("emptyMessage", selector.emptyMessage());
+            encoded.addProperty("loading", selector.loading());
+            encoded.addProperty("scrollOffset", selector.scrollOffset());
+            encoded.addProperty("entryHeight", selector.entryHeight());
+            JsonArray items = new JsonArray();
+            for (ItemSelectorWidget.CollaborationItem item : selector.items()) {
+                JsonObject entry = new JsonObject();
+                entry.addProperty("label", item.label());
+                entry.addProperty("iconNamespace", item.iconNamespace());
+                entry.addProperty("iconPath", item.iconPath());
+                entry.addProperty("iconType", item.iconType());
+                entry.addProperty("hint", item.hint());
+                entry.addProperty("searchTerms", item.searchTerms());
+                entry.addProperty("rankingPriority", item.rankingPriority());
+                entry.addProperty("badge", item.badge());
+                entry.addProperty("section", item.section());
+                items.add(entry);
+            }
+            encoded.add("items", items);
+            return encoded;
         }
         if (state instanceof ToggleWidget.CollaborationState toggle) {
             encoded.addProperty("type", "toggle");
@@ -433,14 +482,36 @@ public final class DesignerCollaborationAuthority {
                 string(state.get("query")), (float) number(state.get("scroll"), 0.0));
             case "text" -> new TextInputWidget.CollaborationState(string(state.get("text")), integer(state.get("cursor"), 0),
                 integer(state.get("selectionStart"), 0), integer(state.get("selectionEnd"), 0), (float) number(state.get("scroll"), 0.0));
-            case "selector" -> GSON.fromJson(state, ItemSelectorWidget.CollaborationState.class);
+            case "selector" -> decodeSelector(state);
             case "toggle" -> new ToggleWidget.CollaborationState(booleanValue(state.get("value")));
             case "scroll-selector" -> new ScrollSelectorWidget.CollaborationState(integer(state.get("selected"), 0));
             default -> null;
         };
     }
 
-    private record TimedState(JsonArray path, String key, JsonObject state, long updatedAt) {
+    public static ItemSelectorWidget.CollaborationState decodeSelector(JsonObject state) {
+        List<ItemSelectorWidget.CollaborationItem> items = new ArrayList<>();
+        JsonElement values = state.get("items");
+        if (values != null && values.isJsonArray()) {
+            for (JsonElement value : values.getAsJsonArray()) {
+                if (!value.isJsonObject()) {
+                    continue;
+                }
+                JsonObject item = value.getAsJsonObject();
+                items.add(new ItemSelectorWidget.CollaborationItem(string(item.get("label")), string(item.get("iconNamespace")),
+                    string(item.get("iconPath")), string(item.get("iconType")), string(item.get("hint")),
+                    string(item.get("searchTerms")), integer(item.get("rankingPriority"), 0), string(item.get("badge")),
+                    booleanValue(item.get("section"))));
+            }
+        }
+        return new ItemSelectorWidget.CollaborationState(integer(state.get("width"), 1), integer(state.get("height"), 1),
+            string(state.get("query")), string(state.get("selectedItem")), string(state.get("emptyMessage")),
+            booleanValue(state.get("loading")), (float) number(state.get("scrollOffset"), 0.0),
+            integer(state.get("entryHeight"), 1), items);
+    }
+
+    private record TimedState(String identity, ScreenCollaborationSurface.Path path, String key,
+                              CollaborativeWidget.State state, long updatedAt) {
     }
 
     private static List<? extends Widget> children(Widget widget) {

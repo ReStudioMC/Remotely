@@ -74,6 +74,15 @@ public final class ReSyncWebSocketFrameTransport implements ReSyncFrameTransport
     }
 
     @Override
+    public void renewSession(String ticket) {
+        BinaryWebSocket current = socket;
+        if (current == null || !current.isOpen() || ticket == null || ticket.isBlank()) return;
+        current.sendText("resync-ticket." + ticket).whenComplete((ignored, failure) -> {
+            if (failure != null && socket == current && current.isOpen()) errorHandler.accept(failure);
+        });
+    }
+
+    @Override
     public void connect() {
         int generation;
         ConnectionAttempt attempt;

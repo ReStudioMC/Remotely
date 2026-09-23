@@ -1,6 +1,6 @@
 package redxax.oxy.remotely.flow.ui.studio;
 
-import com.google.gson.Gson;
+import redxax.oxy.remotely.flow.data.FlowJson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import redxax.oxy.remotely.flow.data.GuiDefinition;
@@ -10,18 +10,35 @@ import redxax.oxy.remotely.flow.data.TabDefinition;
 import java.util.Map;
 
 public final class ReSyncCollaborationDocuments {
-    private static final Gson GSON = new Gson();
-
     private ReSyncCollaborationDocuments() {
     }
 
-    public static JsonObject from(Object value) {
-        JsonElement json = GSON.toJsonTree(value);
-        return json != null && json.isJsonObject() ? json.getAsJsonObject() : null;
+    public static JsonObject from(GuiDefinition value) {
+        return value != null ? FlowJson.gui(value) : null;
     }
 
-    public static <T> T to(JsonObject document, Class<T> type) {
-        return document != null ? GSON.fromJson(document, type) : null;
+    public static JsonObject from(ScoreboardDefinition value) {
+        return value != null ? FlowJson.scoreboard(value) : null;
+    }
+
+    public static JsonObject from(TabDefinition value) {
+        return value != null ? FlowJson.tab(value) : null;
+    }
+
+    public static JsonObject from(JsonObject value) {
+        return value != null ? value.deepCopy() : null;
+    }
+
+    public static GuiDefinition gui(JsonObject document) {
+        return document != null ? FlowJson.gui(document) : null;
+    }
+
+    public static ScoreboardDefinition scoreboard(JsonObject document) {
+        return document != null ? FlowJson.scoreboard(document) : null;
+    }
+
+    public static TabDefinition tab(JsonObject document) {
+        return document != null ? FlowJson.tab(document) : null;
     }
 
     public static void copy(JsonObject target, JsonObject source) {

@@ -4,7 +4,12 @@ import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import redxax.oxy.remotely.collaboration.CollaborationService;
+import redxax.oxy.remotely.flow.data.FlowJson;
+import restudio.rescreen.util.JsonTreeParser;
+import java.util.ArrayList;
+import java.util.function.Function;
 import restudio.resync.flow.workspace.LiveDocumentChannel;
+import restudio.resync.flow.protocol.ProtocolEditability;
 import restudio.resync.flow.workspace.WorkspacePatch;
 import restudio.resync.flow.workspace.WorkspaceTarget;
 
@@ -18,9 +23,8 @@ import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
 public final class ReSyncWorkspaceClient {
-    private final Gson gson;
     private final CollaborationService collaboration;
-    private final LiveDocumentChannel<JsonObject, List<WorkspacePatch<JsonElement>>, JsonObject, CollaborationService.Identity> documents =
+    private final LiveDocumentChannel<WorkspaceDocument, List<WorkspacePatch<JsonElement>>, JsonObject, CollaborationService.Identity> documents =
         new LiveDocumentChannel<>();
     private final Map<Listener, AdapterRegistration> adapters = new HashMap<>();
     private final Map<Listener, Set<String>> listenerTargets = new HashMap<>();
@@ -36,7 +40,6 @@ public final class ReSyncWorkspaceClient {
     }
 
     public ReSyncWorkspaceClient(Gson gson, CollaborationService collaboration) {
-        this.gson = gson;
         this.collaboration = collaboration;
     }
 
@@ -161,6 +164,21 @@ public final class ReSyncWorkspaceClient {
             ? "" : documents.publishOperation(target(type, resourceId), patches);
     }
 
+    public String publishOperation(String type, String resourceId, LiveDocumentChannel.PublicationStamp expected,
+                                   List<WorkspacePatch<JsonElement>> patches) {
+        return publishOperation(type, resourceId, expected, patches, () -> true);
+    }
+
+    public String publishOperation(String type, String resourceId, LiveDocumentChannel.PublicationStamp expected,
+                                   List<WorkspacePatch<JsonElement>> patches, BooleanSupplier current) {
+        if (!mutationAllowed() || patches == null || patches.isEmpty()) {
+            return "";
+        }
+        synchronized (documents) {
+            return current.getAsBoolean() ? documents.publishOperation(target(type, resourceId), expected, patches) : "";
+        }
+    }
+
     public boolean publishAwareness(String type, String resourceId, JsonObject state) {
         if (!mutationAllowed()) return false;
         return documents.publishAwareness(target(type, resourceId), state != null ? state : new JsonObject());
@@ -177,14 +195,15 @@ public final class ReSyncWorkspaceClient {
     }
 
     private void applyCurrentSnapshot(String json, int generation, long sourceEpoch) {
-        Snapshot snapshot = parse(json, Snapshot.class);
+        Snapshot snapshot = parse(json, this::decodeSnapshot);
         if (snapshot == null || snapshot.document() == null) {
             return;
         }
         List<LiveDocumentChannel.Awareness<JsonObject, CollaborationService.Identity>> awareness = snapshot.awareness() == null
             ? List.of() : snapshot.awareness().stream().filter(value -> !isOwn(value.authorSessionId())).map(this::toGeneric).toList();
         documents.acceptSnapshot(new LiveDocumentChannel.Snapshot<>(
-            target(snapshot.type(), snapshot.resourceId()), snapshot.sequence(), snapshot.document(), awareness), generation, sourceEpoch);
+            target(snapshot.type(), snapshot.resourceId()), snapshot.sequence(),
+            new WorkspaceDocument(snapshot.document(), snapshot.editability()), awareness), generation, sourceEpoch);
     }
 
     private void applyOperation(String json, int generation, long sourceEpoch) {
@@ -198,7 +217,7 @@ public final class ReSyncWorkspaceClient {
     }
 
     private void applyCurrentOperation(String json, int generation, long sourceEpoch) {
-        Operation operation = parse(json, Operation.class);
+        Operation operation = parse(json, this::decodeOperation);
         if (operation == null || operation.patches() == null) {
             return;
         }
@@ -218,7 +237,7 @@ public final class ReSyncWorkspaceClient {
     }
 
     private void applyCurrentAwareness(String json, int generation, long sourceEpoch) {
-        Awareness awareness = parse(json, Awareness.class);
+        Awareness awareness = parse(json, this::decodeAwareness);
         if (awareness != null && !isOwn(awareness.authorSessionId())) {
             documents.acceptAwareness(toGeneric(awareness), generation, sourceEpoch);
         }
@@ -235,7 +254,7 @@ public final class ReSyncWorkspaceClient {
     }
 
     private void applyCurrentResync(String json, int generation, long sourceEpoch) {
-        Resync resync = parse(json, Resync.class);
+        Resync resync = parse(json, this::decodeResync);
         if (resync != null) {
             documents.acceptResync(target(resync.type(), resync.resourceId()), resync.reason(), generation, sourceEpoch);
         }
@@ -253,15 +272,16 @@ public final class ReSyncWorkspaceClient {
         return mutationAdmission.getAsBoolean();
     }
 
-    private LiveDocumentChannel.Listener<JsonObject, List<WorkspacePatch<JsonElement>>, JsonObject, CollaborationService.Identity> adapt(
+    private LiveDocumentChannel.Listener<WorkspaceDocument, List<WorkspacePatch<JsonElement>>, JsonObject, CollaborationService.Identity> adapt(
         AdapterRegistration registration) {
         return new LiveDocumentChannel.Listener<>() {
             @Override
-            public void onSnapshot(LiveDocumentChannel.Snapshot<JsonObject, JsonObject, CollaborationService.Identity> snapshot) {
+            public void onSnapshot(LiveDocumentChannel.Snapshot<WorkspaceDocument, JsonObject, CollaborationService.Identity> snapshot) {
                 if (active(registration, snapshot.target())) {
                     registration.listener.onSnapshot(new Snapshot(snapshot.target().resourceType(), snapshot.target().resourceId(),
-                        snapshot.sequence(), snapshot.document(),
-                        snapshot.awareness().stream().map(ReSyncWorkspaceClient.this::fromGeneric).toList()));
+                        snapshot.sequence(), snapshot.document().document(),
+                        snapshot.awareness().stream().map(ReSyncWorkspaceClient.this::fromGeneric).toList(),
+                        snapshot.document().editability(), snapshot.stamp()));
                 }
             }
 
@@ -271,7 +291,7 @@ public final class ReSyncWorkspaceClient {
                 if (active(registration, operation.target())) {
                     registration.listener.onOperation(new Operation(operation.target().resourceType(), operation.target().resourceId(),
                         operation.sequence(), operation.operationId(), operation.authorSessionId(), operation.author(),
-                        operation.operation()), own || isOwn(operation.authorSessionId()));
+                        operation.operation(), operation.stamp()), own || isOwn(operation.authorSessionId()));
                 }
             }
 
@@ -324,9 +344,46 @@ public final class ReSyncWorkspaceClient {
         return new WorkspaceTarget(type, resourceId);
     }
 
-    private <T> T parse(String json, Class<T> type) {
+    private Snapshot decodeSnapshot(JsonObject root) {
+        List<Awareness> awareness = new ArrayList<>();
+        for (JsonElement value : FlowJson.array(root, "awareness")) awareness.add(decodeAwareness(value.getAsJsonObject()));
+        return new Snapshot(FlowJson.string(root, "type", null), FlowJson.string(root, "resourceId", null),
+            FlowJson.longValue(root, "sequence", 0L), FlowJson.object(root, "document"), awareness,
+            ProtocolEditability.valueOf(FlowJson.string(root, "editability", "READ_ONLY_GRAPH")), null);
+    }
+
+    private Operation decodeOperation(JsonObject root) {
+        List<WorkspacePatch<JsonElement>> patches = new ArrayList<>();
+        for (JsonElement value : FlowJson.array(root, "patches")) {
+            JsonObject patch = value.getAsJsonObject();
+            patches.add(new WorkspacePatch<>(FlowJson.string(patch, "op", null),
+                FlowJson.string(patch, "path", null), patch.get("value")));
+        }
+        return new Operation(FlowJson.string(root, "type", null), FlowJson.string(root, "resourceId", null),
+            FlowJson.longValue(root, "sequence", 0L), FlowJson.string(root, "operationId", null),
+            FlowJson.string(root, "authorSessionId", null), decodeIdentity(FlowJson.object(root, "author")), patches);
+    }
+
+    private Awareness decodeAwareness(JsonObject root) {
+        return new Awareness(FlowJson.string(root, "type", null), FlowJson.string(root, "resourceId", null),
+            FlowJson.string(root, "authorSessionId", null), decodeIdentity(FlowJson.object(root, "author")),
+            FlowJson.object(root, "state"), FlowJson.longValue(root, "updatedAt", 0L));
+    }
+
+    private Resync decodeResync(JsonObject root) {
+        return new Resync(FlowJson.string(root, "type", null), FlowJson.string(root, "resourceId", null),
+            FlowJson.string(root, "reason", null));
+    }
+
+    private ReSyncCollaborationClient.Identity decodeIdentity(JsonObject root) {
+        return root == null ? null : new ReSyncCollaborationClient.Identity(FlowJson.string(root, "subjectId", ""),
+            FlowJson.string(root, "displayName", "Collaborator"), FlowJson.string(root, "avatar", ""),
+            FlowJson.string(root, "source", ""));
+    }
+
+    private <T> T parse(String json, Function<JsonObject, T> decoder) {
         try {
-            return gson.fromJson(json, type);
+            return decoder.apply(JsonTreeParser.parse(json).getAsJsonObject());
         } catch (RuntimeException exception) {
             return null;
         }
@@ -359,7 +416,7 @@ public final class ReSyncWorkspaceClient {
     private final class AdapterRegistration {
         private final Listener listener;
         private final long epoch;
-        private final LiveDocumentChannel.Listener<JsonObject, List<WorkspacePatch<JsonElement>>, JsonObject, CollaborationService.Identity> adapter;
+        private final LiveDocumentChannel.Listener<WorkspaceDocument, List<WorkspacePatch<JsonElement>>, JsonObject, CollaborationService.Identity> adapter;
 
         private AdapterRegistration(Listener listener, long epoch) {
             this.listener = listener;
@@ -378,15 +435,27 @@ public final class ReSyncWorkspaceClient {
         void onResync(String reason);
     }
 
-    public record Snapshot(String type, String resourceId, long sequence, JsonObject document, List<Awareness> awareness) {
+    public record Snapshot(String type, String resourceId, long sequence, JsonObject document, List<Awareness> awareness,
+                           ProtocolEditability editability, LiveDocumentChannel.PublicationStamp stamp) {
+        public Snapshot(String type, String resourceId, long sequence, JsonObject document, List<Awareness> awareness) {
+            this(type, resourceId, sequence, document, awareness, null, null);
+        }
     }
 
     public record Operation(String type, String resourceId, long sequence, String operationId, String authorSessionId,
-                            ReSyncCollaborationClient.Identity author, List<WorkspacePatch<JsonElement>> patches) {
+                            ReSyncCollaborationClient.Identity author, List<WorkspacePatch<JsonElement>> patches,
+                            LiveDocumentChannel.PublicationStamp stamp) {
+        public Operation(String type, String resourceId, long sequence, String operationId, String authorSessionId,
+                         ReSyncCollaborationClient.Identity author, List<WorkspacePatch<JsonElement>> patches) {
+            this(type, resourceId, sequence, operationId, authorSessionId, author, patches, null);
+        }
     }
 
     public record Awareness(String type, String resourceId, String authorSessionId,
                             ReSyncCollaborationClient.Identity author, JsonObject state, long updatedAt) {
+    }
+
+    private record WorkspaceDocument(JsonObject document, ProtocolEditability editability) {
     }
 
     private record Resync(String type, String resourceId, String reason) {
