@@ -22,7 +22,10 @@ public final class NexoGlyphLoader {
         if (files == null || workspaceRoot == null) return Async.completed(Optional.empty());
         Files source = cached(files);
         RemotePath primary = workspaceRoot.resolve("plugins").resolve("Nexo");
-        return exists(source, primary.resolve("glyphs")).thenCompose(primaryExists -> primaryExists
+        return exists(source, workspaceRoot.resolve("plugins"))
+                .thenCompose(pluginsExist -> pluginsExist ? exists(source, primary) : Async.completed(false))
+                .thenCompose(primaryExists -> primaryExists ? exists(source, primary.resolve("glyphs")) : Async.completed(false))
+                .thenCompose(primaryExists -> primaryExists
                 ? Async.completed(Optional.of(primary))
                 : exists(source, workspaceRoot.resolve("glyphs")).thenApply(rootExists -> rootExists
                         ? Optional.of(workspaceRoot)
