@@ -1,5 +1,6 @@
 package redxax.oxy.remotely.host;
 
+import restudio.rescreen.platform.Async;
 import restudio.rescreen.platform.HostActionHandler.SelectedFile;
 import restudio.rescreen.platform.KeyValueStore;
 import restudio.rescreen.platform.desktop.DesktopFileActionHandler;
@@ -16,6 +17,11 @@ public final class MinecraftHostActionHandler implements DesktopFileActionHandle
     @Override
     public boolean openBrowser(String url) {
         return desktop.openBrowser(url);
+    }
+
+    @Override
+    public Async<Boolean> openBrowserAsync(String url) {
+        return desktop.openBrowserAsync(url);
     }
 
     @Override
