@@ -21,6 +21,7 @@ import org.gradle.api.artifacts.repositories.MavenArtifactRepository
 import org.gradle.api.attributes.java.TargetJvmVersion
 import org.gradle.api.execution.TaskExecutionGraph
 import org.gradle.api.tasks.Copy
+import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.SourceSetContainer
 import org.gradle.api.tasks.Sync
 import org.gradle.jvm.toolchain.JavaLanguageVersion
@@ -273,6 +274,8 @@ private fun Project.configureSharedConfigurations() {
 private fun Project.configureSharedDependencies() {
     val remotelyAppBuild = gradle.includedBuild("RemotelyApp").task(":jar")
     val remotelyAppJar = files(rootProject.file("../build/libs/Remotely-App.jar")).builtBy(remotelyAppBuild)
+    val networkCoreBuild = gradle.includedBuild("RemotelyApp").task(":NetworkCore:jar")
+    val networkCoreJar = files(rootProject.file("../NetworkCore/build/libs/NetworkCore-${modVersion()}.jar")).builtBy(networkCoreBuild)
     val remotelySnakeYamlBuild = gradle.includedBuild("RemotelyApp").task(":relocatedSnakeYaml")
     val remotelySnakeYamlJar = files(rootProject.file("../build/relocated-inputs/remotely-snakeyaml-2.6.jar")).builtBy(remotelySnakeYamlBuild)
     val rescreenJsoupBuild = gradle.includedBuild("ReScreen").task(":relocatedJsoup")
@@ -341,6 +344,7 @@ private fun Project.configureSharedDependencies() {
     })
 
     bundledFile(remotelyAppJar, remotelyAppNested)
+    bundledFile(networkCoreJar)
     bundledFile(remotelySnakeYamlJar)
     bundledFile(rescreenJsoupJar)
     bundled("dev.restudio:rescreen:1.0")
@@ -367,7 +371,7 @@ private fun Project.configureSharedDependencies() {
     bundled("com.github.JnCrMx:discord-game-sdk4j:1.0.0")
 
     tasks.matching { it.name == "processIncludeJars" }.configureEach {
-        dependsOn(remotelyAppBuild, remotelySnakeYamlBuild, rescreenJsoupBuild)
+        dependsOn(remotelyAppBuild, networkCoreBuild, remotelySnakeYamlBuild, rescreenJsoupBuild)
     }
 
     configureSourceRuntimeClasspath()
@@ -380,6 +384,7 @@ private fun Project.configureSourceRuntimeClasspath() {
 
     val sourceRuntimeTasks = listOf(
         gradle.includedBuild("RemotelyApp").task(":jar"),
+        gradle.includedBuild("RemotelyApp").task(":NetworkCore:jar"),
         gradle.includedBuild("RemotelyApp").task(":relocatedSnakeYaml"),
         gradle.includedBuild("ReScreen").task(":jar"),
         gradle.includedBuild("ReScreen").task(":relocatedJsoup"),
@@ -391,6 +396,7 @@ private fun Project.configureSourceRuntimeClasspath() {
     )
     val sourceArtifacts = listOf(
         rootProject.file("../build/libs/Remotely-App.jar"),
+        rootProject.file("../NetworkCore/build/libs/NetworkCore-${modVersion()}.jar"),
         rootProject.file("../build/relocated-inputs/remotely-snakeyaml-2.6.jar"),
         rootProject.file("../../ReScreen/build/libs/ReScreen-1.0.jar"),
         rootProject.file("../../ReScreen/build/relocated-inputs/jsoup-1.15.4.jar"),
@@ -649,9 +655,12 @@ private fun configureFabricApi(project: Project, dropFabric: Boolean) {
 private fun configureFabricJar(project: Project, dropFabric: Boolean) {
     val taskName = if (dropFabric) "jar" else "remapJar"
     project.tasks.named(taskName, AbstractArchiveTask::class.java).configure(action<AbstractArchiveTask> { task ->
+        val runtimeJars = project.configurations.getByName("nestedRuntimeJars")
+        task.inputs.files(runtimeJars).withPathSensitivity(PathSensitivity.RELATIVE)
         task.doLast {
-            val runtimeJars = project.configurations.getByName("nestedRuntimeJars").files
-            injectNestedJars(task.archiveFile.get().asFile, "fabric", project.modVersion(), runtimeJars)
+            val files = runtimeJars.files
+            injectNestedJars(task.archiveFile.get().asFile, "fabric", project.modVersion(), files)
+            verifyPackagedRuntime(task.archiveFile.get().asFile, "fabric", files)
         }
     })
 }
@@ -662,6 +671,7 @@ private fun Project.configureNeoForgeModDev() {
         ?: error("dgt.neoforge.version has not been set for $name")
     val embeddedRuntimeJars = listOf(
         gradle.includedBuild("RemotelyApp").task(":jar") to rootProject.file("../build/libs/Remotely-App.jar"),
+        gradle.includedBuild("RemotelyApp").task(":NetworkCore:jar") to rootProject.file("../NetworkCore/build/libs/NetworkCore-${modVersion()}.jar"),
         gradle.includedBuild("ReScreen").task(":jar") to rootProject.file("../../ReScreen/build/libs/ReScreen-1.0.jar"),
         gradle.includedBuild("Remodel").task(":jar") to rootProject.file("../../Remodel/build/libs/Remodel-1.0.0.jar"),
         gradle.includedBuild("Rebase").task(":jar") to rootProject.file("../../Rebase/build/libs/Rebase-1.0-SNAPSHOT.jar")
@@ -696,6 +706,8 @@ private fun Project.configureNeoForgeModDev() {
         task.dependsOn(mergeNeoForgeEmbeddedRuntime)
     })
     tasks.withType(JvmJar::class.java).configureEach(action<JvmJar> { task ->
+        val runtimeJars = configurations.getByName("nestedRuntimeJars")
+        task.inputs.files(runtimeJars).withPathSensitivity(PathSensitivity.RELATIVE)
         task.duplicatesStrategy = DuplicatesStrategy.EXCLUDE
         task.archiveBaseName.set(modName())
         task.archiveVersion.set("${modVersion()}+${minecraftVersion()}-${loader()}")
@@ -712,7 +724,9 @@ private fun Project.configureNeoForgeModDev() {
             }
         }
         task.doLast {
-            injectNestedJars(task.archiveFile.get().asFile, "neoforge", project.modVersion(), project.configurations.getByName("nestedRuntimeJars").files)
+            val files = runtimeJars.files
+            injectNestedJars(task.archiveFile.get().asFile, "neoforge", project.modVersion(), files)
+            verifyPackagedRuntime(task.archiveFile.get().asFile, "neoforge", files)
         }
     })
 }
@@ -940,6 +954,36 @@ private fun injectNestedJars(archive: File, loader: String, modVersion: String, 
     temp.renameTo(archive)
 }
 
+private fun verifyPackagedRuntime(archive: File, loader: String, runtimeJars: Set<File>) {
+    val jars = runtimeJars
+        .filter { it.isFile && it.extension == "jar" }
+        .distinctBy { it.name }
+    val nestedRoot = if (loader == "neoforge") "META-INF/jarjar" else "META-INF/jars"
+    ZipFile(archive).use { packaged ->
+        val packagedEntries = packaged.entries().asSequence().map { it.name }.toHashSet()
+        val missing = linkedSetOf<String>()
+        jars.forEach { jar ->
+            if (loader == "fabric" && isReStudioNestedJar(jar)) {
+                ZipFile(jar).use { source ->
+                    source.entries().asSequence()
+                        .filter { !it.isDirectory && it.name.endsWith(".class") && !shouldDropNestedJarEntry(jar, it.name) }
+                        .map { it.name }
+                        .filterNot(packagedEntries::contains)
+                        .forEach(missing::add)
+                }
+            } else if ("$nestedRoot/${jar.name}" !in packagedEntries) {
+                missing.add("$nestedRoot/${jar.name}")
+            }
+        }
+        if (missing.isNotEmpty()) {
+            val preview = missing.take(20).joinToString(", ")
+            val remainder = missing.size - minOf(missing.size, 20)
+            val suffix = if (remainder > 0) " and $remainder more" else ""
+            throw GradleException("Packaged runtime is incomplete: $preview$suffix")
+        }
+    }
+}
+
 private fun writeFabricOuterJarEntries(output: ZipOutputStream, jar: File, written: MutableSet<String>) {
     ZipInputStream(jar.inputStream().buffered()).use { input ->
         generateSequence { input.nextEntry }.forEach { entry ->
@@ -1108,7 +1152,8 @@ private fun classPackage(name: String): String? {
 }
 
 private fun isReStudioNestedJar(jar: File): Boolean {
-    return jar.name in setOf("Remotely-App.jar", "ReScreen-1.0.jar", "Remodel-1.0.0.jar", "Rebase-1.0-SNAPSHOT.jar")
+    return jar.name.startsWith("NetworkCore-")
+            || jar.name in setOf("Remotely-App.jar", "ReScreen-1.0.jar", "Remodel-1.0.0.jar", "Rebase-1.0-SNAPSHOT.jar")
 }
 
 private fun isSignatureEntry(name: String): Boolean {
@@ -1167,6 +1212,9 @@ private fun neoForgeJarJarMetadata(jars: List<File>, modVersion: String): String
 private data class NestedJarCoordinate(val group: String, val artifact: String, val version: String)
 
 private fun jarCoordinate(jar: File, modVersion: String): NestedJarCoordinate {
+    if (jar.name.startsWith("NetworkCore-")) {
+        return NestedJarCoordinate("dev.restudio", "network-core", modVersion)
+    }
     return when (jar.name) {
         "Remotely-App.jar" -> NestedJarCoordinate("dev.restudio", "remotely-app", modVersion)
         "ReScreen-1.0.jar" -> NestedJarCoordinate("dev.restudio", "rescreen", "1.0")
