@@ -16,6 +16,25 @@ class OptionCatalogCacheTest {
     Path tempDirectory;
 
     @Test
+    void legacyRevisionTracksContentAndInvalidation() {
+        OptionCatalogCache cache = cache();
+        String serverId = "catalog-item-selector-server";
+        String sourceId = "server:minecraft:material";
+        cache.invalidate(serverId, sourceId);
+
+        assertEquals(0L, cache.legacyRevision(serverId, sourceId));
+        assertTrue(cache.put(serverId, sourceId, "first", 1L, List.of("STONE"), List.of()));
+        long first = cache.legacyRevision(serverId, sourceId);
+        assertTrue(first > 0L);
+        assertFalse(cache.put(serverId, sourceId, "first", 2L, List.of("STONE"), List.of()));
+        assertEquals(first, cache.legacyRevision(serverId, sourceId));
+        cache.invalidate(serverId, sourceId);
+        assertEquals(0L, cache.legacyRevision(serverId, sourceId));
+        assertTrue(cache.put(serverId, sourceId, "second", 3L, List.of("DIAMOND"), List.of()));
+        assertTrue(cache.legacyRevision(serverId, sourceId) > first);
+    }
+
+    @Test
     void staleAndLegacyResponsesCannotOverwriteNewerSequencedCatalogs() {
         OptionCatalogCache cache = cache();
         String serverId = "catalog-sequence-server";

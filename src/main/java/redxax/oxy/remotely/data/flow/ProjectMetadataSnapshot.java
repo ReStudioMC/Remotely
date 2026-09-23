@@ -357,6 +357,7 @@ final class ProjectMetadataSnapshot {
     private final long nextResourceOrder;
     private final long nextBundleOrder;
     private final long nextDocumentOrder;
+    private volatile long browserPresentationStamp;
 
     private ProjectMetadataSnapshot(String serverId, OverlayMap<String, Folder> folders,
                                     OverlayMap<String, Resource> resources, OverlayMap<String, Bundle> bundles,
@@ -465,6 +466,66 @@ final class ProjectMetadataSnapshot {
 
     List<Bundle> bundles() {
         return List.copyOf(ordered(bundles, bundleOrders).values());
+    }
+
+    long browserPresentationStamp() {
+        long stamp = browserPresentationStamp;
+        if (stamp != 0L) {
+            return stamp;
+        }
+        synchronized (this) {
+            if (browserPresentationStamp != 0L) {
+                return browserPresentationStamp;
+            }
+            long value = 0xcbf29ce484222325L;
+            for (Folder folder : folders()) {
+                value = presentationText(value, folder.path());
+                value = presentationText(value, folder.parentPath());
+                value = presentationText(value, folder.name());
+                value = presentationPart(value, folder.sortOrder());
+                value = presentationPart(value, folder.collapsed() ? 1 : 0);
+            }
+            value = presentationPart(value, -1);
+            for (Resource resource : resources()) {
+                value = presentationText(value, resource.type());
+                value = presentationText(value, resource.id());
+                value = presentationText(value, resource.displayName());
+                value = presentationText(value, resource.path());
+                value = presentationPart(value, resource.sortOrder());
+            }
+            value = presentationPart(value, -2);
+            for (Bundle bundle : bundles()) {
+                value = presentationText(value, bundle.marketplaceSlug());
+                value = presentationText(value, bundle.listingSlug());
+                value = presentationText(value, bundle.title());
+                value = presentationText(value, bundle.versionId());
+                value = presentationText(value, bundle.version());
+                value = presentationText(value, bundle.rootPath());
+                value = presentationText(value, bundle.iconMediaId());
+                value = presentationPart(value, bundle.enabled() ? 1 : 0);
+                value = presentationPart(value, bundle.resourceKeys().size());
+                for (String key : bundle.resourceKeys()) {
+                    value = presentationText(value, key);
+                }
+            }
+            browserPresentationStamp = value == 0L ? 1L : value;
+            return browserPresentationStamp;
+        }
+    }
+
+    private static long presentationText(long stamp, String value) {
+        if (value == null) {
+            return presentationPart(stamp, -1);
+        }
+        long result = presentationPart(stamp, value.length());
+        for (int index = 0; index < value.length(); index++) {
+            result = presentationPart(result, value.charAt(index));
+        }
+        return result;
+    }
+
+    private static long presentationPart(long stamp, int value) {
+        return (stamp ^ Integer.toUnsignedLong(value)) * 0x100000001b3L;
     }
 
     Bundle bundle(String marketplaceSlug, String listingSlug) {

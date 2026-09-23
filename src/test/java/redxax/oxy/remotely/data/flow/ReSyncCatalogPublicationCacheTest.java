@@ -3,6 +3,7 @@ package redxax.oxy.remotely.data.flow;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import restudio.resync.contract.cache.CatalogProjectionVersion;
+import restudio.rescreen.platform.Async;
 import restudio.resync.contract.canonical.JsonValue;
 import restudio.resync.flow.canonical.CanonicalLimits;
 import restudio.resync.flow.cache.CatalogCacheKey;
@@ -25,12 +26,14 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -50,7 +53,7 @@ class ReSyncCatalogPublicationCacheTest {
         Path path = tempDir.resolve("catalog-publication-cache.json");
         CatalogCacheKey key = key(SERVER);
         ReSyncCatalogPublicationProjection first = new ReSyncCatalogPublicationProjection(SERVER,
-            new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path)));
+            new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path)));
         CatalogCachePublication full = full(key, 1, "first");
         byte[] fullBytes = CODEC.encodeBytes(full);
         CatalogCachePublication delta = new CatalogCachePublication(CatalogCachePublication.Kind.DELTA, key, 2,
@@ -62,7 +65,7 @@ class ReSyncCatalogPublicationCacheTest {
         assertTrue(first.apply(delta, deltaBytes));
 
         ReSyncCatalogPublicationProjection restarted = new ReSyncCatalogPublicationProjection(SERVER,
-            new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path)));
+            new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path)));
 
         assertTrue(restarted.hydrateFromCache());
         ReSyncCatalogPublicationProjection.Snapshot active = restarted.active().orElseThrow();
@@ -77,11 +80,11 @@ class ReSyncCatalogPublicationCacheTest {
     void isolatesCachedPublicationsByCanonicalServerId(@TempDir Path tempDir) {
         Path path = tempDir.resolve("catalog-publication-cache.json");
         ReSyncCatalogPublicationProjection first = new ReSyncCatalogPublicationProjection(SERVER,
-            new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path)));
+            new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path)));
         CatalogCachePublication publication = full(key(SERVER), 1, "server-one");
         assertTrue(first.apply(publication, CODEC.encodeBytes(publication)));
 
-        ReSyncCatalogPublicationCache cache = new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path));
+        ReSyncCatalogPublicationCache cache = new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path));
         ReSyncCatalogPublicationProjection other = new ReSyncCatalogPublicationProjection(OTHER_SERVER, cache);
 
         assertTrue(cache.latest(SERVER).isPresent());
@@ -94,15 +97,15 @@ class ReSyncCatalogPublicationCacheTest {
     @Test
     void independentCacheInstancesPreserveEachServersPublication(@TempDir Path tempDir) {
         Path path = tempDir.resolve("catalog-publication-cache.json");
-        ReSyncCatalogPublicationCache first = new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path));
-        ReSyncCatalogPublicationCache second = new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path));
+        ReSyncCatalogPublicationCache first = new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path));
+        ReSyncCatalogPublicationCache second = new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path));
         CatalogCachePublication firstPublication = full(key(SERVER), 1, "server-one");
         CatalogCachePublication secondPublication = full(key(OTHER_SERVER), 1, "server-two");
 
         assertTrue(first.store(SERVER, firstPublication, CODEC.encodeBytes(firstPublication), firstPublication));
         assertTrue(second.store(OTHER_SERVER, secondPublication, CODEC.encodeBytes(secondPublication), secondPublication));
 
-        ReSyncCatalogPublicationCache restarted = new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path));
+        ReSyncCatalogPublicationCache restarted = new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path));
         assertEquals(firstPublication, restarted.latest(SERVER).orElseThrow().publication());
         assertEquals(secondPublication, restarted.latest(OTHER_SERVER).orElseThrow().publication());
     }
@@ -111,9 +114,9 @@ class ReSyncCatalogPublicationCacheTest {
     void loadedSnapshotCanBeReadWithoutASecondDiskDecode(@TempDir Path tempDir) throws Exception {
         Path path = tempDir.resolve("catalog-publication-cache.json");
         CatalogCachePublication publication = full(key(SERVER), 53, "loaded");
-        ReSyncCatalogPublicationCache writer = new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path));
+        ReSyncCatalogPublicationCache writer = new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path));
         assertTrue(writer.store(SERVER, publication, CODEC.encodeBytes(publication), publication));
-        ReSyncCatalogPublicationCache loaded = new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path));
+        ReSyncCatalogPublicationCache loaded = new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path));
 
         Files.delete(path);
 
@@ -145,21 +148,28 @@ class ReSyncCatalogPublicationCacheTest {
     }
 
     @Test
-    void completedLoadsContinueAwayFromTheCallingThread(@TempDir Path tempDir) {
-        ReSyncCatalogPublicationCache cache = ReSyncCatalogPublicationCache.deferred(
-            DesktopReSyncStorage.fromKey(tempDir.resolve("catalog-publication-cache.json")), 4);
-        var completedLoad = cache.latestAsync(SERVER);
-        completedLoad.join();
-        AtomicReference<String> callbackThread = new AtomicReference<>();
-        CompletableFuture<Void> completed = new CompletableFuture<>();
+    void completedLoadsContinueAwayFromTheCallingThread(@TempDir Path tempDir) throws Exception {
+        Async.Snapshot previous = Async.snapshot();
+        Thread caller = Thread.currentThread();
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            Async.installExecutor(executor::execute, ignored -> {});
+            try {
+                ReSyncCatalogPublicationCache cache = ReSyncCatalogPublicationCache.deferred(
+                    DesktopReSyncStorage.fromKey(tempDir.resolve("catalog-publication-cache.json")), 4);
+                var completedLoad = cache.latestAsync(SERVER);
+                completedLoad.join();
+                CompletableFuture<Thread> completed = new CompletableFuture<>();
 
-        cache.continueAsync(completedLoad, () -> true, (value, failure) -> {
-            callbackThread.set(Thread.currentThread().getName());
-            completed.complete(null);
-        });
-        completed.join();
+                cache.continueAsync(completedLoad, () -> true, (value, failure) -> {
+                    if (failure != null) completed.completeExceptionally(failure);
+                    else completed.complete(Thread.currentThread());
+                });
 
-        assertEquals("ReSync-Catalog-Cache-Continuation", callbackThread.get());
+                assertNotSame(caller, completed.get(5, TimeUnit.SECONDS));
+            } finally {
+                Async.restore(previous);
+            }
+        }
     }
 
     @Test
@@ -176,14 +186,14 @@ class ReSyncCatalogPublicationCacheTest {
     void compactFullSnapshotRoundTripsWithoutDuplicatingItsProjection(@TempDir Path tempDir) throws Exception {
         Path path = tempDir.resolve("catalog-publication-cache.json");
         CatalogCachePublication publication = full(key(SERVER), 53, "compact");
-        ReSyncCatalogPublicationCache cache = new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path));
+        ReSyncCatalogPublicationCache cache = new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path));
 
         assertTrue(cache.store(SERVER, publication, CODEC.encodeBytes(publication), publication));
 
         String encoded = Files.readString(path);
         assertTrue(encoded.contains("\"projection\":\"publication\""));
         assertFalse(encoded.contains("\"projection\":{"));
-        ReSyncCatalogPublicationCache.CachedPublication restored = new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path))
+        ReSyncCatalogPublicationCache.CachedPublication restored = new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path))
             .latest(SERVER).orElseThrow();
         assertEquals(publication, restored.publication());
         assertEquals(publication, restored.hydrationProjection());
@@ -203,7 +213,7 @@ class ReSyncCatalogPublicationCacheTest {
         );
         Files.write(path, JsonValue.fromJava(root).canonicalBytes(CanonicalLimits.catalog()));
 
-        ReSyncCatalogPublicationCache.CachedPublication restored = new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path))
+        ReSyncCatalogPublicationCache.CachedPublication restored = new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path))
             .latest(SERVER).orElseThrow();
         assertEquals(publication, restored.publication());
         assertEquals(publication, restored.hydrationProjection());
@@ -214,20 +224,20 @@ class ReSyncCatalogPublicationCacheTest {
         Path path = tempDir.resolve("catalog-publication-cache.json");
         CatalogCacheKey legacyKey = new CatalogCacheKey(SERVER, 1, CHECKSUM);
         CatalogCachePublication legacy = full(legacyKey, 1, "legacy");
-        ReSyncCatalogPublicationCache legacyCache = new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path));
+        ReSyncCatalogPublicationCache legacyCache = new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path));
         assertTrue(legacyCache.store(SERVER, legacy, CODEC.encodeBytes(legacy), legacy));
 
         CatalogCachePublication current = full(key(SERVER), 2, "current");
-        ReSyncCatalogPublicationCache restarted = new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path));
+        ReSyncCatalogPublicationCache restarted = new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path));
 
         assertTrue(restarted.store(SERVER, current, CODEC.encodeBytes(current), current));
-        assertEquals(current, new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path)).latest(SERVER).orElseThrow().publication());
+        assertEquals(current, new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path)).latest(SERVER).orElseThrow().publication());
     }
 
     @Test
     void exactCacheReplayIsIdempotentButSameRevisionConflictIsRejected(@TempDir Path tempDir) {
         Path path = tempDir.resolve("catalog-publication-cache.json");
-        ReSyncCatalogPublicationCache cache = new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path));
+        ReSyncCatalogPublicationCache cache = new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path));
         CatalogCacheKey key = key(SERVER);
         CatalogCachePublication publication = full(key, 1, "accepted");
         CatalogCachePublication conflict = full(key, 1, "conflict");
@@ -241,7 +251,7 @@ class ReSyncCatalogPublicationCacheTest {
     @Test
     void exactPreparedReplaySkipsValidationAndDurableRewrite(@TempDir Path tempDir) {
         Path path = tempDir.resolve("catalog-publication-cache.json");
-        ReSyncCatalogPublicationCache cache = new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path));
+        ReSyncCatalogPublicationCache cache = new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path));
         CatalogCachePublication publication = full(key(SERVER), 7, "prepared");
         ReSyncCatalogPublicationProjection projection = new ReSyncCatalogPublicationProjection(SERVER);
         assertTrue(projection.apply(publication, CODEC.encodeBytes(publication)));
@@ -258,9 +268,25 @@ class ReSyncCatalogPublicationCacheTest {
     }
 
     @Test
+    void preparedProjectionPersistsItsValidatedPublication(@TempDir Path tempDir) {
+        Path path = tempDir.resolve("catalog-publication-cache.json");
+        ReSyncCatalogPublicationCache cache = new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path));
+        CatalogCachePublication publication = full(key(SERVER), 7, "prepared");
+        byte[] canonical = CODEC.encodeBytes(publication);
+        ReSyncCatalogPublicationProjection projection = new ReSyncCatalogPublicationProjection(SERVER);
+        ReSyncCatalogPublicationProjection.Prepared prepared = projection.prepare(
+            CODEC.decodeValidatedPublication(canonical)).orElseThrow();
+
+        assertTrue(cache.storeAsync(SERVER, prepared, null, List.of()).join().stored());
+        assertEquals(publication, new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path))
+            .latest(SERVER).orElseThrow().publication());
+        assertFalse(cache.store(SERVER, publication, CODEC.encodeBytes(full(key(SERVER), 7, "other")), publication));
+    }
+
+    @Test
     void asynchronousStoresPreserveRevisionOrderAndRejectStalePersistence(@TempDir Path tempDir) {
         Path path = tempDir.resolve("catalog-publication-cache.json");
-        ReSyncCatalogPublicationCache cache = new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path));
+        ReSyncCatalogPublicationCache cache = new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path));
         CatalogCacheKey key = key(SERVER);
         CatalogCachePublication first = full(key, 1, "first");
         CatalogCachePublication second = full(key, 2, "second");
@@ -275,7 +301,7 @@ class ReSyncCatalogPublicationCacheTest {
         assertTrue(firstResult.stored());
         assertTrue(secondResult.stored());
         assertFalse(staleResult.stored());
-        assertEquals(second, new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path)).latest(SERVER).orElseThrow().publication());
+        assertEquals(second, new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path)).latest(SERVER).orElseThrow().publication());
     }
 
     @Test
@@ -291,16 +317,16 @@ class ReSyncCatalogPublicationCacheTest {
         CatalogCachePublication publication = new CatalogCachePublication(CatalogCachePublication.Kind.FULL, key, 1,
             entries);
         byte[] canonical = CODEC.encodeBytes(publication);
-        ReSyncCatalogPublicationCache cache = new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path));
+        ReSyncCatalogPublicationCache cache = new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path));
 
         assertTrue(cache.store(SERVER, publication, canonical, publication));
-        assertEquals(publication, new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path)).latest(SERVER).orElseThrow().publication());
+        assertEquals(publication, new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path)).latest(SERVER).orElseThrow().publication());
     }
 
     @Test
     void bytePressureEvictsTheOldestSnapshotAndPersistsTheNewest(@TempDir Path tempDir) throws Exception {
         Path path = tempDir.resolve("catalog-publication-cache.json");
-        ReSyncCatalogPublicationCache cache = new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path));
+        ReSyncCatalogPublicationCache cache = new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path));
         CatalogCachePublication newest = null;
         for (long generation : List.of(53L, 54L, 55L, 61L)) {
             CatalogCacheKey key = new CatalogCacheKey(SERVER, generation,
@@ -309,7 +335,7 @@ class ReSyncCatalogPublicationCacheTest {
             assertTrue(cache.store(SERVER, newest, CODEC.encodeBytes(newest), newest));
         }
 
-        ReSyncCatalogPublicationCache restarted = new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path));
+        ReSyncCatalogPublicationCache restarted = new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path));
         assertEquals(newest, restarted.latest(SERVER).orElseThrow().publication());
         List<Long> retained = restarted.snapshotState().snapshots().get(SERVER.canonicalText()).values().stream()
             .map(value -> value.key().catalogGeneration()).sorted().toList();
@@ -337,14 +363,14 @@ class ReSyncCatalogPublicationCacheTest {
         Files.write(path, JsonValue.fromJava(Map.of("schemaVersion", ReSyncCatalogPublicationCache.SCHEMA_VERSION,
             "servers", servers)).canonicalBytes(CanonicalLimits.catalog()));
 
-        ReSyncCatalogPublicationCache cache = new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path));
+        ReSyncCatalogPublicationCache cache = new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path));
         assertEquals(current, cache.latest(currentServer).orElseThrow().publication());
         CatalogCacheKey nextKey = new CatalogCacheKey(currentServer, 13, CHECKSUM, BINDING_HASH, VERSION);
         CatalogCachePublication next = full(nextKey, 2, "current");
 
         assertTrue(cache.store(currentServer, next, CODEC.encodeBytes(next), next));
 
-        ReSyncCatalogPublicationCache restarted = new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path));
+        ReSyncCatalogPublicationCache restarted = new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path));
         assertEquals(next, restarted.latest(currentServer).orElseThrow().publication());
         assertTrue(restarted.snapshotState().snapshots().size() <= 8);
         assertEquals(1, restarted.snapshotState().snapshots().get(currentServer.canonicalText()).size());
@@ -355,7 +381,7 @@ class ReSyncCatalogPublicationCacheTest {
         Path path = tempDir.resolve("catalog-publication-cache.json");
         CatalogCacheKey key = key(SERVER);
         ReSyncCatalogPublicationProjection deltaProjection = new ReSyncCatalogPublicationProjection(SERVER,
-            new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path)));
+            new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path)));
         CatalogCachePublication full = full(key, 1, "first");
         CatalogCachePublication delta = new CatalogCachePublication(CatalogCachePublication.Kind.DELTA, key, 2,
             List.of(present(ENTRY, 2, "second"), CatalogCachePublication.Entry.tombstone(REMOVED, 2)));
@@ -376,7 +402,7 @@ class ReSyncCatalogPublicationCacheTest {
         byte[] corrupt = "{not-canonical".getBytes(StandardCharsets.UTF_8);
         Files.write(path, corrupt);
 
-        ReSyncCatalogPublicationCache cache = new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path));
+        ReSyncCatalogPublicationCache cache = new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path));
         ReSyncCatalogPublicationProjection projection = new ReSyncCatalogPublicationProjection(SERVER, cache);
 
         assertTrue(cache.latest(SERVER).isEmpty());
@@ -390,7 +416,7 @@ class ReSyncCatalogPublicationCacheTest {
         Path path = tempDir.resolve("catalog-publication-cache.json");
         CatalogCacheKey key = key(SERVER);
         ReSyncCatalogPublicationProjection projection = new ReSyncCatalogPublicationProjection(SERVER,
-            new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path)));
+            new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path)));
         CatalogCachePublication full = full(key, 3, "accepted");
         assertTrue(projection.apply(full, CODEC.encodeBytes(full)));
         CatalogCachePublication stale = new CatalogCachePublication(CatalogCachePublication.Kind.DELTA, key, 4,
@@ -399,7 +425,7 @@ class ReSyncCatalogPublicationCacheTest {
         assertFalse(projection.apply(stale, CODEC.encodeBytes(stale)));
 
         ReSyncCatalogPublicationProjection restarted = new ReSyncCatalogPublicationProjection(SERVER,
-            new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(path)));
+            new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path)));
         assertTrue(restarted.hydrateFromCache());
         assertEquals(full, restarted.active().orElseThrow().publication());
     }

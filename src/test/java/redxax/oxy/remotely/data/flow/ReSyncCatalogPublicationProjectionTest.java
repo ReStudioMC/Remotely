@@ -60,6 +60,20 @@ class ReSyncCatalogPublicationProjectionTest {
     }
 
     @Test
+    void decodedPublicationUsesItsValidatedBytesAndRawPairsStillRequireExactMatch() {
+        CatalogCacheKey key = new CatalogCacheKey(SERVER, 7, CHECKSUM, BINDING_HASH, VERSION);
+        CatalogCachePublication publication = full(key, 1, "first");
+        CatalogCachePublication other = full(key, 1, "other");
+        CatalogCachePublicationCodec codec = new CatalogCachePublicationCodec();
+        byte[] bytes = codec.encodeBytes(publication);
+        ReSyncCatalogPublicationProjection projection = new ReSyncCatalogPublicationProjection(SERVER);
+
+        assertTrue(projection.prepare(codec.decodeValidatedPublication(bytes)).isPresent());
+        assertTrue(projection.prepare(other, bytes).isEmpty());
+        assertTrue(projection.active().isEmpty());
+    }
+
+    @Test
     void rejectsAKeyMismatchWithoutChangingTheAcknowledgedProjection() {
         CatalogCacheKey acceptedKey = new CatalogCacheKey(SERVER, 7, CHECKSUM, BINDING_HASH, VERSION);
         CatalogCacheKey mismatchedKey = new CatalogCacheKey(SERVER, 7, new ContentHash("b".repeat(64)), BINDING_HASH, VERSION);

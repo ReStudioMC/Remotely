@@ -51,7 +51,7 @@ public final class ReSyncGenericDescriptorProjection {
         }
         String canonical = entry.data().canonicalText();
         try {
-            Object parsed = CanonicalJson.parseOpaque(entry.data().canonicalBytes());
+            Object parsed = entry.data().canonicalValue().toJava();
             if (!(parsed instanceof Map<?, ?> raw)) {
                 return traced(entry, Optional.of(Projection.invalid(entry, canonical,
                     "The catalog descriptor is not an object.")), startedAt, "descriptor_not_object");
@@ -83,6 +83,7 @@ public final class ReSyncGenericDescriptorProjection {
 
     private static Optional<Projection> traced(CatalogCachePublication.Entry entry, Optional<Projection> result,
                                                long startedAt, String outcome) {
+        if (!ReSyncLifecycleDiagnostics.enabled()) return result;
         Projection projection = result.orElse(null);
         List<Field> fields = projection != null ? projection.fields() : List.of();
         List<String> unsupportedReasons = fields.stream().filter(field -> !field.editable())

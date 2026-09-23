@@ -106,15 +106,26 @@ public final class ReSyncCatalogPublicationProjection {
     }
 
     public synchronized Optional<Prepared> prepare(CatalogCachePublication publication, byte[] canonicalBytes) {
+        return prepare(publication, canonicalBytes, false);
+    }
+
+    synchronized Optional<Prepared> prepare(CatalogCachePublicationCodec.ValidatedPublication validated) {
+        Objects.requireNonNull(validated, "Validated catalog publication is required");
+        return prepare(validated.publication(), validated.canonicalBytes(), true);
+    }
+
+    private synchronized Optional<Prepared> prepare(CatalogCachePublication publication, byte[] canonicalBytes,
+                                                     boolean validated) {
         Objects.requireNonNull(publication, "Catalog publication is required");
         Objects.requireNonNull(canonicalBytes, "Catalog publication bytes are required");
         if (canonicalBytes.length == 0 || !acceptsServer(publication.key())
             || !PROJECTION_VERSION.equals(publication.projectionVersion())
-            || !canonicalPublication(publication, canonicalBytes)) {
+            || !validated && !canonicalPublication(publication, canonicalBytes)) {
             return Optional.empty();
         }
         CatalogCachePublication nodePublication = nodePublication(publication);
-        byte[] nodeCanonicalBytes = PUBLICATION_CODEC.encodeBytes(nodePublication);
+        byte[] nodeCanonicalBytes = nodePublication == publication
+            ? canonicalBytes : PUBLICATION_CODEC.encodeBytes(nodePublication);
         CatalogCacheKey expected = acknowledgedKey.get();
         if (expected != null && !expected.equals(nodePublication.key())) {
             if (nodePublication.kind() != CatalogCachePublication.Kind.FULL
@@ -375,8 +386,7 @@ public final class ReSyncCatalogPublicationProjection {
             return false;
         }
         try {
-            CatalogCachePublication decoded = PUBLICATION_CODEC.decodeBytes(canonicalBytes);
-            return publication.equals(decoded) && Arrays.equals(canonicalBytes, PUBLICATION_CODEC.encodeBytes(decoded));
+            return Arrays.equals(canonicalBytes, PUBLICATION_CODEC.encodeBytes(publication));
         } catch (RuntimeException exception) {
             return false;
         }
@@ -548,9 +558,21 @@ public final class ReSyncCatalogPublicationProjection {
         }
     }
 
-    public record Prepared(Snapshot previous, Snapshot candidate) {
-        public Prepared {
-            Objects.requireNonNull(candidate, "Prepared catalog candidate is required");
+    public static final class Prepared {
+        private final Snapshot previous;
+        private final Snapshot candidate;
+
+        private Prepared(Snapshot previous, Snapshot candidate) {
+            this.previous = previous;
+            this.candidate = Objects.requireNonNull(candidate, "Prepared catalog candidate is required");
+        }
+
+        public Snapshot previous() {
+            return previous;
+        }
+
+        public Snapshot candidate() {
+            return candidate;
         }
     }
 

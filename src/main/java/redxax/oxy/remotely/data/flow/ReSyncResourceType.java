@@ -196,6 +196,7 @@ public enum ReSyncResourceType {
     private final String displayName;
     private final String defaultFolder;
     private final boolean enabled;
+    private final boolean flowPackets;
     private final Serializer serializer;
     private final Deserializer deserializer;
     private final BiConsumer<Object, String> renameApplier;
@@ -208,6 +209,7 @@ public enum ReSyncResourceType {
         this.typeId = name().toLowerCase(Locale.ROOT);
         ReSyncProtocolContract.ResourceContract resource = ReSyncProtocolContract.resource(typeId);
         ReSyncProtocolContract.ResourceFlowPackets packets = resource != null ? resource.flowPackets() : null;
+        this.flowPackets = packets != null;
         this.requestByte = packets != null ? packets.request() : 0;
         this.listRequestByte = packets != null ? packets.listRequest() : 0;
         this.dataResponseByte = packets != null ? packets.data() : 0;
@@ -236,6 +238,7 @@ public enum ReSyncResourceType {
     public String displayName() { return displayName; }
     public String defaultFolder() { return defaultFolder; }
     public boolean enabled() { return enabled; }
+    public boolean hasFlowPackets() { return flowPackets; }
 
     public String serialize(Object item) { return serializer.serialize(item); }
     public Object deserialize(String json) { return deserializer.deserialize(json); }
@@ -253,28 +256,28 @@ public enum ReSyncResourceType {
 
     public static ReSyncResourceType byDataResponse(byte packetId) {
         for (ReSyncResourceType rt : values()) {
-            if (rt.enabled && !rt.isGraph() && rt.dataResponseByte == packetId) return rt;
+            if (rt.enabled && rt.flowPackets && !rt.isGraph() && rt.dataResponseByte == packetId) return rt;
         }
         return null;
     }
 
     public static ReSyncResourceType byListResponse(byte packetId) {
         for (ReSyncResourceType rt : values()) {
-            if (rt.enabled && !rt.isGraph() && rt.listResponseByte == packetId) return rt;
+            if (rt.enabled && rt.flowPackets && !rt.isGraph() && rt.listResponseByte == packetId) return rt;
         }
         return null;
     }
 
     public static ReSyncResourceType bySaveAck(byte packetId) {
         for (ReSyncResourceType rt : values()) {
-            if (rt.enabled && !rt.isGraph() && rt.saveAckByte == packetId) return rt;
+            if (rt.enabled && rt.flowPackets && !rt.isGraph() && rt.saveAckByte == packetId) return rt;
         }
         return null;
     }
 
     public static boolean isLegacyGraphResponse(byte packetId) {
         for (ReSyncResourceType type : List.of(FLOW, FUNCTION, COMMAND)) {
-            if (type.enabled && (type.dataResponseByte == packetId || type.listResponseByte == packetId
+            if (type.enabled && type.flowPackets && (type.dataResponseByte == packetId || type.listResponseByte == packetId
                 || type.saveAckByte == packetId)) {
                 return true;
             }

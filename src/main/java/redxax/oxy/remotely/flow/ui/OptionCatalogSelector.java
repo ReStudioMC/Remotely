@@ -1,6 +1,7 @@
 package redxax.oxy.remotely.flow.ui;
 
 import redxax.oxy.remotely.data.flow.OptionCatalogItem;
+import redxax.oxy.remotely.data.flow.OptionCatalogCache;
 import redxax.oxy.remotely.data.flow.OptionCatalogLoader;
 import restudio.rescreen.ui.widgets.ItemSelectorWidget;
 import restudio.resync.flow.identity.ServerResourceLocator;
@@ -13,6 +14,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Objects;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -35,6 +37,34 @@ public final class OptionCatalogSelector {
 
     public static Runnable refreshAction(Supplier<Optional<OptionCatalogLoader.CoreRequest>> requestSupplier) {
         return () -> request(requestSupplier).ifPresent(OptionCatalogLoader::refresh);
+    }
+
+    public static ItemSelectorWidget.AsyncItemSource legacySource(String serverId, String source,
+        Supplier<? extends Collection<String>> fallbackSupplier, Supplier<String> selectedSupplier,
+        Consumer<String> onSelected, String emptyMessage) {
+        return new ItemSelectorWidget.AsyncItemSource() {
+            private long revision = Long.MIN_VALUE;
+            private boolean loading;
+            private String selected;
+            private ItemSelectorWidget.AsyncItemSnapshot resident;
+
+            @Override
+            public ItemSelectorWidget.AsyncItemSnapshot snapshot() {
+                OptionCatalogCache cache = OptionCatalogCache.getInstance();
+                long nextRevision = cache.legacyRevision(serverId, source);
+                boolean nextLoading = !cache.hasCatalog(serverId, source) || cache.isStale(serverId, source, "")
+                    || cache.isRequestInFlight(serverId, source);
+                String nextSelected = selectedSupplier != null ? selectedSupplier.get() : "";
+                if (resident == null || revision != nextRevision || loading != nextLoading || !Objects.equals(selected, nextSelected)) {
+                    resident = OptionCatalogSelector.snapshot(serverId, source, Map.of(), fallbackSupplier,
+                        () -> nextSelected, onSelected, emptyMessage);
+                    revision = nextRevision;
+                    loading = nextLoading;
+                    selected = nextSelected;
+                }
+                return resident;
+            }
+        };
     }
 
     public static ItemSelectorWidget.AsyncItemSnapshot snapshot(

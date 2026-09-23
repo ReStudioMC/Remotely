@@ -3,8 +3,12 @@ package redxax.oxy.remotely.data.flow;
 import restudio.rescreen.platform.Async;
 import redxax.oxy.remotely.util.BrowserWork;
 import redxax.oxy.remotely.util.BrowserSafeState;
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import redxax.oxy.remotely.flow.data.FlowJson;
+import redxax.oxy.remotely.flow.sync.OptionCatalogSnapshot;
+import restudio.rescreen.util.JsonTreeParser;
 import restudio.rescreen.logging.LogSource;
 import restudio.rescreen.logging.LogTypes;
 import restudio.rescreen.logging.ReLog;
@@ -43,7 +47,6 @@ public class OptionCatalogCache {
     static final int MAX_CORE_ITEMS = 100_000;
     private static final String KEY_SEPARATOR = "\0";
     private static volatile OptionCatalogCache INSTANCE = new OptionCatalogCache();
-    private final Gson gson = new GsonBuilder().create();
     private final Storage storage;
     private final Work work;
     private final Clock clock;
@@ -580,6 +583,13 @@ public class OptionCatalogCache {
         }
     }
 
+    public long legacyRevision(String serverId, String sourceId) {
+        String key = legacyKey(serverId, sourceId, "");
+        synchronized (catalogLookupLock) {
+            return catalogLookups.getOrDefault(key, CatalogLookup.EMPTY).revision();
+        }
+    }
+
     public boolean hasValues(String serverId, String sourceId) {
         Catalog catalog = catalogs.get(legacyKey(serverId, sourceId, ""));
         return catalog != null && !catalog.values().isEmpty();
@@ -921,7 +931,7 @@ public class OptionCatalogCache {
             if (persisted == null || persisted.isBlank()) {
                 return;
             }
-            PersistedState state = gson.fromJson(persisted, PersistedState.class);
+            PersistedState state = readState(JsonTreeParser.parse(persisted).getAsJsonObject());
             if (state == null || state.schemaVersion < 1 || state.schemaVersion > CACHE_SCHEMA_VERSION || state.catalogs == null) {
                 return;
             }
@@ -1039,12 +1049,74 @@ public class OptionCatalogCache {
 
     private boolean save(Map<String, Catalog> snapshot) {
         try {
-            storage.write(gson.toJson(new PersistedState(snapshot)));
+            storage.write(JsonTreeParser.write(writeState(snapshot)));
             return true;
         } catch (Exception exception) {
             ReLog.logger(LogTypes.FLOW).source(LogSource.application("Remotely")).component(OptionCatalogCache.class).operation("Save Option Catalog").error("Could not save option catalog cache", exception);
             return false;
         }
+    }
+
+    private static PersistedState readState(JsonObject root) {
+        PersistedState state = new PersistedState();
+        state.schemaVersion = FlowJson.integer(root, "schemaVersion", 0);
+        JsonObject entries = FlowJson.object(root, "catalogs");
+        if (entries == null) {
+            return state;
+        }
+        for (Map.Entry<String, JsonElement> entry : entries.entrySet()) {
+            if (!entry.getValue().isJsonObject()) {
+                continue;
+            }
+            try {
+                JsonObject encoded = entry.getValue().getAsJsonObject();
+                OptionCatalogSnapshot decoded = FlowJson.optionCatalog(encoded);
+                state.catalogs.put(entry.getKey(), new Catalog(decoded.getRevision(), decoded.getSequence(),
+                    decoded.getValues(), decoded.getItems(), decoded.getStatus(), decoded.getDiagnostic(),
+                    FlowJson.bool(encoded, "resources", false)));
+            } catch (RuntimeException exception) {
+                ReLog.logger(LogTypes.FLOW).operation("Load Option Catalog").warn("Invalid Cached Option Catalog");
+            }
+        }
+        return state;
+    }
+
+    private static JsonObject writeState(Map<String, Catalog> catalogs) {
+        JsonObject root = new JsonObject();
+        root.addProperty("schemaVersion", CACHE_SCHEMA_VERSION);
+        JsonObject entries = new JsonObject();
+        catalogs.forEach((key, catalog) -> {
+            JsonObject encoded = new JsonObject();
+            encoded.addProperty("revision", catalog.revision());
+            encoded.addProperty("sequence", catalog.sequence());
+            encoded.add("values", FlowJson.value(catalog.values()));
+            encoded.addProperty("status", catalog.status());
+            encoded.addProperty("diagnostic", catalog.diagnostic());
+            encoded.addProperty("resources", catalog.resources());
+            JsonArray items = new JsonArray();
+            for (OptionCatalogItem item : catalog.items()) {
+                JsonObject value = new JsonObject();
+                ServerResourceLocator resource = item.getResource();
+                if (resource != null) {
+                    value.addProperty("resourceServerId", resource.serverId().canonicalText());
+                    value.addProperty("resourceOwnerId", resource.owner().canonicalText());
+                    value.addProperty("resourceTypeId", resource.resourceType().value());
+                    value.addProperty("resourceId", resource.id());
+                } else {
+                    value.addProperty("value", item.getValue());
+                }
+                value.addProperty("label", item.getLabel());
+                value.addProperty("description", item.getDescription());
+                value.addProperty("icon", item.getIcon());
+                value.addProperty("group", item.getGroup());
+                value.add("metadata", FlowJson.value(item.getMetadata()));
+                items.add(value);
+            }
+            encoded.add("items", items);
+            entries.add(key, encoded);
+        });
+        root.add("catalogs", entries);
+        return root;
     }
 
     private void publishLookup(String key, Catalog catalog) {

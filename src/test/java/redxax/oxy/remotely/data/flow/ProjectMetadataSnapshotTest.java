@@ -7,9 +7,29 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 class ProjectMetadataSnapshotTest {
+
+    @Test
+    void browserPresentationChangesWithResourcesButNotOpenDocuments() {
+        ReSyncProjectMetadata metadata = new ReSyncProjectMetadata("server");
+        metadata.setResources(new ArrayList<>(List.of(resource("flow", "one"))));
+        ProjectMetadataSnapshot original = ProjectMetadataSnapshot.from(metadata);
+
+        ProjectMetadataSnapshot.Editor opened = original.edit();
+        opened.put(new ProjectMetadataSnapshot.Document("flow", "one", "One", true));
+        opened.selectedResourceKey(ReSyncProjectMetadata.resourceKey("flow", "one"));
+        ProjectMetadataSnapshot withDocument = opened.freeze();
+
+        assertEquals(original.browserPresentationStamp(), withDocument.browserPresentationStamp());
+        assertEquals(original.browserPresentationStamp(), ProjectMetadataSnapshot.from(withDocument.materialize()).browserPresentationStamp());
+
+        ProjectMetadataSnapshot.Editor renamed = withDocument.edit();
+        renamed.put(new ProjectMetadataSnapshot.Resource("flow", "one", "Renamed", "Flows", 0));
+        assertNotEquals(original.browserPresentationStamp(), renamed.freeze().browserPresentationStamp());
+    }
 
     @Test
     void materializePreservesSourceAndPersistentInsertionOrder() {

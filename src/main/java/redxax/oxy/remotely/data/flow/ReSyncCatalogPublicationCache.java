@@ -311,6 +311,17 @@ public final class ReSyncCatalogPublicationCache {
     }
 
     synchronized Async<Persistence> storeAsync(ServerId serverId,
+                                                ReSyncCatalogPublicationProjection.Prepared prepared,
+                                                ReSyncCatalogAuthoringProjection.Snapshot authoring,
+                                                List<String> authoringCapabilities) {
+        Objects.requireNonNull(prepared, "Prepared catalog projection is required");
+        ReSyncCatalogPublicationProjection.Snapshot snapshot = prepared.candidate();
+        CatalogCachePublication publication = snapshot.publication();
+        return enqueueStore(publication.key(), publication.revision(), () -> storeProjectionSnapshot(serverId,
+            snapshot, authoring, authoringCapabilities, true));
+    }
+
+    synchronized Async<Persistence> storeAsync(ServerId serverId,
                                                 ReSyncCatalogPublicationProjection.Snapshot snapshot,
                                                 ReSyncCatalogAuthoringProjection.Snapshot authoring,
                                                 List<String> authoringCapabilities) {
@@ -318,12 +329,12 @@ public final class ReSyncCatalogPublicationCache {
         Objects.requireNonNull(snapshot, "Catalog publication snapshot is required");
         CatalogCachePublication publication = snapshot.publication();
         return enqueueStore(publication.key(), publication.revision(), () -> storeProjectionSnapshot(serverId,
-            snapshot, authoring, authoringCapabilities));
+            snapshot, authoring, authoringCapabilities, false));
     }
 
     private boolean storeProjectionSnapshot(ServerId serverId, ReSyncCatalogPublicationProjection.Snapshot snapshot,
                                             ReSyncCatalogAuthoringProjection.Snapshot authoring,
-                                            List<String> authoringCapabilities) {
+                                            List<String> authoringCapabilities, boolean prepared) {
         CatalogCachePublication publication = snapshot.publication();
         synchronized (pathLock) {
             Map<String, CachedPublication> serverSnapshots = currentSnapshots().get(serverId.canonicalText());
@@ -343,8 +354,17 @@ public final class ReSyncCatalogPublicationCache {
             ReSyncFlowClient.traceLifecycle(serverId.canonicalText(), "catalog_cache_persistence_started",
                 "catalogKey", publication.key().canonicalText(), "revision", publication.revision(),
                 "bytes", canonicalBytes.length);
-            boolean stored = storePrepared(serverId, publication, canonicalBytes, snapshot.hydrationPublication(),
-                authoring == null ? null : authoring.publication(), authoringCapabilities);
+            CatalogAuthoringPublication authoringPublication = authoring == null ? null : authoring.publication();
+            boolean stored;
+            if (prepared) {
+                validatedStores.incrementAndGet();
+                CachedPublication candidate = validatePrepared(serverId, snapshot, canonicalBytes,
+                    authoringPublication, authoringCapabilities);
+                stored = candidate != null && store(candidate);
+            } else {
+                stored = storePrepared(serverId, publication, canonicalBytes, snapshot.hydrationPublication(),
+                    authoringPublication, authoringCapabilities);
+            }
             ReSyncFlowClient.traceLifecycle(serverId.canonicalText(), stored
                     ? "catalog_cache_persistence_stored" : "catalog_cache_persistence_rejected",
                 "catalogKey", publication.key().canonicalText(), "revision", publication.revision(),
@@ -455,7 +475,8 @@ public final class ReSyncCatalogPublicationCache {
                 || hydrationProjection.kind() != CatalogCachePublication.Kind.FULL) {
                 return null;
             }
-            if (!canonicalPublication(publication, canonicalBytes)) {
+            byte[] encodedPublication = codec.encodeBytes(publication);
+            if (!Arrays.equals(canonicalBytes, encodedPublication)) {
                 return null;
             }
             CatalogCachePublication nodePublication = nodePublication(publication);
@@ -467,13 +488,17 @@ public final class ReSyncCatalogPublicationCache {
                 || !canonicalAuthoring(authoringPublication))) {
                 return null;
             }
-            byte[] nodeCanonicalBytes = codec.encodeBytes(nodePublication);
-            byte[] hydrationBytes = codec.encodeBytes(nodeHydrationProjection);
-            CatalogCachePublication decodedHydration = codec.decodeBytes(hydrationBytes);
-            if (!decodedHydration.equals(nodeHydrationProjection)
-                || !Arrays.equals(hydrationBytes, codec.encodeBytes(decodedHydration))
-                || !sameProjectionEntries(nodePublication, nodeHydrationProjection)) {
+            byte[] nodeCanonicalBytes = nodePublication == publication ? encodedPublication : codec.encodeBytes(nodePublication);
+            if (!sameProjectionEntries(nodePublication, nodeHydrationProjection)) {
                 return null;
+            }
+            if (nodePublication.kind() != CatalogCachePublication.Kind.FULL) {
+                byte[] hydrationBytes = codec.encodeBytes(nodeHydrationProjection);
+                CatalogCachePublication decodedHydration = codec.decodeBytes(hydrationBytes);
+                if (!decodedHydration.equals(nodeHydrationProjection)
+                    || !Arrays.equals(hydrationBytes, codec.encodeBytes(decodedHydration))) {
+                    return null;
+                }
             }
             return new CachedPublication(serverId, nodePublication.key(), nodePublication, nodeHydrationProjection,
                 nodeCanonicalBytes, authoringPublication, capabilities);
@@ -482,10 +507,35 @@ public final class ReSyncCatalogPublicationCache {
         }
     }
 
+    private CachedPublication validatePrepared(ServerId serverId, ReSyncCatalogPublicationProjection.Snapshot snapshot,
+                                               byte[] canonicalBytes, CatalogAuthoringPublication authoringPublication,
+                                               List<String> authoringCapabilities) {
+        try {
+            CatalogCachePublication publication = snapshot.publication();
+            CatalogCachePublication hydrationProjection = snapshot.hydrationPublication();
+            if (serverId == null || !serverId.equals(publication.serverId())
+                || !serverId.equals(hydrationProjection.serverId())
+                || !CatalogProjectionVersion.isSupported(publication.projectionVersion())
+                || !publication.key().equals(hydrationProjection.key())
+                || publication.revision() != hydrationProjection.revision()
+                || hydrationProjection.kind() != CatalogCachePublication.Kind.FULL
+                || !sameProjectionEntries(publication, hydrationProjection)
+                || authoringPublication != null && (!publication.key().hasCatalogBinding()
+                    || !publication.key().catalogBinding().equals(authoringPublication.binding())
+                    || !publication.projectionVersion().equals(authoringPublication.projectionVersion())
+                    || !canonicalAuthoring(authoringPublication))) {
+                return null;
+            }
+            return new CachedPublication(serverId, publication.key(), publication, hydrationProjection,
+                canonicalBytes, authoringPublication, canonicalCapabilities(authoringCapabilities));
+        } catch (RuntimeException exception) {
+            return null;
+        }
+    }
+
     private boolean canonicalPublication(CatalogCachePublication publication, byte[] canonicalBytes) {
         try {
-            CatalogCachePublication decoded = codec.decodeBytes(canonicalBytes);
-            return publication.equals(decoded) && Arrays.equals(canonicalBytes, codec.encodeBytes(decoded));
+            return Arrays.equals(canonicalBytes, codec.encodeBytes(publication));
         } catch (RuntimeException exception) {
             return false;
         }

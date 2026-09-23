@@ -11,6 +11,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -98,6 +99,36 @@ public final class ItemOptionCatalog {
                 onSelected != null ? () -> onSelected.accept(selected) : null));
         }
         return new ItemSelectorWidget.AsyncItemSnapshot(items, isRefreshing(serverId), "No Items");
+    }
+
+    public static ItemSelectorWidget.AsyncItemSource selectorSource(String serverId, Supplier<String> selectedSupplier,
+        Consumer<String> onSelected, boolean includeNone) {
+        return new ItemSelectorWidget.AsyncItemSource() {
+            private long recipeRevision = Long.MIN_VALUE;
+            private long materialRevision = Long.MIN_VALUE;
+            private boolean loading;
+            private String selected;
+            private ItemSelectorWidget.AsyncItemSnapshot resident;
+
+            @Override
+            public ItemSelectorWidget.AsyncItemSnapshot snapshot() {
+                ensureLoaded(serverId);
+                OptionCatalogCache cache = OptionCatalogCache.getInstance();
+                long nextRecipeRevision = cache.legacyRevision(serverId, SOURCE);
+                long nextMaterialRevision = cache.legacyRevision(serverId, MATERIAL_SOURCE);
+                boolean nextLoading = isRefreshing(serverId);
+                String nextSelected = selectedSupplier != null ? selectedSupplier.get() : "";
+                if (resident == null || recipeRevision != nextRecipeRevision || materialRevision != nextMaterialRevision
+                    || loading != nextLoading || !Objects.equals(selected, nextSelected)) {
+                    resident = selectorSnapshot(serverId, () -> nextSelected, onSelected, includeNone);
+                    recipeRevision = nextRecipeRevision;
+                    materialRevision = nextMaterialRevision;
+                    loading = nextLoading;
+                    selected = nextSelected;
+                }
+                return resident;
+            }
+        };
     }
 
     public static Map<String, OptionCatalogItem> byValue(String serverId) {

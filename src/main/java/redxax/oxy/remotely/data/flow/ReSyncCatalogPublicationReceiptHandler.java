@@ -74,6 +74,18 @@ public final class ReSyncCatalogPublicationReceiptHandler {
 
     synchronized PreparedApplication prepare(CatalogPublicationReceipt receipt, CatalogCachePublication publication,
                                              byte[] canonicalBytes) {
+        return prepare(receipt, publication, canonicalBytes, null);
+    }
+
+    synchronized PreparedApplication prepare(CatalogPublicationReceipt receipt,
+                                             CatalogCachePublicationCodec.ValidatedPublication validated) {
+        Objects.requireNonNull(validated, "Validated catalog publication is required");
+        return prepare(receipt, validated.publication(), validated.canonicalBytes(), validated);
+    }
+
+    private synchronized PreparedApplication prepare(CatalogPublicationReceipt receipt,
+                                                    CatalogCachePublication publication, byte[] canonicalBytes,
+                                                    CatalogCachePublicationCodec.ValidatedPublication validated) {
         Objects.requireNonNull(receipt, "Catalog publication receipt is required");
         Objects.requireNonNull(publication, "Catalog publication is required");
         Objects.requireNonNull(canonicalBytes, "Catalog publication bytes are required");
@@ -83,13 +95,15 @@ public final class ReSyncCatalogPublicationReceiptHandler {
         }
         if (authoringProjection != null && (authoringRequired
             || publication.authoringPublication() != null)) {
-            return prepareWithAuthoring(publication, canonicalBytes);
+            return prepareWithAuthoring(publication, canonicalBytes, validated);
         }
-        return prepareNodeOnly(publication, canonicalBytes);
+        return prepareNodeOnly(publication, canonicalBytes, validated);
     }
 
-    private PreparedApplication prepareNodeOnly(CatalogCachePublication publication, byte[] canonicalBytes) {
-        Optional<ReSyncCatalogPublicationProjection.Prepared> prepared = projection.prepare(publication, canonicalBytes);
+    private PreparedApplication prepareNodeOnly(CatalogCachePublication publication, byte[] canonicalBytes,
+                                                CatalogCachePublicationCodec.ValidatedPublication validated) {
+        Optional<ReSyncCatalogPublicationProjection.Prepared> prepared = validated == null
+            ? projection.prepare(publication, canonicalBytes) : projection.prepare(validated);
         if (prepared.isEmpty()) {
             return PreparedApplication.rejected(publication.key(), publication.revision(), READ_ONLY_STALE);
         }
@@ -98,19 +112,21 @@ public final class ReSyncCatalogPublicationReceiptHandler {
             projection.acknowledgedKey().orElse(null));
     }
 
-    private PreparedApplication prepareWithAuthoring(CatalogCachePublication publication, byte[] canonicalBytes) {
+    private PreparedApplication prepareWithAuthoring(CatalogCachePublication publication, byte[] canonicalBytes,
+                                                     CatalogCachePublicationCodec.ValidatedPublication validated) {
         CatalogAuthoringPublication authoring = publication.authoringPublication();
         byte[] authoringBytes;
         if (authoring == null) {
             if (!authoringRequired) {
-                return prepareNodeOnly(publication, canonicalBytes);
+                return prepareNodeOnly(publication, canonicalBytes, validated);
             }
             return PreparedApplication.rejected(publication.key(), publication.revision(),
                 "CATALOG_PUBLICATION.AUTHORING_MISSING");
         } else {
             authoringBytes = authoringCodec.encodeBytes(authoring);
         }
-        Optional<ReSyncCatalogPublicationProjection.Prepared> nodePrepared = projection.prepare(publication, canonicalBytes);
+        Optional<ReSyncCatalogPublicationProjection.Prepared> nodePrepared = validated == null
+            ? projection.prepare(publication, canonicalBytes) : projection.prepare(validated);
         Optional<ReSyncCatalogAuthoringProjection.Prepared> authoringPrepared = authoringProjection.prepare(
             publication.key(), publication.revision(), authoring, authoringBytes);
         if (nodePrepared.isEmpty()) {
@@ -189,7 +205,7 @@ public final class ReSyncCatalogPublicationReceiptHandler {
                 return Application.readOnly(READ_ONLY_STALE);
             }
         }
-        persist(node.candidate(), prepared.authoring() == null ? null : prepared.authoring().candidate());
+        persist(node, prepared.authoring() == null ? null : prepared.authoring().candidate());
         return Application.applied(node.candidate());
     }
 
@@ -222,18 +238,19 @@ public final class ReSyncCatalogPublicationReceiptHandler {
         return null;
     }
 
-    private void persist(ReSyncCatalogPublicationProjection.Snapshot snapshot,
+    private void persist(ReSyncCatalogPublicationProjection.Prepared prepared,
                          ReSyncCatalogAuthoringProjection.Snapshot authoring) {
         if (durableCache == null) {
             return;
         }
         long sequence = ++cachePersistenceSequence;
+        ReSyncCatalogPublicationProjection.Snapshot snapshot = prepared.candidate();
         CatalogCachePublication publication = snapshot.publication();
         cachePersistence = CachePersistence.pending(sequence, publication.key(), publication.revision());
         Async<CachePersistence> reportedCompletion = Async.pending();
         cachePersistenceCompletion = reportedCompletion;
         Async<ReSyncCatalogPublicationCache.Persistence> completion = durableCache.storeAsync(
-            expectedServerId, snapshot, authoring, authoring == null ? List.of() : authoringCapabilities);
+            expectedServerId, prepared, authoring, authoring == null ? List.of() : authoringCapabilities);
         completion.whenComplete((result, failure) -> reportedCompletion.complete(completePersistence(sequence,
             publication.key(), publication.revision(), result, failure)));
     }
