@@ -17,10 +17,12 @@ import redxax.oxy.remotely.settings.server.ServerSettingsPack;
 import redxax.oxy.remotely.settings.server.ServerSettingsSnapshot;
 import restudio.rebase.minecraft.MinecraftBiomeCatalog;
 import restudio.rescreen.platform.Async;
+import restudio.rescreen.ui.core.ScreenManager;
 import restudio.rescreen.ui.settings.Setting;
 import restudio.rescreen.ui.settings.SettingWidgetFactory;
 import restudio.rescreen.ui.settings.options.ConfigOption;
 import restudio.rescreen.ui.settings.options.OptionEditor;
+import restudio.rescreen.util.UiTasks;
 
 import java.io.IOException;
 import java.io.StringReader;
@@ -270,7 +272,7 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
             definitions.stream().flatMap(definition -> definition.fields().stream()).map(ServerSettingsField::tab).forEach(declaredTabs::add);
         }
         List<Async<Void>> loads = definitions.stream()
-                .map(definition -> loadDocument(definition).thenAccept(loaded -> acceptLoadedDocument(generation, loaded)))
+                .map(definition -> loadDocument(definition).thenCompose(loaded -> onUi(() -> acceptLoadedDocument(generation, loaded))))
                 .toList();
         synchronized (stateLock) {
             if (closed || generation != loadGeneration) {
@@ -284,6 +286,25 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
             return Async.completed(null);
         }
         return Async.allOf(loads.toArray(Async[]::new)).thenRun(() -> discoverWorlds(generation));
+    }
+
+    private Async<Void> onUi(Runnable action) {
+        Async<Void> result = Async.pending();
+        Runnable task = () -> {
+            try {
+                action.run();
+                result.complete(null);
+            } catch (Throwable error) {
+                result.fail(error);
+            }
+        };
+        try {
+            if (UiTasks.isUiThread()) task.run();
+            else ScreenManager.getInstance().execute(task);
+        } catch (Throwable error) {
+            result.fail(error);
+        }
+        return result;
     }
 
     private void acceptLoadedDocument(long generation, LoadedDocument loaded) {
@@ -390,7 +411,7 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
             }
             worldDiscovery = discovery;
         }
-        discovery.thenAccept(worlds -> publishSettings(generation, worlds, true)).exceptionally(error -> null);
+        discovery.thenCompose(worlds -> onUi(() -> publishSettings(generation, worlds, true))).exceptionally(error -> null);
         discovery.whenComplete((worlds, error) -> {
             synchronized (stateLock) {
                 if (worldDiscovery == discovery) worldDiscovery = null;

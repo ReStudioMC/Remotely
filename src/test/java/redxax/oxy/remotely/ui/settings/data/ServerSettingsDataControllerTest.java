@@ -19,6 +19,7 @@ import restudio.rebase.backend.FileSystemProvider;
 import restudio.rebase.backend.ServerBackend;
 import restudio.rebase.instance.Instance;
 import restudio.rescreen.ui.core.Widget;
+import restudio.rescreen.ui.core.ScreenManager;
 import restudio.rescreen.ui.settings.Setting;
 import restudio.rescreen.ui.settings.SettingEntryWidget;
 import restudio.rescreen.ui.settings.CollectionSettingWidget;
@@ -26,6 +27,7 @@ import restudio.rescreen.ui.settings.options.ConfigOption;
 import restudio.rescreen.ui.settings.options.OptionEditor;
 import restudio.rescreen.render.TextRenderer;
 import restudio.rescreen.theme.ThemeManager;
+import restudio.rescreen.util.UiTasks;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -613,6 +615,68 @@ class ServerSettingsDataControllerTest {
         controller.close();
         assertTrue(slowRead.isCancelled());
         assertEquals(List.of("Fast"), publications);
+    }
+
+    @Test
+    void publishesLoadedSettingsOnUiThread() throws InterruptedException {
+        ServerSettingsField field = new ServerSettingsField("motd", "motd", ServerSettingsFieldType.TEXT,
+                "Server", "General", "MOTD", "Message", "Hello", null, null, List.of());
+        ServerSettingsPack pack = new ServerSettingsPack("paper", "Paper", "Paper", 0, List.of("paper"), List.of(
+                new ServerSettingsDocument("server.properties", ServerSettingsFormat.PROPERTIES, true, false, List.of(field))));
+        Async<Document> read = Async.pending();
+        ServerSettingsDocumentStore store = new ServerSettingsDocumentStore() {
+            @Override
+            public Async<Document> read(String relativePath) {
+                return read;
+            }
+
+            @Override
+            public Async<Void> write(String relativePath, String content) {
+                return Async.completed(null);
+            }
+        };
+        ServerSettingsDocumentTarget target = new ServerSettingsDocumentTarget() {
+            @Override
+            public Collection<String> softwareTokens() {
+                return List.of("paper");
+            }
+
+            @Override
+            public String property(String key) {
+                return null;
+            }
+
+            @Override
+            public void property(String key, String value) {
+            }
+
+            @Override
+            public void removeProperty(String key) {
+            }
+
+            @Override
+            public void replaceProperties(Map<String, String> properties) {
+            }
+        };
+        Thread uiThread = Thread.currentThread();
+        UiTasks.setUiThreadChecker(() -> Thread.currentThread() == uiThread);
+        try {
+            ServerSettingsDataController controller = new ServerSettingsDocumentDataController(target,
+                    new ServerSettingsSnapshot(List.of(pack)), store);
+            Thread worker = new Thread(() -> read.complete(new Document(true, "motd=Hello\n")));
+            worker.start();
+            worker.join();
+
+            assertTrue(controller.tabNames().isEmpty());
+            assertFalse(controller.ready().isDone());
+            ScreenManager.getInstance().processTasks();
+            assertEquals(List.of("Server"), controller.tabNames());
+            assertFalse(controller.settings("Server").isEmpty());
+            assertTrue(controller.ready().isDone());
+            controller.close();
+        } finally {
+            UiTasks.setUiThreadChecker(() -> true);
+        }
     }
 
     @Test

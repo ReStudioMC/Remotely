@@ -37,6 +37,7 @@ import restudio.rescreen.render.TextRenderer;
 import restudio.rescreen.ui.core.Screen;
 import restudio.rescreen.ui.core.ScreenManager;
 import restudio.rescreen.util.ResourceManager;
+import restudio.rescreen.util.UiTasks;
 
 import java.lang.reflect.Field;
 
@@ -50,6 +51,7 @@ public class MinecraftApplicationHost extends ReScreenApplicationHost {
         //#else
         //$$ ReInputEventFactory.setNativeMapper(new GlfwInputMapper());
         //#endif
+        UiTasks.setUiThreadChecker(mc::isSameThread);
         ScreenManager.getInstance().installRuntime(new MinecraftReScreenRuntime());
     }
 
