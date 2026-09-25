@@ -80,7 +80,10 @@ public final class ServerConfigurationUiComposition {
                 ? new ServerPlanSettingsController(platform.planSettingsProvider()) : null;
         if (plan != null) plan.selectPlanByName(state.preselectedPlanName());
         if (!linkedModpack && !state.resourcePoolCreation()) {
-            settings.put("Server Software", version::getSettings);
+            settings.put("Server Software", () -> {
+                if (state.restudioBackend() || state.restudioCreation()) version.bindToRemoteVariables(remoteVariables);
+                return version.getSettings();
+            });
         }
         settings.put("General", () -> {
             List<Setting> result = new ArrayList<>();
