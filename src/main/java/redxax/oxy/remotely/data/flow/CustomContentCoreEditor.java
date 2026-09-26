@@ -73,7 +73,7 @@ public final class CustomContentCoreEditor {
             if (!document.catalogBinding().equals(publication.binding())) {
                 if (document.catalogBinding().generation() >= publication.binding().generation()
                     || (!migrated.migrated()
-                    && !Objects.equals(document.unknown().get(CATALOG_COMPATIBILITY), compatibility(document, publication, entries)))) {
+                    && !compatibleNodes(document, publication, entries))) {
                     throw new IllegalArgumentException("Content Requires Server Catalog Migration");
                 }
             }
@@ -177,6 +177,15 @@ public final class CustomContentCoreEditor {
         return new GraphDocument(document.schemaVersion(), document.resource(), document.revision(), document.catalogBinding(),
             document.requiredCapabilities(), document.nodes(), document.connections(), document.passthroughs(), document.variables(), document.functions(),
             document.unknown().with(CATALOG_COMPATIBILITY, compatibility(document, publication, entries)));
+    }
+
+    private static boolean compatibleNodes(GraphDocument document, CatalogAuthoringPublication publication,
+                                           Collection<CatalogCachePublication.Entry> entries) {
+        Object stored = document.unknown().get(CATALOG_COMPATIBILITY);
+        if (!(stored instanceof Map<?, ?> compatibility) || !"1".equals(compatibility.get("version"))) {
+            return false;
+        }
+        return Objects.equals(compatibility.get("descriptorHash"), compatibility(document, publication, entries).get("descriptorHash"));
     }
 
     private static Map<String, String> compatibility(GraphDocument document, CatalogAuthoringPublication publication,
@@ -349,6 +358,17 @@ public final class CustomContentCoreEditor {
                 throw new IllegalArgumentException("Custom content node is absent from the published catalog: " + node.getType());
             }
             node.setType(qualified);
+            if (qualified.equals("restudio.resync:" + CustomContentGraphAdapter.ARMOR_NODE)
+                && node.getInputValues().containsKey("hand_filter")) {
+                Object handFilter = node.getInputValues().get("hand_filter");
+                if (handFilter != null && !String.valueOf(handFilter).isBlank()
+                    && !"any".equals(String.valueOf(handFilter))) {
+                    throw new IllegalArgumentException("Armor Hand Filter Cannot Be Migrated Because Armor Has No Hand Filter Input");
+                }
+                Map<String, Object> values = new LinkedHashMap<>(node.getInputValues());
+                values.remove("hand_filter");
+                node.setInputValues(values);
+            }
             int targetVersion = descriptor.get("schemaVersion").getAsInt();
             int sourceVersion = Math.max(1, node.getVersion());
             if (sourceVersion == targetVersion) {

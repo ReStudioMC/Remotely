@@ -83,9 +83,24 @@ public final class ReSyncCatalogPublicationReceiptHandler {
         return prepare(receipt, validated.publication(), validated.canonicalBytes(), validated);
     }
 
+    synchronized PreparedApplication prepareWorkerValidated(CatalogPublicationReceipt receipt,
+                                                            CatalogCachePublication publication, byte[] canonicalBytes,
+                                                            byte[] nodeCanonicalBytes, byte[] authoringCanonicalBytes) {
+        return prepare(receipt, publication, canonicalBytes, null, true, nodeCanonicalBytes,
+            authoringCanonicalBytes);
+    }
+
     private synchronized PreparedApplication prepare(CatalogPublicationReceipt receipt,
                                                     CatalogCachePublication publication, byte[] canonicalBytes,
                                                     CatalogCachePublicationCodec.ValidatedPublication validated) {
+        return prepare(receipt, publication, canonicalBytes, validated, false, null, null);
+    }
+
+    private synchronized PreparedApplication prepare(CatalogPublicationReceipt receipt,
+                                                    CatalogCachePublication publication, byte[] canonicalBytes,
+                                                    CatalogCachePublicationCodec.ValidatedPublication validated,
+                                                    boolean workerValidated, byte[] nodeCanonicalBytes,
+                                                    byte[] authoringCanonicalBytes) {
         Objects.requireNonNull(receipt, "Catalog publication receipt is required");
         Objects.requireNonNull(publication, "Catalog publication is required");
         Objects.requireNonNull(canonicalBytes, "Catalog publication bytes are required");
@@ -95,15 +110,18 @@ public final class ReSyncCatalogPublicationReceiptHandler {
         }
         if (authoringProjection != null && (authoringRequired
             || publication.authoringPublication() != null)) {
-            return prepareWithAuthoring(publication, canonicalBytes, validated);
+            return prepareWithAuthoring(publication, canonicalBytes, validated, workerValidated,
+                nodeCanonicalBytes, authoringCanonicalBytes);
         }
-        return prepareNodeOnly(publication, canonicalBytes, validated);
+        return prepareNodeOnly(publication, canonicalBytes, validated, workerValidated, nodeCanonicalBytes);
     }
 
     private PreparedApplication prepareNodeOnly(CatalogCachePublication publication, byte[] canonicalBytes,
-                                                CatalogCachePublicationCodec.ValidatedPublication validated) {
-        Optional<ReSyncCatalogPublicationProjection.Prepared> prepared = validated == null
-            ? projection.prepare(publication, canonicalBytes) : projection.prepare(validated);
+                                                CatalogCachePublicationCodec.ValidatedPublication validated,
+                                                boolean workerValidated, byte[] nodeCanonicalBytes) {
+        Optional<ReSyncCatalogPublicationProjection.Prepared> prepared = workerValidated
+            ? projection.prepareWorkerValidated(publication, canonicalBytes, nodeCanonicalBytes)
+            : validated == null ? projection.prepare(publication, canonicalBytes) : projection.prepare(validated);
         if (prepared.isEmpty()) {
             return PreparedApplication.rejected(publication.key(), publication.revision(), READ_ONLY_STALE);
         }
@@ -113,22 +131,25 @@ public final class ReSyncCatalogPublicationReceiptHandler {
     }
 
     private PreparedApplication prepareWithAuthoring(CatalogCachePublication publication, byte[] canonicalBytes,
-                                                     CatalogCachePublicationCodec.ValidatedPublication validated) {
+                                                     CatalogCachePublicationCodec.ValidatedPublication validated,
+                                                     boolean workerValidated, byte[] nodeCanonicalBytes,
+                                                     byte[] authoringCanonicalBytes) {
         CatalogAuthoringPublication authoring = publication.authoringPublication();
-        byte[] authoringBytes;
         if (authoring == null) {
             if (!authoringRequired) {
-                return prepareNodeOnly(publication, canonicalBytes, validated);
+                return prepareNodeOnly(publication, canonicalBytes, validated, workerValidated, nodeCanonicalBytes);
             }
             return PreparedApplication.rejected(publication.key(), publication.revision(),
                 "CATALOG_PUBLICATION.AUTHORING_MISSING");
-        } else {
-            authoringBytes = authoringCodec.encodeBytes(authoring);
         }
-        Optional<ReSyncCatalogPublicationProjection.Prepared> nodePrepared = validated == null
-            ? projection.prepare(publication, canonicalBytes) : projection.prepare(validated);
-        Optional<ReSyncCatalogAuthoringProjection.Prepared> authoringPrepared = authoringProjection.prepare(
-            publication.key(), publication.revision(), authoring, authoringBytes);
+        Optional<ReSyncCatalogPublicationProjection.Prepared> nodePrepared = workerValidated
+            ? projection.prepareWorkerValidated(publication, canonicalBytes, nodeCanonicalBytes)
+            : validated == null ? projection.prepare(publication, canonicalBytes) : projection.prepare(validated);
+        Optional<ReSyncCatalogAuthoringProjection.Prepared> authoringPrepared = workerValidated
+            ? authoringProjection.prepareWorkerValidated(publication.key(), publication.revision(), authoring,
+                authoringCanonicalBytes)
+            : validated == null ? authoringProjection.prepare(publication.key(), publication.revision(), authoring,
+                authoringCodec.encodeBytes(authoring)) : authoringProjection.prepareValidated(validated);
         if (nodePrepared.isEmpty()) {
             return PreparedApplication.rejected(publication.key(), publication.revision(), READ_ONLY_STALE);
         }

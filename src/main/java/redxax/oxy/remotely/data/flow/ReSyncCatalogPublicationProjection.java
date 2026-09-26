@@ -114,8 +114,18 @@ public final class ReSyncCatalogPublicationProjection {
         return prepare(validated.publication(), validated.canonicalBytes(), true);
     }
 
+    synchronized Optional<Prepared> prepareWorkerValidated(CatalogCachePublication publication,
+                                                            byte[] canonicalBytes, byte[] nodeCanonicalBytes) {
+        return prepare(publication, canonicalBytes, true, nodeCanonicalBytes);
+    }
+
     private synchronized Optional<Prepared> prepare(CatalogCachePublication publication, byte[] canonicalBytes,
                                                      boolean validated) {
+        return prepare(publication, canonicalBytes, validated, null);
+    }
+
+    private synchronized Optional<Prepared> prepare(CatalogCachePublication publication, byte[] canonicalBytes,
+                                                     boolean validated, byte[] trustedNodeBytes) {
         Objects.requireNonNull(publication, "Catalog publication is required");
         Objects.requireNonNull(canonicalBytes, "Catalog publication bytes are required");
         if (canonicalBytes.length == 0 || !acceptsServer(publication.key())
@@ -124,8 +134,8 @@ public final class ReSyncCatalogPublicationProjection {
             return Optional.empty();
         }
         CatalogCachePublication nodePublication = nodePublication(publication);
-        byte[] nodeCanonicalBytes = nodePublication == publication
-            ? canonicalBytes : PUBLICATION_CODEC.encodeBytes(nodePublication);
+        byte[] nodeCanonicalBytes = trustedNodeBytes != null ? trustedNodeBytes
+            : nodePublication == publication ? canonicalBytes : PUBLICATION_CODEC.encodeBytes(nodePublication);
         CatalogCacheKey expected = acknowledgedKey.get();
         if (expected != null && !expected.equals(nodePublication.key())) {
             if (nodePublication.kind() != CatalogCachePublication.Kind.FULL

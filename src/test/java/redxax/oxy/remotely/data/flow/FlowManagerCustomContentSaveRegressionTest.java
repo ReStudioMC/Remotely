@@ -7,8 +7,16 @@ import com.google.gson.JsonParser;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import redxax.oxy.remotely.RemotelyClient;
+import redxax.oxy.remotely.RemotelyComposition;
 import redxax.oxy.remotely.flow.data.CustomContentDefinition;
 import redxax.oxy.remotely.flow.data.FlowSerializer;
+import redxax.oxy.remotely.host.ApplicationHost;
+import redxax.oxy.remotely.host.ApplicationHostRegistry;
+import redxax.oxy.remotely.util.TaskSchedulers;
+import restudio.rebase.platform.jvm.JvmTaskScheduler;
+import restudio.rescreen.game.MinecraftGameAssets;
+import restudio.rescreen.platform.TaskScheduler;
+import restudio.rescreen.ui.core.Screen;
 import restudio.resync.contract.cache.CatalogProjectionVersion;
 import restudio.resync.flow.cache.CatalogAuthoringPublication;
 import restudio.resync.flow.cache.CatalogCacheKey;
@@ -28,6 +36,7 @@ import restudio.resync.flow.protocol.CanonicalPayload;
 import restudio.resync.flow.protocol.ProtocolBody;
 import restudio.resync.flow.protocol.ProtocolEnvelope;
 import restudio.resync.flow.protocol.ProtocolEnvelopeCodec;
+import restudio.resync.flow.protocol.ProtocolRejectionCode;
 import restudio.resync.flow.protocol.ResourceActivationState;
 import restudio.resync.flow.protocol.ResourceDocument;
 import restudio.resync.flow.protocol.ResourceOperationKind;
@@ -35,6 +44,8 @@ import restudio.resync.flow.protocol.ResourceSaveRequest;
 import restudio.resync.flow.resource.ResourcePayloadCodecs;
 import restudio.resync.protocol.ReSyncProtocolContract;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -132,6 +143,143 @@ class FlowManagerCustomContentSaveRegressionTest {
             }
             probe.close();
         }
+    }
+
+    @Test
+    void pendingReceiptReplaysTheSameTypedMutationAndSettlesItsOriginalTicket() throws Exception {
+        TaskScheduler previousScheduler = TaskSchedulers.current();
+        JvmTaskScheduler scheduler = new JvmTaskScheduler();
+        Probe probe = new Probe(temporaryDirectory.resolve("pending-receipt"));
+        TaskSchedulers.configure(scheduler);
+        Harness harness = null;
+        try {
+            harness = connect(probe);
+            CustomContentDefinition authoritative = content("custom-item", "Original");
+            JsonObject authoritativeJson = JsonParser.parseString(FlowSerializer.serializeCustomContent(authoritative))
+                .getAsJsonObject();
+            CanonicalPayload<Map<String, Object>> authoritativePayload = canonical(authoritativeJson);
+            UUID authoritativeMutation = UUID.randomUUID();
+            harness.peer.seed(authoritativePayload, 1L, authoritativeMutation);
+            harness.peer.delayAckOnce = true;
+            harness.client.resourceRevisionReconciler().apply(new ReSyncResourceRevisionReconciler.ResourceResult(
+                SERVER_ID, ReSyncResourceType.CUSTOM_CONTENT.typeId(), authoritative.getId(), 1L,
+                authoritativeMutation.toString(), authoritativePayload.checksum().canonicalText(), false,
+                authoritativeJson, 1L));
+            probe.manager.cacheCustomContent(SERVER_ID, authoritative);
+
+            DesignerSaveNotifications.SaveTicket ticket = ticket(authoritative.getId());
+            AtomicReference<Boolean> saved = new AtomicReference<>();
+            ticket.whenFinished((value, ignored) -> saved.set(value));
+            assertTrue(probe.manager.saveCustomContent(SERVER_ID, content(authoritative.getId(), "Edited"), ticket,
+                probe.manager.customContentAuthority(SERVER_ID, authoritative.getId())));
+
+            long deadline = System.nanoTime() + 6_000_000_000L;
+            while (System.nanoTime() < deadline && saved.get() == null) {
+                ReSyncFlowClientTestHarness.drain(harness.client);
+                harness.peer.pump();
+                LockSupport.parkNanos(1_000_000L);
+            }
+            assertEquals(Boolean.TRUE, saved.get(), "requests=" + harness.peer.saveRequests.size()
+                + ",acks=" + harness.peer.ackCount() + ",revision=" + harness.peer.currentRevision()
+                + ",pending=" + DesignerSaveNotifications.isPending(ticket));
+            assertEquals(2, harness.peer.saveRequests.size());
+            assertEquals(ticket.requestId(), harness.peer.saveRequests.getFirst().requestId().toString());
+            assertEquals(harness.peer.saveRequests.getFirst().requestId(), harness.peer.saveRequests.getLast().requestId());
+            assertEquals(harness.peer.saveRequests.getFirst().mutationId(), harness.peer.saveRequests.getLast().mutationId());
+            assertEquals(2L, harness.peer.currentRevision());
+            assertEquals(1, harness.peer.ackCount());
+        } finally {
+            if (harness != null) {
+                harness.close();
+            }
+            probe.close();
+            TaskSchedulers.configure(previousScheduler);
+            scheduler.close();
+        }
+    }
+
+    @Test
+    void retainedTypedSaveRestoresItsFenceBeforeAnAuthoritativeReplayAck() throws Exception {
+        Probe probe = new Probe(temporaryDirectory.resolve("retained-save"));
+        Harness harness = null;
+        try {
+            harness = connect(probe);
+            CustomContentDefinition authoritative = content("custom-item", "Original");
+            JsonObject authoritativeJson = JsonParser.parseString(FlowSerializer.serializeCustomContent(authoritative))
+                .getAsJsonObject();
+            CanonicalPayload<Map<String, Object>> authoritativePayload = canonical(authoritativeJson);
+            UUID authoritativeMutation = UUID.randomUUID();
+            harness.peer.seed(authoritativePayload, 1L, authoritativeMutation);
+            harness.client.resourceRevisionReconciler().apply(new ReSyncResourceRevisionReconciler.ResourceResult(
+                SERVER_ID, ReSyncResourceType.CUSTOM_CONTENT.typeId(), authoritative.getId(), 1L,
+                authoritativeMutation.toString(), authoritativePayload.checksum().canonicalText(), false,
+                authoritativeJson, 1L));
+            probe.manager.cacheCustomContent(SERVER_ID, authoritative);
+
+            DesignerSaveNotifications.SaveTicket ticket = ticket(authoritative.getId());
+            AtomicReference<Boolean> saved = new AtomicReference<>();
+            ticket.whenFinished((value, ignored) -> saved.set(value));
+            assertTrue(probe.manager.saveCustomContent(SERVER_ID, content(authoritative.getId(), "Edited"), ticket,
+                probe.manager.customContentAuthority(SERVER_ID, authoritative.getId())));
+            ProtocolEnvelope<Map<String, Object>> first = awaitTypedSaveRequest(harness);
+            harness.peer.handled.add(first.messageId());
+            harness.peer.saveRequests.add(first);
+
+            Field pendingField = ReSyncFlowClient.class.getDeclaredField("pendingTypedResourceRequests");
+            pendingField.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            Map<UUID, Object> pendingRequests = (Map<UUID, Object>) pendingField.get(harness.client);
+            Object pending = pendingRequests.get(first.requestId());
+            assertNotNull(pending);
+            Method retain = ReSyncFlowClient.class.getDeclaredMethod("retainTypedTransportMutation", pending.getClass());
+            retain.setAccessible(true);
+            assertTrue((Boolean) retain.invoke(harness.client, pending));
+            Method retireSaves = ReSyncFlowClient.class.getDeclaredMethod("retireResourceSavesWithoutDispatch");
+            retireSaves.setAccessible(true);
+            retireSaves.invoke(harness.client);
+            Field generationField = ReSyncFlowClient.class.getDeclaredField("activeTransportGeneration");
+            generationField.setAccessible(true);
+            int generation = generationField.getInt(harness.client);
+            Method replay = ReSyncFlowClient.class.getDeclaredMethod("retryRetainedTransportMutations", int.class);
+            replay.setAccessible(true);
+            replay.invoke(harness.client, generation);
+
+            long deadline = System.nanoTime() + 3_000_000_000L;
+            while (System.nanoTime() < deadline && saved.get() == null) {
+                ReSyncFlowClientTestHarness.drain(harness.client);
+                harness.peer.pump();
+                LockSupport.parkNanos(1_000_000L);
+            }
+            assertEquals(Boolean.TRUE, saved.get());
+            assertEquals(2, harness.peer.saveRequests.size());
+            assertEquals(first.requestId(), harness.peer.saveRequests.getLast().requestId());
+            assertEquals(first.mutationId(), harness.peer.saveRequests.getLast().mutationId());
+            assertEquals(2L, harness.peer.currentRevision());
+        } finally {
+            if (harness != null) {
+                harness.close();
+            }
+            probe.close();
+        }
+    }
+
+    private static ProtocolEnvelope<Map<String, Object>> awaitTypedSaveRequest(Harness harness) throws Exception {
+        long deadline = System.nanoTime() + 3_000_000_000L;
+        while (System.nanoTime() < deadline) {
+            ReSyncFlowClientTestHarness.drain(harness.client);
+            for (ReSyncDecodedFrame frame : harness.transport.sentFrames()) {
+                if (frame.messageType() != ReSyncProtocolContract.MESSAGE_PROTOCOL_ENVELOPE) {
+                    continue;
+                }
+                ProtocolEnvelope<Map<String, Object>> request = CustomContentAuthoringPeer.ENVELOPES.decodeBytes(frame.payload());
+                if (request.body() instanceof ProtocolBody.ResourceRequest body
+                    && body.operation() instanceof ResourceSaveRequest<?>) {
+                    return request;
+                }
+            }
+            LockSupport.parkNanos(1_000_000L);
+        }
+        throw new AssertionError("Typed resource save was not dispatched");
     }
 
     private static DesignerSaveNotifications.SaveTicket ticket(String id) {
@@ -249,7 +397,7 @@ class FlowManagerCustomContentSaveRegressionTest {
         private final Path stateRoot;
 
         private Probe(Path stateRoot) {
-            super(null);
+            super(RemotelyComposition.browser(new TestHost()).build());
             this.stateRoot = stateRoot;
             manager = new FlowManager(this, null, null, redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(stateRoot));
         }
@@ -261,7 +409,27 @@ class FlowManagerCustomContentSaveRegressionTest {
 
         private void close() {
             manager.shutdown();
+            TestHost host = (TestHost) getHost();
+            ApplicationHostRegistry.install(host.previousHost);
+            RemotelyClient.INSTANCE = host.previousClient;
         }
+    }
+
+    private static final class TestHost implements ApplicationHost {
+        private final ApplicationHost previousHost = ApplicationHostRegistry.current();
+        private final RemotelyClient previousClient = RemotelyClient.INSTANCE;
+
+        @Override public void setScreen(Screen screen) { }
+        @Override public Screen getCurrentScreen() { return null; }
+        @Override public void ensureTextRenderer() { }
+        @Override public MinecraftGameAssets getGameAssets() { return null; }
+        @Override public Object getFontIdentifier(String namespace, String path) { return null; }
+        @Override public void openParentScreen(Screen currentScreen, Object parent) { }
+        @Override public void setClipboard(String text) { }
+        @Override public boolean shouldCloseRootScreen() { return false; }
+        @Override public String getGameVersion() { return ""; }
+        @Override public String getGameUserName() { return ""; }
+        @Override public String getGameUUID() { return ""; }
     }
 
     private record Harness(ReSyncFlowClient client, ScriptedReSyncTransport transport,
@@ -285,6 +453,8 @@ class FlowManagerCustomContentSaveRegressionTest {
         private ServerResourceLocator resource;
         private ResourceDocument<Map<String, Object>> current;
         private ProtocolEnvelope<Map<String, Object>> lastSaveRequest;
+        private final List<ProtocolEnvelope<Map<String, Object>>> saveRequests = new ArrayList<>();
+        private boolean delayAckOnce;
         private int sequence = 20;
         private int acknowledgements;
 
@@ -318,11 +488,21 @@ class FlowManagerCustomContentSaveRegressionTest {
                 @SuppressWarnings("unchecked")
                 ResourceSaveRequest<Map<String, Object>> save = (ResourceSaveRequest<Map<String, Object>>) untyped;
                 lastSaveRequest = request;
-                if (save.expectedRevision() != current.revision()) {
+                saveRequests.add(request);
+                if (save.expectedRevision() != current.revision()
+                    && !save.mutationId().equals(current.mutationId())) {
                     continue;
                 }
-                current = ResourceDocument.live(resource, current.revision() + 1L, save.mutationId(),
-                    save.canonicalPayload(), ResourceActivationState.ACTIVE, "peer");
+                if (!save.mutationId().equals(current.mutationId())) {
+                    current = ResourceDocument.live(resource, current.revision() + 1L, save.mutationId(),
+                        save.canonicalPayload(), ResourceActivationState.ACTIVE, "peer");
+                }
+                if (delayAckOnce) {
+                    delayAckOnce = false;
+                    transport.receiveEnvelope(pending(request), sequence++);
+                    handledNow++;
+                    continue;
+                }
                 transport.receiveEnvelope(response(request, current), sequence++);
                 acknowledgements++;
                 handledNow++;
@@ -351,6 +531,16 @@ class FlowManagerCustomContentSaveRegressionTest {
                 ContractRef.of(OWNER, ResourceTypeId.of("resource.document")), null, document.payloadHash(), false,
                 null, null, null, null, null, 1L, ProtocolEnvelope.Status.OK, List.of(), Map.of(),
                 new ProtocolBody.ResourceDocumentResponse(ResourceOperationKind.SAVE, document));
+        }
+
+        private ProtocolEnvelope<Map<String, Object>> pending(ProtocolEnvelope<Map<String, Object>> request) {
+            Map<String, Object> values = Map.of("rejectionCode", ProtocolRejectionCode.RESOURCE_MUTATION_PENDING.wireValue(),
+                "rejectionMessage", "Resource mutation is awaiting durable recovery");
+            return new ProtocolEnvelope<>(ProtocolEnvelope.Kind.RESPONSE, request.contractVersion(), UUID.randomUUID(),
+                request.requestId(), request.correlationId(), request.traceId(), server, request.resource(), 0L, 1L,
+                request.mutationId(), request.operation(), request.capabilities(), request.payloadType(), null,
+                request.payloadHash(), false, null, null, null, null, null, 0L, ProtocolEnvelope.Status.REJECTED,
+                List.of(), values, new ProtocolBody.ControlResponse("resource.rejection", values));
         }
     }
 }

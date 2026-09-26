@@ -1,5 +1,6 @@
 import org.gradle.api.tasks.Sync
 import org.teavm.gradle.api.SourceFilePolicy
+import org.teavm.gradle.tasks.GenerateJavaScriptTask
 
 import java.io.File
 import java.security.MessageDigest
@@ -361,6 +362,18 @@ teavm {
 }
 
 val browserSshAssets = layout.buildDirectory.dir("generated/browser-ssh")
+val generateCatalogWorker by tasks.registering(GenerateJavaScriptTask::class) {
+    dependsOn(verifyBrowserGraph)
+    classpath.from(configurations.named("teavmClasspath"), sourceSets.main.get().runtimeClasspath,
+        sourceSets.named("teavm").get().runtimeClasspath)
+    mainClass.set("redxax.oxy.remotely.web.platform.BrowserCatalogPublicationWorker")
+    targetFileName.set("remotely-catalog-worker.js")
+    outputDir.set(layout.buildDirectory.dir("generated/teavm/catalog-worker").get().asFile)
+    obfuscated.set(true)
+    sourceMap.set(false)
+    sourceFilePolicy.set(SourceFilePolicy.DO_NOTHING)
+}
+val minecraftAssetsDirectory = providers.environmentVariable("REMOTELY_MINECRAFT_ASSETS_DIR").orNull?.let(::file)
 val buildBrowserSsh by tasks.registering(Exec::class) {
     val output = browserSshAssets.get().asFile
     inputs.files(fileTree("src/main/go/browser-ssh"))
@@ -373,11 +386,18 @@ tasks.register<Sync>("browserDist") {
     filePermissions {
         unix("0644")
     }
+    dirPermissions {
+        unix("0755")
+    }
     val distribution = layout.buildDirectory.dir("generated/teavm/remotely")
     val atlasDirectory = layout.buildDirectory.dir("generated/icon-atlas")
-    dependsOn(tasks.named("generateJavaScript"), verifyBrowserGraph, buildBrowserSsh, tasks.named("verifyIconAtlas"))
+    dependsOn(tasks.named("generateJavaScript"), generateCatalogWorker, verifyBrowserGraph, buildBrowserSsh,
+        tasks.named("verifyIconAtlas"))
     from(layout.projectDirectory.dir("src/main/resources"))
     from(layout.buildDirectory.dir("generated/teavm/js")) {
+        into("js")
+    }
+    from(layout.buildDirectory.dir("generated/teavm/catalog-worker")) {
         into("js")
     }
     from(layout.projectDirectory.dir("../../ReScreen/src/main/java")) {
@@ -404,22 +424,43 @@ tasks.register<Sync>("browserDist") {
     from(atlasDirectory) {
         into("assets/restudio/textures/icons")
     }
+    if (minecraftAssetsDirectory != null) {
+        from(minecraftAssetsDirectory) {
+            into("assets/minecraft")
+        }
+    }
     into(distribution)
     doLast {
         val root = distribution.get().asFile
         val bundle = root.resolve("js/remotely-browser.js")
+        val catalogWorker = root.resolve("js/remotely-catalog-worker.js")
+        val catalogBootstrap = root.resolve("js/remotely-catalog-worker-bootstrap.js")
         val index = root.resolve("index.html")
         val sshWorker = root.resolve("ssh/restudio-ssh-worker.js")
         val sshEngine = root.resolve("ssh/restudio-ssh.wasm")
         val sshRuntime = root.resolve("ssh/wasm_exec.js")
+        val minecraftCatalog = root.resolve("assets/minecraft/catalog.js")
+        val minecraftManifest = root.resolve("assets/minecraft/manifest.json")
         require(bundle.isFile && bundle.length() > 0) { "Remotely Web browser bundle is missing or empty: $bundle" }
+        require(catalogWorker.isFile && catalogWorker.length() > 0) { "Remotely Web catalog worker is missing or empty: $catalogWorker" }
+        require(catalogBootstrap.isFile && catalogBootstrap.length() > 0) {
+            "Remotely Web catalog worker bootstrap is missing or empty: $catalogBootstrap"
+        }
         require(index.isFile) { "Remotely Web index is missing: $index" }
         require(sshWorker.isFile && sshWorker.length() > 0) { "Remotely Web SSH worker is missing or empty: $sshWorker" }
         require(sshEngine.isFile && sshEngine.length() > 0) { "Remotely Web SSH engine is missing or empty: $sshEngine" }
         require(sshRuntime.isFile && sshRuntime.length() > 0) { "Remotely Web Go runtime is missing or empty: $sshRuntime" }
+        require(minecraftCatalog.exists() == minecraftManifest.exists()) {
+            "Remotely Web Minecraft assets require both catalog.js and manifest.json"
+        }
+        if (minecraftCatalog.isFile) {
+            val verification = ProcessBuilder("python3", file("scripts/prepare-minecraft-assets.py").absolutePath,
+                "--output", root.absolutePath, "--verify").inheritIO().start()
+            require(verification.waitFor() == 0) { "Remotely Web Minecraft asset verification failed" }
+        }
 
         val digest = MessageDigest.getInstance("SHA-256")
-        listOf(bundle, sshWorker, sshEngine, sshRuntime).forEach { artifact ->
+        (listOf(bundle, sshWorker, sshEngine, sshRuntime) + listOfNotNull(minecraftCatalog.takeIf(File::isFile))).forEach { artifact ->
             digest.update(artifact.name.toByteArray())
             digest.update(0.toByte())
             digest.update(artifact.readBytes())
@@ -427,7 +468,9 @@ tasks.register<Sync>("browserDist") {
         }
         val buildId = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
         val markerPattern = Regex("""(<meta\s+name="remotely-build-id"\s+content=")[^"]*(">)""")
-        val indexHtml = index.readText()
+        val indexHtml = index.readText().let { html ->
+            if (minecraftCatalog.isFile) html else html.replace("    <script src=\"assets/minecraft/catalog.js\"></script>\n", "")
+        }
         require(markerPattern.containsMatchIn(indexHtml)) { "Remotely Web build marker meta tag is missing: $index" }
         val manifests = atlasDirectory.get().asFile.listFiles { candidate -> candidate.isFile && candidate.name.matches(Regex("atlas-[0-9a-f]{64}\\.json")) }.orEmpty()
         require(manifests.size == 1) { "Remotely Web Distribution Requires Exactly One Content-Versioned Icon Atlas" }

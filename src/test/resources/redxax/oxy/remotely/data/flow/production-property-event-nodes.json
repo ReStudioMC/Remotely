@@ -1,0 +1,2537 @@
+{
+  "sources": [
+    {
+      "source": "nodes/event.json",
+      "sourceSha256": "8296112A0EB3278F3DFA8AF9C8154729E9D3FB1A538FEC2747DC3F960C461545",
+      "nodeSha256": "2A8DBB148433EC9FF751BDC3A6C8466BD8697974E2086309E4E174962B8CEB64",
+      "node": {
+    "id": "event.block.break",
+    "displayName": "Event Block Break",
+    "description": "Runs when the event block break event occurs.",
+    "domain": "event",
+    "family": "block",
+    "lifecycle": "active",
+    "handlerCapability": "flow.event",
+    "selectorIntent": "none",
+    "inspectorIntent": "generic",
+    "owner": "restudio.resync",
+    "category": "EVENT",
+    "schemaVersion": 2,
+    "kind": "EVENT",
+    "tags": [
+      "event",
+      "block"
+    ],
+    "examples": [
+      "Connect Flow to the actions that should run when the event block break event occurs."
+    ],
+    "trigger": true,
+    "eventType": "org.bukkit.event.block.BlockBreakEvent",
+    "handlerConfig": {
+      "priority": "HIGHEST",
+      "ignoreCancelled": false,
+      "playerEvent": true
+    },
+    "inputs": [],
+    "outputs": [
+      {
+        "id": "flow",
+        "displayName": "Flow",
+        "name": "flow",
+        "pinType": "FLOW",
+        "dataType": "execution",
+        "description": "Starts the connected flow for this event.",
+        "direction": "output"
+      },
+      {
+        "id": "event.player",
+        "displayName": "Player",
+        "name": "event.player",
+        "pinType": "DATA",
+        "dataType": "player",
+        "description": "Provides the player value produced by this event.",
+        "direction": "output"
+      },
+      {
+        "id": "event.block",
+        "displayName": "Block",
+        "name": "event.block",
+        "pinType": "DATA",
+        "dataType": "block",
+        "description": "Provides the block value produced by this event.",
+        "direction": "output"
+      },
+      {
+        "id": "event.location",
+        "displayName": "Location",
+        "name": "event.location",
+        "pinType": "DATA",
+        "dataType": "location",
+        "description": "Provides the location value produced by this event.",
+        "direction": "output"
+      },
+      {
+        "id": "event.is_cancelled",
+        "displayName": "Is Cancelled",
+        "name": "event.is_cancelled",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Provides the is cancelled value produced by this event.",
+        "direction": "output"
+      }
+    ],
+    "outputMappings": [
+      {
+        "source": "event.player",
+        "target": "event.player"
+      },
+      {
+        "source": "event.block",
+        "target": "event.block"
+      },
+      {
+        "source": "event.block.location",
+        "target": "event.location"
+      },
+      {
+        "source": "event.cancelled",
+        "target": "event.is_cancelled"
+      }
+    ],
+    "migrationMapping": {
+      "sourceSchemaVersion": 1,
+      "targetSchemaVersion": 2,
+      "complete": true,
+      "pins": [
+        {
+          "direction": "output",
+          "source": "flow",
+          "target": "flow"
+        },
+        {
+          "direction": "output",
+          "source": "event.player",
+          "target": "event.player"
+        },
+        {
+          "direction": "output",
+          "source": "event.block",
+          "target": "event.block"
+        },
+        {
+          "direction": "output",
+          "source": "event.location",
+          "target": "event.location"
+        },
+        {
+          "direction": "output",
+          "source": "event.is_cancelled",
+          "target": "event.is_cancelled"
+        }
+      ]
+    },
+    "aliases": [
+      "block_break"
+    ]
+  }
+    },
+    {
+      "source": "nodes/player.json",
+      "sourceSha256": "9A00C39DD08AC807D5A96B02C253EC0D6BE949B30610B41E6120B45192C7A287",
+      "nodeSha256": "977D6DE38118BD3AFF6AAE76C771F4F92BAA28BE84F17D400D405D6069D78C28",
+      "node": {
+    "id": "player.properties",
+    "displayName": "Player Properties",
+    "description": "Reads a selected property from a player.",
+    "domain": "player",
+    "family": "properties",
+    "lifecycle": "active",
+    "handlerCapability": "player.properties",
+    "selectorIntent": "player-property",
+    "inspectorIntent": "player-property",
+    "owner": "restudio.resync",
+    "category": "PLAYER",
+    "schemaVersion": 2,
+    "kind": "QUERY",
+    "tags": [
+      "player",
+      "properties",
+      "query"
+    ],
+    "examples": [
+      "Provide a player, choose a property, and connect the typed output."
+    ],
+    "handler": "player",
+    "handlerConfig": {
+      "operation": "get"
+    },
+    "inputs": [
+      {
+        "id": "target",
+        "displayName": "Target",
+        "name": "target",
+        "pinType": "DATA",
+        "dataType": "player",
+        "description": "Player selected for this operation.",
+        "direction": "input"
+      },
+      {
+        "id": "action",
+        "displayName": "Action",
+        "name": "action",
+        "pinType": "DATA",
+        "dataType": "string",
+        "description": "Action to apply to the selected target.",
+        "direction": "input",
+        "widget": "DROPDOWN",
+        "options": [
+          "get",
+          "has"
+        ],
+        "defaultValue": "get"
+      },
+      {
+        "id": "property",
+        "displayName": "Property",
+        "name": "property",
+        "pinType": "DATA",
+        "dataType": "string",
+        "description": "Property name used for this operation.",
+        "direction": "input",
+        "widget": "SEARCHABLE_LIST",
+        "options": [
+          "location",
+          "health",
+          "max_health",
+          "food_level",
+          "gamemode",
+          "sneak",
+          "fly",
+          "name",
+          "uuid",
+          "world",
+          "inventory",
+          "item_in_hand",
+          "display_name",
+          "xp_level",
+          "walk_speed",
+          "fly_speed",
+          "exp",
+          "total_exp",
+          "exp_to_level",
+          "allow_flight",
+          "on_ground",
+          "sleeping",
+          "bed_spawn_location",
+          "last_damage",
+          "killer",
+          "ping",
+          "player_list_name",
+          "op",
+          "offhand_item",
+          "saturation",
+          "exhaustion",
+          "sprint",
+          "vanish",
+          "glowing",
+          "invulnerable",
+          "fire_ticks",
+          "freeze_ticks",
+          "no_damage_ticks",
+          "remaining_air",
+          "max_air",
+          "xp_progress",
+          "compass_target",
+          "ip",
+          "is_flying",
+          "online",
+          "whitelisted",
+          "banned",
+          "sleep_ticks",
+          "locale",
+          "view_distance",
+          "is_op",
+          "item_in_offhand",
+          "armor"
+        ],
+        "defaultValue": "location"
+      }
+    ],
+    "outputs": [
+      {
+        "id": "has",
+        "displayName": "Has",
+        "name": "has",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Reports whether the requested player value is available.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "has"
+        }
+      },
+      {
+        "id": "location",
+        "displayName": "Location",
+        "name": "location",
+        "pinType": "DATA",
+        "dataType": "location",
+        "description": "Returns the Location value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "location"
+        }
+      },
+      {
+        "id": "health",
+        "displayName": "Health",
+        "name": "health",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Returns the Health value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "health"
+        }
+      },
+      {
+        "id": "max_health",
+        "displayName": "Max Health",
+        "name": "max_health",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Returns the Max Health value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "max_health"
+        }
+      },
+      {
+        "id": "food_level",
+        "displayName": "Food Level",
+        "name": "food_level",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Returns the Food Level value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "food_level"
+        }
+      },
+      {
+        "id": "gamemode",
+        "displayName": "Gamemode",
+        "name": "gamemode",
+        "pinType": "DATA",
+        "dataType": "gamemode",
+        "description": "Returns the Gamemode value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "gamemode"
+        }
+      },
+      {
+        "id": "sneak",
+        "displayName": "Sneak",
+        "name": "sneak",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Returns the Sneak value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "sneak"
+        }
+      },
+      {
+        "id": "fly",
+        "displayName": "Fly",
+        "name": "fly",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Returns the Fly value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "fly"
+        }
+      },
+      {
+        "id": "name",
+        "displayName": "Name",
+        "name": "name",
+        "pinType": "DATA",
+        "dataType": "string",
+        "description": "Returns the Name value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "name"
+        }
+      },
+      {
+        "id": "uuid",
+        "displayName": "UUID",
+        "name": "uuid",
+        "pinType": "DATA",
+        "dataType": "uuid",
+        "description": "Returns the UUID value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "uuid"
+        }
+      },
+      {
+        "id": "world",
+        "displayName": "World",
+        "name": "world",
+        "pinType": "DATA",
+        "dataType": "world",
+        "description": "Returns the World value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "world"
+        }
+      },
+      {
+        "id": "inventory",
+        "displayName": "Inventory",
+        "name": "inventory",
+        "pinType": "DATA",
+        "dataType": "inventory",
+        "description": "Returns the Inventory value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "inventory"
+        }
+      },
+      {
+        "id": "item_in_hand",
+        "displayName": "Item In Hand",
+        "name": "item_in_hand",
+        "pinType": "DATA",
+        "dataType": "itemstack",
+        "description": "Returns the Item In Hand value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "item_in_hand"
+        }
+      },
+      {
+        "id": "display_name",
+        "displayName": "Display Name",
+        "name": "display_name",
+        "pinType": "DATA",
+        "dataType": "string",
+        "description": "Returns the Display Name value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "display_name"
+        }
+      },
+      {
+        "id": "xp_level",
+        "displayName": "XP Level",
+        "name": "xp_level",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Returns the XP Level value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "xp_level"
+        }
+      },
+      {
+        "id": "walk_speed",
+        "displayName": "Walk Speed",
+        "name": "walk_speed",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Returns the Walk Speed value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "walk_speed"
+        }
+      },
+      {
+        "id": "fly_speed",
+        "displayName": "Fly Speed",
+        "name": "fly_speed",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Returns the Fly Speed value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "fly_speed"
+        }
+      },
+      {
+        "id": "exp",
+        "displayName": "Exp",
+        "name": "exp",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Returns the Exp value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "exp"
+        }
+      },
+      {
+        "id": "total_exp",
+        "displayName": "Total Exp",
+        "name": "total_exp",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Returns the Total Exp value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "total_exp"
+        }
+      },
+      {
+        "id": "exp_to_level",
+        "displayName": "Exp To Level",
+        "name": "exp_to_level",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Returns the Exp To Level value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "exp_to_level"
+        }
+      },
+      {
+        "id": "allow_flight",
+        "displayName": "Allow Flight",
+        "name": "allow_flight",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Returns the Allow Flight value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "allow_flight"
+        }
+      },
+      {
+        "id": "on_ground",
+        "displayName": "On Ground",
+        "name": "on_ground",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Returns the On Ground value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "on_ground"
+        }
+      },
+      {
+        "id": "sleeping",
+        "displayName": "Sleeping",
+        "name": "sleeping",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Returns the Sleeping value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "sleeping"
+        }
+      },
+      {
+        "id": "bed_spawn_location",
+        "displayName": "Bed Spawn Location",
+        "name": "bed_spawn_location",
+        "pinType": "DATA",
+        "dataType": "location",
+        "description": "Returns the Bed Spawn Location value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "bed_spawn_location"
+        }
+      },
+      {
+        "id": "last_damage",
+        "displayName": "Last Damage",
+        "name": "last_damage",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Returns the Last Damage value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "last_damage"
+        }
+      },
+      {
+        "id": "killer",
+        "displayName": "Killer",
+        "name": "killer",
+        "pinType": "DATA",
+        "dataType": "player",
+        "description": "Returns the Killer value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "killer"
+        }
+      },
+      {
+        "id": "ping",
+        "displayName": "Ping",
+        "name": "ping",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Returns the Ping value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "ping"
+        }
+      },
+      {
+        "id": "player_list_name",
+        "displayName": "Player List Name",
+        "name": "player_list_name",
+        "pinType": "DATA",
+        "dataType": "string",
+        "description": "Returns the Player List Name value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "player_list_name"
+        }
+      },
+      {
+        "id": "op",
+        "displayName": "Op",
+        "name": "op",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Returns the Op value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "op"
+        }
+      },
+      {
+        "id": "offhand_item",
+        "displayName": "Offhand Item",
+        "name": "offhand_item",
+        "pinType": "DATA",
+        "dataType": "itemstack",
+        "description": "Returns the Offhand Item value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "offhand_item"
+        }
+      },
+      {
+        "id": "saturation",
+        "displayName": "Saturation",
+        "name": "saturation",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Returns the Saturation value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "saturation"
+        }
+      },
+      {
+        "id": "exhaustion",
+        "displayName": "Exhaustion",
+        "name": "exhaustion",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Returns the Exhaustion value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "exhaustion"
+        }
+      },
+      {
+        "id": "sprint",
+        "displayName": "Sprint",
+        "name": "sprint",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Returns the Sprint value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "sprint"
+        }
+      },
+      {
+        "id": "vanish",
+        "displayName": "Vanish",
+        "name": "vanish",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Returns the Vanish value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "vanish"
+        }
+      },
+      {
+        "id": "glowing",
+        "displayName": "Glowing",
+        "name": "glowing",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Returns the Glowing value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "glowing"
+        }
+      },
+      {
+        "id": "invulnerable",
+        "displayName": "Invulnerable",
+        "name": "invulnerable",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Returns the Invulnerable value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "invulnerable"
+        }
+      },
+      {
+        "id": "fire_ticks",
+        "displayName": "Fire Ticks",
+        "name": "fire_ticks",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Returns the Fire Ticks value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "fire_ticks"
+        }
+      },
+      {
+        "id": "freeze_ticks",
+        "displayName": "Freeze Ticks",
+        "name": "freeze_ticks",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Returns the Freeze Ticks value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "freeze_ticks"
+        }
+      },
+      {
+        "id": "no_damage_ticks",
+        "displayName": "No Damage Ticks",
+        "name": "no_damage_ticks",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Returns the No Damage Ticks value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "no_damage_ticks"
+        }
+      },
+      {
+        "id": "remaining_air",
+        "displayName": "Remaining Air",
+        "name": "remaining_air",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Returns the Remaining Air value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "remaining_air"
+        }
+      },
+      {
+        "id": "max_air",
+        "displayName": "Max Air",
+        "name": "max_air",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Returns the Max Air value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "max_air"
+        }
+      },
+      {
+        "id": "xp_progress",
+        "displayName": "XP Progress",
+        "name": "xp_progress",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Returns the XP Progress value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "xp_progress"
+        }
+      },
+      {
+        "id": "compass_target",
+        "displayName": "Compass Target",
+        "name": "compass_target",
+        "pinType": "DATA",
+        "dataType": "location",
+        "description": "Returns the Compass Target value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "compass_target"
+        }
+      },
+      {
+        "id": "ip",
+        "displayName": "IP",
+        "name": "ip",
+        "pinType": "DATA",
+        "dataType": "string",
+        "description": "Returns the IP value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "ip"
+        }
+      },
+      {
+        "id": "is_flying",
+        "displayName": "Is Flying",
+        "name": "is_flying",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Returns the Is Flying value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "is_flying"
+        }
+      },
+      {
+        "id": "online",
+        "displayName": "Online",
+        "name": "online",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Returns the Online value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "online"
+        }
+      },
+      {
+        "id": "whitelisted",
+        "displayName": "Whitelisted",
+        "name": "whitelisted",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Returns the Whitelisted value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "whitelisted"
+        }
+      },
+      {
+        "id": "banned",
+        "displayName": "Banned",
+        "name": "banned",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Returns the Banned value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "banned"
+        }
+      },
+      {
+        "id": "sleep_ticks",
+        "displayName": "Sleep Ticks",
+        "name": "sleep_ticks",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Returns the Sleep Ticks value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "sleep_ticks"
+        }
+      },
+      {
+        "id": "locale",
+        "displayName": "Locale",
+        "name": "locale",
+        "pinType": "DATA",
+        "dataType": "string",
+        "description": "Returns the Locale value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "locale"
+        }
+      },
+      {
+        "id": "view_distance",
+        "displayName": "View Distance",
+        "name": "view_distance",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Returns the View Distance value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "view_distance"
+        }
+      },
+      {
+        "id": "is_op",
+        "displayName": "Is Op",
+        "name": "is_op",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Returns the Is Op value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "is_op"
+        }
+      },
+      {
+        "id": "item_in_offhand",
+        "displayName": "Item In Offhand",
+        "name": "item_in_offhand",
+        "pinType": "DATA",
+        "dataType": "itemstack",
+        "description": "Returns the Item In Offhand value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "item_in_offhand"
+        }
+      },
+      {
+        "id": "armor",
+        "displayName": "Armor",
+        "name": "armor",
+        "pinType": "DATA",
+        "dataType": "list<item>",
+        "description": "Returns the Armor value produced by this operation.",
+        "direction": "output",
+        "visibleWhen": {
+          "action": "get",
+          "property": "armor"
+        }
+      }
+    ]
+  }
+    },
+    {
+      "source": "nodes/entity.json",
+      "sourceSha256": "892B175C4EFA4714179E284BB797572AB902D754770D161C2E34DD5191F8CC56",
+      "nodeSha256": "24E7DA9FCD6E882B66FB6BA320EDE8A8099819015F0885215BAB4DF25B55721A",
+      "node": {
+    "id": "entity.properties",
+    "displayName": "Entity Properties",
+    "description": "Provides the entity property family contract for entity workflows.",
+    "domain": "entity",
+    "family": "entity",
+    "lifecycle": "active",
+    "handlerCapability": "entity.property",
+    "selectorIntent": "entity-property",
+    "inspectorIntent": "entity-property",
+    "owner": "restudio.resync",
+    "category": "ENTITY",
+    "schemaVersion": 2,
+    "kind": "QUERY",
+    "tags": [
+      "entity",
+      "property"
+    ],
+    "aliases": [
+      "Entity Property",
+      "Get Entity Property"
+    ],
+    "examples": [
+      "Provides the entity property family contract for entity workflows."
+    ],
+    "handler": "entity",
+    "handlerConfig": {"operation": "get"},
+    "inputs": [
+      {
+        "id": "input_target",
+        "displayName": "Target",
+        "name": "target",
+        "pinType": "DATA",
+        "dataType": "entity",
+        "description": "Entity selected for this operation."
+      },
+      {
+        "id": "input_action",
+        "displayName": "Action",
+        "name": "action",
+        "pinType": "DATA",
+        "dataType": "string",
+        "description": "Action to apply to the selected target.",
+        "widget": "DROPDOWN",
+        "options": [
+          "get",
+          "has"
+        ],
+        "defaultValue": "get"
+      },
+      {
+        "id": "input_property",
+        "displayName": "Property",
+        "name": "property",
+        "pinType": "DATA",
+        "dataType": "string",
+        "description": "Property name used for this operation.",
+        "widget": "SEARCHABLE_LIST",
+        "options": [
+          "name",
+          "custom_name",
+          "glowing",
+          "silent",
+          "invulnerable",
+          "fire_ticks",
+          "freeze_ticks",
+          "health",
+          "max_health",
+          "persistent",
+          "target",
+          "baby",
+          "tamed",
+          "sitting",
+          "swimming",
+          "pickup_items",
+          "gravity",
+          "visible",
+          "ai",
+          "collidable",
+          "remove",
+          "kill",
+          "exists",
+          "type",
+          "uuid",
+          "location",
+          "velocity",
+          "world",
+          "passengers",
+          "vehicle",
+          "height",
+          "width",
+          "ticks_lived",
+          "no_damage_ticks",
+          "remaining_air",
+          "max_air",
+          "fall_distance",
+          "portal_cooldown",
+          "scoreboard_tags",
+          "absorption",
+          "is_alive",
+          "is_valid",
+          "is_dead"
+        ],
+        "defaultValue": "name"
+      }
+    ],
+    "outputs": [
+      {
+        "id": "output_has",
+        "displayName": "Has",
+        "name": "has",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "has"
+        }
+      },
+      {
+        "id": "output_name",
+        "displayName": "Name",
+        "name": "name",
+        "pinType": "DATA",
+        "dataType": "string",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "name"
+        }
+      },
+      {
+        "id": "output_custom_name",
+        "displayName": "Custom Name",
+        "name": "custom_name",
+        "pinType": "DATA",
+        "dataType": "string",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "custom_name"
+        }
+      },
+      {
+        "id": "output_glowing",
+        "displayName": "Glowing",
+        "name": "glowing",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "glowing"
+        }
+      },
+      {
+        "id": "output_silent",
+        "displayName": "Silent",
+        "name": "silent",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "silent"
+        }
+      },
+      {
+        "id": "output_invulnerable",
+        "displayName": "Invulnerable",
+        "name": "invulnerable",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "invulnerable"
+        }
+      },
+      {
+        "id": "output_fire_ticks",
+        "displayName": "Fire Ticks",
+        "name": "fire_ticks",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "fire_ticks"
+        }
+      },
+      {
+        "id": "output_freeze_ticks",
+        "displayName": "Freeze Ticks",
+        "name": "freeze_ticks",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "freeze_ticks"
+        }
+      },
+      {
+        "id": "output_health",
+        "displayName": "Health",
+        "name": "health",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "health"
+        }
+      },
+      {
+        "id": "output_max_health",
+        "displayName": "Max Health",
+        "name": "max_health",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "max_health"
+        }
+      },
+      {
+        "id": "output_persistent",
+        "displayName": "Persistent",
+        "name": "persistent",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "persistent"
+        }
+      },
+      {
+        "id": "output_target",
+        "displayName": "Target",
+        "name": "target",
+        "pinType": "DATA",
+        "dataType": "entity",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "target"
+        }
+      },
+      {
+        "id": "output_baby",
+        "displayName": "Baby",
+        "name": "baby",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "baby"
+        }
+      },
+      {
+        "id": "output_tamed",
+        "displayName": "Tamed",
+        "name": "tamed",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "tamed"
+        }
+      },
+      {
+        "id": "output_sitting",
+        "displayName": "Sitting",
+        "name": "sitting",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "sitting"
+        }
+      },
+      {
+        "id": "output_swimming",
+        "displayName": "Swimming",
+        "name": "swimming",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "swimming"
+        }
+      },
+      {
+        "id": "output_pickup_items",
+        "displayName": "Pickup Items",
+        "name": "pickup_items",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "pickup_items"
+        }
+      },
+      {
+        "id": "output_gravity",
+        "displayName": "Gravity",
+        "name": "gravity",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "gravity"
+        }
+      },
+      {
+        "id": "output_visible",
+        "displayName": "Visible",
+        "name": "visible",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "visible"
+        }
+      },
+      {
+        "id": "output_ai",
+        "displayName": "Ai",
+        "name": "ai",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "ai"
+        }
+      },
+      {
+        "id": "output_collidable",
+        "displayName": "Collidable",
+        "name": "collidable",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "collidable"
+        }
+      },
+      {
+        "id": "output_exists",
+        "displayName": "Exists",
+        "name": "exists",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "exists"
+        }
+      },
+      {
+        "id": "output_type",
+        "displayName": "Type",
+        "name": "type",
+        "pinType": "DATA",
+        "dataType": "string",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "type"
+        }
+      },
+      {
+        "id": "output_uuid",
+        "displayName": "Uuid",
+        "name": "uuid",
+        "pinType": "DATA",
+        "dataType": "uuid",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "uuid"
+        }
+      },
+      {
+        "id": "output_location",
+        "displayName": "Location",
+        "name": "location",
+        "pinType": "DATA",
+        "dataType": "location",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "location"
+        }
+      },
+      {
+        "id": "output_velocity",
+        "displayName": "Velocity",
+        "name": "velocity",
+        "pinType": "DATA",
+        "dataType": "location",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "velocity"
+        }
+      },
+      {
+        "id": "output_world",
+        "displayName": "World",
+        "name": "world",
+        "pinType": "DATA",
+        "dataType": "world",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "world"
+        }
+      },
+      {
+        "id": "output_passengers",
+        "displayName": "Passengers",
+        "name": "passengers",
+        "pinType": "DATA",
+        "dataType": "list<entity>",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "passengers"
+        }
+      },
+      {
+        "id": "output_vehicle",
+        "displayName": "Vehicle",
+        "name": "vehicle",
+        "pinType": "DATA",
+        "dataType": "entity",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "vehicle"
+        }
+      },
+      {
+        "id": "output_height",
+        "displayName": "Height",
+        "name": "height",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "height"
+        }
+      },
+      {
+        "id": "output_width",
+        "displayName": "Width",
+        "name": "width",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "width"
+        }
+      },
+      {
+        "id": "output_ticks_lived",
+        "displayName": "Ticks Lived",
+        "name": "ticks_lived",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "ticks_lived"
+        }
+      },
+      {
+        "id": "output_no_damage_ticks",
+        "displayName": "No Damage Ticks",
+        "name": "no_damage_ticks",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "no_damage_ticks"
+        }
+      },
+      {
+        "id": "output_remaining_air",
+        "displayName": "Remaining Air",
+        "name": "remaining_air",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "remaining_air"
+        }
+      },
+      {
+        "id": "output_max_air",
+        "displayName": "Max Air",
+        "name": "max_air",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "max_air"
+        }
+      },
+      {
+        "id": "output_fall_distance",
+        "displayName": "Fall Distance",
+        "name": "fall_distance",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "fall_distance"
+        }
+      },
+      {
+        "id": "output_portal_cooldown",
+        "displayName": "Portal Cooldown",
+        "name": "portal_cooldown",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "portal_cooldown"
+        }
+      },
+      {
+        "id": "output_scoreboard_tags",
+        "displayName": "Scoreboard Tags",
+        "name": "scoreboard_tags",
+        "pinType": "DATA",
+        "dataType": "list<string>",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "scoreboard_tags"
+        }
+      },
+      {
+        "id": "output_absorption",
+        "displayName": "Absorption",
+        "name": "absorption",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "absorption"
+        }
+      },
+      {
+        "id": "output_remove",
+        "displayName": "Remove",
+        "name": "remove",
+        "pinType": "DATA",
+        "dataType": "string",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "remove"
+        }
+      },
+      {
+        "id": "output_kill",
+        "displayName": "Kill",
+        "name": "kill",
+        "pinType": "DATA",
+        "dataType": "string",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "kill"
+        }
+      },
+      {
+        "id": "output_is_alive",
+        "displayName": "Is Alive",
+        "name": "is_alive",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "is_alive"
+        }
+      },
+      {
+        "id": "output_is_valid",
+        "displayName": "Is Valid",
+        "name": "is_valid",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "is_valid"
+        }
+      },
+      {
+        "id": "output_is_dead",
+        "displayName": "Is Dead",
+        "name": "is_dead",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Value returned by the entity operation.",
+        "visibleWhen": {
+          "input_action": "get",
+          "input_property": "is_dead"
+        }
+      }
+    ],
+    "migrationMapping": {
+      "sourceSchemaVersion": 1,
+      "targetSchemaVersion": 2,
+      "complete": true,
+      "pins": [
+        {
+          "direction": "input",
+          "source": "target",
+          "target": "input_target"
+        },
+        {
+          "direction": "input",
+          "source": "action",
+          "target": "input_action"
+        },
+        {
+          "direction": "input",
+          "source": "property",
+          "target": "input_property"
+        },
+        {
+          "direction": "output",
+          "source": "has",
+          "target": "output_has"
+        },
+        {
+          "direction": "output",
+          "source": "name",
+          "target": "output_name"
+        },
+        {
+          "direction": "output",
+          "source": "custom_name",
+          "target": "output_custom_name"
+        },
+        {
+          "direction": "output",
+          "source": "glowing",
+          "target": "output_glowing"
+        },
+        {
+          "direction": "output",
+          "source": "silent",
+          "target": "output_silent"
+        },
+        {
+          "direction": "output",
+          "source": "invulnerable",
+          "target": "output_invulnerable"
+        },
+        {
+          "direction": "output",
+          "source": "fire_ticks",
+          "target": "output_fire_ticks"
+        },
+        {
+          "direction": "output",
+          "source": "freeze_ticks",
+          "target": "output_freeze_ticks"
+        },
+        {
+          "direction": "output",
+          "source": "health",
+          "target": "output_health"
+        },
+        {
+          "direction": "output",
+          "source": "max_health",
+          "target": "output_max_health"
+        },
+        {
+          "direction": "output",
+          "source": "persistent",
+          "target": "output_persistent"
+        },
+        {
+          "direction": "output",
+          "source": "target",
+          "target": "output_target"
+        },
+        {
+          "direction": "output",
+          "source": "baby",
+          "target": "output_baby"
+        },
+        {
+          "direction": "output",
+          "source": "tamed",
+          "target": "output_tamed"
+        },
+        {
+          "direction": "output",
+          "source": "sitting",
+          "target": "output_sitting"
+        },
+        {
+          "direction": "output",
+          "source": "swimming",
+          "target": "output_swimming"
+        },
+        {
+          "direction": "output",
+          "source": "pickup_items",
+          "target": "output_pickup_items"
+        },
+        {
+          "direction": "output",
+          "source": "gravity",
+          "target": "output_gravity"
+        },
+        {
+          "direction": "output",
+          "source": "visible",
+          "target": "output_visible"
+        },
+        {
+          "direction": "output",
+          "source": "ai",
+          "target": "output_ai"
+        },
+        {
+          "direction": "output",
+          "source": "collidable",
+          "target": "output_collidable"
+        },
+        {
+          "direction": "output",
+          "source": "exists",
+          "target": "output_exists"
+        },
+        {
+          "direction": "output",
+          "source": "type",
+          "target": "output_type"
+        },
+        {
+          "direction": "output",
+          "source": "uuid",
+          "target": "output_uuid"
+        },
+        {
+          "direction": "output",
+          "source": "location",
+          "target": "output_location"
+        },
+        {
+          "direction": "output",
+          "source": "velocity",
+          "target": "output_velocity"
+        },
+        {
+          "direction": "output",
+          "source": "world",
+          "target": "output_world"
+        },
+        {
+          "direction": "output",
+          "source": "passengers",
+          "target": "output_passengers"
+        },
+        {
+          "direction": "output",
+          "source": "vehicle",
+          "target": "output_vehicle"
+        },
+        {
+          "direction": "output",
+          "source": "height",
+          "target": "output_height"
+        },
+        {
+          "direction": "output",
+          "source": "width",
+          "target": "output_width"
+        },
+        {
+          "direction": "output",
+          "source": "ticks_lived",
+          "target": "output_ticks_lived"
+        },
+        {
+          "direction": "output",
+          "source": "no_damage_ticks",
+          "target": "output_no_damage_ticks"
+        },
+        {
+          "direction": "output",
+          "source": "remaining_air",
+          "target": "output_remaining_air"
+        },
+        {
+          "direction": "output",
+          "source": "max_air",
+          "target": "output_max_air"
+        },
+        {
+          "direction": "output",
+          "source": "fall_distance",
+          "target": "output_fall_distance"
+        },
+        {
+          "direction": "output",
+          "source": "portal_cooldown",
+          "target": "output_portal_cooldown"
+        },
+        {
+          "direction": "output",
+          "source": "scoreboard_tags",
+          "target": "output_scoreboard_tags"
+        },
+        {
+          "direction": "output",
+          "source": "absorption",
+          "target": "output_absorption"
+        },
+        {
+          "direction": "output",
+          "source": "remove",
+          "target": "output_remove"
+        },
+        {
+          "direction": "output",
+          "source": "kill",
+          "target": "output_kill"
+        },
+        {
+          "direction": "output",
+          "source": "is_alive",
+          "target": "output_is_alive"
+        },
+        {
+          "direction": "output",
+          "source": "is_valid",
+          "target": "output_is_valid"
+        },
+        {
+          "direction": "output",
+          "source": "is_dead",
+          "target": "output_is_dead"
+        }
+      ]
+    }
+  }
+    },
+    {
+      "source": "nodes/event.json",
+      "sourceSha256": "E6C25E374ADDC29382F7C7A586775CBB7E568734D79F4F58B1388EA18229E234",
+      "nodeSha256": "DADD54D757C569F422D0044F30BC34B811E018676B6E7CE5181F378C1D76605E",
+      "verifiedCatalogChecksum": "4f335d707ce8cd6c60c06e3296d92a46b8ee66feb22df533389b9f1c8ffa556b",
+      "verifiedCatalogSha256": "314C95C181D3792FE94365224771B7C9C6AE2C0FACBDD32DC888742E77332BBE",
+      "node": {
+    "id": "event.command",
+    "displayName": "Event Command",
+    "description": "Runs when the event command event occurs.",
+    "domain": "event",
+    "family": "command",
+    "lifecycle": "active",
+    "handlerCapability": "flow.event",
+    "selectorIntent": "none",
+    "inspectorIntent": "generic",
+    "owner": "restudio.resync",
+    "category": "EVENT",
+    "schemaVersion": 3,
+    "kind": "EVENT",
+    "tags": [
+      "event",
+      "command"
+    ],
+    "examples": [
+      "Connect Flow to the actions that should run when the event command event occurs."
+    ],
+    "trigger": true,
+    "eventType": "org.bukkit.event.player.PlayerCommandPreprocessEvent",
+    "handlerConfig": {
+      "priority": "LOWEST",
+      "ignoreCancelled": false,
+      "playerEvent": true
+    },
+    "inputs": [],
+    "outputs": [
+      {
+        "id": "flow",
+        "displayName": "Flow",
+        "name": "flow",
+        "pinType": "FLOW",
+        "dataType": "execution",
+        "description": "Starts the connected flow for this event.",
+        "direction": "output"
+      },
+      {
+        "id": "event.player",
+        "displayName": "Player",
+        "name": "event.player",
+        "pinType": "DATA",
+        "dataType": "player",
+        "description": "Provides the player value produced by this event.",
+        "direction": "output"
+      },
+      {
+        "id": "event.command",
+        "displayName": "Command",
+        "name": "event.command",
+        "pinType": "DATA",
+        "dataType": "string",
+        "description": "Provides the command value produced by this event.",
+        "direction": "output"
+      },
+      {
+        "id": "event.is_cancelled",
+        "displayName": "Is Cancelled",
+        "name": "event.is_cancelled",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Provides the is cancelled value produced by this event.",
+        "direction": "output"
+      },
+      {
+        "id": "event.bound_command",
+        "displayName": "Bound Command",
+        "name": "event.bound_command",
+        "pinType": "DATA",
+        "dataType": "string",
+        "description": "Provides the registered command bound to this invocation.",
+        "direction": "output"
+      },
+      {
+        "id": "event.command_label",
+        "displayName": "Command Label",
+        "name": "event.command_label",
+        "pinType": "DATA",
+        "dataType": "string",
+        "description": "Provides the command label used for this invocation.",
+        "direction": "output"
+      },
+      {
+        "id": "event.args",
+        "displayName": "Arguments",
+        "name": "event.args",
+        "pinType": "DATA",
+        "dataType": "string",
+        "description": "Provides the command arguments as joined text.",
+        "direction": "output"
+      },
+      {
+        "id": "event.args_list",
+        "displayName": "Argument List",
+        "name": "event.args_list",
+        "pinType": "DATA",
+        "dataType": "list<string>",
+        "description": "Provides the command argument tokens in order.",
+        "direction": "output"
+      },
+      {
+        "id": "event.args_count",
+        "displayName": "Argument Count",
+        "name": "event.args_count",
+        "pinType": "DATA",
+        "dataType": "number",
+        "description": "Provides the number of command argument tokens.",
+        "direction": "output"
+      },
+      {
+        "id": "event.is_console",
+        "displayName": "Is Console",
+        "name": "event.is_console",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "description": "Reports whether the command sender is the console.",
+        "direction": "output"
+      }
+    ],
+    "outputMappings": [
+      {
+        "source": "event.player",
+        "target": "event.player"
+      },
+      {
+        "source": "event.message",
+        "target": "event.command"
+      },
+      {
+        "source": "event.cancelled",
+        "target": "event.is_cancelled"
+      },
+      {
+        "source": "event.bound_command",
+        "target": "event.bound_command"
+      },
+      {
+        "source": "event.command_label",
+        "target": "event.command_label"
+      },
+      {
+        "source": "event.args",
+        "target": "event.args"
+      },
+      {
+        "source": "event.args_list",
+        "target": "event.args_list"
+      },
+      {
+        "source": "event.args_count",
+        "target": "event.args_count"
+      },
+      {
+        "source": "event.is_console",
+        "target": "event.is_console"
+      }
+    ],
+    "migrationMapping": {
+      "sourceSchemaVersion": 2,
+      "targetSchemaVersion": 3,
+      "complete": true,
+      "pins": [
+        {
+          "direction": "output",
+          "source": "flow",
+          "target": "flow"
+        },
+        {
+          "direction": "output",
+          "source": "event.player",
+          "target": "event.player"
+        },
+        {
+          "direction": "output",
+          "source": "event.command",
+          "target": "event.command"
+        },
+        {
+          "direction": "output",
+          "source": "event.is_cancelled",
+          "target": "event.is_cancelled"
+        }
+      ],
+      "id": "migration.event.command.v2-v3"
+    },
+    "aliases": [
+      "player_command"
+    ],
+    "migrationHistory": [
+      {
+        "sourceSchemaVersion": 1,
+        "targetSchemaVersion": 2,
+        "complete": true,
+        "pins": [
+          {
+            "direction": "output",
+            "source": "flow",
+            "target": "flow"
+          },
+          {
+            "direction": "output",
+            "source": "event.player",
+            "target": "event.player"
+          },
+          {
+            "direction": "output",
+            "source": "event.command",
+            "target": "event.command"
+          },
+          {
+            "direction": "output",
+            "source": "event.is_cancelled",
+            "target": "event.is_cancelled"
+          }
+        ],
+        "id": "migration.event.command"
+      }
+    ]
+  }
+    },
+    {
+      "source": "nodes/inventory.json",
+      "sourceSha256": "DB3E5C1EE2BED125E3035FD290B8B0E31CE573B7323B7A8BABA4D2C83FE99203",
+      "nodeSha256": "7E6220E4083EBC8C2106B3AE59953F01233EEB7E8239FA29B3A1D41E8F97BF2F",
+      "sourceNodeSha256": "FC89EBCB3E28E4B55C09F69604E82E1C30A186B54E5DAC9E749BC2DB5D8EDB76",
+      "normalization": "CRLF To LF",
+      "node": {
+    "id": "inventory.properties",
+    "displayName": "Inventory Properties",
+    "description": "Read supported properties from an inventory without changing it.",
+    "domain": "minecraft",
+    "family": "inventory",
+    "lifecycle": "active",
+    "handlerCapability": "family-inventory",
+    "selectorIntent": "inventory-property",
+    "inspectorIntent": "generic",
+    "owner": "restudio.resync",
+    "category": "INVENTORY",
+    "schemaVersion": 2,
+    "kind": "QUERY",
+    "tags": [
+      "inventory",
+      "property",
+      "query"
+    ],
+    "legacyIds": [
+      "inventory",
+      "inventory.size",
+      "inventory.type",
+      "inventory.items",
+      "inventory.first_empty",
+      "inventory.max_stack_size",
+      "inventory.holder",
+      "inventory.inventory_get_contents",
+      "inventory.inventory_has_item",
+      "inventory.inventory_count_item",
+      "inventory.inventory_get_slot",
+      "inventory.inventory_has_space",
+      "inventory.inventory_count_material",
+      "inventory.inventory_get_all",
+      "inventory.inventory_get_storage_contents",
+      "inventory.inventory_size",
+      "inventory.inventory_get_first_empty",
+      "inventory.inventory_get_max_stack_size",
+      "inventory.inventory_contains_at_least"
+    ],
+    "migrationMapping": {
+      "sourceSchemaVersion": 1,
+      "targetSchemaVersion": 2,
+      "complete": true,
+      "pins": [
+        {
+          "direction": "input",
+          "source": "target",
+          "target": "target"
+        },
+        {
+          "direction": "input",
+          "source": "action",
+          "target": "action"
+        },
+        {
+          "direction": "input",
+          "source": "property",
+          "target": "property"
+        },
+        {
+          "direction": "output",
+          "source": "has",
+          "target": "has"
+        },
+        {
+          "direction": "output",
+          "source": "size",
+          "target": "size"
+        },
+        {
+          "direction": "output",
+          "source": "type",
+          "target": "type"
+        },
+        {
+          "direction": "output",
+          "source": "items",
+          "target": "items"
+        },
+        {
+          "direction": "output",
+          "source": "first_empty",
+          "target": "first_empty"
+        },
+        {
+          "direction": "output",
+          "source": "max_stack_size",
+          "target": "max_stack_size"
+        },
+        {
+          "direction": "output",
+          "source": "holder",
+          "target": "holder"
+        },
+        {
+          "direction": "output",
+          "source": "contents",
+          "target": "contents"
+        },
+        {
+          "direction": "output",
+          "source": "storage_contents",
+          "target": "storage_contents"
+        },
+        {
+          "direction": "output",
+          "source": "armor",
+          "target": "armor"
+        }
+      ]
+    },
+    "handler": "inventory",
+    "handlerConfig": {
+      "operation": "get",
+      "action": "get"
+    },
+    "inputs": [
+      {
+        "id": "target",
+        "displayName": "Target",
+        "name": "target",
+        "pinType": "DATA",
+        "dataType": "inventory",
+        "description": "Inventory to inspect.",
+        "direction": "input"
+      },
+      {
+        "id": "action",
+        "displayName": "Action",
+        "name": "action",
+        "pinType": "DATA",
+        "dataType": "string",
+        "widget": "DROPDOWN",
+        "options": [
+          "get",
+          "has"
+        ],
+        "defaultValue": "get",
+        "description": "Reads a property or checks whether it is available.",
+        "direction": "input"
+      },
+      {
+        "id": "property",
+        "displayName": "Property",
+        "name": "property",
+        "pinType": "DATA",
+        "dataType": "string",
+        "widget": "SEARCHABLE_LIST",
+        "options": [
+          "size",
+          "type",
+          "items",
+          "first_empty",
+          "max_stack_size",
+          "holder",
+          "contents",
+          "storage_contents",
+          "armor"
+        ],
+        "defaultValue": "size",
+        "description": "Property to read.",
+        "direction": "input"
+      }
+    ],
+    "outputs": [
+      {
+        "id": "has",
+        "displayName": "Has",
+        "name": "has",
+        "pinType": "DATA",
+        "dataType": "boolean",
+        "visibleWhen": {
+          "action": "has"
+        },
+        "description": "Whether the selected property is available.",
+        "direction": "output"
+      },
+      {
+        "id": "size",
+        "displayName": "Size",
+        "name": "size",
+        "pinType": "DATA",
+        "dataType": "number",
+        "visibleWhen": {
+          "action": "get",
+          "property": "size"
+        },
+        "description": "Number of inventory slots.",
+        "direction": "output"
+      },
+      {
+        "id": "type",
+        "displayName": "Type",
+        "name": "type",
+        "pinType": "DATA",
+        "dataType": "string",
+        "visibleWhen": {
+          "action": "get",
+          "property": "type"
+        },
+        "description": "Inventory type name.",
+        "direction": "output"
+      },
+      {
+        "id": "items",
+        "displayName": "Items",
+        "name": "items",
+        "pinType": "DATA",
+        "dataType": "list<itemstack>",
+        "visibleWhen": {
+          "action": "get",
+          "property": "items"
+        },
+        "description": "All inventory item slots.",
+        "direction": "output"
+      },
+      {
+        "id": "first_empty",
+        "displayName": "First Empty",
+        "name": "first_empty",
+        "pinType": "DATA",
+        "dataType": "number",
+        "visibleWhen": {
+          "action": "get",
+          "property": "first_empty"
+        },
+        "description": "First empty slot, or -1 when none exists.",
+        "direction": "output"
+      },
+      {
+        "id": "max_stack_size",
+        "displayName": "Max Stack Size",
+        "name": "max_stack_size",
+        "pinType": "DATA",
+        "dataType": "number",
+        "visibleWhen": {
+          "action": "get",
+          "property": "max_stack_size"
+        },
+        "description": "Inventory maximum stack size.",
+        "direction": "output"
+      },
+      {
+        "id": "holder",
+        "displayName": "Holder",
+        "name": "holder",
+        "pinType": "DATA",
+        "dataType": "entity",
+        "visibleWhen": {
+          "action": "get",
+          "property": "holder"
+        },
+        "description": "Entity that owns the inventory when one exists.",
+        "direction": "output"
+      },
+      {
+        "id": "contents",
+        "displayName": "Contents",
+        "name": "contents",
+        "pinType": "DATA",
+        "dataType": "list<itemstack>",
+        "visibleWhen": {
+          "action": "get",
+          "property": "contents"
+        },
+        "description": "Inventory contents including every slot.",
+        "direction": "output"
+      },
+      {
+        "id": "storage_contents",
+        "displayName": "Storage Contents",
+        "name": "storage_contents",
+        "pinType": "DATA",
+        "dataType": "list<itemstack>",
+        "visibleWhen": {
+          "action": "get",
+          "property": "storage_contents"
+        },
+        "description": "Storage slots exposed by the inventory.",
+        "direction": "output"
+      },
+      {
+        "id": "armor",
+        "displayName": "Armor",
+        "name": "armor",
+        "pinType": "DATA",
+        "dataType": "list<itemstack>",
+        "visibleWhen": {
+          "action": "get",
+          "property": "armor"
+        },
+        "description": "Armor slots for a player inventory.",
+        "direction": "output"
+      }
+    ]
+  }
+    },
+    {
+      "source": "nodes/world_lookup.json",
+      "sourceSha256": "B57C36E2A679E23CB8A8C618E367A921404E4B288F73181316CB797D54CFE3C6",
+      "nodeSha256": "093F9BA26003584F63E1A9A6F8C03FC09D6EE3C0CA97C55E93F8207B1A41D7EC",
+      "node": {
+    "id": "world_get_all",
+    "displayName": "World Get All",
+    "description": "Return every currently loaded world.",
+    "domain": "world",
+    "family": "world_lookup",
+    "lifecycle": "active",
+    "handlerCapability": "world-action",
+    "selectorIntent": "none",
+    "inspectorIntent": "generic",
+    "owner": "restudio.resync",
+    "legacyIds": ["world.world_get_all"],
+    "category": "WORLD",
+    "schemaVersion": 1,
+    "kind": "PURE",
+    "tags": ["world", "lookup", "list"],
+    "handler": "WorldActionHandler",
+    "handlerConfig": {"operation": "world_get_all"},
+    "outputs": [
+      {"id": "worlds_list", "displayName": "Worlds", "name": "worlds_list", "pinType": "DATA", "dataType": "list<world>", "description": "Returns every currently loaded world."}
+    ],
+    "inputs": []
+  }
+    },
+    {
+      "source": "nodes/world_action.json",
+      "sourceSha256": "622BBE0DC054F5401C8F4188B43118072B541CC411FBB27D638DAE260A6E92B5",
+      "nodeSha256": "75C16B48BA12B2218825CA5A9FAE59F05D6F56E6C8B65AB7E0404375C0A7DBE1",
+      "node": {
+    "id": "world_set_weather",
+    "displayName": "World Set Weather",
+    "description": "Run the world set weather operation against a loaded world.",
+    "domain": "world",
+    "family": "world_action",
+    "lifecycle": "active",
+    "handlerCapability": "world-action",
+    "selectorIntent": "typed-reference",
+    "inspectorIntent": "generic",
+    "owner": "restudio.resync",
+    "legacyIds": [
+      "world.world_set_weather"
+    ],
+    "category": "WORLD",
+    "schemaVersion": 2,
+    "kind": "ACTION",
+    "tags": [
+      "world",
+      "action",
+      "set",
+      "weather"
+    ],
+    "examples": [
+      "Connect Flow to run world set weather when the world operation is needed."
+    ],
+    "authorizationPolicy": "trusted_server_flow",
+    "auditPolicy": "world_mutation",
+    "handler": "WorldActionHandler",
+    "handlerConfig": {
+      "operation": "world_set_weather"
+    },
+    "inputs": [
+      {
+        "id": "flow",
+        "displayName": "Flow",
+        "name": "flow",
+        "pinType": "FLOW",
+        "dataType": "execution",
+        "direction": "input",
+        "description": "Starts this operation when the execution route is reached."
+      },
+      {
+        "id": "world",
+        "displayName": "World",
+        "name": "world",
+        "pinType": "DATA",
+        "dataType": "world",
+        "direction": "input",
+        "description": "Provides the world world used by this operation."
+      },
+      {
+        "id": "weather_type",
+        "displayName": "Weather Type",
+        "name": "weather_type",
+        "pinType": "DATA",
+        "dataType": "string",
+        "direction": "input",
+        "description": "Provides the weather type string used by this operation.",
+        "widget": "DROPDOWN",
+        "options": [
+          "clear",
+          "rain",
+          "thunder"
+        ],
+        "defaultValue": "clear"
+      },
+      {
+        "id": "duration_ticks",
+        "displayName": "Duration Ticks",
+        "name": "duration_ticks",
+        "pinType": "DATA",
+        "dataType": "number",
+        "direction": "input",
+        "description": "Provides the duration ticks number used by this operation."
+      }
+    ],
+    "outputs": [
+      {
+        "id": "output_flow",
+        "displayName": "Flow",
+        "name": "flow",
+        "pinType": "FLOW",
+        "dataType": "execution",
+        "direction": "output",
+        "description": "Continues execution after this operation completes."
+      }
+    ],
+    "migrationMapping": {
+      "sourceSchemaVersion": 1,
+      "targetSchemaVersion": 2,
+      "complete": true,
+      "pins": [
+        {
+          "direction": "input",
+          "source": "flow",
+          "target": "flow"
+        },
+        {
+          "direction": "input",
+          "source": "world",
+          "target": "world"
+        },
+        {
+          "direction": "input",
+          "source": "weather_type",
+          "target": "weather_type"
+        },
+        {
+          "direction": "input",
+          "source": "duration_ticks",
+          "target": "duration_ticks"
+        },
+        {
+          "direction": "output",
+          "source": "flow",
+          "target": "output_flow"
+        }
+      ]
+    },
+    "hidden": true,
+    "hiddenReason": "Advanced world operation retained for compatibility with the world action surface."
+  }
+    }
+  ]
+}

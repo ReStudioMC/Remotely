@@ -2,8 +2,14 @@ package redxax.oxy.remotely.data.flow;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import redxax.oxy.remotely.util.BrowserSafeState;
+import restudio.rescreen.platform.Async;
+import restudio.resync.diagnostics.DiagnosticEvent;
+import restudio.resync.diagnostics.DiagnosticSink;
 import restudio.resync.contract.cache.CatalogProjectionVersion;
 import restudio.resync.flow.cache.CatalogCacheKey;
 import restudio.resync.flow.cache.CatalogCacheOpaque;
@@ -28,10 +34,12 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.Consumer;
 
@@ -40,32 +48,38 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ReSyncFlowClientCatalogChunkTest {
+    private Async.Snapshot previousAsync;
+    private ExecutorService asyncPool;
+
+    @BeforeEach
+    void installAsyncExecutor() {
+        previousAsync = Async.snapshot();
+        asyncPool = Executors.newVirtualThreadPerTaskExecutor();
+        Async.installExecutor(asyncPool::execute, ignored -> Thread.currentThread().interrupt());
+    }
+
+    @AfterEach
+    void restoreAsyncExecutor() {
+        Async.restore(previousAsync);
+        asyncPool.shutdownNow();
+    }
+
     @Test
     void catalogAdmissionCannotInterleaveWorkspaceConnectAndStartupCommit(@TempDir Path directory) throws Exception {
         CatalogCachePublication publication = publication(server("8ddddddd-dddd-4ddd-8ddd-dddddddddddd"), 64);
         CapturingTransport transport = new CapturingTransport();
         ControlledClient client = new ControlledClient(publication, transport, directory);
         client.pauseStartup = true;
-        CountDownLatch heartbeatEntered = new CountDownLatch(1);
-        CountDownLatch heartbeatRelease = new CountDownLatch(1);
-        ScheduledThreadPoolExecutor heartbeat = (ScheduledThreadPoolExecutor)
-            field(ReSyncFlowClient.class, "heartbeatScheduler").get(client);
+        Thread startup = Thread.ofVirtual().start(() -> authenticate(client, transport, publication.key()));
         try {
-            heartbeat.execute(() -> {
-                heartbeatEntered.countDown();
-                await(heartbeatRelease);
-            });
-            assertTrue(heartbeatEntered.await(2, TimeUnit.SECONDS));
-            authenticate(client, transport, publication.key());
             assertTrue(client.workspaceConnected.await(2, TimeUnit.SECONDS));
             assertTrue(client.requestCatalogPublication(true));
-            heartbeatRelease.countDown();
-            heartbeat.submit(() -> {}).get(2, TimeUnit.SECONDS);
-            heartbeat.submit(() -> {}).get(2, TimeUnit.SECONDS);
             assertEquals(0, transport.catalogRequests().size());
             Object acquisition = field(ReSyncFlowClient.class, "catalogAcquisition").get(client);
             assertFalse(field(acquisition.getClass(), "sendQueued").getBoolean(acquisition));
             client.workspaceRelease.countDown();
+            startup.join(TimeUnit.SECONDS.toMillis(2));
+            assertFalse(startup.isAlive());
             awaitRequests(transport, 1);
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
             while (!client.isConnectedState() && System.nanoTime() < deadline) {
@@ -74,8 +88,8 @@ class ReSyncFlowClientCatalogChunkTest {
             assertTrue(client.isConnectedState(), () -> client.handshakeObservation().toString());
             assertEquals(1, client.workspaceConnects.get());
         } finally {
-            heartbeatRelease.countDown();
             client.release();
+            startup.join(TimeUnit.SECONDS.toMillis(2));
             client.shutdown();
         }
     }
@@ -101,7 +115,8 @@ class ReSyncFlowClientCatalogChunkTest {
             transport.receiveFlow(chunks(publication).getFirst());
             client.catalogPublicationWorkerIdentity().join();
             Object admission = field(ReSyncFlowClient.class, "catalogChunkAdmission").get(client);
-            AtomicLong epoch = (AtomicLong) field(ReSyncFlowClient.class, "catalogPublicationWorkEpoch").get(client);
+            BrowserSafeState.LongValue epoch = (BrowserSafeState.LongValue)
+                field(ReSyncFlowClient.class, "catalogPublicationWorkEpoch").get(client);
             long retiredEpoch = epoch.get();
             reserved = client.reserveCatalogPublicationWork(1);
             assertTrue(reserved);
@@ -206,6 +221,24 @@ class ReSyncFlowClientCatalogChunkTest {
         return field;
     }
 
+    private static String acquisitionState(ControlledClient client) {
+        try {
+            Object acquisition = field(ReSyncFlowClient.class, "catalogAcquisition").get(client);
+            if (acquisition == null) return "none";
+            Class<?> type = acquisition.getClass();
+            return "pending=" + field(type, "pending").getBoolean(acquisition)
+                + ",settled=" + field(type, "settled").getBoolean(acquisition)
+                + ",failed=" + field(type, "failed").getBoolean(acquisition)
+                + ",phase=" + field(type, "phase").get(acquisition)
+                + ",attempts=" + field(type, "attempts").getInt(acquisition)
+                + ",startedAt=" + field(type, "startedAt").getLong(acquisition)
+                + ",progressAt=" + field(type, "progressAt").getLong(acquisition)
+                + ",now=" + client.now.get() + ",reserved=" + client.pendingCatalogPublicationBytes();
+        } catch (Exception exception) {
+            return exception.toString();
+        }
+    }
+
     private static void invoke(ReSyncFlowClient client, String name) throws Exception {
         Method method = ReSyncFlowClient.class.getDeclaredMethod(name);
         method.setAccessible(true);
@@ -217,10 +250,11 @@ class ReSyncFlowClientCatalogChunkTest {
         CatalogCachePublication publication = publication(server("81111111-1111-4111-8111-111111111111"), 300_000);
         CapturingTransport transport = new CapturingTransport();
         ControlledClient client = new ControlledClient(publication, transport, directory);
+        client.blockFirst = true;
         try {
             authenticate(client, transport, publication.key());
             awaitRequests(transport, 1);
-            chunks(publication).forEach(transport::receiveFlow);
+            client.sendAsync(transport, publication);
             assertTrue(client.firstDecoded.await(2, TimeUnit.SECONDS));
             transport.catalogRequestHandler = ignored -> chunks(publication).forEach(transport::receiveFlow);
             for (int index = 0; index < 10; index++) assertTrue(client.requestCatalogPublication());
@@ -240,10 +274,11 @@ class ReSyncFlowClientCatalogChunkTest {
         CatalogCachePublication publication = publication(server("82222222-2222-4222-8222-222222222222"), 300_000);
         CapturingTransport transport = new CapturingTransport();
         ControlledClient client = new ControlledClient(publication, transport, directory);
+        client.blockFirst = true;
         try {
             authenticate(client, transport, publication.key());
             awaitRequests(transport, 1);
-            chunks(publication).forEach(transport::receiveFlow);
+            client.sendAsync(transport, publication);
             assertTrue(client.firstDecoded.await(2, TimeUnit.SECONDS));
             for (int index = 0; index < 5; index++) assertTrue(client.requestCatalogPublication(true));
             assertEquals(1, transport.catalogRequests().size());
@@ -288,20 +323,49 @@ class ReSyncFlowClientCatalogChunkTest {
         CatalogCachePublication publication = publication(server("89999999-9999-4999-8999-999999999999"), 300_000);
         CapturingTransport transport = new CapturingTransport();
         ControlledClient client = new ControlledClient(publication, transport, directory);
+        client.blockFirst = true;
         try {
             authenticate(client, transport, publication.key());
             awaitRequests(transport, 1);
-            chunks(publication).forEach(transport::receiveFlow);
+            client.sendAsync(transport, publication);
             assertTrue(client.firstDecoded.await(2, TimeUnit.SECONDS));
             client.advance(61);
             client.checkCatalogAcquisitionDeadline();
             client.checkCatalogAcquisitionDeadline();
-            assertTrue(client.catalogAuthorityDiagnostic().orElseThrow().contains("WORKER_STALLED"));
+            assertTrue(client.catalogAuthorityDiagnostic().orElseThrow().contains("WORKER_STALLED"),
+                () -> client.catalogAuthorityDebugState() + ", acquisition=" + acquisitionState(client));
             assertFalse(client.requestCatalogPublication());
             assertEquals(1, transport.catalogRequests().size());
             client.firstRelease.countDown();
             client.catalogPublicationWorkerIdentity().join();
             assertTrue(client.catalogPublicationProjection().active().isEmpty());
+        } finally {
+            client.release();
+            client.shutdown();
+        }
+    }
+
+    @Test
+    void retiredBrowserWorkerReleasesItsReservationAndCannotPublishLate(@TempDir Path directory) throws Exception {
+        CatalogCachePublication publication = publication(server("89999999-9999-4999-8999-999999999998"), 300_000);
+        CapturingTransport transport = new CapturingTransport();
+        HoldingDecoder decoder = new HoldingDecoder();
+        ControlledClient client = new ControlledClient(publication, transport, directory, decoder);
+        try {
+            authenticate(client, transport, publication.key());
+            awaitRequests(transport, 1);
+            chunks(publication).forEach(transport::receiveFlow);
+            assertTrue(decoder.submitted.await(2, TimeUnit.SECONDS));
+            assertTrue(client.pendingCatalogPublicationBytes() > 0L);
+
+            client.advance(31);
+            client.checkCatalogAcquisitionDeadline();
+
+            assertEquals(1, decoder.cancellations.get());
+            assertEquals(0L, client.pendingCatalogPublicationBytes());
+            decoder.last.get().completed(new byte[CatalogPublicationChunkPacket.SHA256_BYTES]);
+            assertTrue(client.catalogPublicationProjection().active().isEmpty());
+            awaitRequests(transport, 2);
         } finally {
             client.release();
             client.shutdown();
@@ -365,13 +429,25 @@ class ReSyncFlowClientCatalogChunkTest {
                 CatalogProjectionVersion.current()), 2, first.entries());
         CapturingTransport transport = new CapturingTransport();
         ControlledClient client = new ControlledClient(first, transport, directory);
+        client.blockFirst = true;
         client.blockSecond = true;
         try {
             authenticate(client, transport, first.key());
             awaitRequests(transport, 1);
-            chunks(first).forEach(transport::receiveFlow);
+            client.sendAsync(transport, first);
             assertTrue(client.firstDecoded.await(2, TimeUnit.SECONDS));
-            chunks(next).forEach(transport::receiveFlow);
+            BrowserSafeState.LongValue activity = (BrowserSafeState.LongValue)
+                field(ReSyncFlowClient.class, "catalogPublicationActivity").get(client);
+            long firstActivity = activity.get();
+            Thread nextDelivery = client.sendAsync(transport, next);
+            nextDelivery.join(TimeUnit.SECONDS.toMillis(2));
+            assertFalse(nextDelivery.isAlive(), () -> "delivery=" + List.of(nextDelivery.getStackTrace())
+                + ", acquisition=" + acquisitionState(client) + ", state=" + client.catalogAuthorityDebugState());
+            long admissionDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (activity.get() == firstActivity && System.nanoTime() < admissionDeadline) {
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+            }
+            assertTrue(activity.get() > firstActivity);
             client.firstRelease.countDown();
             assertTrue(client.secondDecoded.await(2, TimeUnit.SECONDS));
             assertTrue(client.catalogPublicationProjection().active().isEmpty());
@@ -388,10 +464,11 @@ class ReSyncFlowClientCatalogChunkTest {
         CatalogCachePublication publication = publication(server("87777777-7777-4777-8777-777777777777"), 300_000);
         CapturingTransport transport = new CapturingTransport();
         ControlledClient client = new ControlledClient(publication, transport, directory);
+        client.blockFirst = true;
         try {
             authenticate(client, transport, publication.key());
             awaitRequests(transport, 1);
-            chunks(publication).forEach(transport::receiveFlow);
+            client.sendAsync(transport, publication);
             assertTrue(client.firstDecoded.await(2, TimeUnit.SECONDS));
             Field epoch = ReSyncFlowClient.class.getDeclaredField("handshakeAuthorityEpoch");
             epoch.setAccessible(true);
@@ -414,12 +491,12 @@ class ReSyncFlowClientCatalogChunkTest {
         CatalogCachePublication publication = publication(server("88888888-8888-4888-8888-888888888888"), 300_000);
         CapturingTransport transport = new CapturingTransport();
         ControlledClient client = new ControlledClient(publication, transport, directory);
-        client.failDecode = true;
+        List<byte[]> invalid = CatalogPublicationChunkPacket.splitEncoded("invalid catalog".getBytes(StandardCharsets.UTF_8));
         try {
             authenticate(client, transport, publication.key());
             awaitRequests(transport, 1);
-            transport.catalogRequestHandler = ignored -> chunks(publication).forEach(transport::receiveFlow);
-            chunks(publication).forEach(transport::receiveFlow);
+            transport.catalogRequestHandler = ignored -> invalid.forEach(transport::receiveFlow);
+            invalid.forEach(transport::receiveFlow);
             awaitRequests(transport, 3);
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
             while (!client.catalogAuthorityDiagnostic().orElse("").contains("RETRY_EXHAUSTED")
@@ -451,13 +528,69 @@ class ReSyncFlowClientCatalogChunkTest {
         private final CountDownLatch workspaceConnected = new CountDownLatch(1);
         private final CountDownLatch workspaceRelease = new CountDownLatch(1);
         private final AtomicInteger workspaceConnects = new AtomicInteger();
+        private final List<Thread> deliveries = new CopyOnWriteArrayList<>();
+        private final DiagnosticSink previousSink;
+        private volatile boolean blockFirst;
         private volatile boolean blockSecond;
-        private volatile boolean failDecode;
         private volatile boolean pauseStartup;
 
         private ControlledClient(CatalogCachePublication publication, CapturingTransport transport, Path directory) {
-            super(publication.serverId().canonicalText(), transport, null,
-                new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(directory.resolve("acquisition.json"))));
+            this(publication, transport, directory, null);
+        }
+
+        private ControlledClient(CatalogCachePublication publication, CapturingTransport transport, Path directory,
+                                 ReSyncCatalogPublicationDecoder decoder) {
+            super(decoder, publication.serverId().canonicalText(), transport, null,
+                new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(directory.resolve("acquisition.json"))));
+            previousSink = ReSyncLifecycleDiagnostics.install(new DiagnosticSink() {
+                @Override
+                public Status status() {
+                    return Status.ready(Mode.VERBOSE);
+                }
+
+                @Override
+                public Offer offer(DiagnosticEvent event) {
+                    if ("typed_catalog_conversion_started".equals(event.stage())) {
+                        int count = decodes.incrementAndGet();
+                        try {
+                            if (count == 1) {
+                                firstDecoded.countDown();
+                                if (blockFirst && !firstRelease.await(10, TimeUnit.SECONDS)) {
+                                    throw new IllegalStateException("First catalog preparation was not released");
+                                }
+                            } else if (count == 2 && blockSecond) {
+                                secondDecoded.countDown();
+                                if (!secondRelease.await(10, TimeUnit.SECONDS)) {
+                                    throw new IllegalStateException("Second catalog preparation was not released");
+                                }
+                            }
+                        } catch (InterruptedException exception) {
+                            Thread.currentThread().interrupt();
+                            throw new IllegalStateException(exception);
+                        }
+                    }
+                    return Offer.ACCEPTED;
+                }
+
+                @Override
+                public Status pause() {
+                    return status();
+                }
+
+                @Override
+                public Status resume() {
+                    return status();
+                }
+
+                @Override
+                public Flush flush() {
+                    return Flush.EMPTY;
+                }
+
+                @Override
+                public void close() {
+                }
+            });
         }
 
         @Override
@@ -476,24 +609,10 @@ class ReSyncFlowClientCatalogChunkTest {
             return now.get();
         }
 
-        @Override
-        CatalogCachePublication decodeCatalogPublication(byte[] bytes) {
-            if (failDecode) throw new IllegalArgumentException("Rejected fixture");
-            CatalogCachePublication decoded = super.decodeCatalogPublication(bytes);
-            int count = decodes.incrementAndGet();
-            try {
-                if (count == 1) {
-                    firstDecoded.countDown();
-                    assertTrue(firstRelease.await(2, TimeUnit.SECONDS));
-                } else if (count == 2 && blockSecond) {
-                    secondDecoded.countDown();
-                    assertTrue(secondRelease.await(2, TimeUnit.SECONDS));
-                }
-            } catch (InterruptedException exception) {
-                Thread.currentThread().interrupt();
-                throw new IllegalStateException(exception);
-            }
-            return decoded;
+        private Thread sendAsync(CapturingTransport transport, CatalogCachePublication publication) {
+            Thread delivery = Thread.ofVirtual().start(() -> chunks(publication).forEach(transport::receiveFlow));
+            deliveries.add(delivery);
+            return delivery;
         }
 
         private void advance(long seconds) {
@@ -504,6 +623,46 @@ class ReSyncFlowClientCatalogChunkTest {
             workspaceRelease.countDown();
             firstRelease.countDown();
             secondRelease.countDown();
+            for (Thread delivery : deliveries) {
+                try {
+                    delivery.join(TimeUnit.SECONDS.toMillis(2));
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(exception);
+                }
+            }
+            ReSyncLifecycleDiagnostics.install(previousSink);
+        }
+    }
+
+    private static final class HoldingDecoder implements ReSyncCatalogPublicationDecoder {
+        private final CountDownLatch submitted = new CountDownLatch(1);
+        private final AtomicInteger cancellations = new AtomicInteger();
+        private final AtomicReference<Callback> pending = new AtomicReference<>();
+        private final AtomicReference<Callback> last = new AtomicReference<>();
+
+        @Override
+        public void decode(byte[] canonicalBytes, Callback callback) {
+            pending.set(callback);
+            last.set(callback);
+            submitted.countDown();
+        }
+
+        @Override
+        public void cancelPending() {
+            cancellations.incrementAndGet();
+            Callback callback = pending.getAndSet(null);
+            if (callback != null) {
+                callback.failed("Retired");
+            }
+        }
+
+        @Override
+        public void close() {
+            Callback callback = pending.getAndSet(null);
+            if (callback != null) {
+                callback.failed("Closed");
+            }
         }
     }
 
@@ -513,7 +672,7 @@ class ReSyncFlowClientCatalogChunkTest {
         CatalogCachePublication publication = publication(server, 300_000);
         CapturingTransport transport = new CapturingTransport();
         ReSyncFlowClient client = new ReSyncFlowClient(server.canonicalText(), transport, null,
-            new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(temporaryDirectory.resolve("ordered.json"))));
+            new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(temporaryDirectory.resolve("ordered.json"))));
         try {
             authenticate(client, transport, publication.key());
             for (byte[] chunk : chunks(publication)) {
@@ -533,7 +692,7 @@ class ReSyncFlowClientCatalogChunkTest {
         List<byte[]> chunks = chunks(publication);
         CapturingTransport transport = new CapturingTransport();
         ReSyncFlowClient client = new ReSyncFlowClient(server.canonicalText(), transport, null,
-            new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(temporaryDirectory.resolve("duplicate.json"))));
+            new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(temporaryDirectory.resolve("duplicate.json"))));
         try {
             authenticate(client, transport, publication.key());
             transport.receiveFlow(chunks.getFirst());
@@ -557,7 +716,7 @@ class ReSyncFlowClientCatalogChunkTest {
             first.totalLength(), first.chunkIndex(), first.chunkCount(), first.digest(), conflictingPayload));
         CapturingTransport transport = new CapturingTransport();
         ReSyncFlowClient client = new ReSyncFlowClient(server.canonicalText(), transport, null,
-            new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(temporaryDirectory.resolve("conflict.json"))));
+            new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(temporaryDirectory.resolve("conflict.json"))));
         try {
             authenticate(client, transport, publication.key());
             transport.receiveFlow(chunks.getFirst());
@@ -575,7 +734,7 @@ class ReSyncFlowClientCatalogChunkTest {
         List<byte[]> chunks = chunks(publication);
         CapturingTransport transport = new CapturingTransport();
         ReSyncFlowClient client = new ReSyncFlowClient(server.canonicalText(), transport, null,
-            new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(temporaryDirectory.resolve("generation.json"))));
+            new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(temporaryDirectory.resolve("generation.json"))));
         try {
             authenticate(client, transport, publication.key());
             transport.receiveFlow(chunks.getFirst());
@@ -597,7 +756,7 @@ class ReSyncFlowClientCatalogChunkTest {
         CatalogCachePublicationCodec codec = new CatalogCachePublicationCodec();
         CapturingTransport transport = new CapturingTransport();
         ReSyncFlowClient client = new ReSyncFlowClient(server.canonicalText(), transport, null,
-            new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(temporaryDirectory.resolve("single.json"))));
+            new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(temporaryDirectory.resolve("single.json"))));
         try {
             authenticate(client, transport, publication.key());
             ByteBuffer payload = ByteBuffer.allocate(1 + codec.encodeBytes(publication).length);
@@ -614,7 +773,7 @@ class ReSyncFlowClientCatalogChunkTest {
     void catalogWorkUsesADedicatedBoundedWorker(@TempDir Path temporaryDirectory) throws Exception {
         ServerId server = server("66666666-6666-4666-8666-666666666666");
         ReSyncFlowClient client = new ReSyncFlowClient(server.canonicalText(), new CapturingTransport(), null,
-            new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(temporaryDirectory.resolve("worker.json"))));
+            new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(temporaryDirectory.resolve("worker.json"))));
         int publicationBytes = CatalogPublicationChunkPacket.MAX_PUBLICATION_BYTES;
         try {
             assertTrue(client.catalogPublicationWorkerIdentity().join() != null);
@@ -636,7 +795,7 @@ class ReSyncFlowClientCatalogChunkTest {
         CatalogCachePublication publication = publication(server, 300_000);
         CapturingTransport transport = new CapturingTransport();
         ReSyncFlowClient client = new ReSyncFlowClient(server.canonicalText(), transport, null,
-            new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(temporaryDirectory.resolve("shutdown.json"))));
+            new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(temporaryDirectory.resolve("shutdown.json"))));
         try {
             authenticate(client, transport, publication.key());
             transport.receiveFlow(chunks(publication).getFirst());

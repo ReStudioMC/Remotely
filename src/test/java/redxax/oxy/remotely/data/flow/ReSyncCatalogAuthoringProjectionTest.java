@@ -5,6 +5,7 @@ import restudio.resync.contract.cache.CatalogProjectionVersion;
 import restudio.resync.flow.cache.CatalogAuthoringPublication;
 import restudio.resync.flow.cache.CatalogAuthoringPublicationCodec;
 import restudio.resync.flow.cache.CatalogCacheKey;
+import restudio.resync.flow.cache.CatalogCachePublication;
 import restudio.resync.flow.cache.CatalogCachePublicationCodec;
 import restudio.resync.flow.cache.CatalogCacheState;
 import restudio.resync.flow.catalog.CatalogVersion;
@@ -20,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ReSyncCatalogAuthoringProjectionTest {
@@ -41,6 +43,13 @@ class ReSyncCatalogAuthoringProjectionTest {
         assertEquals(publication, projection.activePublication().orElseThrow());
         assertArrayEquals(bytes, projection.active().orElseThrow().canonicalBytes());
         assertTrue(projection.apply(key, 4, publication, bytes));
+        byte[] retained = projection.active().orElseThrow().canonicalBytes();
+        bytes[0] ^= 1;
+        assertArrayEquals(retained, projection.active().orElseThrow().canonicalBytes());
+        assertEquals(CatalogCachePublicationCodec.authoringPublicationChecksum(publication),
+            projection.active().orElseThrow().checksum());
+        assertThrows(IllegalArgumentException.class, () -> new ReSyncCatalogAuthoringProjection.Snapshot(
+            key, 4, publication, bytes, projection.active().orElseThrow().checksum()));
     }
 
     @Test
@@ -60,6 +69,27 @@ class ReSyncCatalogAuthoringProjectionTest {
         nonCanonical[nonCanonical.length - 1] = 0;
         assertFalse(projection.apply(key, 5, first, nonCanonical));
         assertSame(active, projection.active().orElseThrow());
+    }
+
+    @Test
+    void validatedParentPublicationAdmitsTheSameCanonicalAuthoringSnapshot() {
+        CatalogCacheKey key = new CatalogCacheKey(SERVER, BINDING, VERSION);
+        CatalogAuthoringPublication authoring = publication(BINDING, CatalogCacheState.ACTIVE);
+        CatalogCachePublication parent = new CatalogCachePublication(CatalogCachePublication.Kind.FULL, key, 4,
+            List.of()).withAuthoringPublication(authoring);
+        CatalogCachePublicationCodec codec = new CatalogCachePublicationCodec();
+        byte[] parentBytes = codec.encodeBytes(parent);
+        ReSyncCatalogAuthoringProjection projection = new ReSyncCatalogAuthoringProjection(SERVER);
+
+        ReSyncCatalogAuthoringProjection.Prepared prepared = projection.prepareValidated(
+            codec.decodeValidatedPublication(parentBytes)).orElseThrow();
+        assertTrue(projection.commitPrepared(prepared));
+        assertEquals(CatalogCachePublicationCodec.authoringPublicationChecksum(authoring),
+            projection.activeChecksum().orElseThrow());
+        assertArrayEquals(new CatalogAuthoringPublicationCodec().encodeBytes(authoring),
+            projection.active().orElseThrow().canonicalBytes());
+        assertThrows(IllegalArgumentException.class, () -> codec.decodeValidatedPublication(
+            new byte[]{'{', '}'}));
     }
 
     private static CatalogAuthoringPublication publication(CatalogBinding binding, CatalogCacheState state) {

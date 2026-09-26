@@ -616,6 +616,7 @@ tasks.jar {
 tasks.register<Jar>("fatJar") {
     group = "build"
     dependsOn(reStudioReleaseJarTasks)
+    dependsOn(":NetworkCore:jar")
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     isPreserveFileTimestamps = false
     isReproducibleFileOrder = true

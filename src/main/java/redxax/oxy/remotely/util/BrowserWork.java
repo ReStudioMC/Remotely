@@ -55,6 +55,10 @@ public final class BrowserWork {
         return new Executor(true, namePrefix);
     }
 
+    public static Executor serialYieldingExecutor() {
+        return new Executor(true, null, true);
+    }
+
     public static boolean failed(Async<?> async) {
         return async != null && async.isDone() && async.failure() != null;
     }
@@ -62,6 +66,7 @@ public final class BrowserWork {
     public static final class Executor {
         private final boolean serial;
         private final String namePrefix;
+        private final boolean yieldBetweenTasks;
         private final Deque<Runnable> pending = new ArrayDeque<>();
         private int counter;
         private boolean running;
@@ -69,8 +74,13 @@ public final class BrowserWork {
         private int active;
 
         private Executor(boolean serial, String namePrefix) {
+            this(serial, namePrefix, false);
+        }
+
+        private Executor(boolean serial, String namePrefix, boolean yieldBetweenTasks) {
             this.serial = serial;
             this.namePrefix = namePrefix;
+            this.yieldBetweenTasks = yieldBetweenTasks;
         }
 
         private Runnable wrapTask(Runnable task) {
@@ -154,6 +164,22 @@ public final class BrowserWork {
                 try {
                     next.run();
                 } catch (RuntimeException ignored) {
+                }
+                if (yieldBetweenTasks) {
+                    synchronized (this) {
+                        if (shutdown || pending.isEmpty()) {
+                            running = false;
+                            active = 0;
+                            notifyAll();
+                            return;
+                        }
+                        active = 0;
+                    }
+                    try {
+                        BrowserWork.execute(this::drain);
+                        return;
+                    } catch (RuntimeException ignored) {
+                    }
                 }
             }
         }

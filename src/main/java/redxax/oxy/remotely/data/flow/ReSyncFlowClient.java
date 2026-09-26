@@ -592,6 +592,8 @@ public class ReSyncFlowClient {
     private static final long CORE_REQUEST_REPLAY_TIMEOUT_SECONDS = 4L;
     private static final long CORE_RESPONSE_SETTLEMENT_TIMEOUT_SECONDS = 2L;
     private static final long TYPED_RESOURCE_RESPONSE_TIMEOUT_SECONDS = 15L;
+    private static final int MAX_TYPED_MUTATION_RECOVERY_REPLAYS = 3;
+    private static final long TYPED_MUTATION_RECOVERY_DELAY_SECONDS = 2L;
     private static final int MAX_CORE_SAVE_SESSION_SETTLEMENT_ATTEMPTS = 3;
     private static final long CORE_SAVE_SESSION_SETTLEMENT_RETRY_SECONDS = 1L;
     static final int MAX_CORE_AUTHORING_REDISCOVERY_ATTEMPTS = 3;
@@ -618,6 +620,7 @@ public class ReSyncFlowClient {
     private volatile String durabilityHealthFingerprint = "";
     private final NodeRegistryCache nodeRegistryCache = NodeRegistryCache.getInstance();
     private final CatalogCachePublicationCodec catalogPublicationCodec = new CatalogCachePublicationCodec();
+    private final ReSyncCatalogPublicationDecoder catalogPublicationDecoder;
     private final ReSyncCatalogPublicationCache catalogPublicationCache;
     private final ReSyncCatalogPublicationProjection catalogPublicationProjection;
     private final ReSyncCatalogAuthoringProjection catalogAuthoringProjection;
@@ -632,7 +635,7 @@ public class ReSyncFlowClient {
     private final BrowserSafeState.LongValue catalogPublicationWorkEpoch = new BrowserSafeState.LongValue();
     private final BrowserSafeState.BooleanValue catalogAcquisitionDrainQueued = new BrowserSafeState.BooleanValue();
     private final BrowserSafeState.BooleanValue catalogPublicationAccountingClosed = new BrowserSafeState.BooleanValue();
-    private final BrowserWork.Executor catalogPublicationWorker = BrowserWork.serialExecutor();
+    private final BrowserWork.Executor catalogPublicationWorker = BrowserWork.serialYieldingExecutor();
     private final BrowserSafeState.LongValue catalogPublicationActivity = new BrowserSafeState.LongValue();
     private final BrowserSafeState.LongValue catalogCacheHydrationRequest = new BrowserSafeState.LongValue();
     private final BrowserSafeState.ReferenceValue<Async<Optional<ReSyncCatalogPublicationCache.CachedPublication>>>
@@ -650,7 +653,6 @@ public class ReSyncFlowClient {
     private int catalogChunkCount;
     private int catalogChunkNextIndex;
     private byte[] catalogChunkDigest;
-    private ReSyncCatalogPublicationReceiptOutbox.PublicationIdentity[] catalogChunkPayloadIdentities;
     private CatalogPublicationAdmission catalogChunkAdmission;
     private TaskScheduler.ScheduledTask catalogChunkIdleTimeout;
     private long catalogChunkReservedBytes;
@@ -733,6 +735,7 @@ public class ReSyncFlowClient {
     private final WorldGenProtocolHandler worldGenProtocolHandler;
     private final String stableClientId;
     private final ReSyncIdentityProvider identityProvider;
+    private final ReSyncLuckPermsProvider luckPermsProvider;
     private final ReSyncCollaborationClient collaboration;
     private final ReSyncWorkspaceClient workspaces;
     private final ReSyncWorkspaceClient.WorkspaceSource workspaceSource;
@@ -750,6 +753,8 @@ public class ReSyncFlowClient {
     private final Map<UUID, PendingTypedResourceRequest> pendingTypedResourceRequests = BrowserSafeState.map();
     private final Map<UUID, TypedRequestDelivery> typedRequestDeliveries = BrowserSafeState.map();
     private final Map<UUID, PendingTypedResourceRequest> retainedTypedTransportMutations = BrowserSafeState.map();
+    private final Map<UUID, Integer> typedMutationRecoveryAttempts = BrowserSafeState.map();
+    private final Set<UUID> scheduledTypedMutationRecoveries = BrowserSafeState.set();
     private final Map<UUID, ResourcePresentationIntent> pendingCreatePresentations = BrowserSafeState.map();
     private final Set<UUID> aggregatePrimaryResponses = BrowserSafeState.set();
     private final Set<UUID> aggregatePrimarySettlements = BrowserSafeState.set();
@@ -797,16 +802,35 @@ public class ReSyncFlowClient {
         this(serverId, null, null, "bridge", client, frameTransport, catalogPublicationCache);
     }
 
-    private ReSyncFlowClient(String serverId, RemotelyServerApi apiClient, String directWsUrl, String directApiKey,
-                             RemotelyClient client, ReSyncFrameTransport frameTransport,
-                             ReSyncCatalogPublicationCache catalogPublicationCache) {
-        this(serverId, apiClient, directWsUrl, directApiKey, client, frameTransport, catalogPublicationCache, null);
+    ReSyncFlowClient(ReSyncCatalogPublicationDecoder catalogPublicationDecoder, String serverId,
+                     ReSyncFrameTransport frameTransport, RemotelyClient client,
+                     ReSyncCatalogPublicationCache catalogPublicationCache) {
+        this(serverId, null, null, "bridge", client, frameTransport, catalogPublicationCache, null,
+            ReSyncLuckPermsProvider.unavailable(), catalogPublicationDecoder);
     }
 
     private ReSyncFlowClient(String serverId, RemotelyServerApi apiClient, String directWsUrl, String directApiKey,
                              RemotelyClient client, ReSyncFrameTransport frameTransport,
-                             ReSyncCatalogPublicationCache catalogPublicationCache, ReSyncIdentityProvider identityProvider) {
+                             ReSyncCatalogPublicationCache catalogPublicationCache) {
+        this(serverId, apiClient, directWsUrl, directApiKey, client, frameTransport, catalogPublicationCache, null,
+            ReSyncLuckPermsProvider.unavailable());
+    }
+
+    private ReSyncFlowClient(String serverId, RemotelyServerApi apiClient, String directWsUrl, String directApiKey,
+                             RemotelyClient client, ReSyncFrameTransport frameTransport,
+                             ReSyncCatalogPublicationCache catalogPublicationCache, ReSyncIdentityProvider identityProvider,
+                             ReSyncLuckPermsProvider luckPermsProvider) {
+        this(serverId, apiClient, directWsUrl, directApiKey, client, frameTransport, catalogPublicationCache,
+            identityProvider, luckPermsProvider, null);
+    }
+
+    private ReSyncFlowClient(String serverId, RemotelyServerApi apiClient, String directWsUrl, String directApiKey,
+                             RemotelyClient client, ReSyncFrameTransport frameTransport,
+                             ReSyncCatalogPublicationCache catalogPublicationCache, ReSyncIdentityProvider identityProvider,
+                             ReSyncLuckPermsProvider luckPermsProvider,
+                             ReSyncCatalogPublicationDecoder catalogPublicationDecoder) {
         this.serverId = serverId;
+        this.catalogPublicationDecoder = catalogPublicationDecoder;
         this.catalogPublicationCache = Objects.requireNonNull(catalogPublicationCache, "Catalog publication cache is required");
         this.catalogPublicationProjection = ReSyncCatalogPublicationProjection.forConfiguredServerId(serverId,
             catalogPublicationCache);
@@ -821,6 +845,7 @@ public class ReSyncFlowClient {
         this.worldGenProtocolHandler = new WorldGenProtocolHandler(serverId, gson, this::trackGenericJob,
             this::worldGenAuthorityEpoch, this::acceptWorldGenAuthorityTransitionEpoch);
         this.identityProvider = identityProvider;
+        this.luckPermsProvider = Objects.requireNonNull(luckPermsProvider, "LuckPerms provider is required");
         this.stableClientId = identityProvider == null ? stableClientId(serverId)
             : Objects.requireNonNull(identityProvider.clientId(serverId), "ReSync client identity is required");
         if (stableClientId.isBlank()) throw new IllegalArgumentException("ReSync client identity is required");
@@ -855,9 +880,17 @@ public class ReSyncFlowClient {
                             ReSyncFlowClientContext context, TaskScheduler scheduler, Clock clock,
                             ReSyncIdentityProvider identityProvider, ReSyncCredentialProvider credentialProvider,
                             boolean ownsScheduler) {
+        this(serverId, frameTransport, apiKey, context, scheduler, clock, identityProvider, credentialProvider,
+            ownsScheduler, null);
+    }
+
+    public ReSyncFlowClient(String serverId, ReSyncFrameTransport frameTransport, String apiKey,
+                            ReSyncFlowClientContext context, TaskScheduler scheduler, Clock clock,
+                            ReSyncIdentityProvider identityProvider, ReSyncCredentialProvider credentialProvider,
+                            boolean ownsScheduler, ReSyncCatalogPublicationDecoder catalogPublicationDecoder) {
         this(serverId, null, null, handshakeCredential(credentialProvider, serverId, null, apiKey), hostClient(),
             Objects.requireNonNull(frameTransport, "Frame transport is required"),
-            catalogCache(context), identityProvider);
+            catalogCache(context), identityProvider, luckPermsProvider(context), catalogPublicationDecoder);
     }
 
     public ReSyncFlowClient(String serverId, RemotelyServerApi apiClient, String directWsUrl, String directApiKey,
@@ -874,7 +907,7 @@ public class ReSyncFlowClient {
                             ReSyncCredentialProvider credentialProvider, boolean ownsScheduler) {
         this(serverId, apiClient, directWsUrl, handshakeCredential(credentialProvider, serverId, directWsUrl, directApiKey),
             hostClient(), createTransport(transportFactory, directWsUrl),
-            catalogCache(context), identityProvider);
+            catalogCache(context), identityProvider, luckPermsProvider(context));
     }
 
     private static String handshakeCredential(ReSyncCredentialProvider provider, String serverId, String endpoint,
@@ -898,6 +931,10 @@ public class ReSyncFlowClient {
 
     private static ReSyncCatalogPublicationCache catalogCache(ReSyncFlowClientContext context) {
         return ReSyncCatalogPublicationCache.deferred();
+    }
+
+    private static ReSyncLuckPermsProvider luckPermsProvider(ReSyncFlowClientContext context) {
+        return context == null ? ReSyncLuckPermsProvider.unavailable() : context.luckPermsProvider();
     }
 
     private void configureHeartbeatScheduler() {
@@ -1191,14 +1228,15 @@ public class ReSyncFlowClient {
     }
 
     public ReSyncLuckPermsClient luckPerms() {
-        if (shutdownRequested) throw new IllegalStateException("ReSync client is shut down");
         ReSyncLuckPermsClient current = luckPermsClient;
         if (current != null) {
+            if (shutdownRequested) throw new IllegalStateException("ReSync client is shut down");
             return current;
         }
         synchronized (this) {
+            if (shutdownRequested) throw new IllegalStateException("ReSync client is shut down");
             if (luckPermsClient == null) {
-                luckPermsClient = new ReSyncLuckPermsClient(this);
+                luckPermsClient = luckPermsProvider.get(this);
             }
             return luckPermsClient;
         }
@@ -1792,6 +1830,7 @@ public class ReSyncFlowClient {
                 .map(snapshot -> snapshot.publication().key().equals(key)).orElse(false);
             if (typedCatalogAuthority()) {
                 refreshCatalogAuthority();
+                notifyCatalogAuthorityUpdated();
                 return true;
             }
             if (catalogPublicationConfirmed && !typedInteractionDiagnostic.isBlank()) {
@@ -4485,7 +4524,11 @@ public class ReSyncFlowClient {
         PendingTypedResourceRequest typed = pendingTypedResourceRequests.get(envelope.requestId());
         if (typed != null) {
             if (typed.matchesRejection(envelope)) {
-                failTypedResourceRequest(typed, rejectionMessage(envelope), false);
+                if (typed.mutation() && rejectionRetryable(envelope)) {
+                    recoverRejectedTypedMutation(typed);
+                } else {
+                    failTypedResourceRequest(typed, rejectionMessage(envelope), false);
+                }
             }
             return;
         }
@@ -4516,6 +4559,47 @@ public class ReSyncFlowClient {
             return ProtocolRejectionCode.fromWire(text).retryability() != ProtocolRetryability.NEVER;
         } catch (IllegalArgumentException exception) {
             return false;
+        }
+    }
+
+    private void recoverRejectedTypedMutation(PendingTypedResourceRequest pending) {
+        if (pendingTypedResourceRequests.get(pending.requestId()) != pending
+            || !scheduledTypedMutationRecoveries.add(pending.requestId())) {
+            return;
+        }
+        int attempt = typedMutationRecoveryAttempts.merge(pending.requestId(), 1, Integer::sum);
+        if (attempt > MAX_TYPED_MUTATION_RECOVERY_REPLAYS) {
+            scheduledTypedMutationRecoveries.remove(pending.requestId());
+            if (retainTypedTransportMutation(pending)) {
+                notifyError("ReSync Resource Update Awaits Recovery. Reconnect To Check Its Result.");
+            }
+            return;
+        }
+        try {
+            heartbeatScheduler.schedule(() -> {
+                scheduledTypedMutationRecoveries.remove(pending.requestId());
+                if (pendingTypedResourceRequests.get(pending.requestId()) != pending) {
+                    return;
+                }
+                if (!isConnectionReadyGeneration(pending.transportGeneration())) {
+                    retainTypedTransportMutation(pending);
+                    return;
+                }
+                ResourceSaveFence fence = pending.operation() == ResourceOperationKind.CREATE
+                    || pending.operation() == ResourceOperationKind.SAVE
+                    ? resourceSaveFence(saveRequestId(pending)) : null;
+                if ((pending.operation() == ResourceOperationKind.CREATE || pending.operation() == ResourceOperationKind.SAVE)
+                    && (fence == null || !currentResourceSaveFence(fence))) {
+                    retainTypedTransportMutation(pending);
+                    return;
+                }
+                dispatchTypedResourceRequest(pending, fence);
+            }, Duration.ofSeconds(TYPED_MUTATION_RECOVERY_DELAY_SECONDS));
+        } catch (RuntimeException exception) {
+            scheduledTypedMutationRecoveries.remove(pending.requestId());
+            if (retainTypedTransportMutation(pending)) {
+                notifyError("ReSync Resource Update Awaits Recovery. Reconnect To Check Its Result.");
+            }
         }
     }
 
@@ -4598,6 +4682,8 @@ public class ReSyncFlowClient {
             }
             clearPendingTypedReplays(pending.requestId());
             typedRequestDeliveries.remove(pending.requestId());
+            typedMutationRecoveryAttempts.remove(pending.requestId());
+            scheduledTypedMutationRecoveries.remove(pending.requestId());
             return true;
         }
     }
@@ -4611,6 +4697,8 @@ public class ReSyncFlowClient {
             typedRequestDeliveries.remove(requestId);
             if (pending != null) {
                 clearPendingTypedReplays(requestId);
+                typedMutationRecoveryAttempts.remove(requestId);
+                scheduledTypedMutationRecoveries.remove(requestId);
             }
             return pending;
         }
@@ -8378,6 +8466,9 @@ public class ReSyncFlowClient {
                 return;
             }
             observeHandshakeFailure(generation, HandshakeStage.TIMED_OUT, "handshake_timeout");
+            if (frameTransport != null) {
+                logger().operation("Connect").warn("ReSync bridge handshake timed out");
+            }
             synchronized (connectionCleanupLock) {
                 ConnectionRetirement retirement = retireConnectionGeneration(generation, "handshake_timeout");
                 if (!retirement.retired()) {
@@ -8707,14 +8798,24 @@ public class ReSyncFlowClient {
             processCatalogPublicationChunk(work);
             return;
         }
+        boolean transferred = false;
         try {
             if (!currentCatalogPublicationAdmission(work.admission())) {
                 return;
             }
             resetCatalogChunkAssembly();
-            processCatalogPublication(copyRemaining(work.payload()), work.admission());
+            byte[] canonicalBytes = copyRemaining(work.payload());
+            if (catalogPublicationDecoder == null) {
+                processCatalogPublication(canonicalBytes, work.admission(), null);
+            } else {
+                new BrowserCatalogPublicationTask(canonicalBytes, work.admission(), null, work.epoch(),
+                    work.reservedBytes()).start();
+                transferred = true;
+            }
         } finally {
-            releaseCatalogPublicationWork(work.reservedBytes());
+            if (!transferred) {
+                releaseCatalogPublicationWork(work.reservedBytes());
+            }
         }
     }
 
@@ -8749,15 +8850,14 @@ public class ReSyncFlowClient {
                         catalogChunkTotalLength = chunk.totalLength();
                         catalogChunkCount = chunk.chunkCount();
                         catalogChunkDigest = digest;
-                        catalogChunkPayloadIdentities =
-                            new ReSyncCatalogPublicationReceiptOutbox.PublicationIdentity[chunk.chunkCount()];
                         catalogChunkNextIndex = 0;
                     }
                     if (chunk.chunkIndex() < catalogChunkNextIndex) {
-                        ReSyncCatalogPublicationReceiptOutbox.PublicationIdentity duplicate =
-                            ReSyncCatalogPublicationReceiptOutbox.PublicationIdentity.of(chunk.payload());
-                        if (!duplicate.equals(catalogChunkPayloadIdentities[chunk.chunkIndex()])) {
-                            throw new IllegalArgumentException("Catalog publication chunk duplicate conflicts");
+                        Optional<byte[]> duplicate = catalogPublicationDecoder == null
+                            ? catalogPublicationChunkReassembler.accept(work.admission().generation(), chunk)
+                            : catalogPublicationChunkReassembler.acceptUnverified(work.admission().generation(), chunk);
+                        if (duplicate.isPresent()) {
+                            throw new IllegalArgumentException("Catalog publication duplicate completed a transfer");
                         }
                         catalogChunkAdmission = work.admission();
                         if (!scheduleCatalogChunkExpiry()) {
@@ -8771,8 +8871,9 @@ public class ReSyncFlowClient {
                     if (chunk.chunkIndex() != catalogChunkNextIndex) {
                         throw new IllegalArgumentException("Catalog publication chunks must arrive sequentially");
                     }
-                    Optional<byte[]> assembled = catalogPublicationChunkReassembler.accept(
-                        work.admission().generation(), chunk);
+                    Optional<byte[]> assembled = catalogPublicationDecoder == null
+                        ? catalogPublicationChunkReassembler.accept(work.admission().generation(), chunk)
+                        : catalogPublicationChunkReassembler.acceptUnverified(work.admission().generation(), chunk);
                     int headerBytes = CatalogPublicationChunkPacket.HEADER_BYTES - 1;
                     int payloadBytes = work.reservedBytes() - headerBytes;
                     if (payloadBytes < 1) {
@@ -8781,15 +8882,17 @@ public class ReSyncFlowClient {
                     releaseCatalogPublicationWork(headerBytes);
                     catalogChunkReservedBytes += payloadBytes;
                     transferred = true;
-                    catalogChunkPayloadIdentities[chunk.chunkIndex()] =
-                        ReSyncCatalogPublicationReceiptOutbox.PublicationIdentity.of(chunk.payload());
                     catalogChunkNextIndex++;
                     catalogChunkAdmission = work.admission();
                     observeCatalogProgress(work.admission(), "receiving", work.epoch());
                     if (assembled.isPresent()) {
                         long reservedBytes = catalogChunkReservedBytes;
+                        ReSyncCatalogPublicationReceiptOutbox.PublicationIdentity identity =
+                            new ReSyncCatalogPublicationReceiptOutbox.PublicationIdentity(
+                                assembled.orElseThrow().length, chunk.digest());
                         clearCatalogChunkTracking();
-                        completed = new CompletedCatalogPublication(assembled.orElseThrow(), work.admission(), reservedBytes);
+                        completed = new CompletedCatalogPublication(assembled.orElseThrow(), work.admission(),
+                            identity, reservedBytes);
                     } else if (shutdownRequested) {
                         discardedBytes += discardCatalogChunkAssemblyLocked();
                     } else if (!scheduleCatalogChunkExpiry()) {
@@ -8817,15 +8920,21 @@ public class ReSyncFlowClient {
             }
         }
         if (completed != null) {
-            try {
-                processCatalogPublication(completed.canonicalBytes(), completed.admission());
-            } finally {
-                releaseCatalogPublicationWork(completed.reservedBytes());
+            if (catalogPublicationDecoder == null) {
+                try {
+                    processCatalogPublication(completed.canonicalBytes(), completed.admission(), completed.identity());
+                } finally {
+                    releaseCatalogPublicationWork(completed.reservedBytes());
+                }
+            } else {
+                new BrowserCatalogPublicationTask(completed.canonicalBytes(), completed.admission(),
+                    completed.identity(), work.epoch(), completed.reservedBytes()).start();
             }
         }
     }
 
-    private void processCatalogPublication(byte[] canonicalBytes, CatalogPublicationAdmission admission) {
+    private void processCatalogPublication(byte[] canonicalBytes, CatalogPublicationAdmission admission,
+                                           ReSyncCatalogPublicationReceiptOutbox.PublicationIdentity verifiedIdentity) {
         if (!currentCatalogPublicationAdmission(admission)) {
             return;
         }
@@ -8863,7 +8972,8 @@ public class ReSyncFlowClient {
                 }
             }
             prepared = new PreparedCatalogPublication(publication, application, interaction,
-                ReSyncCatalogPublicationReceiptOutbox.PublicationIdentity.of(canonicalBytes));
+                verifiedIdentity == null ? ReSyncCatalogPublicationReceiptOutbox.PublicationIdentity.of(canonicalBytes)
+                    : verifiedIdentity);
         } catch (RuntimeException exception) {
             rejectCatalogPublicationAdmission(admission, "CATALOG_PUBLICATION.PAYLOAD_REJECTED");
             logger().operation("Catalog Publication").with("reason", exception.getMessage())
@@ -9078,7 +9188,6 @@ public class ReSyncFlowClient {
         catalogChunkCount = 0;
         catalogChunkNextIndex = 0;
         catalogChunkDigest = null;
-        catalogChunkPayloadIdentities = null;
         catalogChunkAdmission = null;
         catalogChunkReservedBytes = 0L;
     }
@@ -9205,6 +9314,235 @@ public class ReSyncFlowClient {
         }
     }
 
+    private final class BrowserCatalogPublicationTask implements ReSyncCatalogPublicationDecoder.Callback {
+        private final byte[] canonicalBytes;
+        private final CatalogPublicationAdmission admission;
+        private final ReSyncCatalogPublicationReceiptOutbox.PublicationIdentity expectedIdentity;
+        private final long workEpoch;
+        private final long reservedBytes;
+        private final List<CatalogCachePublication.Entry> entries = new ArrayList<>();
+        private CatalogCachePublication first;
+        private byte[] authoringBytes;
+        private byte[] nodeBytes;
+        private int nextPart;
+        private int totalParts;
+        private int nextNodeOffset;
+        private boolean finished;
+
+        private BrowserCatalogPublicationTask(byte[] canonicalBytes, CatalogPublicationAdmission admission,
+                                              ReSyncCatalogPublicationReceiptOutbox.PublicationIdentity expectedIdentity,
+                                              long workEpoch, long reservedBytes) {
+            this.canonicalBytes = canonicalBytes;
+            this.admission = admission;
+            this.expectedIdentity = expectedIdentity;
+            this.workEpoch = workEpoch;
+            this.reservedBytes = reservedBytes;
+        }
+
+        private void start() {
+            if (!current()) {
+                discard();
+                return;
+            }
+            observeCatalogProgress(admission, "decoding", workEpoch);
+            try {
+                catalogPublicationDecoder.decode(canonicalBytes, this);
+            } catch (RuntimeException exception) {
+                failed(exception.getMessage());
+            }
+        }
+
+        @Override
+        public void part(int index, int total, byte[] partBytes) {
+            if (finished) {
+                return;
+            }
+            if (!current()) {
+                discard();
+                return;
+            }
+            try {
+                if (partBytes == null || partBytes.length == 0 || partBytes.length > 512 * 1024
+                    || total < 1 || total > CatalogPublicationChunkPacket.MAX_CHUNKS
+                    || index != nextPart || nextPart > 0 && total != totalParts) {
+                    throw new IllegalArgumentException("Catalog publication worker part order is invalid");
+                }
+                CatalogCachePublicationCodec.ValidatedPublication validated =
+                    catalogPublicationCodec.decodeValidatedPublication(partBytes);
+                CatalogCachePublication publication = validated.publication();
+                if (first == null) {
+                    first = publication;
+                    totalParts = total;
+                    authoringBytes = validated.authoringCanonicalBytes();
+                } else if (publication.kind() != first.kind() || !publication.key().equals(first.key())
+                    || !Objects.equals(publication.catalogBinding(), first.catalogBinding())
+                    || publication.revision() != first.revision()
+                    || publication.authoringPublication() != null || !publication.unknown().isEmpty()) {
+                    throw new IllegalArgumentException("Catalog publication worker part identity changed");
+                }
+                if (!entries.isEmpty() && !publication.entries().isEmpty()
+                    && entries.getLast().definitionKey().canonicalText().compareTo(
+                        publication.entries().getFirst().definitionKey().canonicalText()) >= 0) {
+                    throw new IllegalArgumentException("Catalog publication worker part order changed");
+                }
+                entries.addAll(publication.entries());
+                nextPart++;
+            } catch (RuntimeException exception) {
+                failed(exception.getMessage());
+            }
+        }
+
+        @Override
+        public void node(int offset, int total, byte[] partBytes) {
+            if (finished) {
+                return;
+            }
+            if (!current()) {
+                discard();
+                return;
+            }
+            try {
+                if (first == null || first.authoringPublication() == null || partBytes == null
+                    || partBytes.length == 0 || partBytes.length > 128 * 1024
+                    || total < 1 || total > CatalogPublicationChunkPacket.MAX_PUBLICATION_BYTES
+                    || offset != nextNodeOffset || nodeBytes != null && nodeBytes.length != total
+                    || partBytes.length > total - offset) {
+                    throw new IllegalArgumentException("Catalog publication worker node bytes are invalid");
+                }
+                if (nodeBytes == null) {
+                    nodeBytes = new byte[total];
+                }
+                System.arraycopy(partBytes, 0, nodeBytes, offset, partBytes.length);
+                nextNodeOffset += partBytes.length;
+            } catch (RuntimeException exception) {
+                failed(exception.getMessage());
+            }
+        }
+
+        @Override
+        public void completed(byte[] sha256) {
+            if (finished) {
+                return;
+            }
+            if (!current()) {
+                discard();
+                return;
+            }
+            try {
+                if (sha256 == null || sha256.length != CatalogPublicationChunkPacket.SHA256_BYTES
+                    || first == null || nextPart != totalParts
+                    || first.authoringPublication() != null
+                        && (nodeBytes == null || nextNodeOffset != nodeBytes.length)
+                    || first.authoringPublication() == null && nodeBytes != null
+                    || expectedIdentity != null && !Arrays.equals(expectedIdentity.sha256(), sha256)) {
+                    throw new IllegalArgumentException("Catalog publication worker digest or parts do not match");
+                }
+                ReSyncCatalogPublicationReceiptOutbox.PublicationIdentity identity = expectedIdentity == null
+                    ? new ReSyncCatalogPublicationReceiptOutbox.PublicationIdentity(canonicalBytes.length, sha256)
+                    : expectedIdentity;
+                CatalogCachePublication publication = new CatalogCachePublication(first.kind(), first.key(),
+                    first.catalogBinding(), first.revision(), entries, first.authoringPublication(), first.unknown());
+                prepare(publication, identity);
+            } catch (RuntimeException exception) {
+                failed(exception.getMessage());
+            }
+        }
+
+        private void prepare(CatalogCachePublication publication,
+                             ReSyncCatalogPublicationReceiptOutbox.PublicationIdentity identity) {
+            if (!admission.expectedServer().equals(publication.serverId())) {
+                throw new IllegalArgumentException("Catalog publication server does not match the connection");
+            }
+            observeCatalogProgress(admission, "preparing", workEpoch);
+            CatalogPublicationReceipt pendingReceipt = CatalogPublicationReceipt
+                .pending(stableClientId, catalogPublicationReceiptOwnerToken(admission.generation()), publication)
+                .dispatched();
+            CatalogPublicationReceipt.Transition received = pendingReceipt.clientReceived(publication.key(),
+                publication.revision());
+            if (!received.accepted()) {
+                throw new IllegalArgumentException(received.code());
+            }
+            ReSyncCatalogPublicationReceiptHandler.PreparedApplication application = catalogPublicationReceiptHandler
+                .prepareWorkerValidated(received.receipt().orElseThrow(), publication, canonicalBytes,
+                    nodeBytes == null ? canonicalBytes : nodeBytes, authoringBytes);
+            if (!application.ready()) {
+                publish(new PreparedCatalogPublication(publication, application, null, identity));
+                return;
+            }
+            CatalogAuthoringPublication authoring = application.authoring() != null
+                ? application.authoring().candidate().publication()
+                : application.previousAuthoring() != null
+                    ? application.previousAuthoring().publication() : null;
+            ReSyncTypedInteractionProjection.Builder builder = ReSyncTypedInteractionProjection.begin(
+                application.node().candidate(), authoring);
+            BrowserWork.execute(() -> project(publication, application, identity, builder));
+        }
+
+        private void project(CatalogCachePublication publication,
+                             ReSyncCatalogPublicationReceiptHandler.PreparedApplication application,
+                             ReSyncCatalogPublicationReceiptOutbox.PublicationIdentity identity,
+                             ReSyncTypedInteractionProjection.Builder builder) {
+            if (finished) {
+                return;
+            }
+            if (!current()) {
+                discard();
+                return;
+            }
+            try {
+                if (!builder.advance(8)) {
+                    BrowserWork.execute(() -> project(publication, application, identity, builder));
+                    return;
+                }
+                publish(new PreparedCatalogPublication(publication, application, builder.finish(), identity));
+            } catch (ReSyncTypedInteractionProjection.ValidationException exception) {
+                publish(new PreparedCatalogPublication(publication,
+                    ReSyncCatalogPublicationReceiptHandler.PreparedApplication.rejected(publication.key(),
+                        publication.revision(), exception.diagnostic()), null, identity));
+            } catch (RuntimeException exception) {
+                failed(exception.getMessage());
+            }
+        }
+
+        private void publish(PreparedCatalogPublication prepared) {
+            if (!current()) {
+                discard();
+                return;
+            }
+            try {
+                completeCatalogPublication(admission, prepared);
+            } finally {
+                discard();
+            }
+        }
+
+        @Override
+        public void failed(String reason) {
+            if (finished) {
+                return;
+            }
+            boolean active = current();
+            discard();
+            if (active) {
+                rejectCatalogPublicationAdmission(admission, "CATALOG_PUBLICATION.PAYLOAD_REJECTED");
+                logger().operation("Catalog Publication").with("reason", reason == null ? "Worker failed" : reason)
+                    .warn("Rejected invalid catalog publication");
+            }
+        }
+
+        private boolean current() {
+            return !finished && workEpoch == catalogPublicationWorkEpoch.get()
+                && currentCatalogPublicationAdmission(admission);
+        }
+
+        private void discard() {
+            if (!finished) {
+                finished = true;
+                releaseCatalogPublicationWork(reservedBytes);
+            }
+        }
+    }
+
     private final class CatalogChunkExpiryTask implements Runnable {
         private final CatalogChunkTransfer transfer;
 
@@ -9244,12 +9582,17 @@ public class ReSyncFlowClient {
     }
 
     private record CompletedCatalogPublication(byte[] canonicalBytes, CatalogPublicationAdmission admission,
+                                               ReSyncCatalogPublicationReceiptOutbox.PublicationIdentity identity,
                                                long reservedBytes) {
         private CompletedCatalogPublication {
             canonicalBytes = Objects.requireNonNull(canonicalBytes, "Canonical catalog publication is required");
             admission = Objects.requireNonNull(admission, "Catalog publication admission is required");
+            identity = Objects.requireNonNull(identity, "Verified catalog publication identity is required");
             if (canonicalBytes.length == 0 || reservedBytes < canonicalBytes.length) {
                 throw new IllegalArgumentException("Completed catalog publication reservation is invalid");
+            }
+            if (identity.canonicalLength() != canonicalBytes.length) {
+                throw new IllegalArgumentException("Verified catalog publication length does not match");
             }
         }
     }
@@ -10939,7 +11282,7 @@ public class ReSyncFlowClient {
 
     private record ResourceSaveWork(ResourceSaveKey key, String trackerId, long draftVersion, ResourceSaveFence fence,
                                     ResourceSavePreparation payloadPreparation, BooleanSupplier currentPayload,
-                                    Runnable preparation, Runnable rejection) {
+                                    Runnable preparation, Runnable rejection, long queuedAtNanos) {
         private ResourceSaveWork {
             key = Objects.requireNonNull(key, "Resource save key is required");
             trackerId = Objects.requireNonNull(trackerId, "Resource save tracker is required");
@@ -13449,8 +13792,11 @@ public class ReSyncFlowClient {
             acquisition = catalogAcquisition;
             if (!currentCatalogAcquisitionLocked(acquisition) || acquisition.failed || acquisition.settled) return;
             long now = catalogAcquisitionNanos();
-            if (now - acquisition.startedAt >= CATALOG_ACQUISITION_LIMIT_NANOS && acquisition.pending) {
+            if (now - acquisition.startedAt >= CATALOG_ACQUISITION_LIMIT_NANOS
+                && (acquisition.pending || catalogPublicationWorkBytes.get() != 0L)) {
                 failCatalogAcquisitionLocked(acquisition, "CATALOG_PUBLICATION.WORKER_STALLED");
+                catalogPublicationActivity.incrementAndGet();
+                catalogPublicationWorkEpoch.incrementAndGet();
                 expired = true;
             } else if (!acquisition.pending && (now - acquisition.progressAt >= CATALOG_ACQUISITION_IDLE_NANOS
                 || now - acquisition.startedAt >= CATALOG_ACQUISITION_LIMIT_NANOS)) {
@@ -13467,6 +13813,9 @@ public class ReSyncFlowClient {
             if (!acquisition.failed) armCatalogAcquisitionTimeoutLocked(acquisition);
         }
         if (expired) {
+            if (catalogPublicationDecoder != null) {
+                catalogPublicationDecoder.cancelPending();
+            }
             resetCatalogChunkAssembly();
             traceCatalogAcquisition(acquisition, acquisition.failed ? "failed" : "deadline");
             notifyCatalogAuthorityUpdated();
@@ -16405,7 +16754,7 @@ public class ReSyncFlowClient {
                                         ResourceSavePreparation payloadPreparation, BooleanSupplier currentPayload,
                                         Runnable preparation, Runnable rejection) {
         ResourceSaveWork work = new ResourceSaveWork(key, trackerId, draftVersion, fence, payloadPreparation, currentPayload,
-            preparation, rejection);
+            preparation, rejection, System.nanoTime());
         boolean start;
         synchronized (resourceSaveQueueLock) {
             if (shutdownRequested || retainedResourceSaves >= MAX_PENDING_RESOURCE_PREPARATIONS
@@ -16426,6 +16775,14 @@ public class ReSyncFlowClient {
     }
 
     private void completeResourceSave(String trackerId) {
+        ResourceSaveWork work;
+        synchronized (resourceSaveQueueLock) {
+            work = resourceSavesByTracker.get(trackerId);
+        }
+        if (work != null && work.key().type() == ReSyncResourceType.LOOT_TABLE) {
+            logger().operation("Loot Save").with("resource", work.key().id())
+                .with("elapsedMs", (System.nanoTime() - work.queuedAtNanos()) / 1_000_000L).info("Loot save settled");
+        }
         removeResourceSave(trackerId);
     }
 
@@ -16471,8 +16828,14 @@ public class ReSyncFlowClient {
     }
 
     private void runResourceSavePreparation(ResourceSaveWork work) {
+        long startedAtNanos = System.nanoTime();
         try {
             work.preparation().run();
+            if (work.key().type() == ReSyncResourceType.LOOT_TABLE) {
+                logger().operation("Loot Save").with("resource", work.key().id())
+                    .with("queueMs", (startedAtNanos - work.queuedAtNanos()) / 1_000_000L)
+                    .with("preparationMs", (System.nanoTime() - startedAtNanos) / 1_000_000L).info("Loot save preparation finished");
+            }
         } catch (RuntimeException | Error failure) {
             ReLog.logger(LogTypes.FLOW).source(LogSource.server(serverId, serverId))
                 .component(ReSyncFlowClient.class).operation("Resource Save Preparation")
@@ -17474,6 +17837,8 @@ public class ReSyncFlowClient {
             }
             typedRequestDeliveries.remove(pending.requestId());
             clearPendingTypedReplays(pending.requestId());
+            typedMutationRecoveryAttempts.remove(pending.requestId());
+            scheduledTypedMutationRecoveries.remove(pending.requestId());
         }
         cancelPendingSend(pending.requestId().toString());
         traceLifecycle(serverId, "transport_mutation_retained", "serverId", serverId, "resourceKey",
@@ -17568,6 +17933,12 @@ public class ReSyncFlowClient {
             UUID requestId = entry.getKey();
             PendingTypedResourceRequest retained = entry.getValue();
             PendingTypedResourceRequest resumed = retained.forTransportGeneration(generation);
+            ResourceSaveFence fence = resumed.operation() == ResourceOperationKind.CREATE
+                || resumed.operation() == ResourceOperationKind.SAVE ? captureResourceSaveFence() : null;
+            if ((resumed.operation() == ResourceOperationKind.CREATE || resumed.operation() == ResourceOperationKind.SAVE)
+                && (fence == null || fence.transportGeneration() != generation)) {
+                continue;
+            }
             synchronized (transportMutationRetentionLock) {
                 if (pendingTypedResourceRequests.putIfAbsent(requestId, resumed) != null) {
                     continue;
@@ -17581,7 +17952,18 @@ public class ReSyncFlowClient {
                 temporaryLifecycleResourceKey(resumed.type(), resumed.resource()), "operation", resumed.operation(),
                 "requestId", resumed.requestId(), "mutationId", resumed.mutationId(), "generation", generation,
                 "authorityEpoch", handshakeAuthorityEpoch, "revision", resumed.expectedRevision());
-            dispatchTypedResourceRequest(resumed);
+            if (fence == null) {
+                dispatchTypedResourceRequest(resumed);
+                continue;
+            }
+            String trackerId = saveRequestId(resumed);
+            boolean admitted = enqueueResourceSave(new ResourceSaveKey(resumed.type(), resumed.resource().id()),
+                trackerId, -1L, fence, null, () -> true,
+                () -> dispatchTypedResourceRequest(resumed, fence),
+                () -> retainTypedTransportMutation(resumed));
+            if (!admitted) {
+                retainTypedTransportMutation(resumed);
+            }
         }
     }
 
@@ -19095,6 +19477,9 @@ public class ReSyncFlowClient {
         if (!isActiveGeneration(generation)) {
             return;
         }
+        if (frameTransport != null) {
+            logger().operation("Connect").with("reason", message).warn("ReSync bridge connection failed");
+        }
         connectionFailure.set(classifyConnectionFailure(message));
         synchronized (connectionCleanupLock) {
             ConnectionRetirement retirement = retireConnectionGeneration(generation,
@@ -19317,12 +19702,12 @@ public class ReSyncFlowClient {
             () -> WorldGenManager.getInstance().drainPendingMutations(serverId, "ReSync Disconnected"));
         failure = runShutdownStep(failure, () -> WorldGenManager.getInstance().shutdown(serverId));
         failure = runShutdownStep(failure, this::stopHeartbeat);
-        ReSyncLuckPermsClient currentLuckPerms = luckPermsClient;
-        failure = runShutdownStep(failure, () -> {
-            if (currentLuckPerms != null) {
-                currentLuckPerms.close();
-            }
-        });
+        ReSyncLuckPermsClient currentLuckPerms;
+        synchronized (this) {
+            currentLuckPerms = luckPermsClient;
+        }
+        if (currentLuckPerms != null) failure = runShutdownStep(failure, currentLuckPerms::close);
+        failure = runShutdownStep(failure, () -> luckPermsProvider.close(this));
         if (frameTransport != null) {
             failure = runShutdownStep(failure, frameTransport::close);
         }
@@ -19415,6 +19800,9 @@ public class ReSyncFlowClient {
     private void shutdownCatalogPublicationWorker() {
         catalogPublicationAccountingClosed.set(true);
         catalogPublicationWorkEpoch.incrementAndGet();
+        if (catalogPublicationDecoder != null) {
+            catalogPublicationDecoder.close();
+        }
         List<Runnable> discarded = catalogPublicationWorker.shutdownNow();
         long discardedBytes = 0L;
         for (Runnable item : discarded) {

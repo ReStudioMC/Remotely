@@ -359,7 +359,7 @@ public final class ReSyncCatalogPublicationCache {
             if (prepared) {
                 validatedStores.incrementAndGet();
                 CachedPublication candidate = validatePrepared(serverId, snapshot, canonicalBytes,
-                    authoringPublication, authoringCapabilities);
+                    authoring, authoringCapabilities);
                 stored = candidate != null && store(candidate);
             } else {
                 stored = storePrepared(serverId, publication, canonicalBytes, snapshot.hydrationPublication(),
@@ -508,11 +508,12 @@ public final class ReSyncCatalogPublicationCache {
     }
 
     private CachedPublication validatePrepared(ServerId serverId, ReSyncCatalogPublicationProjection.Snapshot snapshot,
-                                               byte[] canonicalBytes, CatalogAuthoringPublication authoringPublication,
+                                               byte[] canonicalBytes, ReSyncCatalogAuthoringProjection.Snapshot authoring,
                                                List<String> authoringCapabilities) {
         try {
             CatalogCachePublication publication = snapshot.publication();
             CatalogCachePublication hydrationProjection = snapshot.hydrationPublication();
+            CatalogAuthoringPublication authoringPublication = authoring == null ? null : authoring.publication();
             if (serverId == null || !serverId.equals(publication.serverId())
                 || !serverId.equals(hydrationProjection.serverId())
                 || !CatalogProjectionVersion.isSupported(publication.projectionVersion())
@@ -520,10 +521,12 @@ public final class ReSyncCatalogPublicationCache {
                 || publication.revision() != hydrationProjection.revision()
                 || hydrationProjection.kind() != CatalogCachePublication.Kind.FULL
                 || !sameProjectionEntries(publication, hydrationProjection)
-                || authoringPublication != null && (!publication.key().hasCatalogBinding()
+                || authoring != null && (!publication.key().equals(authoring.key())
+                    || publication.revision() != authoring.revision()
+                    || !publication.key().hasCatalogBinding()
                     || !publication.key().catalogBinding().equals(authoringPublication.binding())
                     || !publication.projectionVersion().equals(authoringPublication.projectionVersion())
-                    || !canonicalAuthoring(authoringPublication))) {
+                    || !authoring.validatedWitness() && !canonicalAuthoring(authoringPublication))) {
                 return null;
             }
             return new CachedPublication(serverId, publication.key(), publication, hydrationProjection,
@@ -672,6 +675,12 @@ public final class ReSyncCatalogPublicationCache {
 
     private Map<String, Map<String, CachedPublication>> readDisk() {
         try {
+            if (storage instanceof ReSyncStorage.Memory) {
+                MemorySnapshots memory = storage.readObject("payload", MemorySnapshots.class);
+                if (memory != null) {
+                    return memory.values();
+                }
+            }
             String persisted = storage.read("payload");
             if (persisted == null || persisted.isBlank()) {
                 return Map.of();
@@ -916,15 +925,15 @@ public final class ReSyncCatalogPublicationCache {
         ArrayDeque<SnapshotIdentity> evictions = new ArrayDeque<>(evictionOrder(fitted, protectedServer,
             protectedKey));
         while (true) {
-            boolean clearlyOversized = estimatedBytes(fitted) > MAX_CACHE_BYTES + 65_536L;
-            if (!clearlyOversized || evictions.isEmpty()) {
-                try {
-                    Map<String, Map<String, CachedPublication>> immutable = immutableSnapshots(fitted);
-                    return new PreparedReplacement(immutable, encode(immutable));
-                } catch (RuntimeException exception) {
-                    if (evictions.isEmpty()) {
-                        return null;
-                    }
+            try {
+                Map<String, Map<String, CachedPublication>> immutable = immutableSnapshots(fitted);
+                if (storage instanceof ReSyncStorage.Memory && fitsMemoryCache(immutable)) {
+                    return new PreparedReplacement(immutable, null);
+                }
+                return new PreparedReplacement(immutable, encode(immutable));
+            } catch (RuntimeException exception) {
+                if (evictions.isEmpty()) {
+                    return null;
                 }
             }
             SnapshotIdentity eviction = evictions.removeFirst();
@@ -936,6 +945,26 @@ public final class ReSyncCatalogPublicationCache {
                 fitted.remove(eviction.server());
             }
         }
+    }
+
+    private boolean fitsMemoryCache(Map<String, Map<String, CachedPublication>> values) {
+        long bytes = 0L;
+        for (Map<String, CachedPublication> server : values.values()) {
+            for (CachedPublication snapshot : server.values()) {
+                if (snapshot.publication().kind() != CatalogCachePublication.Kind.FULL
+                    || !snapshot.publication().equals(snapshot.hydrationProjection())) {
+                    return false;
+                }
+                bytes += snapshot.canonicalLength();
+                if (snapshot.authoringPublication() != null) {
+                    bytes += authoringCodec.encodeBytes(snapshot.authoringPublication()).length;
+                }
+                if (bytes > MAX_CACHE_BYTES - 1_048_576L) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     private List<SnapshotIdentity> evictionOrder(Map<String, Map<String, CachedPublication>> values,
@@ -976,37 +1005,11 @@ public final class ReSyncCatalogPublicationCache {
         return older;
     }
 
-    private long estimatedBytes(Map<String, Map<String, CachedPublication>> values) {
-        long bytes = 64L;
-        try {
-            for (Map.Entry<String, Map<String, CachedPublication>> server : values.entrySet()) {
-                bytes += server.getKey().getBytes(StandardCharsets.UTF_8).length + 16L;
-                for (Map.Entry<String, CachedPublication> snapshot : server.getValue().entrySet()) {
-                    CachedPublication publication = snapshot.getValue();
-                    bytes += snapshot.getKey().getBytes(StandardCharsets.UTF_8).length
-                        + publication.canonicalByteLength() + 96L;
-                    if (publication.publication().kind() != CatalogCachePublication.Kind.FULL
-                        || !publication.publication().equals(publication.hydrationProjection())) {
-                        bytes += codec.encodeBytes(publication.hydrationProjection()).length;
-                    }
-                    if (publication.authoringPublication() != null) {
-                        bytes += authoringCodec.encodeBytes(publication.authoringPublication()).length;
-                        bytes += publication.authoringCapabilities().stream()
-                            .mapToLong(value -> value.getBytes(StandardCharsets.UTF_8).length + 8L).sum();
-                    }
-                    if (bytes > Integer.MAX_VALUE) {
-                        return bytes;
-                    }
-                }
-            }
-            return bytes;
-        } catch (RuntimeException exception) {
-            return Long.MAX_VALUE;
-        }
-    }
-
     private boolean replaceSnapshots(Map<String, Map<String, CachedPublication>> values) {
         synchronized (pathLock) {
+            if (storage instanceof ReSyncStorage.Memory && fitsMemoryCache(values)) {
+                return replaceSnapshots(values, null);
+            }
             byte[] encoded;
             try {
                 encoded = encode(values);
@@ -1019,6 +1022,13 @@ public final class ReSyncCatalogPublicationCache {
 
     private boolean replaceSnapshots(Map<String, Map<String, CachedPublication>> values, byte[] encoded) {
         synchronized (pathLock) {
+            if (storage instanceof ReSyncStorage.Memory) {
+                storage.writeObject("payload", new MemorySnapshots(immutableSnapshots(values)));
+                durableWrites.incrementAndGet();
+                installSnapshots(values);
+                publishShared(snapshots);
+                return true;
+            }
             if (!replace(encoded)) {
                 return false;
             }
@@ -1271,6 +1281,10 @@ public final class ReSyncCatalogPublicationCache {
             return canonicalBytes.clone();
         }
 
+        int canonicalLength() {
+            return canonicalBytes.length;
+        }
+
         boolean matches(ReSyncCatalogPublicationProjection.Snapshot snapshot,
                         ReSyncCatalogAuthoringProjection.Snapshot authoring,
                         List<String> capabilities) {
@@ -1373,6 +1387,9 @@ public final class ReSyncCatalogPublicationCache {
     }
 
     private record PreparedReplacement(Map<String, Map<String, CachedPublication>> snapshots, byte[] encoded) {
+    }
+
+    private record MemorySnapshots(Map<String, Map<String, CachedPublication>> values) {
     }
 
     private record PendingStore(CatalogCacheKey key, long revision, BooleanSupplier transaction,

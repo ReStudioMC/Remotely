@@ -19,6 +19,7 @@ import redxax.oxy.remotely.host.ApplicationHostRegistry;
 import redxax.oxy.remotely.metadata.catalog.ServerSettingsCatalogService;
 import redxax.oxy.remotely.web.platform.BrowserApplicationHost;
 import redxax.oxy.remotely.web.platform.BrowserClock;
+import redxax.oxy.remotely.web.platform.BrowserCatalogPublicationDecoder;
 import redxax.oxy.remotely.util.TaskIdentities;
 import redxax.oxy.remotely.web.platform.BrowserCommunityProvider;
 import redxax.oxy.remotely.web.platform.BrowserDiagnosticsClient;
@@ -35,6 +36,7 @@ import redxax.oxy.remotely.web.platform.BrowserRemotelyServerApi;
 import redxax.oxy.remotely.web.platform.BrowserRemotelyConfigStore;
 import redxax.oxy.remotely.web.platform.BrowserTaskScheduler;
 import restudio.rescreen.platform.browser.BrowserWebSocketTransport;
+import restudio.rescreen.platform.browser.BrowserKeyValueStore;
 import redxax.oxy.remotely.util.TaskSchedulers;
 import redxax.oxy.remotely.settings.server.BrowserSafeYamlServerSettingsMetadataParser;
 import redxax.oxy.remotely.settings.server.BundledServerSettingsRegistry;
@@ -153,11 +155,18 @@ public final class RemotelyBrowserComposition {
                         ? BrowserLaunchSession.reSyncUrl(serverId) : directWsUrl;
                     frameTransport = transportFactory.create(endpoint);
                 }
-                return new ReSyncFlowClient(serverId, frameTransport, directApiKey, context,
-                    activeAdapters.scheduler(), activeAdapters.clock(), identity, credentials);
+                BrowserCatalogPublicationDecoder catalogDecoder = new BrowserCatalogPublicationDecoder();
+                try {
+                    return new ReSyncFlowClient(serverId, frameTransport, directApiKey, context,
+                        activeAdapters.scheduler(), activeAdapters.clock(), identity, credentials, false, catalogDecoder);
+                } catch (RuntimeException | Error exception) {
+                    catalogDecoder.close();
+                    throw exception;
+                }
             };
             composition = RemotelyComposition.browser(host)
                 .configManager(config)
+                .storageBreakdownStore(BrowserKeyValueStore.local("remotely:storage-breakdown:v1"), 1_500_000)
                 .apiClient(serverApi)
                 .scheduler(activeAdapters.scheduler())
                 .clock(activeAdapters.clock())

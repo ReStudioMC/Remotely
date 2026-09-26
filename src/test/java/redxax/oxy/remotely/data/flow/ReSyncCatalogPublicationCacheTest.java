@@ -6,11 +6,13 @@ import restudio.resync.contract.cache.CatalogProjectionVersion;
 import restudio.rescreen.platform.Async;
 import restudio.resync.contract.canonical.JsonValue;
 import restudio.resync.flow.canonical.CanonicalLimits;
+import restudio.resync.flow.cache.CatalogAuthoringPublication;
 import restudio.resync.flow.cache.CatalogCacheKey;
 import restudio.resync.flow.cache.CatalogCacheOpaque;
 import restudio.resync.flow.cache.CatalogCachePublication;
 import restudio.resync.flow.cache.CatalogCachePublicationCodec;
 import restudio.resync.flow.cache.CatalogCacheState;
+import restudio.resync.flow.catalog.CatalogVersion;
 import restudio.resync.flow.identity.ContentHash;
 import restudio.resync.flow.identity.ContractRef;
 import restudio.resync.flow.identity.NodeId;
@@ -108,6 +110,21 @@ class ReSyncCatalogPublicationCacheTest {
         ReSyncCatalogPublicationCache restarted = new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path));
         assertEquals(firstPublication, restarted.latest(SERVER).orElseThrow().publication());
         assertEquals(secondPublication, restarted.latest(OTHER_SERVER).orElseThrow().publication());
+    }
+
+    @Test
+    void browserMemoryCacheReusesTheCommittedFullPublicationAcrossInstances() {
+        String namespace = "catalog-memory-" + UUID.randomUUID();
+        CatalogCachePublication publication = full(key(SERVER), 1, "browser");
+        byte[] canonicalBytes = CODEC.encodeBytes(publication);
+        ReSyncCatalogPublicationCache first = new ReSyncCatalogPublicationCache(ReSyncStorage.memory(namespace));
+
+        assertTrue(first.store(SERVER, publication, canonicalBytes, publication));
+
+        ReSyncCatalogPublicationCache second = new ReSyncCatalogPublicationCache(ReSyncStorage.memory(namespace));
+        ReSyncCatalogPublicationCache.CachedPublication restored = second.latest(SERVER).orElseThrow();
+        assertSame(publication, restored.publication());
+        assertArrayEquals(canonicalBytes, restored.canonicalBytes());
     }
 
     @Test
@@ -281,6 +298,42 @@ class ReSyncCatalogPublicationCacheTest {
         assertEquals(publication, new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path))
             .latest(SERVER).orElseThrow().publication());
         assertFalse(cache.store(SERVER, publication, CODEC.encodeBytes(full(key(SERVER), 7, "other")), publication));
+    }
+
+    @Test
+    void preparedAuthoringPersistsOnlyWithTheMatchingCatalogIdentity(@TempDir Path tempDir) {
+        Path path = tempDir.resolve("catalog-publication-cache.json");
+        ReSyncCatalogPublicationCache cache = new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(path));
+        CatalogCacheKey key = key(SERVER);
+        CatalogAuthoringPublication authoring = new CatalogAuthoringPublication(key.catalogBinding(),
+            new CatalogVersion(1, 0), VERSION, List.of(
+                new CatalogAuthoringPublication.SectionProjection(CatalogAuthoringPublication.Section.TYPES,
+                    true, true, CatalogCacheState.ACTIVE, List.of()),
+                new CatalogAuthoringPublication.SectionProjection(CatalogAuthoringPublication.Section.EDITORS,
+                    true, true, CatalogCacheState.ACTIVE, List.of()),
+                new CatalogAuthoringPublication.SectionProjection(CatalogAuthoringPublication.Section.PREVIEWS,
+                    true, true, CatalogCacheState.ACTIVE, List.of()),
+                new CatalogAuthoringPublication.SectionProjection(CatalogAuthoringPublication.Section.CAPABILITIES,
+                    true, true, CatalogCacheState.ACTIVE, List.of())), Set.of());
+        CatalogCachePublication parent = full(key, 7, "prepared")
+            .withAuthoringPublication(authoring);
+        CatalogCachePublicationCodec.ValidatedPublication validated = CODEC.decodeValidatedPublication(
+            CODEC.encodeBytes(parent));
+        ReSyncCatalogPublicationProjection.Prepared node = new ReSyncCatalogPublicationProjection(SERVER)
+            .prepare(validated).orElseThrow();
+        ReSyncCatalogAuthoringProjection.Prepared preparedAuthoring = new ReSyncCatalogAuthoringProjection(SERVER)
+            .prepareValidated(validated).orElseThrow();
+
+        assertTrue(cache.storeAsync(SERVER, node, preparedAuthoring.candidate(),
+            List.of("catalog-authoring")).join().stored());
+        ReSyncCatalogPublicationCache.CachedPublication restored = new ReSyncCatalogPublicationCache(
+            DesktopReSyncStorage.fromKey(path)).latest(SERVER).orElseThrow();
+        assertEquals(authoring, restored.authoringPublication());
+        assertEquals(List.of("catalog-authoring"), restored.authoringCapabilities());
+        assertFalse(cache.storeAsync(SERVER, node,
+            new ReSyncCatalogAuthoringProjection.Snapshot(key, 8, authoring,
+                preparedAuthoring.candidate().canonicalBytes(), preparedAuthoring.candidate().checksum()),
+            List.of("catalog-authoring")).join().stored());
     }
 
     @Test

@@ -1,6 +1,7 @@
 package redxax.oxy.remotely.data.flow;
 
 import org.junit.jupiter.api.Test;
+import redxax.oxy.remotely.flow.registry.NodeDefinition;
 import restudio.resync.contract.cache.CatalogProjectionVersion;
 import restudio.resync.flow.cache.CatalogCacheKey;
 import restudio.resync.flow.cache.CatalogCacheOpaque;
@@ -23,6 +24,7 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ReSyncGenericDescriptorProjectionTest {
@@ -82,6 +84,10 @@ class ReSyncGenericDescriptorProjectionTest {
         assertFalse(projection.fields().getFirst().editable());
         assertEquals(Map.of("retain", true), projection.unknown());
         assertEquals(named("player"), projection.pin("target", true).orElseThrow().type());
+        assertThrows(UnsupportedOperationException.class,
+            () -> ((Map<?, ?>) projection.descriptor().get("future")).clear());
+        assertThrows(UnsupportedOperationException.class,
+            () -> ((Map<?, ?>) projection.pin("target", true).orElseThrow().type()).clear());
     }
 
     @Test
@@ -99,6 +105,66 @@ class ReSyncGenericDescriptorProjectionTest {
         assertEquals(1, projection.fields().size());
         assertFalse(projection.fields().getFirst().editable());
         assertEquals(descriptor, projection.canonicalData());
+    }
+
+    @Test
+    void raycastScalarSelectorKeepsItsOtherInputsEditable() {
+        Map<String, Object> editor = Map.of("ownerId", "extension.generic", "localId", "generic-editor");
+        Map<String, Object> material = named("material");
+        Map<String, Object> descriptor = Map.of("id", "generic.node", "pins", List.of(
+            Map.of("id", "distance", "direction", "input", "type", named("number"),
+                "defaultValue", 20, "editor", editor),
+            Map.of("id", "block_filter", "direction", "input", "type", material,
+                "defaultValue", "any", "editor", editor,
+                "optionSource", Map.of("ownerId", "extension.generic", "localId", "blocks"),
+                "presentation", Map.of("widget", "SEARCHABLE_LIST"))));
+        ReSyncGenericDescriptorProjection.Projection projection = ReSyncGenericDescriptorProjection.open(
+            present("generic.node", CanonicalJson.canonicalize(descriptor), Map.of()),
+            ReSyncGenericDescriptorProjection.ClientCapabilities.primitive()).orElseThrow();
+
+        assertEquals(ReSyncGenericDescriptorProjection.Status.ACTIVE, projection.status());
+        assertFalse(projection.readOnly());
+        assertTrue(projection.fields().stream().anyMatch(field -> field.id().equals("pin:distance")
+            && field.editorKind() == ReSyncGenericDescriptorProjection.EditorKind.NUMBER && field.editable()));
+        assertTrue(projection.fields().stream().anyMatch(field -> field.id().equals("pin:block_filter")
+            && field.editorKind() == ReSyncGenericDescriptorProjection.EditorKind.SELECT && field.editable()));
+        assertEquals(ContractRef.of(OWNER, InspectorFieldId.of("blocks")),
+            projection.pin("block_filter", true).orElseThrow().optionSource());
+
+        ReSyncGenericWidgetCapabilities.Conversion conversion = ReSyncGenericWidgetCapabilities.convert(projection);
+        assertTrue(conversion.widget().isPresent(), conversion.reason());
+        ReSyncGenericWidgetCapabilities.WidgetDefinition widget = conversion.widget().orElseThrow();
+        assertFalse(widget.readOnly());
+        NodeDefinition.PinDefinition blockFilter = widget.definition().getInputs().stream()
+            .filter(pin -> pin.getId().value().equals("block_filter")).findFirst().orElseThrow();
+        assertEquals(NodeDefinition.WidgetType.SEARCHABLE_LIST, blockFilter.getWidgetType());
+        assertEquals(ContractRef.of(OWNER, InspectorFieldId.of("blocks")), blockFilter.getOptionSourceRef());
+    }
+
+    @Test
+    void namedScalarWithoutOptionSourceStaysReadOnly() {
+        Map<String, Object> descriptor = Map.of("id", "generic.node", "pins", List.of(
+            Map.of("id", "block_filter", "direction", "input", "type", named("material"),
+                "defaultValue", "any", "editor", Map.of("ownerId", "extension.generic", "localId", "generic-editor"),
+                "presentation", Map.of("widget", "SEARCHABLE_LIST"))));
+        ReSyncGenericDescriptorProjection.Projection projection = ReSyncGenericDescriptorProjection.open(
+            present("generic.node", CanonicalJson.canonicalize(descriptor), Map.of()),
+            ReSyncGenericDescriptorProjection.ClientCapabilities.primitive()).orElseThrow();
+
+        assertEquals(ReSyncGenericDescriptorProjection.Status.READ_ONLY, projection.status());
+        assertFalse(projection.fields().getFirst().editable());
+
+        Map<String, Object> unsupported = Map.of("id", "generic.node", "pins", List.of(
+            Map.of("id", "target", "direction", "input", "type", named("player"),
+                "defaultValue", "player-id", "editor", Map.of("ownerId", "extension.generic", "localId", "generic-editor"),
+                "optionSource", Map.of("ownerId", "extension.generic", "localId", "players"),
+                "presentation", Map.of("widget", "SEARCHABLE_LIST"))));
+        ReSyncGenericDescriptorProjection.Projection unsupportedProjection = ReSyncGenericDescriptorProjection.open(
+            present("generic.node", CanonicalJson.canonicalize(unsupported), Map.of()),
+            ReSyncGenericDescriptorProjection.ClientCapabilities.primitive()).orElseThrow();
+
+        assertEquals(ReSyncGenericDescriptorProjection.Status.READ_ONLY, unsupportedProjection.status());
+        assertFalse(unsupportedProjection.fields().getFirst().editable());
     }
 
     private static Map<String, Object> named(String id) {

@@ -1,10 +1,12 @@
 package redxax.oxy.remotely.data.flow;
 
 import redxax.oxy.remotely.util.BrowserSafeState;
+import restudio.resync.contract.canonical.CanonicalHash;
 import restudio.resync.contract.cache.CatalogProjectionVersion;
 import restudio.resync.flow.cache.CatalogAuthoringPublication;
 import restudio.resync.flow.cache.CatalogAuthoringPublicationCodec;
 import restudio.resync.flow.cache.CatalogCacheKey;
+import restudio.resync.flow.cache.CatalogCachePublication;
 import restudio.resync.flow.cache.CatalogCachePublicationCodec;
 import restudio.resync.flow.identity.CatalogBinding;
 import restudio.resync.flow.identity.ContentHash;
@@ -82,12 +84,33 @@ public final class ReSyncCatalogAuthoringProjection {
     public synchronized Optional<Prepared> prepare(CatalogCacheKey key, long revision,
                                                     CatalogAuthoringPublication publication,
                                                     byte[] canonicalBytes) {
+        return prepare(key, revision, publication, canonicalBytes, false);
+    }
+
+    synchronized Optional<Prepared> prepareValidated(CatalogCachePublicationCodec.ValidatedPublication validated) {
+        Objects.requireNonNull(validated, "Validated catalog publication is required");
+        CatalogCachePublication publication = validated.publication();
+        CatalogAuthoringPublication authoring = Objects.requireNonNull(publication.authoringPublication(),
+            "Validated catalog authoring publication is required");
+        return prepare(publication.key(), publication.revision(), authoring,
+            Objects.requireNonNull(validated.authoringCanonicalBytes(), "Validated authoring bytes are required"), true);
+    }
+
+    synchronized Optional<Prepared> prepareWorkerValidated(CatalogCacheKey key, long revision,
+                                                            CatalogAuthoringPublication publication,
+                                                            byte[] canonicalBytes) {
+        return prepare(key, revision, publication, canonicalBytes, true);
+    }
+
+    private Optional<Prepared> prepare(CatalogCacheKey key, long revision,
+                                       CatalogAuthoringPublication publication,
+                                       byte[] canonicalBytes, boolean validated) {
         Snapshot previous = active.get();
         if (previous != null && key != null && key.equals(previous.key()) && revision == previous.revision()) {
             return previous.canonicalBytesEqual(canonicalBytes) && previous.publication().equals(publication)
                 ? Optional.of(new Prepared(previous, previous)) : Optional.empty();
         }
-        Snapshot candidate = validate(key, revision, publication, canonicalBytes);
+        Snapshot candidate = validate(key, revision, publication, canonicalBytes, validated);
         if (candidate == null) {
             return Optional.empty();
         }
@@ -176,6 +199,11 @@ public final class ReSyncCatalogAuthoringProjection {
 
     private Snapshot validate(CatalogCacheKey key, long revision,
                               CatalogAuthoringPublication publication, byte[] canonicalBytes) {
+        return validate(key, revision, publication, canonicalBytes, false);
+    }
+
+    private Snapshot validate(CatalogCacheKey key, long revision,
+                              CatalogAuthoringPublication publication, byte[] canonicalBytes, boolean validated) {
         if (key == null || publication == null || canonicalBytes == null || canonicalBytes.length == 0
             || expectedServerId == null || !expectedServerId.equals(key.serverId())
             || !key.hasCatalogBinding() || revision < 0L
@@ -189,11 +217,15 @@ public final class ReSyncCatalogAuthoringProjection {
             return null;
         }
         try {
-            CatalogAuthoringPublication decoded = CODEC.decodeBytes(canonicalBytes);
-            if (!publication.equals(decoded) || !Arrays.equals(canonicalBytes, CODEC.encodeBytes(decoded))) {
-                return null;
+            if (!validated) {
+                CatalogAuthoringPublication decoded = CODEC.decodeBytes(canonicalBytes);
+                if (!publication.equals(decoded) || !Arrays.equals(canonicalBytes, CODEC.encodeBytes(decoded))) {
+                    return null;
+                }
             }
-            return new Snapshot(key, revision, publication, canonicalBytes, checksum(canonicalBytes));
+            ContentHash checksum = new ContentHash(CanonicalHash.sha256(
+                CatalogCachePublicationCodec.AUTHORING_PUBLICATION_HASH_DOMAIN, canonicalBytes));
+            return new Snapshot(key, revision, publication, canonicalBytes, checksum, true);
         } catch (RuntimeException exception) {
             return null;
         }
@@ -230,24 +262,57 @@ public final class ReSyncCatalogAuthoringProjection {
         }
     }
 
-    public record Snapshot(CatalogCacheKey key, long revision, CatalogAuthoringPublication publication,
-                           byte[] canonicalBytes, ContentHash checksum) {
-        public Snapshot {
-            key = Objects.requireNonNull(key, "Catalog authoring cache key is required");
-            publication = Objects.requireNonNull(publication, "Catalog authoring publication is required");
-            canonicalBytes = Objects.requireNonNull(canonicalBytes, "Catalog authoring bytes are required").clone();
-            if (canonicalBytes.length == 0) {
-                throw new IllegalArgumentException("Catalog authoring bytes cannot be empty");
-            }
-            checksum = Objects.requireNonNull(checksum, "Catalog authoring checksum is required");
-            if (!checksum.equals(ReSyncCatalogAuthoringProjection.checksum(canonicalBytes))) {
-                throw new IllegalArgumentException("Catalog authoring checksum does not match bytes");
-            }
+    public static final class Snapshot {
+        private final CatalogCacheKey key;
+        private final long revision;
+        private final CatalogAuthoringPublication publication;
+        private final byte[] canonicalBytes;
+        private final ContentHash checksum;
+        private final boolean validatedWitness;
+
+        public Snapshot(CatalogCacheKey key, long revision, CatalogAuthoringPublication publication,
+                        byte[] canonicalBytes, ContentHash checksum) {
+            this(key, revision, publication, canonicalBytes, checksum, false);
         }
 
-        @Override
+        private Snapshot(CatalogCacheKey key, long revision, CatalogAuthoringPublication publication,
+                         byte[] canonicalBytes, ContentHash checksum, boolean validated) {
+            this.key = Objects.requireNonNull(key, "Catalog authoring cache key is required");
+            this.revision = revision;
+            this.publication = Objects.requireNonNull(publication, "Catalog authoring publication is required");
+            this.canonicalBytes = Objects.requireNonNull(canonicalBytes, "Catalog authoring bytes are required").clone();
+            if (this.canonicalBytes.length == 0) {
+                throw new IllegalArgumentException("Catalog authoring bytes cannot be empty");
+            }
+            this.checksum = Objects.requireNonNull(checksum, "Catalog authoring checksum is required");
+            if (!validated && !checksum.equals(ReSyncCatalogAuthoringProjection.checksum(this.canonicalBytes))) {
+                throw new IllegalArgumentException("Catalog authoring checksum does not match bytes");
+            }
+            this.validatedWitness = validated;
+        }
+
+        boolean validatedWitness() {
+            return validatedWitness;
+        }
+
+        public CatalogCacheKey key() {
+            return key;
+        }
+
+        public long revision() {
+            return revision;
+        }
+
+        public CatalogAuthoringPublication publication() {
+            return publication;
+        }
+
         public byte[] canonicalBytes() {
             return canonicalBytes.clone();
+        }
+
+        public ContentHash checksum() {
+            return checksum;
         }
 
         public boolean canonicalBytesEqual(byte[] bytes) {

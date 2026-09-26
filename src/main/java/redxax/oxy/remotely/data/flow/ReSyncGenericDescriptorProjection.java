@@ -56,7 +56,7 @@ public final class ReSyncGenericDescriptorProjection {
                 return traced(entry, Optional.of(Projection.invalid(entry, canonical,
                     "The catalog descriptor is not an object.")), startedAt, "descriptor_not_object");
             }
-            Map<String, Object> descriptor = freezeMap(raw);
+            Map<String, Object> descriptor = readMap(raw);
             String descriptorId = text(descriptor.get("id"));
             if (!entry.definitionKey().id().value().equals(descriptorId)) {
                 return traced(entry, Optional.of(Projection.invalid(entry, canonical,
@@ -147,7 +147,7 @@ public final class ReSyncGenericDescriptorProjection {
                 fields.add(Field.unsupported("pin:unknown", "Unknown Pin", "The pin descriptor is not an object."));
                 continue;
             }
-            Map<String, Object> pin = freezeMap(raw);
+            Map<String, Object> pin = readMap(raw);
             String id = text(pin.get("id"));
             if (id.isBlank()) {
                 fields.add(Field.unsupported("pin:unknown", "Unknown Pin", "The pin has no stable identity."));
@@ -170,12 +170,15 @@ public final class ReSyncGenericDescriptorProjection {
                 continue;
             }
             if (direction == Direction.INPUT && literalInput(pin)) {
+                String widget = text(presentationView(pin).get("widget"));
                 Field field = qualifiedResourceType(type) && optionSource != null
+                    ? new Field("pin:" + id, text(pin.get("displayName")), text(pin.get("description")),
+                        EditorKind.SELECT, CanonicalJson.canonicalize(type), capability(pin.get("editor")), true, "")
+                    : scalarSelector(type, optionSource, widget, capability(pin.get("editor")))
                     ? new Field("pin:" + id, text(pin.get("displayName")), text(pin.get("description")),
                         EditorKind.SELECT, CanonicalJson.canonicalize(type), capability(pin.get("editor")), true, "")
                     : field("pin:" + id, text(pin.get("displayName")), text(pin.get("description")),
                         pin.get("type"), pin.get("editor"), capabilities);
-                String widget = text(presentation(pin).get("widget"));
                 if (!supportsWidget(field.editorKind(), widget)) {
                     field = new Field(field.id(), field.title(), field.description(), EditorKind.UNSUPPORTED,
                         field.typeExpression(), field.capability(), false,
@@ -187,11 +190,30 @@ public final class ReSyncGenericDescriptorProjection {
         return List.copyOf(result);
     }
 
+    private static boolean scalarSelector(Object type, ContractRef<InspectorFieldId> optionSource, String widget,
+                                          String editor) {
+        if (optionSource == null || !editor.endsWith("/generic-editor")
+            || !Set.of("dropdown", "searchable_list").contains(widget.toLowerCase(Locale.ROOT))
+            || !(type instanceof Map<?, ?> raw)) {
+            return false;
+        }
+        Map<String, Object> named = readMap(raw);
+        if (!"named".equalsIgnoreCase(text(named.get("kind")))
+            || !(named.get("type") instanceof Map<?, ?> reference)
+            || !(named.get("arguments") instanceof Collection<?> arguments) || !arguments.isEmpty()) {
+            return false;
+        }
+        Map<String, Object> identity = readMap(reference);
+        return "builtin".equals(text(identity.get("ownerId")))
+            && Set.of("material", "sound", "potion_effect", "entity_type", "network_scope")
+                .contains(text(identity.get("localId")));
+    }
+
     private static boolean qualifiedResourceType(Object value) {
         if (!(value instanceof Map<?, ?> raw)) {
             return false;
         }
-        Map<String, Object> type = freezeMap(raw);
+        Map<String, Object> type = readMap(raw);
         if (!"resource".equalsIgnoreCase(text(type.get("kind")))
             || !(type.get("resourceType") instanceof Map<?, ?> reference)) {
             return false;
@@ -218,7 +240,7 @@ public final class ReSyncGenericDescriptorProjection {
         if (!(value instanceof Map<?, ?> raw)) {
             return false;
         }
-        Map<String, Object> type = freezeMap(raw);
+        Map<String, Object> type = readMap(raw);
         String kind = text(type.get("kind")).toLowerCase(Locale.ROOT);
         if ("resource".equals(kind)) {
             if (!(type.get("resourceType") instanceof Map<?, ?> reference)) {
@@ -262,7 +284,7 @@ public final class ReSyncGenericDescriptorProjection {
         if (flowType(pin.get("type"))) {
             return false;
         }
-        Map<String, Object> presentation = presentation(pin);
+        Map<String, Object> presentation = presentationView(pin);
         String widget = text(presentation.get("widget"));
         String editor = capability(pin.get("editor"));
         return primitiveTypeExpression(typeName(pin.get("type")))
@@ -275,13 +297,17 @@ public final class ReSyncGenericDescriptorProjection {
     }
 
     static Map<String, Object> presentation(Map<String, Object> pin) {
+        return freezeMap(presentationView(pin));
+    }
+
+    private static Map<String, Object> presentationView(Map<String, Object> pin) {
         if (!pin.containsKey("presentation")) {
             return pin;
         }
         if (!(pin.get("presentation") instanceof Map<?, ?> raw)) {
             throw new IllegalArgumentException("Pin presentation must be an object");
         }
-        return freezeMap(raw);
+        return readMap(raw);
     }
 
     private static boolean supportsWidget(EditorKind kind, String widget) {
@@ -312,7 +338,7 @@ public final class ReSyncGenericDescriptorProjection {
         if (!(value instanceof Map<?, ?> raw)) {
             return Inspector.empty();
         }
-        Map<String, Object> inspector = freezeMap(raw);
+        Map<String, Object> inspector = readMap(raw);
         Object sections = inspector.get("sections");
         if (!(sections instanceof Collection<?> values)) {
             return new Inspector(text(inspector.get("id")), text(inspector.get("title")),
@@ -325,7 +351,7 @@ public final class ReSyncGenericDescriptorProjection {
                 fields.add(Field.unsupported("inspector:unknown", "Unknown Field", "The inspector section is not an object."));
                 continue;
             }
-            Map<String, Object> section = freezeMap(sectionRaw);
+            Map<String, Object> section = readMap(sectionRaw);
             Object rows = section.get("rows");
             if (!(rows instanceof Collection<?> rowValues)) {
                 projectedSections.add(new InspectorSection(text(section.get("id")), text(section.get("title")),
@@ -339,7 +365,7 @@ public final class ReSyncGenericDescriptorProjection {
                     fields.add(Field.unsupported("inspector:unknown", "Unknown Field", "The inspector row is not an object."));
                     continue;
                 }
-                Map<String, Object> row = freezeMap(rowRaw);
+                Map<String, Object> row = readMap(rowRaw);
                 List<InspectorField> projectedFields = parseFields(row.get("fields"), fields, capabilities, "field:", owner);
                 projectedRows.add(new InspectorRow(text(row.get("id")), text(row.get("title")),
                     text(row.get("description")), projectedFields, property(row, "bindings", "binding"),
@@ -365,7 +391,7 @@ public final class ReSyncGenericDescriptorProjection {
                 fields.add(Field.unsupported(prefix + "unknown", "Unknown Field", "The inspector field is not an object."));
                 continue;
             }
-            Map<String, Object> source = freezeMap(raw);
+            Map<String, Object> source = readMap(raw);
             String id = text(source.get("id"));
             if (id.isBlank()) {
                 fields.add(Field.unsupported(prefix + "unknown", "Unknown Field", "The inspector field has no stable identity."));
@@ -421,7 +447,7 @@ public final class ReSyncGenericDescriptorProjection {
         if (!(value instanceof Map<?, ?> raw)) {
             return "";
         }
-        Map<String, Object> map = freezeMap(raw);
+        Map<String, Object> map = readMap(raw);
         String owner = text(map.get("ownerId"));
         String id = text(map.get("localId"));
         return owner.isBlank() || id.isBlank() ? "" : owner + "/" + id;
@@ -434,7 +460,7 @@ public final class ReSyncGenericDescriptorProjection {
         if (!(value instanceof Map<?, ?> raw)) {
             throw new IllegalArgumentException("Option source reference must be an object");
         }
-        Map<String, Object> source = freezeMap(raw);
+        Map<String, Object> source = readMap(raw);
         String owner = text(source.get("ownerId"));
         String id = text(source.get("localId"));
         if (owner.isBlank() || id.isBlank()) {
@@ -450,7 +476,7 @@ public final class ReSyncGenericDescriptorProjection {
         if (!(value instanceof Map<?, ?> raw) || owner == null) {
             throw new IllegalArgumentException("Inspector option source must be an object");
         }
-        Map<String, Object> source = freezeMap(raw);
+        Map<String, Object> source = readMap(raw);
         if (!source.keySet().containsAll(Set.of("id", "title", "description", "valueType", "querySchema",
             "capability", "pageLimit", "invalidationKey"))) {
             throw new IllegalArgumentException("Inspector option source is incomplete");
@@ -478,10 +504,10 @@ public final class ReSyncGenericDescriptorProjection {
         if (!(value instanceof Map<?, ?> raw)) {
             return "";
         }
-        Map<String, Object> map = freezeMap(raw);
+        Map<String, Object> map = readMap(raw);
         String kind = text(map.get("kind"));
         if ("named".equalsIgnoreCase(kind) && map.get("type") instanceof Map<?, ?> reference) {
-            Map<String, Object> typed = freezeMap(reference);
+            Map<String, Object> typed = readMap(reference);
             String owner = text(typed.get("ownerId"));
             String localId = text(typed.get("localId"));
             return owner.isBlank() || localId.isBlank() || "builtin".equals(owner)
@@ -495,6 +521,17 @@ public final class ReSyncGenericDescriptorProjection {
 
     private static String text(Object value) {
         return value instanceof String string ? string : "";
+    }
+
+    private static Map<String, Object> readMap(Map<?, ?> source) {
+        LinkedHashMap<String, Object> result = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> entry : source.entrySet()) {
+            if (!(entry.getKey() instanceof String key)) {
+                throw new IllegalArgumentException("Canonical descriptor maps require string keys");
+            }
+            result.put(key, entry.getValue());
+        }
+        return result;
     }
 
     private static Map<String, Object> freezeMap(Map<?, ?> source) {

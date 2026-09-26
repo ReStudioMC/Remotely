@@ -3,6 +3,7 @@ package redxax.oxy.remotely.util;
 import org.junit.jupiter.api.Test;
 import restudio.rescreen.platform.Async;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -15,6 +16,33 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class BrowserWorkSerialExecutorTest {
+    @Test
+    void yieldingSerialExecutorReturnsToTheSchedulerBetweenQueuedTasks() {
+        Async.Snapshot platform = Async.snapshot();
+        ArrayDeque<Runnable> turns = new ArrayDeque<>();
+        BrowserWork.Executor worker = BrowserWork.serialYieldingExecutor();
+        List<Integer> completed = new ArrayList<>();
+        try {
+            Async.installExecutor(turns::addLast, ignored -> { });
+            worker.execute(() -> completed.add(1));
+            worker.execute(() -> completed.add(2));
+            worker.execute(() -> completed.add(3));
+            assertEquals(1, turns.size());
+            turns.removeFirst().run();
+            assertEquals(List.of(1), completed);
+            assertEquals(1, turns.size());
+            turns.removeFirst().run();
+            assertEquals(List.of(1, 2), completed);
+            assertEquals(1, turns.size());
+            turns.removeFirst().run();
+            assertEquals(List.of(1, 2, 3), completed);
+            assertTrue(turns.isEmpty());
+        } finally {
+            worker.shutdownNow();
+            Async.restore(platform);
+        }
+    }
+
     @Test
     void serialExecutorPreservesSubmissionOrderOnAParallelAsyncPool() throws Exception {
         Async.Snapshot platform = Async.snapshot();

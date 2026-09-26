@@ -460,7 +460,7 @@ class ReSyncPhysicalSendDeadlineContractTest {
         assertTrue(source.contains("send.tracker.expired(nowNanos, MAX_OUTBOUND_DELIVERY_NANOS)"));
         assertTrue(source.contains("if (failOutboundSend(send, \"delivery_timeout\"))"));
         assertFalse(source.contains("if (failOutboundSend(send, \"delivery_timeout\")) {\n                requestRestart(send.generation);"));
-        assertTrue(source.contains("MAX_OUTBOUND_PACKETS_PER_TICK = 32"));
+        assertTrue(source.contains("MAX_OUTBOUND_PACKETS_PER_TICK = 2"));
         assertTrue(source.contains("MAX_OUTBOUND_BYTES_PER_TICK = 768 * 1_024"));
         assertTrue(connections.contains("\"ReSync Connection Failed\".equals(normalized)"));
         assertTrue(connections.contains("live_session_transient_failure_suppressed"));

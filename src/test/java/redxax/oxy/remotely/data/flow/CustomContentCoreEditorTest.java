@@ -68,6 +68,33 @@ class CustomContentCoreEditorTest {
     private static final TypeExpr STRING = TypeExpr.named(TypeReference.of("builtin", "string"));
 
     @Test
+    void generatedAndPreviouslySavedArmorRootsOpenWithoutHandFilter() {
+        FlowGraph generated = CustomContentGraphAdapter.createContentGraph("armor", "armor", "Armor");
+        FlowNode generatedRoot = CustomContentGraphAdapter.findStartNode(generated);
+        assertNotNull(generatedRoot);
+        assertFalse(generatedRoot.getInputValues().containsKey("hand_filter"));
+        List<CatalogCachePublication.Entry> armorCatalog = armorEntries(generatedRoot);
+        ServerResourceLocator armorResource = new ServerResourceLocator(SERVER,
+            ContractRef.of(OWNER, ResourceTypeId.of("custom_content")), "armor");
+
+        for (boolean previouslySaved : List.of(false, true)) {
+            FlowGraph graph = FlowSerializer.deserialize(FlowSerializer.serialize(generated));
+            FlowNode root = CustomContentGraphAdapter.findStartNode(graph);
+            assertNotNull(root);
+            if (previouslySaved) {
+                root.getInputValues().put("hand_filter", "any");
+            }
+            CustomContentDefinition content = CustomContentGraphAdapter.toDefinition(graph);
+            CoreGraphEditorSession session = CustomContentCoreEditor.prepare(content, armorResource, 4,
+                publication(), armorCatalog);
+            assertEquals(1, session.graphDocument().nodes().size());
+            GraphNode coreRoot = session.graphDocument().nodes().getFirst();
+            assertEquals("custom_content.armor", coreRoot.definition().id().canonicalText());
+            assertFalse(coreRoot.values().containsKey(PinId.of("hand_filter")));
+        }
+    }
+
+    @Test
     void acknowledgedAggregateOpensMigratesMovesConnectsAndReopensWithoutLosingTypedState() {
         CustomContentDefinition content = content();
         CoreGraphEditorSession session = open(content, 4);
@@ -232,7 +259,8 @@ class CustomContentCoreEditorTest {
         CatalogAuthoringPublication current = publication();
         CatalogBinding binding = new CatalogBinding(2, "c".repeat(64), "d".repeat(64));
         CatalogAuthoringPublication changed = new CatalogAuthoringPublication(binding, current.contractVersion(),
-            current.projectionVersion(), current.sections(), current.advertisedEditCapabilities());
+            current.projectionVersion(), current.sections(), current.advertisedEditCapabilities(),
+            Map.of("unrelatedCatalogNote", "changed"));
         List<CatalogCachePublication.Entry> changedEntries = new ArrayList<>(entries());
         changedEntries.add(entry("unrelated", 1, List.of(pin("unused", "input", "number")), Map.of()));
 
@@ -379,6 +407,24 @@ class CustomContentCoreEditorTest {
         Map<String, Object> migration = Map.of("sourceSchemaVersion", 1, "targetSchemaVersion", 2, "complete", true, "pins", mapping);
         return List.of(entry("custom_content.item", 2, inputs, Map.of("authoredSource", Map.of("migrationMapping", migration))),
             entry("action", 1, List.of(pin("value", "input", "string"), pin("execute", "input", "execution")), Map.of()));
+    }
+
+    private static List<CatalogCachePublication.Entry> armorEntries(FlowNode root) {
+        List<Map<String, Object>> pins = new ArrayList<>();
+        List<Map<String, String>> migration = new ArrayList<>();
+        root.getInputValues().forEach((id, value) -> {
+            if (CustomContentGraphAdapter.FLOW_BRANCHES_KEY.equals(id)) return;
+            String type = value instanceof Boolean ? "boolean" : value instanceof Number ? "number"
+                : value instanceof Map<?, ?> ? "any" : "string";
+            pins.add(pin(id, "input", type));
+            migration.add(Map.of("direction", "input", "source", id, "target", id));
+        });
+        pins.add(pin("tick", "output", "execution"));
+        migration.add(Map.of("direction", "output", "source", "tick", "target", "tick"));
+        Map<String, Object> mapping = Map.of("sourceSchemaVersion", 1, "targetSchemaVersion", 2,
+            "complete", true, "pins", migration);
+        return List.of(entry("custom_content.armor", 2, pins,
+            Map.of("authoredSource", Map.of("migrationMapping", mapping))));
     }
 
     private static Map<String, Object> pin(String id, String direction, String type) {
