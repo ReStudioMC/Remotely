@@ -20,6 +20,7 @@ import restudio.rescreen.ui.widgets.AnimatedWidget;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -46,6 +47,8 @@ public class GlyphPreviewRenderer {
     private static final int HOVER_MAX_IMAGE_WIDTH = 144;
     private static final long HOVER_TARGET_TTL_MS = 1200L;
     private static final long REFRESH_INTERVAL_MS = 2500L;
+    private static final int ABSENT_TERMINAL_GLYPHS_LIMIT = 512;
+    private static final TerminalTextDecoration.Prepared PLAIN_TERMINAL = new TerminalTextDecoration.Prepared(false, context -> false);
     private static final Pattern YAML_GLYPH_ID = Pattern.compile("^([A-Za-z0-9_.-]+):\\s*$");
     private final GlyphPreviewAccess access;
     private final String filePath;
@@ -55,6 +58,13 @@ public class GlyphPreviewRenderer {
     private final Map<String, GlyphPreviewAccess.Image> loadedImages = new HashMap<>();
     private final Set<String> loadingImages = new HashSet<>();
     private final Set<String> failedImages = new HashSet<>();
+    private final Map<String, Boolean> absentTerminalGlyphs = new LinkedHashMap<>(64, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) {
+            return size() > ABSENT_TERMINAL_GLYPHS_LIMIT;
+        }
+    };
+    private long absentTerminalGlyphsRevision = -1;
     private final GlyphHoverWidget hoverWidget = new GlyphHoverWidget();
     private HoverTarget hoverTarget;
     private PendingHover pendingHover;
@@ -101,17 +111,33 @@ public class GlyphPreviewRenderer {
     }
 
     public boolean replaceTerminal(TerminalTextDecoration.TerminalTextDecorationContext context, GlyphPreviewMode mode) {
+        return prepareTerminal(context.text(), mode).draw().apply(context);
+    }
+
+    public TerminalTextDecoration.Prepared prepareTerminal(String text, GlyphPreviewMode mode) {
         refreshIfDue();
         expireHoverTarget();
-        if (mode == null || mode == GlyphPreviewMode.OFF || context.text() == null || context.text().isEmpty()) {
-            return false;
+        if (mode == null || mode == GlyphPreviewMode.OFF || text == null || text.isEmpty()) {
+            return PLAIN_TERMINAL;
         }
+        long revision = access.catalogRevision();
+        if (revision != absentTerminalGlyphsRevision) {
+            absentTerminalGlyphs.clear();
+            absentTerminalGlyphsRevision = revision;
+        }
+        if (revision >= 0 && absentTerminalGlyphs.containsKey(text)) {
+            return PLAIN_TERMINAL;
+        }
+        List<GlyphPreviewAccess.Preview> previews = access.resolveGlyphs(text);
+        if (previews.isEmpty() && revision >= 0 && revision == access.catalogRevision()) absentTerminalGlyphs.put(text, true);
+        if (previews.isEmpty()) return PLAIN_TERMINAL;
+        return new TerminalTextDecoration.Prepared(mode.inline(), context -> drawTerminal(context, mode, previews));
+    }
+
+    private boolean drawTerminal(TerminalTextDecoration.TerminalTextDecorationContext context, GlyphPreviewMode mode,
+                                 List<GlyphPreviewAccess.Preview> previews) {
         if (!mode.inline()) {
-            draw(context.drawContext(), context.text(), context.segmentX(), context.segmentY(), context.lineHeight(), context.charWidth(), context.mouseX(), context.mouseY(), mode, false, PreviewSurface.TERMINAL);
-            return false;
-        }
-        List<GlyphPreviewAccess.Preview> previews = access.resolveGlyphs(context.text());
-        if (previews.isEmpty()) {
+            draw(context.drawContext(), context.text(), context.segmentX(), context.segmentY(), context.lineHeight(), context.charWidth(), context.mouseX(), context.mouseY(), mode, false, PreviewSurface.TERMINAL, previews);
             return false;
         }
         int rawCursor = 0;
@@ -196,7 +222,11 @@ public class GlyphPreviewRenderer {
         if (mode == null || mode == GlyphPreviewMode.OFF || text == null || text.isEmpty()) {
             return;
         }
-        List<GlyphPreviewAccess.Preview> previews = access.resolveGlyphs(text);
+        draw(ctx, text, drawX, drawY, lineHeight, charWidth, mouseX, mouseY, mode, immediateHover, surface, access.resolveGlyphs(text));
+    }
+
+    private void draw(IDrawContext ctx, String text, int drawX, int drawY, int lineHeight, int charWidth, int mouseX, int mouseY,
+                      GlyphPreviewMode mode, boolean immediateHover, PreviewSurface surface, List<GlyphPreviewAccess.Preview> previews) {
         GlyphPreviewAccess.Preview hovered = null;
         for (GlyphPreviewAccess.Preview preview : previews) {
             if (!rendersPreview(text, preview.match(), surface)) {

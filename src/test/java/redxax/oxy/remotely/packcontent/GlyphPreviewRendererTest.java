@@ -2,6 +2,11 @@ package redxax.oxy.remotely.packcontent;
 
 import com.jediterm.terminal.util.CharUtils;
 import org.junit.jupiter.api.Test;
+import restudio.rescreen.platform.Async;
+
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -85,6 +90,55 @@ class GlyphPreviewRendererTest {
                 "C:\\Servers\\Demo\\glyphs\\TEST.yml", "c:/servers/demo/glyphs/test.yml"));
         assertFalse(GlyphPreviewRenderer.sourceMatchesFile(
                 "/plugins/Nexo/glyphs/test.yml", "/plugins/Nexo/glyphs/other.yml"));
+    }
+
+    @Test
+    void absentTerminalGlyphsStayResidentUntilCatalogRevisionChanges() {
+        AtomicInteger resolutions = new AtomicInteger();
+        class Access implements GlyphPreviewAccess {
+            private long revision = 1;
+
+            @Override
+            public Async<Void> refresh() {
+                return Async.completed(null);
+            }
+
+            @Override
+            public List<Preview> resolveGlyphs(String text) {
+                resolutions.incrementAndGet();
+                return List.of();
+            }
+
+            @Override
+            public long catalogRevision() {
+                return revision;
+            }
+
+            @Override
+            public Optional<Preview> resolveGlyph(String providerId, String glyphId, Integer index) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Async<Image> loadImage(GlyphDefinition glyph) {
+                return Async.completed(null);
+            }
+
+            @Override
+            public String sourceName(GlyphDefinition glyph) {
+                return "";
+            }
+        }
+        Access access = new Access();
+        GlyphPreviewRenderer renderer = new GlyphPreviewRenderer(access, null, null);
+
+        renderer.prepareTerminal("plain", GlyphPreviewMode.INLINE_HOVER);
+        renderer.prepareTerminal("plain", GlyphPreviewMode.INLINE_HOVER);
+        assertEquals(1, resolutions.get());
+
+        access.revision++;
+        renderer.prepareTerminal("plain", GlyphPreviewMode.INLINE_HOVER);
+        assertEquals(2, resolutions.get());
     }
 
 }

@@ -56,8 +56,8 @@ final class BrowserGlyphPreviewRuntime implements NexoGlyphPreviewAccess.Runtime
         if (path == null || files == null) return false;
         ScreenManager manager = ScreenManager.getInstance();
         Screen parent = manager.getCurrentScreen();
-        FileEditorScreen.canOpen(files, path).thenAccept(can -> manager.execute(() -> {
-            if (can) {
+        FileEditorScreen.canOpen(files, path).whenComplete((can, failure) -> manager.execute(() -> {
+            if (failure == null && can) {
                 manager.setScreen(new FileEditorScreen(parent, server, files, workspaceRoot, path, workspaceRoot));
             } else {
                 new Notification("Open Failed", path.fileName(), Notification.Type.ERROR);

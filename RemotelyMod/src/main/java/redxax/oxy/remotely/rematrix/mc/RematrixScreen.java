@@ -19,9 +19,6 @@ import net.minecraft.client.input.MouseButtonEvent;
 //$$ import net.minecraft.client.input.MouseButtonEvent;
 //#endif
 import net.minecraft.network.chat.Component;
-//#if MC >= 26.2 && MC < 26.3
-//$$ import org.lwjgl.glfw.GLFW;
-//#endif
 import redxax.oxy.remotely.adapters.MinecraftDrawContextAdapter;
 import redxax.oxy.remotely.host.MinecraftMouseInput;
 import restudio.rescreen.config.Config;
@@ -125,14 +122,6 @@ public class RematrixScreen extends Screen {
         RematrixContext ctx = new RematrixContext(guiGraphics, renderScale);
         MinecraftDrawContextAdapter libCtx = new MinecraftDrawContextAdapter(ctx);
 
-        //#if MC >= 26.2 && MC < 26.3
-        //$$ long previousContext = GLFW.glfwGetCurrentContext();
-        //$$ long windowHandle = Minecraft.getInstance().getWindow().handle();
-        //$$ if (previousContext != windowHandle) {
-        //$$     GLFW.glfwMakeContextCurrent(windowHandle);
-        //$$ }
-        //#endif
-
         var pose = guiGraphics.pose();
         pose.pushMatrix();
         pose.scale(renderScale, renderScale);
@@ -142,11 +131,6 @@ public class RematrixScreen extends Screen {
         Render.animatedScaling();
         pose.popMatrix();
 
-        //#if MC >= 26.2 && MC < 26.3
-        //$$ if (previousContext != windowHandle) {
-        //$$     GLFW.glfwMakeContextCurrent(previousContext);
-        //$$ }
-        //#endif
     }
     //#endif
 

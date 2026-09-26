@@ -20,6 +20,7 @@ import java.util.UUID;
 import java.util.WeakHashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import net.minecraft.client.Minecraft;
 import net.minecraft.ChatFormatting;
@@ -147,6 +148,7 @@ public final class RematrixContext implements ReContext {
     private static final Map<String, BufferedImage> PLAYER_SKIN_CACHE = new ConcurrentHashMap<>();
     private static final Map<String, Long> PLAYER_SKIN_FAILURES = new ConcurrentHashMap<>();
     private static final Set<String> PLAYER_SKIN_FETCHING = ConcurrentHashMap.newKeySet();
+    private static final AtomicInteger PREVIEW_ENTITY_IDS = new AtomicInteger(-1);
     private static final int SELECTION_COLOR = 0xFF0000FF;
     private static final float PLAYER_HEAD_MOUSE_Y_OFFSET = 0.32f;
 
@@ -371,21 +373,22 @@ public final class RematrixContext implements ReContext {
             ItemStack tooltipStack = stack;
             drawTooltipOnTop(() -> {
                 //#if MC >= 26.1
-                graphics.setTooltipForNextFrame(Minecraft.getInstance().font, tooltipStack, mouseX, mouseY);
+                graphics.setTooltipForNextFrame(Minecraft.getInstance().font, tooltipStack,
+                    Math.round(mouseX * scissorScale), Math.round(mouseY * scissorScale));
                 //#endif
                 //#if MC >= 1.21.11 && MC < 26.1
                 //$$ Identifier tooltipStyle = tooltipStack.get(DataComponents.TOOLTIP_STYLE);
-                //$$ graphics.renderTooltip(Minecraft.getInstance().font, createClientTooltipComponents(Screen.getTooltipFromItem(Minecraft.getInstance(), tooltipStack), tooltipStack.getTooltipImage()), mouseX, mouseY, DefaultTooltipPositioner.INSTANCE, tooltipStyle);
+                //$$ graphics.renderTooltip(Minecraft.getInstance().font, createClientTooltipComponents(Screen.getTooltipFromItem(Minecraft.getInstance(), tooltipStack), tooltipStack.getTooltipImage()), Math.round(mouseX * scissorScale), Math.round(mouseY * scissorScale), DefaultTooltipPositioner.INSTANCE, tooltipStyle);
                 //#endif
                 //#if MC >= 1.21.6 && MC < 1.21.11
                 //$$ ResourceLocation tooltipStyle = tooltipStack.get(DataComponents.TOOLTIP_STYLE);
-                //$$ graphics.renderTooltip(Minecraft.getInstance().font, createClientTooltipComponents(Screen.getTooltipFromItem(Minecraft.getInstance(), tooltipStack), tooltipStack.getTooltipImage()), mouseX, mouseY, DefaultTooltipPositioner.INSTANCE, tooltipStyle);
+                //$$ graphics.renderTooltip(Minecraft.getInstance().font, createClientTooltipComponents(Screen.getTooltipFromItem(Minecraft.getInstance(), tooltipStack), tooltipStack.getTooltipImage()), Math.round(mouseX * scissorScale), Math.round(mouseY * scissorScale), DefaultTooltipPositioner.INSTANCE, tooltipStyle);
                 //#endif
                 //#if MC >= 1.20.1 && MC < 1.21.6
-                //$$ graphics.renderTooltip(Minecraft.getInstance().font, tooltipStack, mouseX, mouseY);
+                //$$ graphics.renderTooltip(Minecraft.getInstance().font, tooltipStack, Math.round(mouseX * scissorScale), Math.round(mouseY * scissorScale));
                 //#endif
                 //#if MC < 1.20.1
-                //$$ graphics.renderTooltip(Minecraft.getInstance().font, tooltipStack, mouseX, mouseY);
+                //$$ graphics.renderTooltip(Minecraft.getInstance().font, tooltipStack, Math.round(mouseX * scissorScale), Math.round(mouseY * scissorScale));
                 //#endif
             });
             return;
@@ -407,19 +410,20 @@ public final class RematrixContext implements ReContext {
         }
         drawTooltipOnTop(() -> {
             //#if MC >= 26.1
-            graphics.setComponentTooltipForNextFrame(Minecraft.getInstance().font, lines, mouseX, mouseY);
+            graphics.setComponentTooltipForNextFrame(Minecraft.getInstance().font, lines,
+                Math.round(mouseX * scissorScale), Math.round(mouseY * scissorScale));
             //#endif
             //#if MC >= 1.21.11 && MC < 26.1
-            //$$ graphics.renderTooltip(Minecraft.getInstance().font, createClientTooltipComponents(lines, Optional.empty()), mouseX, mouseY, DefaultTooltipPositioner.INSTANCE, (Identifier) null);
+            //$$ graphics.renderTooltip(Minecraft.getInstance().font, createClientTooltipComponents(lines, Optional.empty()), Math.round(mouseX * scissorScale), Math.round(mouseY * scissorScale), DefaultTooltipPositioner.INSTANCE, (Identifier) null);
             //#endif
             //#if MC >= 1.21.6 && MC < 1.21.11
-            //$$ graphics.renderTooltip(Minecraft.getInstance().font, createClientTooltipComponents(lines, Optional.empty()), mouseX, mouseY, DefaultTooltipPositioner.INSTANCE, (ResourceLocation) null);
+            //$$ graphics.renderTooltip(Minecraft.getInstance().font, createClientTooltipComponents(lines, Optional.empty()), Math.round(mouseX * scissorScale), Math.round(mouseY * scissorScale), DefaultTooltipPositioner.INSTANCE, (ResourceLocation) null);
             //#endif
             //#if MC >= 1.20.1 && MC < 1.21.6
-            //$$ graphics.renderComponentTooltip(Minecraft.getInstance().font, lines, mouseX, mouseY);
+            //$$ graphics.renderComponentTooltip(Minecraft.getInstance().font, lines, Math.round(mouseX * scissorScale), Math.round(mouseY * scissorScale));
             //#endif
             //#if MC < 1.20.1
-            //$$ graphics.renderComponentTooltip(Minecraft.getInstance().font, lines, mouseX, mouseY);
+            //$$ graphics.renderComponentTooltip(Minecraft.getInstance().font, lines, Math.round(mouseX * scissorScale), Math.round(mouseY * scissorScale));
             //#endif
         });
     }
@@ -616,6 +620,7 @@ public final class RematrixContext implements ReContext {
         //$$ Entity entity = type.create(level);
         //#endif
         if (entity != null) {
+            assignPreviewEntityId(entity);
             applyRenderEntityData(entity, renderEntity);
             prepareSyntheticPreviewEntity(entity);
             entityCache.put(renderEntity, entity);
@@ -660,6 +665,7 @@ public final class RematrixContext implements ReContext {
         //#if MC < 1.21.1 && MC < 26.1
         //$$ RemotePlayer player = new RemotePlayer(minecraft.level, new GameProfile(uuid, profileName));
         //#endif
+        assignPreviewEntityId(player);
         applyRenderEntityData(player, renderEntity);
         prepareSyntheticPreviewEntity(player);
         entityCache.put(renderEntity, player);
@@ -831,6 +837,12 @@ public final class RematrixContext implements ReContext {
         entity.yOld = entity.getY();
         entity.zOld = entity.getZ();
         entity.tickCount = 0;
+    }
+
+    private void assignPreviewEntityId(Entity entity) {
+        //#if MC >= 26.2
+        entity.setId(PREVIEW_ENTITY_IDS.getAndDecrement());
+        //#endif
     }
 
     private void applyEquipment(LivingEntity entity, Map<String, Object> tag) {
@@ -2161,7 +2173,9 @@ public final class RematrixContext implements ReContext {
     }
 
     public void fillGradient(int x1, int y1, int x2, int y2, int color1, int color2, boolean horizontal) {
-        if (!horizontal) {
+        int length = horizontal ? x2 - x1 : y2 - y1;
+        if (length <= 0) return;
+        if (!horizontal && length > 32) {
             //#if MC >= 1.20.1
             graphics.fillGradient(x1, y1, x2, y2, color1, color2);
             //#endif
@@ -2170,8 +2184,6 @@ public final class RematrixContext implements ReContext {
             //#endif
             return;
         }
-        int width = x2 - x1;
-        if (width <= 0) return;
         float a1 = (float) (color1 >> 24 & 255);
         float r1 = (float) (color1 >> 16 & 255);
         float g1 = (float) (color1 >> 8 & 255);
@@ -2180,18 +2192,19 @@ public final class RematrixContext implements ReContext {
         float r2 = (float) (color2 >> 16 & 255);
         float g2 = (float) (color2 >> 8 & 255);
         float b2 = (float) (color2 & 255);
-        int stripCount = Math.min(width, 32);
+        int stripCount = Math.min(length, 32);
         for (int strip = 0; strip < stripCount; strip++) {
-            int stripStart = x1 + strip * width / stripCount;
-            int stripEnd = x1 + (strip + 1) * width / stripCount;
-            float center = (stripStart + stripEnd - 1) * 0.5f - x1;
-            float t = (width == 1) ? 0.0f : center / (width - 1);
+            int stripStart = strip * length / stripCount;
+            int stripEnd = (strip + 1) * length / stripCount;
+            float center = (stripStart + stripEnd - 1) * 0.5f;
+            float t = length == 1 ? 0.0f : center / (length - 1);
             int a = (int) (a1 * (1 - t) + a2 * t);
             int r = (int) (r1 * (1 - t) + r2 * t);
             int g = (int) (g1 * (1 - t) + g2 * t);
             int b = (int) (b1 * (1 - t) + b2 * t);
             int interpolatedColor = (a << 24) | (r << 16) | (g << 8) | b;
-            graphics.fill(stripStart, y1, stripEnd, y2, interpolatedColor);
+            if (horizontal) graphics.fill(x1 + stripStart, y1, x1 + stripEnd, y2, interpolatedColor);
+            else graphics.fill(x1, y1 + stripStart, x2, y1 + stripEnd, interpolatedColor);
         }
     }
 
@@ -2251,6 +2264,11 @@ public final class RematrixContext implements ReContext {
         int th = Math.max(1, (int) Math.ceil(textureHeight));
         //#if MC >= 1.21.11 || MC >= 26.1
         if (texture instanceof Identifier id) {
+            //#if MC >= 26.2 && MC < 26.3
+            if (id.getPath().startsWith("textures/gui/container/")) {
+                return false;
+            }
+            //#endif
             graphics.blit(RenderPipelines.GUI_TEXTURED, id, (int) Math.round(x), (int) Math.round(y), u, v, dw, dh, rw, rh, tw, th);
             return true;
         }
@@ -2704,14 +2722,14 @@ public final class RematrixContext implements ReContext {
 
     private boolean applyScissor(float[] scissor) {
         //#if MC >= 1.20.1
-        float x1 = scissor[0] * scissorScale;
-        float y1 = scissor[1] * scissorScale;
-        float x2 = (scissor[0] + scissor[2]) * scissorScale;
-        float y2 = (scissor[1] + scissor[3]) * scissorScale;
+        double x1 = alignedScissorEdge(scissor[0] * (double) scissorScale);
+        double y1 = alignedScissorEdge(scissor[1] * (double) scissorScale);
+        double x2 = alignedScissorEdge((scissor[0] + scissor[2]) * (double) scissorScale);
+        double y2 = alignedScissorEdge((scissor[1] + scissor[3]) * (double) scissorScale);
         int ix = (int) Math.floor(x1);
         int iy = (int) Math.floor(y1);
-        int iw = Math.max(0, (int) Math.ceil(x2 - x1));
-        int ih = Math.max(0, (int) Math.ceil(y2 - y1));
+        int iw = Math.max(0, (int) Math.ceil(x2) - ix);
+        int ih = Math.max(0, (int) Math.ceil(y2) - iy);
         //#if MC >= 1.21.6 || MC >= 26.1
         var pose = graphics.pose();
         pose.pushMatrix();
@@ -2732,6 +2750,10 @@ public final class RematrixContext implements ReContext {
         //#endif
     }
 
+    private static double alignedScissorEdge(double value) {
+        double whole = Math.rint(value);
+        return Math.abs(value - whole) <= Math.ulp((float) value) * 2d ? whole : value;
+    }
 
     //#if MC < 1.20.1
     //$$ private void applyScissor(int x, int y, int width, int height) {

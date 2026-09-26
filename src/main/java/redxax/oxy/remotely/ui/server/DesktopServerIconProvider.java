@@ -16,6 +16,8 @@ import restudio.rescreen.util.Notification;
 import restudio.rescreen.util.ResourceManager;
 
 import javax.imageio.ImageIO;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
@@ -265,6 +267,7 @@ public final class DesktopServerIconProvider implements ServerIconProvider {
             showErrorNotification("Error", "Failed to resolve icon.");
             return Async.failed(new IllegalArgumentException("Failed To Resolve Icon"));
         }
+        icon = centerCrop(icon);
         try {
             saveToCache(instance, icon);
             remoteIconsLoaded.remove(getInstanceUniqueId(instance));
@@ -331,6 +334,24 @@ public final class DesktopServerIconProvider implements ServerIconProvider {
 
     private File getCachePath(Instance instance) {
         return cacheDir == null ? null : new File(cacheDir.toFile(), getInstanceUniqueId(instance) + ".png");
+    }
+
+    private static BufferedImage centerCrop(BufferedImage source) {
+        int sourceWidth = source.getWidth();
+        int sourceHeight = source.getHeight();
+        if (sourceWidth == 64 && sourceHeight == 64) return source;
+        int size = Math.min(sourceWidth, sourceHeight);
+        BufferedImage icon = new BufferedImage(64, 64, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D graphics = icon.createGraphics();
+        try {
+            graphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+            int left = (sourceWidth - size) / 2;
+            int top = (sourceHeight - size) / 2;
+            graphics.drawImage(source, 0, 0, 64, 64, left, top, left + size, top + size, null);
+        } finally {
+            graphics.dispose();
+        }
+        return icon;
     }
 
     private Path getCustomizationPath(Instance instance) {

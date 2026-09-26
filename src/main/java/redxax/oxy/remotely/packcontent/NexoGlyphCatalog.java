@@ -1,5 +1,7 @@
 package redxax.oxy.remotely.packcontent;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -7,18 +9,25 @@ import java.util.Map;
 public final class NexoGlyphCatalog {
     private static final String PROVIDER_ID = "nexo";
     private final Map<String, GlyphDefinition> glyphs = new LinkedHashMap<>();
+    private long revision;
+    private RawIndex rawIndex = new RawIndex(0, Map.of());
 
     public synchronized void clear() {
         glyphs.clear();
+        refreshRawIndex();
     }
 
     public synchronized void replace(Map<String, GlyphDefinition> next) {
         glyphs.clear();
-        if (next != null) glyphs.putAll(next);
+        if (next != null) next.forEach((id, glyph) -> glyphs.put(id, snapshot(glyph)));
+        refreshRawIndex();
     }
 
     public synchronized void put(GlyphDefinition glyph) {
-        if (glyph != null && glyph.id() != null && !glyph.id().isBlank()) glyphs.put(glyph.id(), glyph);
+        if (glyph != null && glyph.id() != null && !glyph.id().isBlank()) {
+            glyphs.put(glyph.id(), snapshot(glyph));
+            refreshRawIndex();
+        }
     }
 
     public synchronized GlyphDefinition get(String id) {
@@ -29,8 +38,12 @@ public final class NexoGlyphCatalog {
         return Map.copyOf(glyphs);
     }
 
+    public synchronized long revision() {
+        return revision;
+    }
+
     public synchronized List<GlyphTagMatch> parse(String text) {
-        List<GlyphTagMatch> matches = NexoGlyphText.parse(PROVIDER_ID, text, glyphs.values());
+        List<GlyphTagMatch> matches = NexoGlyphText.parse(PROVIDER_ID, text, rawIndex.glyphs());
         for (int index = 0; index < matches.size(); index++) {
             GlyphTagMatch match = matches.get(index);
             if (match.indexStart() != null) continue;
@@ -40,6 +53,24 @@ public final class NexoGlyphCatalog {
                     glyph.index(), glyph.index(), match.shift()));
         }
         return matches;
+    }
+
+    private void refreshRawIndex() {
+        rawIndex = new RawIndex(++revision, NexoGlyphText.indexRawGlyphs(glyphs.values()));
+    }
+
+    private static GlyphDefinition snapshot(GlyphDefinition glyph) {
+        if (glyph == null || glyph.raw() == null) return glyph;
+        Map<String, Object> raw = new LinkedHashMap<>(glyph.raw());
+        for (String key : List.of("char", "chars", "unicode", "unicodes")) {
+            if (raw.get(key) instanceof List<?> values) raw.put(key, Collections.unmodifiableList(new ArrayList<>(values)));
+        }
+        return new GlyphDefinition(glyph.providerId(), glyph.id(), glyph.sourceFile(), glyph.assetRef(), glyph.ascent(),
+                glyph.height(), glyph.font(), glyph.rows(), glyph.columns(), glyph.reference(), glyph.index(), glyph.offset(),
+                glyph.frameCount(), Collections.unmodifiableMap(raw), glyph.frames());
+    }
+
+    private record RawIndex(long revision, Map<String, NexoGlyphText.RawGlyph> glyphs) {
     }
 
     public synchronized GlyphDefinition materialized(String id) {

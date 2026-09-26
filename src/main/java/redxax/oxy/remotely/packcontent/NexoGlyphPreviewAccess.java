@@ -104,6 +104,11 @@ public final class NexoGlyphPreviewAccess implements GlyphPreviewAccess {
     }
 
     @Override
+    public long catalogRevision() {
+        return catalog.revision();
+    }
+
+    @Override
     public Optional<Preview> resolveGlyph(String providerId, String glyphId, Integer index) {
         if (providerId != null && !PROVIDER_ID.equalsIgnoreCase(providerId)) return Optional.empty();
         GlyphDefinition glyph = catalog.materialized(glyphId);

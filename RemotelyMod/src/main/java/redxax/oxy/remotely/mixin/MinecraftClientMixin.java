@@ -1,11 +1,18 @@
 package redxax.oxy.remotely.mixin;
 
+//#if MC >= 26.2 && MC < 26.3
+import java.util.concurrent.CompletableFuture;
+//#endif
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.Screen;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+//#if MC >= 26.2 && MC < 26.3
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+import redxax.oxy.remotely.host.MinecraftNativeGameAssets;
+//#endif
 import redxax.oxy.remotely.RemotelyClient;
 import redxax.oxy.remotely.quickserver.QuickServerManager;
 import redxax.oxy.remotely.rematrix.mc.RematrixScreen;
@@ -26,6 +33,13 @@ public class MinecraftClientMixin {
         ReSyncVanillaBridgeManager.getInstance().tick();
         QuickServerManager.clientTick();
     }
+
+    //#if MC >= 26.2 && MC < 26.3
+    @Inject(method = "reloadResourcePacks()Ljava/util/concurrent/CompletableFuture;", at = @At("RETURN"))
+    private void onResourcePacksReloaded(CallbackInfoReturnable<CompletableFuture<Void>> cir) {
+        cir.getReturnValue().thenRun(MinecraftNativeGameAssets::resourcesReloaded);
+    }
+    //#endif
 
     //#if MC < 26.2
     //$$ @Inject(method = "setScreen", at = @At("HEAD"), cancellable = true)

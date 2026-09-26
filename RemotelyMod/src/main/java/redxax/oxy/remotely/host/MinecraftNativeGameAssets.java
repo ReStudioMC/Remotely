@@ -18,10 +18,21 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
 
-final class MinecraftNativeGameAssets extends AbstractMinecraftGameAssets {
+public final class MinecraftNativeGameAssets extends AbstractMinecraftGameAssets {
+    private static final AtomicLong RESOURCE_REVISION = new AtomicLong();
     private final Minecraft minecraft = Minecraft.getInstance();
+
+    public static void resourcesReloaded() {
+        RESOURCE_REVISION.incrementAndGet();
+    }
+
+    @Override
+    protected long getRevision() {
+        return RESOURCE_REVISION.get();
+    }
 
     @Override
     protected byte[] loadBytes(MinecraftAssetReference asset) throws IOException {
@@ -32,6 +43,16 @@ final class MinecraftNativeGameAssets extends AbstractMinecraftGameAssets {
         if (identifier == null) {
             return null;
         }
+        //#if MC >= 26.2 && MC < 26.3
+        if (identifier instanceof Identifier id) {
+            if (minecraft.getResourceManager() == null) {
+                return null;
+            }
+            try (InputStream inputStream = minecraft.getResourceManager().open(id)) {
+                return inputStream.readAllBytes();
+            }
+        }
+        //#endif
         Object resourceManager = minecraft.getResourceManager();
         if (resourceManager == null) {
             return null;
@@ -49,6 +70,7 @@ final class MinecraftNativeGameAssets extends AbstractMinecraftGameAssets {
         }
         String resolvedNamespace = namespace == null || namespace.isBlank() ? "minecraft" : namespace;
         String resolvedPrefix = prefix == null ? "" : prefix;
+        String lookupPrefix = resolvedPrefix.endsWith("/") ? resolvedPrefix.substring(0, resolvedPrefix.length() - 1) : resolvedPrefix;
         String resolvedSuffix = suffix == null ? "" : suffix;
         Predicate<Object> filter = identifier -> {
             MinecraftAssetReference asset = MinecraftAssetReference.of(String.valueOf(identifier));
@@ -57,7 +79,7 @@ final class MinecraftNativeGameAssets extends AbstractMinecraftGameAssets {
                     && (resolvedSuffix.isBlank() || asset.path().endsWith(resolvedSuffix));
         };
         try {
-            Object listed = invokeValue(resourceManager, "listResources", resolvedPrefix, filter);
+            Object listed = invokeValue(resourceManager, "listResources", lookupPrefix, filter);
             if (!(listed instanceof Map<?, ?> resources)) {
                 return List.of();
             }

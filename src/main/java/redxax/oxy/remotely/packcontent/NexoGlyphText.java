@@ -16,6 +16,10 @@ public final class NexoGlyphText {
     }
 
     public static List<GlyphTagMatch> parse(String providerId, String text, Iterable<GlyphDefinition> definitions) {
+        return parse(providerId, text, indexRawGlyphs(definitions));
+    }
+
+    static List<GlyphTagMatch> parse(String providerId, String text, Map<String, RawGlyph> indexed) {
         List<GlyphTagMatch> matches = new ArrayList<>();
         if (text == null || text.isEmpty()) return matches;
         Matcher matcher = GLYPH_TAG.matcher(text);
@@ -32,16 +36,25 @@ public final class NexoGlyphText {
             matches.add(new GlyphTagMatch(providerId, glyphId, matcher.start(), matcher.end(), range.start(), range.end(),
                     adjacentShift(text, matcher.start(), matcher.end())));
         }
-        matches.addAll(parseRaw(providerId, text, definitions, matches));
+        matches.addAll(parseRaw(providerId, text, indexed, matches));
         matches.sort(Comparator.comparingInt(GlyphTagMatch::start).thenComparingInt(GlyphTagMatch::end));
         return matches;
     }
 
     static List<GlyphTagMatch> parseRaw(String providerId, String text, Iterable<GlyphDefinition> definitions,
                                         List<GlyphTagMatch> excluded) {
-        if (text == null || text.isEmpty() || definitions == null) return List.of();
+        return parseRaw(providerId, text, indexRawGlyphs(definitions), excluded);
+    }
+
+    static Map<String, RawGlyph> indexRawGlyphs(Iterable<GlyphDefinition> definitions) {
         Map<String, RawGlyph> indexed = new LinkedHashMap<>();
-        for (GlyphDefinition glyph : definitions) indexRawGlyph(glyph, indexed);
+        if (definitions != null) for (GlyphDefinition glyph : definitions) indexRawGlyph(glyph, indexed);
+        return Map.copyOf(indexed);
+    }
+
+    private static List<GlyphTagMatch> parseRaw(String providerId, String text, Map<String, RawGlyph> indexed,
+                                                List<GlyphTagMatch> excluded) {
+        if (text == null || text.isEmpty() || indexed == null || indexed.isEmpty()) return List.of();
         List<GlyphTagMatch> matches = new ArrayList<>();
         for (int start = 0; start < text.length();) {
             int end = start + Character.charCount(text.codePointAt(start));
@@ -179,6 +192,6 @@ public final class NexoGlyphText {
     private record IndexRange(Integer start, Integer end) {
     }
 
-    private record RawGlyph(String glyphId, Integer index) {
+    record RawGlyph(String glyphId, Integer index) {
     }
 }

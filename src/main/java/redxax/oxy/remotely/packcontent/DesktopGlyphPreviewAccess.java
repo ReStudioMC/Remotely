@@ -46,6 +46,11 @@ public final class DesktopGlyphPreviewAccess implements GlyphPreviewAccess {
     }
 
     @Override
+    public long catalogRevision() {
+        return access.catalogRevision();
+    }
+
+    @Override
     public Optional<Preview> resolveGlyph(String providerId, String glyphId, Integer index) {
         return access.resolveGlyph(providerId, glyphId, index);
     }

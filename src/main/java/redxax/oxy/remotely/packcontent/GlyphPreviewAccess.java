@@ -33,6 +33,10 @@ public interface GlyphPreviewAccess {
 
     List<Preview> resolveGlyphs(String text);
 
+    default long catalogRevision() {
+        return -1;
+    }
+
     Optional<Preview> resolveGlyph(String providerId, String glyphId, Integer index);
 
     Async<Image> loadImage(GlyphDefinition glyph);
