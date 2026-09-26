@@ -61,7 +61,9 @@ public final class CustomContentGraphAdapter {
         inputs.put("consume_event", false);
         inputs.put("require_sneaking", false);
         inputs.put("require_on_ground", false);
-        inputs.put("hand_filter", "any");
+        if (!"armor".equals(normalizedType)) {
+            inputs.put("hand_filter", "any");
+        }
         inputs.put("target_filter", "any");
         inputs.put("allowed_worlds", "");
         inputs.put("denied_worlds", "");
@@ -85,10 +87,37 @@ public final class CustomContentGraphAdapter {
         if (graph == null || graph.getNodes() == null) {
             return null;
         }
-        return graph.getNodes().values().stream()
-            .filter(node -> node != null && typeFromNode(node.getType()) != null)
-            .findFirst()
-            .orElse(null);
+        Object storedId = graph.getContentProperties().get("content_id");
+        String contentId = storedId != null ? storedId.toString() : "";
+        if (contentId.isBlank()) {
+            String graphId = graph.getId();
+            if (graphId != null) {
+                for (String type : List.of("item", "armor", "block", "projectile")) {
+                    String prefix = "content." + type + ".";
+                    if (graphId.startsWith(prefix)) {
+                        contentId = graphId.substring(prefix.length());
+                        break;
+                    }
+                }
+            }
+        }
+        FlowNode match = null;
+        FlowNode fallback = null;
+        for (Map.Entry<String, FlowNode> entry : graph.getNodes().entrySet()) {
+            FlowNode node = entry.getValue();
+            if (node == null || typeFromNode(node.getType()) == null) {
+                continue;
+            }
+            if (fallback == null) {
+                fallback = node;
+            }
+            if (node.getInputValues() != null
+                && contentId.equals(String.valueOf(node.getInputValues().getOrDefault("content_id", "")))) {
+                match = node;
+                break;
+            }
+        }
+        return match != null ? match : fallback;
     }
 
     public static CustomContentDefinition toDefinition(FlowGraph graph) {
@@ -414,7 +443,7 @@ public final class CustomContentGraphAdapter {
         };
     }
 
-    private static String defaultBranch(String type) {
+    public static String defaultBranch(String type) {
         return switch (normalizeType(type)) {
             case "block" -> "interact";
             case "armor" -> "tick";

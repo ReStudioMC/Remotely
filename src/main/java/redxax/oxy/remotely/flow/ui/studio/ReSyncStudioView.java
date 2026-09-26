@@ -22,6 +22,7 @@ public interface ReSyncStudioView extends StudioResourceRenameAware {
     default boolean hasPanel() { return false; }
     default void configurePanel(StudioPanel panel) {}
     default boolean hasUnsavedChanges() { return false; }
+    default boolean hasKeyboardInputFocus() { return false; }
     default boolean requestSave() {
         return this instanceof StudioSaveProvider provider && provider.requestStudioSave();
     }

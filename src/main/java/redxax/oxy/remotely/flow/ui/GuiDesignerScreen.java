@@ -32,6 +32,7 @@ import restudio.rescreen.platform.input.ReKeyEvent;
 import restudio.rescreen.platform.input.ReMouseButton;
 import restudio.rescreen.platform.input.ReMouseEvent;
 import restudio.rescreen.game.MinecraftRenderItem;
+import restudio.rescreen.theme.ThemeColor;
 import restudio.rescreen.theme.ThemeManager;
 import restudio.rescreen.ui.core.Screen;
 import restudio.rescreen.ui.core.ScreenManager;
@@ -43,22 +44,24 @@ import restudio.rescreen.ui.widgets.AnimatedWidget;
 import restudio.rescreen.ui.widgets.AnimatedButton;
 import restudio.rescreen.ui.widgets.CompactBindingWidget;
 import restudio.rescreen.ui.widgets.DropDownWidget;
+import restudio.rescreen.ui.widgets.IconButton;
 import restudio.rescreen.ui.widgets.ItemSelectorWidget;
 import restudio.rescreen.ui.widgets.PopupWidget;
 import restudio.rescreen.ui.widgets.RowWidget;
 import restudio.rescreen.ui.widgets.ScrollSelectorWidget;
 import restudio.rescreen.ui.widgets.TextInputWidget;
 import restudio.rescreen.ui.widgets.ToggleWidget;
-import restudio.rescreen.util.Identifier;
 import restudio.rescreen.util.Notification;
 import restudio.resync.flow.workspace.WorkspacePatch;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
 
@@ -134,7 +137,10 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
     private StudioPanel inspectorStudioPanel;
     private SidePanel inspectorPanel;
     private TooltipOverlayWidget tooltipOverlay;
-    private ItemSelectorWidget materialSelector;
+    private IconButton materialButton;
+    private ItemSelectorWidget materialPopup;
+    private long materialSelectorRevision = Long.MIN_VALUE;
+    private String materialButtonValue;
     private ScrollSelectorWidget actionTypeSelector;
     private ItemSelectorWidget flowSelector;
     private ItemSelectorWidget guiSelector;
@@ -144,6 +150,8 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
     private final Map<Integer, SlotButton> slotButtons = new HashMap<>();
     private final Map<Integer, GuiElement> slotElements = new HashMap<>();
     private final Map<String, MinecraftAssetReference> materialTextureReferences = new HashMap<>();
+    private final Map<Visual, MinecraftRenderItem> renderItems = new IdentityHashMap<>();
+    private long renderItemsVersion = -1L;
     private final Set<Integer> dragPreviewSlots = new HashSet<>();
 
     private ToggleWidget placeToggle;
@@ -484,6 +492,11 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
     @Override
     public void renderHandler(IDrawContext context, int mouseX, int mouseY, float delta) {
         super.renderHandler(context, mouseX, mouseY, delta);
+        for (SlotButton button : slotButtons.values()) {
+            if (button.hasElement()) {
+                drawGuiElementIcon(context, button.getElement(), button.getX(), button.getY(), button.getWidth(), button.getHeight());
+            }
+        }
         if (inspectorStudioPanel != null && inspectorPanel != null && (inspectorPanel.isVisible() || inspectorPanel.getAnimatedWidth() > 1f)) {
             renderStudioPanel(inspectorStudioPanel, context, mouseX, mouseY, delta);
         }
@@ -586,17 +599,13 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
         }
         MinecraftGameAssets gameAssets = getGameAssets();
         MinecraftAssetReference textureReference = gameAssets.containerTexture("generic_54.png");
-        if (!gameAssets.exists(textureReference)) {
-            return;
-        }
         int rows = Math.max(1, gui.getRows());
         int topHeight = GUI_TOP_MARGIN + rows * SLOT_BASE_SIZE;
         int topHeightScaled = Math.round(topHeight * guiScale);
-        Identifier textureId = gameAssets.getImageId(textureReference);
-        drawGuiTexture(context, gameAssets, textureReference, textureId, guiBackgroundX, guiBackgroundY, guiBackgroundWidth, topHeightScaled, 0, 0, GUI_TEXTURE_WIDTH, topHeight);
+        drawGuiTexture(context, gameAssets, textureReference, guiBackgroundX, guiBackgroundY, guiBackgroundWidth, topHeightScaled, 0, 0, GUI_TEXTURE_WIDTH, topHeight);
         int bottomY = guiBackgroundY + topHeightScaled;
         int bottomHeightScaled = Math.round(GUI_PLAYER_INV_HEIGHT * guiScale);
-        drawGuiTexture(context, gameAssets, textureReference, textureId, guiBackgroundX, bottomY, guiBackgroundWidth, bottomHeightScaled, 0, GUI_BOTTOM_TEXTURE_Y, GUI_TEXTURE_WIDTH, GUI_PLAYER_INV_HEIGHT);
+        drawGuiTexture(context, gameAssets, textureReference, guiBackgroundX, bottomY, guiBackgroundWidth, bottomHeightScaled, 0, GUI_BOTTOM_TEXTURE_Y, GUI_TEXTURE_WIDTH, GUI_PLAYER_INV_HEIGHT);
 
         String title = gui.getTitle() != null && !gui.getTitle().isBlank() ? gui.getTitle() : gui.getId();
         if (title != null && !title.isBlank()) {
@@ -607,28 +616,7 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
         int invLabelX = guiBackgroundX + Math.round(GUI_TITLE_X * guiScale);
         int invLabelY = guiBackgroundY + Math.round((GUI_TOP_MARGIN + rows * SLOT_BASE_SIZE + 3) * guiScale);
         context.drawText("Inventory", invLabelX, invLabelY, TITLE_COLOR, false);
-        renderGuiElements(context);
         renderGuiHighlights(context);
-    }
-
-    private void renderGuiElements(IDrawContext context) {
-        if (gui.getElements() == null || slotSize <= 0) {
-            return;
-        }
-        for (GuiElement element : gui.getElements()) {
-            if (element == null || element.getSlots() == null) {
-                continue;
-            }
-            for (Integer slot : element.getSlots()) {
-                if (slot == null) {
-                    continue;
-                }
-                SlotButton button = slotButtons.get(slot);
-                if (button != null) {
-                    drawGuiElementIcon(context, element, button.getX(), button.getY(), button.getWidth(), button.getHeight());
-                }
-            }
-        }
     }
 
     private void drawGuiElementIcon(IDrawContext context, GuiElement element, int x, int y, int width, int height) {
@@ -905,7 +893,7 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
 
     private void rebuildInspectorItemSection(Container container) {
         if (selectedElement == lastInspectorElement && !inspectorDynamicWidgets.isEmpty()) {
-            if (materialSelector != null) {
+            if (materialButton != null) {
                 refreshMaterialSelector();
             }
             if (flowSelector != null) {
@@ -922,7 +910,10 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
         lastInspectorElement = selectedElement;
         int dynamicStartIndex = Math.max(0, container.getWidgets().size() - inspectorDynamicWidgets.size());
         inspectorDynamicWidgets.clear();
-        materialSelector = null;
+        materialButton = null;
+        materialPopup = null;
+        materialSelectorRevision = Long.MIN_VALUE;
+        materialButtonValue = null;
         actionTypeSelector = null;
         flowSelector = null;
         guiSelector = null;
@@ -967,19 +958,15 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
         AnimatedWidget nameRow = panelState.row("Name", nameInput, rowWidth, guiPanelDescription("Name"));
         insertInspectorDynamic(container, nameRow);
 
-        materialSelector = new ItemSelectorWidget.Builder(this)
-            .size(rowWidth, 140)
-            .embedded(true)
-            .dismissOnSelect(false)
-            .emptyMessage("No items")
-            .asyncItems(OptionCatalogSelector.refreshAction(serverId, MATERIAL_OPTIONS_SOURCE),
-                OptionCatalogSelector.legacySource(serverId, MATERIAL_OPTIONS_SOURCE, this::materialOptions,
-                    () -> selectedElement != null && selectedElement.getVisual() != null ? selectedElement.getVisual().getMaterial() : "",
-                    this::applyMaterial, "No Items"))
+        materialButton = new IconButton.Builder()
+            .label("")
+            .richText(true)
+            .size(rowWidth, ReSyncStudioPanelState.FIELD_HEIGHT)
+            .entranceAnimation(false)
+            .onClick(this::showMaterialSelector)
             .build();
-        disableEntrance(materialSelector);
-        AnimatedWidget materialRow = panelState.row("Material", materialSelector, rowWidth, guiPanelDescription("Material"));
-        materialRow.setHeight(156);
+        disableEntrance(materialButton);
+        AnimatedWidget materialRow = panelState.row("Material", materialButton, rowWidth, guiPanelDescription("Material"));
         insertInspectorDynamic(container, materialRow);
 
         buildActionEditor(container, rowWidth);
@@ -1017,8 +1004,7 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
         disableEntrance(removeButton);
         insertInspectorDynamic(container, removeButton);
         container.replaceWidgetsFromIndex(dynamicStartIndex, inspectorDynamicWidgets);
-        if (materialSelector != null) {
-            materialSelector.openEmbedded();
+        if (materialButton != null) {
             refreshMaterialSelector();
         }
         if (flowSelector != null) {
@@ -1307,13 +1293,80 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
     }
 
     private void refreshMaterialSelector() {
-        if (materialSelector == null) {
+        if (materialButton == null) {
             return;
+        }
+        long revision = OptionCatalogCache.getInstance().legacyRevision(serverId, MATERIAL_OPTIONS_SOURCE);
+        if (revision != materialSelectorRevision && materialPopup != null && materialPopup == activeStudioSelector && materialPopup.visible) {
+            materialPopup.setVirtualItems(materialVirtualItems(), new ItemSelectorWidget.VirtualCatalogFence(null, null));
+            if (selectedElement != null && selectedElement.getVisual() != null) {
+                materialPopup.setSelectedItem(ItemIconPreview.label(serverId, selectedElement.getVisual().getMaterial()));
+            }
         }
         if (selectedElement != null && selectedElement.getVisual() != null) {
             String current = selectedElement.getVisual().getMaterial();
-            setSelectorSelection(materialSelector, OptionCatalogSelector.label(serverId, MATERIAL_OPTIONS_SOURCE, current));
+            if (revision == materialSelectorRevision && Objects.equals(current, materialButtonValue)) {
+                return;
+            }
+            ItemIconPreview.Projection projection = ItemIconPreview.project(serverId, current);
+            materialButton.setMessage(projection.label());
+            materialButton.setMinecraftItem(projection.toRenderItem());
+            materialButtonValue = current;
+            materialSelectorRevision = revision;
         }
+    }
+
+    private void showMaterialSelector() {
+        if (materialButton == null || selectedElement == null) {
+            return;
+        }
+        ItemSelectorWidget selector = new ItemSelectorWidget.Builder(this)
+            .size(220, 240)
+            .dismissOnSelect(true)
+            .emptyMessage("No Items")
+            .virtualItems(materialVirtualItems())
+            .build();
+        materialPopup = showStudioSelector(selector, materialButton.getMessage(), materialButton.getX(), materialButton.getY() + materialButton.getHeight());
+    }
+
+    private ItemSelectorWidget.VirtualItemProvider<ItemSelectorWidget.AsyncItem> materialVirtualItems() {
+        List<ItemSelectorWidget.AsyncItem> items = OptionCatalogSelector.snapshot(serverId, MATERIAL_OPTIONS_SOURCE, Map.of(),
+            this::materialOptions,
+            () -> selectedElement != null && selectedElement.getVisual() != null ? selectedElement.getVisual().getMaterial() : "",
+            this::applyMaterial, "No Items").items();
+        return new ItemSelectorWidget.VirtualItemProvider<>() {
+            @Override
+            public List<ItemSelectorWidget.AsyncItem> model() {
+                return items;
+            }
+
+            @Override
+            public List<ItemSelectorWidget.VirtualItem<ItemSelectorWidget.AsyncItem>> entries(List<ItemSelectorWidget.AsyncItem> model) {
+                List<ItemSelectorWidget.VirtualItem<ItemSelectorWidget.AsyncItem>> entries = new ArrayList<>();
+                String group = "";
+                for (ItemSelectorWidget.AsyncItem item : model) {
+                    if (!item.group().isBlank() && !item.group().equals(group)) {
+                        entries.add(ItemSelectorWidget.VirtualItem.section(item.group()));
+                    }
+                    group = item.group();
+                    entries.add(new ItemSelectorWidget.VirtualItem<>(item, item.label(), item.label(), item.iconPath(),
+                        item.hint(), item.searchTerms(), item.rankingPriority(), item.badge(), false));
+                }
+                return entries;
+            }
+
+            @Override
+            public void select(ItemSelectorWidget.VirtualItem<ItemSelectorWidget.AsyncItem> item) {
+                if (item.value().action() != null) {
+                    item.value().action().run();
+                }
+            }
+
+            @Override
+            public String emptyMessage() {
+                return "No Items";
+            }
+        };
     }
 
     private void insertInspectorDynamic(Container container, AnimatedWidget widget) {
@@ -1492,6 +1545,7 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
         visual.setMaterial(material);
         placementTemplate = visual.copy();
         applySlotState();
+        refreshMaterialSelector();
     }
 
     private void applyFlow(String flowId) {
@@ -2154,6 +2208,7 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
             int selectedIndex = selectedElement != null && previous != null && previous.getElements() != null
                 ? previous.getElements().indexOf(selectedElement) : -1;
             gui = replacement;
+            renderItems.clear();
             List<GuiElement> replacementElements = gui.getElements();
             selectedElement = selectedIndex >= 0 && replacementElements != null && selectedIndex < replacementElements.size()
                 ? replacementElements.get(selectedIndex) : null;
@@ -2318,6 +2373,7 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
     }
 
     private void restoreSnapshot(GuiSnapshot snapshot) {
+        renderItems.clear();
         gui.setTitle(snapshot.title);
         gui.setRows(snapshot.rows);
         gui.setExtendToPlayerInventory(snapshot.extendToPlayerInventory);
@@ -2438,11 +2494,11 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
         return MinecraftGameAssets.EMPTY;
     }
 
-    private void drawGuiTexture(IDrawContext context, MinecraftGameAssets gameAssets, MinecraftAssetReference reference, Identifier fallbackId, int x, int y, int width, int height, int u, int v, int regionWidth, int regionHeight) {
+    private void drawGuiTexture(IDrawContext context, MinecraftGameAssets gameAssets, MinecraftAssetReference reference, int x, int y, int width, int height, int u, int v, int regionWidth, int regionHeight) {
         if (MinecraftUiPreviewRenderer.drawAssetRegion(context, gameAssets, reference, x, y, width, height, u, v, regionWidth, regionHeight, 256, 256)) {
             return;
         }
-        MinecraftUiPreviewRenderer.drawImage(context, fallbackId, x, y, width, height);
+        context.fill(x, y, x + width, y + height, ThemeManager.getColor(ThemeColor.innerBackground));
     }
 
     private MinecraftAssetReference resolveMaterialTexture(Visual visual) {
@@ -2466,7 +2522,13 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
         if (visual == null || shouldRenderAsTexture(visual)) {
             return null;
         }
-        return MinecraftGameItems.fromVisual(visual.getMaterial(), 1, visual.getName(), visual.getLore(), visual.getModelData());
+        long version = guiDraft.editVersion();
+        if (renderItemsVersion != version) {
+            renderItems.clear();
+            renderItemsVersion = version;
+        }
+        return renderItems.computeIfAbsent(visual, item ->
+            MinecraftGameItems.fromVisual(item.getMaterial(), 1, item.getName(), item.getLore(), item.getModelData()));
     }
 
     private boolean shouldRenderAsTexture(Visual visual) {
@@ -2521,9 +2583,6 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
 
         @Override
         protected void drawContent(IDrawContext ctx, int mouseX, int mouseY) {
-            if (element != null) {
-                drawGuiElementIcon(ctx, element, getX(), getY(), getWidth(), getHeight());
-            }
         }
 
         @Override

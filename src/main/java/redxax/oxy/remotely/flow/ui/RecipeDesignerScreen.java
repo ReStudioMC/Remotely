@@ -435,7 +435,6 @@ public class RecipeDesignerScreen extends FocusedJsonResourceDesignerScreen impl
         RecipeStationLayout layout = recipeStationLayout(recipeType);
         MinecraftGameAssets gameAssets = getGameAssets();
         MinecraftAssetReference reference = layout.hasTexture() ? gameAssets.containerTexture(layout.texture()) : null;
-        boolean hasTexture = reference != null && gameAssets.exists(reference);
         int textureWidth = layout.fallbackWidth();
         int textureHeight = layout.fallbackHeight();
         int scale = 1;
@@ -447,9 +446,7 @@ public class RecipeDesignerScreen extends FocusedJsonResourceDesignerScreen impl
         recipePreviewY = viewY;
         recipePreviewScale = scale;
         recipePreviewLayout = layout;
-        if (hasTexture) {
-            drawMinecraftTexture(context, gameAssets, reference, gameAssets.getImageId(reference), viewX, viewY, viewWidth, viewHeight, 0, 0, textureWidth, textureHeight, 256, 256);
-        } else {
+        if (reference == null || !MinecraftUiPreviewRenderer.drawAssetRegion(context, gameAssets, reference, viewX, viewY, viewWidth, viewHeight, 0, 0, textureWidth, textureHeight, 256, 256)) {
             drawRecipeFallbackPanel(context, layout, viewX, viewY, viewWidth, viewHeight, muted, scale);
         }
         drawRecipeSlotHighlights(context, recipeType, layout, viewX, viewY, scale);

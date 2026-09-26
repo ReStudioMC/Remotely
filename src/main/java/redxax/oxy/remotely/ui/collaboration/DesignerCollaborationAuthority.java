@@ -29,6 +29,10 @@ import java.util.WeakHashMap;
 public final class DesignerCollaborationAuthority {
     private static final Map<Screen, Set<AnimatedWidget>> ACCENTED = Collections.synchronizedMap(new WeakHashMap<>());
     private static final Map<Screen, Set<Widget>> STATEFUL = Collections.synchronizedMap(new WeakHashMap<>());
+    private static final Map<ItemSelectorWidget, EncodedSelectorItems> SELECTOR_ITEMS = Collections.synchronizedMap(new WeakHashMap<>());
+
+    private record EncodedSelectorItems(List<ItemSelectorWidget.CollaborationItem> items, JsonArray encoded) {
+    }
 
     public record RemoteFocus(JsonArray path, int color) {
     }
@@ -370,7 +374,7 @@ public final class DesignerCollaborationAuthority {
             return;
         }
         JsonObject state = widget != publishedSeparately && widget instanceof CollaborativeWidget collaborative && collaborative.hasCollaborationState()
-            ? encodeState(collaborative.captureCollaborationState()) : null;
+            ? encodeWidgetState(widget, collaborative.captureCollaborationState()) : null;
         if (state != null) {
             JsonArray path = path(screen, widget);
             if (!path.isEmpty()) {
@@ -380,7 +384,9 @@ public final class DesignerCollaborationAuthority {
                 states.add(String.valueOf(states.size()), entry);
             }
         }
-        for (Widget child : children(widget)) {
+        List<? extends Widget> children = widget instanceof ItemSelectorWidget selector && selector.hasFlatAsyncItems()
+            ? selector.collaborationStateChildren() : children(widget);
+        for (Widget child : children) {
             collectWidgetStates(screen, child, states, visited, publishedSeparately);
         }
     }
@@ -435,31 +441,7 @@ public final class DesignerCollaborationAuthority {
             return encoded;
         }
         if (state instanceof ItemSelectorWidget.CollaborationState selector) {
-            encoded.addProperty("type", "selector");
-            encoded.addProperty("width", selector.width());
-            encoded.addProperty("height", selector.height());
-            encoded.addProperty("query", selector.query());
-            encoded.addProperty("selectedItem", selector.selectedItem());
-            encoded.addProperty("emptyMessage", selector.emptyMessage());
-            encoded.addProperty("loading", selector.loading());
-            encoded.addProperty("scrollOffset", selector.scrollOffset());
-            encoded.addProperty("entryHeight", selector.entryHeight());
-            JsonArray items = new JsonArray();
-            for (ItemSelectorWidget.CollaborationItem item : selector.items()) {
-                JsonObject entry = new JsonObject();
-                entry.addProperty("label", item.label());
-                entry.addProperty("iconNamespace", item.iconNamespace());
-                entry.addProperty("iconPath", item.iconPath());
-                entry.addProperty("iconType", item.iconType());
-                entry.addProperty("hint", item.hint());
-                entry.addProperty("searchTerms", item.searchTerms());
-                entry.addProperty("rankingPriority", item.rankingPriority());
-                entry.addProperty("badge", item.badge());
-                entry.addProperty("section", item.section());
-                items.add(entry);
-            }
-            encoded.add("items", items);
-            return encoded;
+            return encodeSelectorState(selector, encodeSelectorItems(selector.items()));
         }
         if (state instanceof ToggleWidget.CollaborationState toggle) {
             encoded.addProperty("type", "toggle");
@@ -472,6 +454,51 @@ public final class DesignerCollaborationAuthority {
             return encoded;
         }
         return null;
+    }
+
+    private static JsonObject encodeWidgetState(Widget widget, CollaborativeWidget.State state) {
+        if (widget instanceof ItemSelectorWidget selector && state instanceof ItemSelectorWidget.CollaborationState snapshot) {
+            EncodedSelectorItems resident = SELECTOR_ITEMS.get(selector);
+            if (resident == null || resident.items() != snapshot.items()) {
+                resident = new EncodedSelectorItems(snapshot.items(), encodeSelectorItems(snapshot.items()));
+                SELECTOR_ITEMS.put(selector, resident);
+            }
+            return encodeSelectorState(snapshot, resident.encoded());
+        }
+        return encodeState(state);
+    }
+
+    private static JsonObject encodeSelectorState(ItemSelectorWidget.CollaborationState state, JsonArray items) {
+        JsonObject encoded = new JsonObject();
+        encoded.addProperty("type", "selector");
+        encoded.addProperty("width", state.width());
+        encoded.addProperty("height", state.height());
+        encoded.addProperty("query", state.query());
+        encoded.addProperty("selectedItem", state.selectedItem());
+        encoded.addProperty("emptyMessage", state.emptyMessage());
+        encoded.addProperty("loading", state.loading());
+        encoded.addProperty("scrollOffset", state.scrollOffset());
+        encoded.addProperty("entryHeight", state.entryHeight());
+        encoded.add("items", items);
+        return encoded;
+    }
+
+    private static JsonArray encodeSelectorItems(List<ItemSelectorWidget.CollaborationItem> values) {
+        JsonArray items = new JsonArray();
+        for (ItemSelectorWidget.CollaborationItem item : values) {
+            JsonObject entry = new JsonObject();
+            entry.addProperty("label", item.label());
+            entry.addProperty("iconNamespace", item.iconNamespace());
+            entry.addProperty("iconPath", item.iconPath());
+            entry.addProperty("iconType", item.iconType());
+            entry.addProperty("hint", item.hint());
+            entry.addProperty("searchTerms", item.searchTerms());
+            entry.addProperty("rankingPriority", item.rankingPriority());
+            entry.addProperty("badge", item.badge());
+            entry.addProperty("section", item.section());
+            items.add(entry);
+        }
+        return items;
     }
 
     private static CollaborativeWidget.State decodeState(JsonObject state) {

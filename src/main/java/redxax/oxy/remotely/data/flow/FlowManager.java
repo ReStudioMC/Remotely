@@ -806,6 +806,7 @@ public class FlowManager {
     private final Map<ActivationKey, PendingActivation> pendingActivations = BrowserSafeState.map();
     private final Map<ResourceDeleteKey, PendingResourceDelete> pendingResourceDeletions = BrowserSafeState.map();
     private final Map<CreationKey, CreationTransaction> creationTransactions = BrowserSafeState.map();
+    private final Map<CreationKey, CreationTransaction> creationAdmissionReservations = BrowserSafeState.map();
     private final Object creationTransactionLock = new Object();
     private final BrowserSafeState.LongValue creationSequence = new BrowserSafeState.LongValue();
     private final ReSyncStorage creationJournalStorage;
@@ -1435,11 +1436,15 @@ public class FlowManager {
 
     private RuntimeException suspendCreationTransactions() {
         List<CreationTransaction> transactions;
+        List<CreationTransaction> reservations;
         synchronized (creationTransactionLock) {
             transactions = creationTransactions.values().stream()
                 .sorted((left, right) -> Long.compare(left.sequence, right.sequence))
                 .toList();
+            reservations = List.copyOf(creationAdmissionReservations.values());
+            creationAdmissionReservations.clear();
         }
+        reservations.forEach(transaction -> transaction.durableAdmission.complete(false));
         for (CreationTransaction transaction : transactions) {
             DesignerSaveNotifications.SaveTicket payloadTicket;
             DesignerSaveNotifications.SaveTicket metadataTicket;
@@ -5246,10 +5251,7 @@ public class FlowManager {
         transaction.coreSession = session;
         transaction.payloadJson = payloadJson;
         transaction.phase = CreationPhase.PAYLOAD;
-        if (!admitCreationTransaction(transaction)) {
-            return rejectedCreationAdmission("Creation limit reached or resource already pending");
-        }
-        boolean queued = enqueueCreationJournal(transaction, () -> {
+        return queueCreationAdmission(transaction, () -> {
             transaction.durableAdmission.complete(true);
             ServerConnectionToken token = captureServerConnectionToken(serverId);
             if (!isCurrentServerConnection(token)) {
@@ -5257,12 +5259,7 @@ public class FlowManager {
                 return;
             }
             dispatchCreationPhase(transaction);
-        }, () -> rejectCreationAdmission(transaction, "Creation Journal Unavailable"));
-        if (!queued) {
-            rejectCreationAdmission(transaction, "Creation Journal Unavailable");
-        }
-        return new CreationAdmission(queued ? CreationAdmissionStatus.QUEUED : CreationAdmissionStatus.REJECTED,
-            queued ? "Creation queued" : "Creation journal is unavailable", transaction.durableAdmission);
+        });
     }
 
     private CreationAdmission rejectedCreationAdmission(String message) {
@@ -5336,10 +5333,7 @@ public class FlowManager {
             resourceTemplate, locator, null, UUID.randomUUID(), UUID.randomUUID(), metadata,
             resourceType == ReSyncResourceType.COMMAND ? commandContext : null, UUID.randomUUID(), UUID.randomUUID(),
             UUID.randomUUID(), observer, creationSequence.incrementAndGet(), admissionGeneration);
-        if (!admitCreationTransaction(transaction)) {
-            return rejectedCreationAdmission("Creation limit reached or resource already pending");
-        }
-        boolean queued = enqueueCreationJournal(transaction, () -> {
+        return queueCreationAdmission(transaction, () -> {
             transaction.durableAdmission.complete(true);
             if (resourceType == null) {
                 dispatchCreationMetadata(transaction);
@@ -5348,29 +5342,77 @@ public class FlowManager {
             } else if (!queueCreationPreparation(transaction)) {
                 failCreation(transaction, "Creation Preparation Unavailable");
             }
-        }, () -> rejectCreationAdmission(transaction, "Creation Journal Unavailable"));
-        if (!queued) {
-            rejectCreationAdmission(transaction, "Creation Journal Unavailable");
+        });
+    }
+
+    private CreationAdmission queueCreationAdmission(CreationTransaction transaction, Runnable persisted) {
+        if (transaction == null || transaction.key == null) {
+            return rejectedCreationAdmission("Creation input is invalid");
         }
-        return new CreationAdmission(queued ? CreationAdmissionStatus.QUEUED : CreationAdmissionStatus.REJECTED,
-            queued ? "Creation queued" : "Creation journal is unavailable", transaction.durableAdmission);
+        synchronized (creationTransactionLock) {
+            if (closed || !creationJournalLoaded
+                || creationTransactions.size() + creationAdmissionReservations.size() >= MAX_PENDING_CREATION_TRANSACTIONS
+                || creationTransactions.containsKey(transaction.key)
+                || creationAdmissionReservations.containsKey(transaction.key)) {
+                return rejectedCreationAdmission("Creation limit reached or resource already pending");
+            }
+            creationAdmissionReservations.put(transaction.key, transaction);
+        }
+        try {
+            creationJournalScheduler.execute(() -> {
+                boolean admitted = false;
+                try {
+                    admitted = admitCreationTransaction(transaction);
+                } catch (RuntimeException | Error exception) {
+                    synchronized (creationTransactionLock) {
+                        admitted = creationTransactions.get(transaction.key) == transaction;
+                    }
+                    ReSyncFlowClient.traceLifecycle(transaction.key.serverId(), "create_admission_failed", "serverId",
+                        transaction.key.serverId(), "resourceKey", transaction.key.type() + ":" + transaction.key.id(),
+                        "requestId", transaction.payloadRequestId, "mutationId", transaction.payloadMutationId,
+                        "generation", transaction.admissionGeneration, "authorityEpoch", 0L, "revision", 0L,
+                        "reason", TaskIdentities.failureName(exception));
+                }
+                if (!admitted) {
+                    synchronized (creationTransactionLock) {
+                        creationAdmissionReservations.remove(transaction.key, transaction);
+                    }
+                    transaction.durableAdmission.complete(false);
+                    if (!closed) {
+                        ScreenManager.getInstance().execute(() -> new Notification("Create",
+                            "Creation limit reached or resource already pending", Notification.Type.ERROR));
+                    }
+                    return;
+                }
+                if (!enqueueCreationJournal(transaction, persisted,
+                    () -> rejectCreationAdmission(transaction, "Creation Journal Unavailable"))) {
+                    rejectCreationAdmission(transaction, "Creation Journal Unavailable");
+                }
+            });
+        } catch (IllegalStateException exception) {
+            synchronized (creationTransactionLock) {
+                creationAdmissionReservations.remove(transaction.key, transaction);
+            }
+            transaction.durableAdmission.complete(false);
+            return rejectedCreationAdmission("Creation journal is unavailable");
+        }
+        return new CreationAdmission(CreationAdmissionStatus.QUEUED, "Creation queued", transaction.durableAdmission);
     }
 
     private boolean admitCreationTransaction(CreationTransaction transaction) {
-        if (transaction == null || transaction.key == null) {
-            return false;
-        }
-        synchronized (creationTransactionLock) {
-            if (creationTransactions.size() >= MAX_PENDING_CREATION_TRANSACTIONS
-                || creationTransactions.containsKey(transaction.key)) {
-                return false;
+        synchronized (creationJournalPersistenceLock) {
+            List<CreationTransaction> snapshot;
+            synchronized (creationTransactionLock) {
+                if (closed || creationAdmissionReservations.get(transaction.key) != transaction
+                    || creationTransactions.size() >= MAX_PENDING_CREATION_TRANSACTIONS
+                    || creationTransactions.containsKey(transaction.key)) {
+                    return false;
+                }
+                snapshot = new ArrayList<>(creationTransactions.values());
             }
-            List<CreationJournalEntry> entries = new ArrayList<>(creationTransactions.size() + 1);
-            creationTransactions.values().stream()
-                .sorted((left, right) -> Long.compare(left.sequence, right.sequence))
-                .map(this::journalEntry)
-                .forEach(entries::add);
-            entries.add(journalEntry(transaction));
+            snapshot.add(transaction);
+            snapshot.sort((left, right) -> Long.compare(left.sequence, right.sequence));
+            List<CreationJournalEntry> entries = snapshot.stream().map(this::journalEntry).toList();
             if (!creationJournalEntriesWithinLimits(entries)) {
                 return false;
             }
@@ -5380,7 +5422,14 @@ public class FlowManager {
                 new CreationJournal(CREATION_JOURNAL_SCHEMA_VERSION, generation, entries)) == null) {
                 return false;
             }
-            creationTransactions.put(transaction.key, transaction);
+            synchronized (creationTransactionLock) {
+                if (closed || creationAdmissionReservations.get(transaction.key) != transaction
+                    || creationTransactions.containsKey(transaction.key)) {
+                    return false;
+                }
+                creationTransactions.put(transaction.key, transaction);
+                creationAdmissionReservations.remove(transaction.key, transaction);
+            }
             ReSyncFlowClient.traceLifecycle(transaction.key.serverId(), "create_admitted", "serverId",
                 transaction.key.serverId(), "resourceKey", transaction.key.type() + ":" + transaction.key.id(),
                 "requestId", transaction.payloadRequestId, "mutationId", transaction.payloadMutationId,
@@ -16001,6 +16050,9 @@ public class FlowManager {
     private void traceWorkspaceRefresh(String serverId, String target, String outcome, String reason,
                                        boolean rebuildContentBrowser, boolean invalidateProjectCatalog,
                                        boolean refreshAllBindings, int targetedBindingCount) {
+        if (!ReSyncFlowClient.TEMP_LIFECYCLE_DEBUG) {
+            return;
+        }
         ProjectMetadataSnapshot metadata = currentProjectMetadataSnapshot(serverId);
         TypedResourceMembershipSnapshot membership = snapshotTypedResourceMembership(serverId);
         Set<String> metadataKeys = metadata.resources().stream().map(ProjectMetadataSnapshot.Resource::key)

@@ -87,21 +87,6 @@ class VersionedResourceEditorContractTest {
         assertTrue(draft.contains("job.cancelBeforeDispatch()"));
     }
 
-    @Test
-    void customContentPanelDerivationIsCoalescedAndBudgeted() throws IOException {
-        String content = source("ContentDesignerScreen.java");
-        assertTrue(content.contains("submitFrozenWorkspaceGraph(frozenGraph ->"));
-        assertTrue(content.contains("ContentPanelSnapshot"));
-        assertTrue(content.contains("contentPanelDiffs"));
-        assertTrue(content.contains("workspaceMutationVersion()"));
-        assertTrue(content.contains("applied < 2"));
-        assertTrue(content.contains("providerAssetOptions(definition.getProvider(), type)"));
-        assertTrue(content.contains("queueContentPanelRetirement(container)"));
-        assertTrue(content.contains("queueContentPanelWidget(container"));
-        assertTrue(content.contains("container.removeLastWidget(widget)"));
-        assertFalse(content.contains("clearContentPanelWidgets(container)"));
-    }
-
     private static void assertEditor(String file, String draft, String workerSave) throws IOException {
         String source = source(file);
         assertTrue(source.contains("VersionedEditorDraft"));

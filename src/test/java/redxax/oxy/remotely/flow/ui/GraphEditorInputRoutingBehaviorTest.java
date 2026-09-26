@@ -24,6 +24,7 @@ import restudio.rescreen.platform.input.ReTextInputEvent;
 import restudio.rescreen.theme.ThemeManager;
 import restudio.rescreen.ui.core.Screen;
 import restudio.rescreen.ui.core.Widget;
+import restudio.rescreen.ui.rescreen.SidePanel;
 import restudio.rescreen.ui.rescreen.TabsManager;
 import restudio.rescreen.ui.widgets.AnimatedWidget;
 import restudio.rescreen.ui.widgets.ContextMenuWidget;
@@ -79,6 +80,56 @@ class GraphEditorInputRoutingBehaviorTest {
         assertTrue(editor.mouseReleased(release));
         assertEquals(0, editor.workspaceDrags.get());
         assertEquals(0, editor.workspaceReleases.get());
+    }
+
+    @Test
+    void itemComponentPanelConsumesClicksOverAGraphNode() throws Exception {
+        String serverId = "item-panel-route";
+        String nodeId = NodeInstanceId.deterministic("item-panel-node").canonicalText();
+        NodeDefinition definition = new NodeDefinition.Builder("value", "Value", NodeDefinition.NodeCategory.UTILITY)
+            .owner("test").build();
+        NodeRegistry previous = NodeRegistry.getInstance();
+        RoutingEditor editor = null;
+        try {
+            NodeRegistry registry = new NodeRegistry();
+            assertTrue(registry.applySnapshot(serverId, canonicalSnapshot(serverId, definition)));
+            FlowGraph graph = graph("item-panel-graph");
+            editor = new RoutingEditor(graph, serverId);
+            editor.width = 900;
+            editor.height = 600;
+            editor.openItemComponentEditor(new ItemComponentEditorPanel.Model("Item Components", "minecraft:stone",
+                null, Map.of(), false, ignored -> {}, ignored -> {}, () -> {}));
+            SidePanel panel = editor.getSidePanels().stream()
+                .filter(candidate -> "itemComponentEditorPanel".equals(candidate.id()))
+                .findFirst().orElseThrow();
+            panel.animation(false).show();
+            panel.y(54).height(538).width(420);
+            panel.update();
+            int x = editor.width - panel.getConfiguredWidth() / 2;
+            int y = 300;
+            assertTrue(panel.isMouseOver(x, y));
+            double[] world = editor.worldPoint(x, y);
+            int nodeX = (int) world[0] - 20;
+            int nodeY = (int) world[1] - 20;
+            FlowNode node = new FlowNode("test:value", nodeX, nodeY, new LinkedHashMap<>());
+            graph.setNodes(new LinkedHashMap<>(Map.of(nodeId, node)));
+            FlowNodeWidget widget = new FlowNodeWidget(nodeX, nodeY, node, graph, nodeId, serverId, null, null,
+                FlowNodeWidget.FunctionBoundaryCatalog.unavailable(), definition, false, false);
+            widget.render(new TestDrawContext(), (int) world[0], (int) world[1], 0F);
+            assertTrue(widget.isMouseOver(world[0], world[1]));
+            editor.installNode(nodeId, widget);
+
+            assertTrue(editor.mouseClicked(leftMouse(editor, ReMouseEvent.Action.PRESSED, x, y, 0, 0)));
+            assertFalse(editor.nodeDragging());
+            editor.mouseDragged(leftMouse(editor, ReMouseEvent.Action.DRAGGED, x + 25, y + 15, 25, 15));
+            assertEquals(nodeX, widget.getX());
+            assertEquals(nodeY, widget.getY());
+        } finally {
+            if (editor != null) {
+                editor.removed();
+            }
+            restoreNodeRegistry(previous);
+        }
     }
 
     @Test
@@ -431,6 +482,14 @@ class GraphEditorInputRoutingBehaviorTest {
 
         private double[] screenPoint(double worldX, double worldY) {
             return worldToScreen(worldX, worldY);
+        }
+
+        private double[] worldPoint(double screenX, double screenY) {
+            return screenToWorld(screenX, screenY);
+        }
+
+        private boolean nodeDragging() {
+            return draggedWidget != null;
         }
 
         private void setViewport(float zoom, float horizontalPan, float verticalPan) {

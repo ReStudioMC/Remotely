@@ -92,6 +92,7 @@ public class ReSyncProjectMetadata {
         ensureFolder("Content/Items", "Content", 0);
         ensureFolder("Content/Armor", "Content", 1);
         ensureFolder("Content/Blocks", "Content", 2);
+        ensureFolder("Content/Projectiles", "Content", 3);
         ensureFolder("Content/Recipes", "Content", 3);
         ensureFolder("Content/Advancements", "Content", 4);
         ensureFolder("Content/Dialogs", "Content", 5);

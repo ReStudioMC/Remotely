@@ -60,6 +60,7 @@ import restudio.rescreen.ui.widgets.TextInputWidget;
 import restudio.rescreen.util.Notification;
 import restudio.rescreen.util.Identifier;
 import restudio.resync.contract.install.ReSyncInstallationStatus;
+import restudio.resync.permissions.LuckPermsManagementContract;
 
 import java.lang.ref.WeakReference;
 import java.util.ArrayDeque;
@@ -615,6 +616,7 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             .hint("Permissions")
             .onClick(screen::openReSyncPermissions)
             .build();
+        permissionsButton.setVisible(false);
         updateButton = new SquareButtonWidget.Builder()
             .imagePath("ReSync.png")
             .size(STUDIO_CONTENT_BROWSER_TOOL_SIZE, STUDIO_CONTENT_BROWSER_TOOL_SIZE)
@@ -1181,16 +1183,21 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
     public void tick() {
         if (disposed) return;
         super.tick();
+        FlowManager manager = FlowManager.getInstance();
+        ReSyncFlowClient client = manager != null ? manager.existingFlowClient(screen.studioServerId()) : null;
+        boolean permissionsAvailable = client != null && client.isPluginChannelAvailable(LuckPermsManagementContract.CHANNEL_ID);
+        if (permissionsButton.isVisible() != permissionsAvailable) {
+            permissionsButton.setVisible(permissionsAvailable);
+            layoutGate.invalidate();
+        }
         updateButton.setVisible(screen.hasReSyncUpdateAvailable() && !screen.isReSyncUpdateRunning());
         layoutContainersIfDirty();
         long now = System.currentTimeMillis();
-        FlowManager manager = FlowManager.getInstance();
         long metadataStamp = manager != null ? manager.projectBrowserStamp(screen.studioServerId()) : Long.MIN_VALUE;
         if (collaborationChatHighlights.entrySet().removeIf(entry -> entry.getValue().expiresAt() <= now)) {
             refreshRowDecorations();
         }
         if (lastProjectMetadataStamp != metadataStamp) scheduleRebuild(metadataStamp);
-        ReSyncFlowClient client = manager != null ? manager.existingFlowClient(screen.studioServerId()) : null;
         ReSyncCollaborationClient collaboration = client != null ? client.collaboration() : null;
         List<BrowserEditor> editors = new ArrayList<>();
         if (collaboration != null) {
@@ -1945,6 +1952,15 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
 
     private void rightClickTreeNode(WorkspaceTreeExplorer.NodeRef ref) {
         pendingSelectionRestore = BrowserSelectionState.empty();
+        treeContainer.clearSelection();
+        if (ref != null) {
+            for (Object widget : treeContainer.getWidgets()) {
+                if (widget instanceof FileEntryWidget entry && ref.path().equals(entry.getFileEntry().path)) {
+                    treeContainer.addSelectedWidget(entry);
+                    break;
+                }
+            }
+        }
         selectedFolder = null;
         selectedResource = null;
         selectedProjectRoot = false;
@@ -1997,21 +2013,22 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             }
         }
         if (targetFolder != null) {
-            builder.addIconItem("Create", "add.png", () -> ScreenManager.getInstance().execute(() -> showCreateMenu(mouseX + 12, mouseY, targetFolder)), "Create");
+            builder.addIconItem("Create", "add.png", () -> ScreenManager.getInstance().execute(() -> showCreateMenu(mouseX + 12, mouseY, targetFolder, true)), "Create");
         }
         screen.showStudioContextMenu(mouseX, mouseY, builder);
         return true;
     }
 
     private void showCreateMenu() {
-        showCreateMenu(createButton.getX(), createButton.getY() + createButton.getHeight() + 2, selectedCreateTargetFolder());
+        showCreateMenu(createButton.getX(), createButton.getY() + createButton.getHeight() + 2,
+            selectedCreateTargetFolder(), selectionDestination(browserSelection()) != null);
     }
 
-    private void showCreateMenu(int mouseX, int mouseY, String targetFolder) {
+    private void showCreateMenu(int mouseX, int mouseY, String targetFolder, boolean explicitFolder) {
         closeCreateSelector();
         ItemSelectorWidget[] selectorRef = new ItemSelectorWidget[1];
         var overlay = ScreenManager.getInstance().getPopupOverlay();
-        ItemSelectorWidget selector = addCreateSelectorItems(new ItemSelectorWidget.Builder(overlay), targetFolder)
+        ItemSelectorWidget selector = addCreateSelectorItems(new ItemSelectorWidget.Builder(overlay), targetFolder, explicitFolder)
             .size(220, 260)
             .entryHeight(18)
             .searchPlaceholder("Search Actions")
@@ -2028,13 +2045,15 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         selector.show(mouseX, mouseY);
     }
 
-    private ItemSelectorWidget.Builder addCreateSelectorItems(ItemSelectorWidget.Builder builder, String targetFolder) {
+    private ItemSelectorWidget.Builder addCreateSelectorItems(ItemSelectorWidget.Builder builder, String targetFolder,
+                                                              boolean explicitFolder) {
         return builder
             .addItem("New Folder", "folder.png", "Create Folder", "folder directory", () -> showCreateResourcePopup(ReSyncResourceDragPayload.FOLDER, targetFolder))
             .addItem("New Flow", "flow.png", "Create Flow", "flow graph", () -> showCreateResourcePopup(ReSyncResourceDragPayload.FLOW, targetFolder))
             .addItem("New Function", "json.png", "Create Function", "function mcfunction", () -> showCreateResourcePopup(ReSyncResourceDragPayload.FUNCTION, targetFolder))
             .addItem("New Command", "terminal.png", "Create Command", "command terminal", () -> showCreateResourcePopup(ReSyncResourceDragPayload.COMMAND, targetFolder))
-            .addItem("New Content", "content.png", "Create Content", "content item block armor", () -> showCreateResourcePopup(ReSyncResourceDragPayload.CUSTOM_CONTENT, targetFolder))
+            .addItem("New Content", "content.png", "Create Content", "content item block armor",
+                () -> showCreateContentPopup(createDestination(ReSyncResourceDragPayload.CUSTOM_CONTENT, targetFolder), explicitFolder))
             .addItem("New GUI", "fullPanel.png", "Create GUI", "gui interface inventory", () -> showCreateResourcePopup(ReSyncResourceDragPayload.GUI, targetFolder))
             .addItem("New Scoreboard", "panel.png", "Create Scoreboard", "scoreboard sidebar", () -> showCreateResourcePopup(ReSyncResourceDragPayload.SCOREBOARD, targetFolder))
             .addItem("New Tab", "topPanel.png", "Create Tab", "tab player list", () -> showCreateResourcePopup(ReSyncResourceDragPayload.TAB, targetFolder))
@@ -2105,7 +2124,7 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
     private void showCreateResourcePopup(String type, String targetFolder) {
         String destination = createDestination(type, targetFolder);
         if (ReSyncResourceDragPayload.CUSTOM_CONTENT.equals(type)) {
-            showCreateContentPopup(destination);
+            showCreateContentPopup(destination, targetFolder != null);
             return;
         }
         WeakReference<ReSyncContentBrowserWidget> widgetReference = new WeakReference<>(this);
@@ -2129,12 +2148,21 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
         return ReSyncProjectMetadata.normalizePath(ReSyncResourceType.defaultFolderFor(type));
     }
 
+    private static String defaultContentFolder(String type) {
+        return switch (type == null ? "" : type) {
+            case "armor" -> "Content/Armor";
+            case "block" -> "Content/Blocks";
+            case "projectile" -> "Content/Projectiles";
+            default -> "Content/Items";
+        };
+    }
+
     private String selectedCreateTargetFolder() {
         String destination = selectionDestination(browserSelection());
         return destination != null ? destination : ReSyncProjectMetadata.normalizePath(currentFolder);
     }
 
-    private void showCreateContentPopup(String targetFolder) {
+    private void showCreateContentPopup(String targetFolder, boolean explicitFolder) {
         PopupWidget.Builder builder = new PopupWidget.Builder("Create Content")
             .setResizable(false)
             .onClose(this::closeCreateContentSearchSelector);
@@ -2143,7 +2171,8 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
             .size(240, 22)
             .build();
         TextInputWidget idInput = new TextInputWidget.Builder()
-            .placeholder("Content ID (e.g. fire_sword)")
+            .text(ReSyncResourceCreator.suggestedId(screen.studioServerId(), ReSyncResourceDragPayload.CUSTOM_CONTENT, targetFolder))
+            .placeholder("fireSword")
             .size(240, 22)
             .build();
         String[] selectedType = {"item"};
@@ -2194,7 +2223,8 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
                 if (name.isBlank()) {
                     name = id;
                 }
-                if (createContentResource(id, name, selectedType[0], selectedProvider[0], selectedAsset[0], targetFolder,
+                String folder = explicitFolder ? targetFolder : defaultContentFolder(selectedType[0]);
+                if (createContentResource(id, name, selectedType[0], selectedProvider[0], selectedAsset[0], folder,
                     () -> {
                     closeCreateContentSearchSelector();
                     if (popupRef[0] != null) {
@@ -2801,12 +2831,12 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
     }
 
     private String nextWorldGenCopyId(FlowManager manager, String sourceId, String folder, Set<String> reserved) {
-        String base = sourceId + "_copy";
+        String base = ReSyncNaming.copyId(sourceId);
         String candidate = base;
         int suffix = 2;
         while (reserved.contains(ReSyncProjectMetadata.resourceKey(ReSyncResourceDragPayload.WORLDGEN, candidate))
             || ReSyncResourceCreator.exists(manager, screen.studioServerId(), ReSyncResourceDragPayload.WORLDGEN, candidate, folder)) {
-            candidate = base + "_" + suffix++;
+            candidate = base + suffix++;
         }
         return candidate;
     }
@@ -2951,11 +2981,11 @@ public class ReSyncContentBrowserWidget extends AnimatedWidget {
     }
 
     private String nextCopyId(FlowManager manager, String type, String sourceId, String folder) {
-        String base = sourceId + "_copy";
+        String base = ReSyncNaming.copyId(sourceId);
         String candidate = base;
         int suffix = 2;
         while (ReSyncResourceCreator.exists(manager, screen.studioServerId(), type, candidate, folder)) {
-            candidate = base + "_" + suffix++;
+            candidate = base + suffix++;
         }
         return candidate;
     }

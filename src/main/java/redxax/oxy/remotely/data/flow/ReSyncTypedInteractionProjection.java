@@ -23,6 +23,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -51,6 +52,7 @@ public final class ReSyncTypedInteractionProjection {
     private ReSyncTypedInteractionProjection(CatalogCacheKey key,
                                               long revision,
                                               Map<ContractRef<NodeId>, ReSyncGenericDescriptorProjection.Projection> descriptors,
+                                              Map<ContractRef<NodeId>, ReSyncGenericWidgetCapabilities.WidgetDefinition> widgets,
                                               Map<ContractRef<NodeId>, FunctionBoundary> functionBoundaries,
                                               Map<ContractRef<NodeId>, List<DropContribution>> dropContributions,
                                               Set<ContractRef<NodeId>> activeDefinitions,
@@ -58,10 +60,6 @@ public final class ReSyncTypedInteractionProjection {
         this.key = Objects.requireNonNull(key, "Catalog cache key is required");
         this.revision = revision;
         this.descriptors = immutableMap(descriptors);
-        LinkedHashMap<ContractRef<NodeId>, ReSyncGenericWidgetCapabilities.WidgetDefinition> widgets =
-            new LinkedHashMap<>();
-        this.descriptors.forEach((identity, projection) -> ReSyncGenericWidgetCapabilities.from(projection)
-            .ifPresent(widget -> widgets.put(identity, widget)));
         this.widgetDefinitions = immutableMap(widgets);
         this.uniqueWidgetDefinitions = uniqueWidgetDefinitions(this.widgetDefinitions, false);
         this.uniqueWorldGenWidgetDefinitions = uniqueWidgetDefinitions(this.widgetDefinitions, true);
@@ -102,32 +100,77 @@ public final class ReSyncTypedInteractionProjection {
 
     public static ReSyncTypedInteractionProjection from(ReSyncCatalogPublicationProjection.Snapshot snapshot,
                                                          CatalogAuthoringPublication authoring) {
-        long startedAt = System.nanoTime();
-        Objects.requireNonNull(snapshot, "Catalog publication snapshot is required");
-        CatalogCacheKey catalogKey = snapshot.publication().key();
-        ReSyncFlowClient.traceLifecycle(catalogKey.serverId().canonicalText(), "typed_catalog_conversion_started",
-            "resourceKey", catalogKey.canonicalText(), "operation", "convert_typed_catalog", "requestId", "",
-            "correlationId", "", "traceId", "", "mutationId", "", "generation", catalogKey.catalogGeneration(),
-            "authorityEpoch", -1L, "revision", snapshot.publication().revision(), "inputCount",
-            snapshot.entries().size(), "elapsedMs", 0L);
-        Map<ContractRef<NodeId>, ReSyncGenericDescriptorProjection.Projection> descriptors = new LinkedHashMap<>();
-        Map<ContractRef<NodeId>, FunctionBoundary> boundaries = new LinkedHashMap<>();
-        Map<ContractRef<NodeId>, List<DropContribution>> drops = new LinkedHashMap<>();
-        Set<ContractRef<NodeId>> activeDefinitions = new LinkedHashSet<>();
-        Map<String, Integer> rejectionReasons = new LinkedHashMap<>();
-        int descriptorRejectedCount = 0;
-        int descriptorReadOnlyCount = 0;
-        boolean ignoredBoundaryDeclaration = false;
-        for (CatalogCachePublication.Entry entry : snapshot.entries().values()) {
+        Builder builder = begin(snapshot, authoring);
+        boolean ready;
+        do {
+            ready = builder.advance(16);
+        } while (!ready);
+        return builder.finish();
+    }
+
+    public static Builder begin(ReSyncCatalogPublicationProjection.Snapshot snapshot,
+                                CatalogAuthoringPublication authoring) {
+        return new Builder(snapshot, authoring);
+    }
+
+    public static final class Builder {
+        private final ReSyncCatalogPublicationProjection.Snapshot snapshot;
+        private final CatalogAuthoringPublication authoring;
+        private final CatalogCacheKey catalogKey;
+        private final long startedAt;
+        private final Iterator<CatalogCachePublication.Entry> entries;
+        private final Map<ContractRef<NodeId>, ReSyncGenericDescriptorProjection.Projection> descriptors = new LinkedHashMap<>();
+        private final Map<ContractRef<NodeId>, ReSyncGenericWidgetCapabilities.WidgetDefinition> widgets = new LinkedHashMap<>();
+        private final Map<ContractRef<NodeId>, FunctionBoundary> boundaries = new LinkedHashMap<>();
+        private final Map<ContractRef<NodeId>, List<DropContribution>> drops = new LinkedHashMap<>();
+        private final Set<ContractRef<NodeId>> activeDefinitions = new LinkedHashSet<>();
+        private final Map<String, Integer> rejectionReasons = new LinkedHashMap<>();
+        private int descriptorRejectedCount;
+        private int descriptorReadOnlyCount;
+        private boolean ignoredBoundaryDeclaration;
+        private boolean finished;
+
+        private Builder(ReSyncCatalogPublicationProjection.Snapshot snapshot,
+                        CatalogAuthoringPublication authoring) {
+            this.snapshot = Objects.requireNonNull(snapshot, "Catalog publication snapshot is required");
+            this.authoring = authoring;
+            this.catalogKey = snapshot.publication().key();
+            this.startedAt = System.nanoTime();
+            this.entries = snapshot.entries().values().iterator();
+            ReSyncFlowClient.traceLifecycle(catalogKey.serverId().canonicalText(), "typed_catalog_conversion_started",
+                "resourceKey", catalogKey.canonicalText(), "operation", "convert_typed_catalog", "requestId", "",
+                "correlationId", "", "traceId", "", "mutationId", "", "generation", catalogKey.catalogGeneration(),
+                "authorityEpoch", -1L, "revision", snapshot.publication().revision(), "inputCount",
+                snapshot.entries().size(), "elapsedMs", 0L);
+        }
+
+        public boolean advance(int maximumEntries) {
+            if (maximumEntries < 1) {
+                throw new IllegalArgumentException("Catalog projection batch must contain an entry");
+            }
+            if (finished) {
+                return true;
+            }
+            int count = 0;
+            while (entries.hasNext() && count < maximumEntries) {
+                accept(entries.next());
+                count++;
+            }
+            return !entries.hasNext();
+        }
+
+        private void accept(CatalogCachePublication.Entry entry) {
             Optional<ReSyncGenericDescriptorProjection.Projection> opened = ReSyncGenericDescriptorProjection.open(
                 entry, ReSyncGenericDescriptorProjection.ClientCapabilities.primitive());
             if (opened.isEmpty()) {
                 descriptorRejectedCount++;
                 rejectionReasons.merge("descriptor_projection_empty", 1, Integer::sum);
-                continue;
+                return;
             }
             ReSyncGenericDescriptorProjection.Projection descriptor = opened.orElseThrow();
             descriptors.put(entry.definitionKey(), descriptor);
+            ReSyncGenericWidgetCapabilities.from(descriptor)
+                .ifPresent(widget -> widgets.put(entry.definitionKey(), widget));
             if (entry.present() && !entry.opaque() && entry.state() == CatalogCacheState.ACTIVE) {
                 activeDefinitions.add(entry.definitionKey());
                 List<DropContribution> contributions = dropContributions(entry.definitionKey(), descriptor.descriptor());
@@ -140,7 +183,7 @@ public final class ReSyncTypedInteractionProjection {
                 rejectionReasons.merge(descriptor.reason().isBlank() ? descriptor.status().name().toLowerCase(Locale.ROOT)
                     : descriptor.reason(), 1, Integer::sum);
                 ignoredBoundaryDeclaration |= declaresBoundary(entry.definitionKey(), descriptor.descriptor());
-                continue;
+                return;
             }
             BoundaryProjection boundary = boundary(entry.definitionKey(), descriptor.descriptor());
             if (!boundary.valid()) {
@@ -159,43 +202,54 @@ public final class ReSyncTypedInteractionProjection {
                 boundaries.put(entry.definitionKey(), boundary.boundary());
             }
         }
-        if (!boundaries.isEmpty()) {
-            boolean inputsMissing = boundaries.values().stream()
-                .noneMatch(value -> value.role() == FunctionBoundaryRole.INPUTS);
-            boolean outputsMissing = boundaries.values().stream()
-                .noneMatch(value -> value.role() == FunctionBoundaryRole.OUTPUTS);
-            if ((inputsMissing || outputsMissing) && ignoredBoundaryDeclaration) {
-                boundaries.clear();
-            } else if (inputsMissing) {
-                traceRejected(catalogKey, snapshot.entries().size(), descriptors.size(),
-                    "CATALOG_INTERACTION.BOUNDARY_INPUTS_MISSING", startedAt);
-                throw new ValidationException("CATALOG_INTERACTION.BOUNDARY_INPUTS_MISSING");
-            } else if (outputsMissing) {
-                traceRejected(catalogKey, snapshot.entries().size(), descriptors.size(),
-                    "CATALOG_INTERACTION.BOUNDARY_OUTPUTS_MISSING", startedAt);
-                throw new ValidationException("CATALOG_INTERACTION.BOUNDARY_OUTPUTS_MISSING");
+
+        public ReSyncTypedInteractionProjection finish() {
+            if (finished || entries.hasNext()) {
+                throw new IllegalStateException("Catalog projection is not ready");
             }
+            finished = true;
+            return complete();
         }
-        ReSyncTypedInteractionProjection projection = new ReSyncTypedInteractionProjection(catalogKey,
-            snapshot.publication().revision(), descriptors, boundaries, drops, activeDefinitions, authoring);
-        List<String> readOnlyReasons = descriptors.values().stream()
-            .filter(ReSyncGenericDescriptorProjection.Projection::readOnly)
-            .map(ReSyncGenericDescriptorProjection.Projection::reason).filter(reason -> reason != null && !reason.isBlank())
-            .distinct().toList();
-        ReSyncFlowClient.traceLifecycle(catalogKey.serverId().canonicalText(), "typed_catalog_conversion_completed",
-            "resourceKey", catalogKey.canonicalText(), "operation", "convert_typed_catalog", "requestId", "",
-            "correlationId", "", "traceId", "", "mutationId", "", "generation", catalogKey.catalogGeneration(),
-            "authorityEpoch", -1L, "revision", snapshot.publication().revision(), "inputCount",
-            snapshot.entries().size(), "descriptorCount", descriptors.size(), "readOnlyCount",
-            descriptorReadOnlyCount, "descriptorRejectedCount", descriptorRejectedCount, "widgetCount",
-            projection.widgetDefinitions.size(), "widgetRejectedCount",
-            Math.max(0, descriptors.size() - projection.widgetDefinitions.size()), "worldGenCount",
-            projection.worldGenDefinitions.size(), "boundaryCount", boundaries.size(), "dropCount",
-            projection.allDropContributions.size(), "readOnlyReasons", String.join(";", readOnlyReasons), "reason",
-            "converted", "rejectionReasons", rejectionReasons(rejectionReasons), "paletteCount",
-            projection.palette(false).definitions().size(), "worldGenPaletteCount",
-            projection.palette(true).definitions().size(), "elapsedMs", elapsedMillis(startedAt));
-        return projection;
+
+        private ReSyncTypedInteractionProjection complete() {
+            if (!boundaries.isEmpty()) {
+                boolean inputsMissing = boundaries.values().stream()
+                    .noneMatch(value -> value.role() == FunctionBoundaryRole.INPUTS);
+                boolean outputsMissing = boundaries.values().stream()
+                    .noneMatch(value -> value.role() == FunctionBoundaryRole.OUTPUTS);
+                if ((inputsMissing || outputsMissing) && ignoredBoundaryDeclaration) {
+                    boundaries.clear();
+                } else if (inputsMissing) {
+                    traceRejected(catalogKey, snapshot.entries().size(), descriptors.size(),
+                        "CATALOG_INTERACTION.BOUNDARY_INPUTS_MISSING", startedAt);
+                    throw new ValidationException("CATALOG_INTERACTION.BOUNDARY_INPUTS_MISSING");
+                } else if (outputsMissing) {
+                    traceRejected(catalogKey, snapshot.entries().size(), descriptors.size(),
+                        "CATALOG_INTERACTION.BOUNDARY_OUTPUTS_MISSING", startedAt);
+                    throw new ValidationException("CATALOG_INTERACTION.BOUNDARY_OUTPUTS_MISSING");
+                }
+            }
+            ReSyncTypedInteractionProjection projection = new ReSyncTypedInteractionProjection(catalogKey,
+                snapshot.publication().revision(), descriptors, widgets, boundaries, drops, activeDefinitions, authoring);
+            List<String> readOnlyReasons = descriptors.values().stream()
+                .filter(ReSyncGenericDescriptorProjection.Projection::readOnly)
+                .map(ReSyncGenericDescriptorProjection.Projection::reason)
+                .filter(reason -> reason != null && !reason.isBlank()).distinct().toList();
+            ReSyncFlowClient.traceLifecycle(catalogKey.serverId().canonicalText(), "typed_catalog_conversion_completed",
+                "resourceKey", catalogKey.canonicalText(), "operation", "convert_typed_catalog", "requestId", "",
+                "correlationId", "", "traceId", "", "mutationId", "", "generation", catalogKey.catalogGeneration(),
+                "authorityEpoch", -1L, "revision", snapshot.publication().revision(), "inputCount",
+                snapshot.entries().size(), "descriptorCount", descriptors.size(), "readOnlyCount",
+                descriptorReadOnlyCount, "descriptorRejectedCount", descriptorRejectedCount, "widgetCount",
+                projection.widgetDefinitions.size(), "widgetRejectedCount",
+                Math.max(0, descriptors.size() - projection.widgetDefinitions.size()), "worldGenCount",
+                projection.worldGenDefinitions.size(), "boundaryCount", boundaries.size(), "dropCount",
+                projection.allDropContributions.size(), "readOnlyReasons", String.join(";", readOnlyReasons), "reason",
+                "converted", "rejectionReasons", rejectionReasons(rejectionReasons), "paletteCount",
+                projection.palette(false).definitions().size(), "worldGenPaletteCount",
+                projection.palette(true).definitions().size(), "elapsedMs", elapsedMillis(startedAt));
+            return projection;
+        }
     }
 
     public boolean canConvert(FlowTypeRef source, FlowTypeRef target) {
@@ -235,7 +289,7 @@ public final class ReSyncTypedInteractionProjection {
                 continue;
             }
             try {
-                JsonValue value = JsonValue.parse(entry.data().canonicalBytes());
+                JsonValue value = entry.data().canonicalValue();
                 if (!(value instanceof JsonValue.JsonObject object)) {
                     continue;
                 }

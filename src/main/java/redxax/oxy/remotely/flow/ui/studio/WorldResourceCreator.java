@@ -34,7 +34,9 @@ public final class WorldResourceCreator {
         WorldGenManager.getInstance().requestProjectList(serverId);
         WorldSnapshot snapshot = manager.getWorldSnapshot(serverId);
         List<WorldGeneratorDescriptor> generatorDescriptors = snapshot == null ? List.of() : snapshot.getGeneratorDescriptors();
-        TextInputWidget worldInput = new TextInputWidget.Builder().placeholder("World Name").size(220, 18).build();
+        TextInputWidget worldInput = new TextInputWidget.Builder()
+            .text(ReSyncResourceCreator.suggestedId(serverId, ReSyncResourceDragPayload.WORLD, folder))
+            .placeholder("newWorld").size(220, 18).build();
         TextInputWidget seedInput = new TextInputWidget.Builder().placeholder("Seed").size(220, 18).build();
         DropDownWidget<String> environmentSelect = dropdown(List.of("NORMAL", "NETHER", "THE_END", "CUSTOM"), "NORMAL", value -> {});
         List<GeneratorOption> generatorOptions = createGeneratorOptions(manager, serverId, generatorDescriptors);

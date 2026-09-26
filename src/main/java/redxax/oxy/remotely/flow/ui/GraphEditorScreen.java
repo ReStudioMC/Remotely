@@ -93,6 +93,7 @@ import restudio.resync.flow.graph.OpaqueData;
 import restudio.resync.flow.graph.PinValue;
 import restudio.resync.flow.graph.RepeatableBinding;
 import restudio.resync.flow.graph.RepeatableElement;
+import restudio.resync.flow.graph.StringTemplatePins;
 import restudio.resync.flow.identity.ConnectionId;
 import restudio.resync.flow.identity.CapabilityId;
 import restudio.resync.flow.identity.CatalogBinding;
@@ -128,8 +129,10 @@ import restudio.rescreen.logging.LogSource;
 import restudio.rescreen.logging.LogTypes;
 import restudio.rescreen.logging.ReLog;
 import restudio.rescreen.platform.Async;
+import restudio.rescreen.platform.FadeMask;
 import restudio.rescreen.platform.IDrawContext;
 import restudio.rescreen.platform.ITextRenderer;
+import restudio.rescreen.render.TextRenderer;
 import restudio.rescreen.platform.input.ReKey;
 import restudio.rescreen.platform.input.ReKeyEvent;
 import restudio.rescreen.platform.input.ReLifecycleEvent;
@@ -1217,12 +1220,17 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         private static class VariantLabelWidget extends AnimatedWidget {
             private final String familyLabel;
             private final String label;
+            private final String displayLabel;
             private final Runnable action;
+            private int familyWidth;
+            private int separatorWidth;
+            private long textMetricsRevision = Long.MIN_VALUE;
 
             private VariantLabelWidget(String familyLabel, String label, Runnable action) {
                 super(0, 0, 100, 14, (familyLabel != null ? familyLabel : "") + " " + (label != null ? label : ""));
                 this.familyLabel = familyLabel != null ? familyLabel : "";
                 this.label = label != null ? label : "";
+                this.displayLabel = this.familyLabel.isBlank() ? this.label : this.familyLabel + " / " + this.label;
                 this.action = action;
                 this.entranceAnimationEnabled = false;
                 this.animateElevation = false;
@@ -1237,17 +1245,24 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                 int textY = getY() + (getHeight() - ITextRenderer.fontHeight) / 2 + 1;
                 int maxLabelWidth = Math.max(0, getWidth() - 10);
                 String separator = " / ";
-                String displayLabel = familyLabel.isBlank() ? label : familyLabel + separator + label;
-                int displayWidth = tr.getWidth(displayLabel);
-                if (displayWidth <= maxLabelWidth && !familyLabel.isBlank()) {
-                    int familyWidth = tr.getWidth(familyLabel);
-                    int separatorWidth = tr.getWidth(separator);
-                    ctx.drawText(familyLabel, textX, textY, mutedTextColor, shadow);
-                    ctx.drawText(separator, textX + familyWidth, textY, mutedTextColor, shadow);
-                    ctx.drawText(label, textX + familyWidth + separatorWidth, textY, textColor, shadow);
-                } else {
-                    ctx.drawText(ellipsize(displayLabel, maxLabelWidth), textX, textY, textColor, shadow);
-                }
+                if (maxLabelWidth <= 0) return;
+                FadeMask mask = FadeMask.text(textX, textY - 2, maxLabelWidth, ITextRenderer.fontHeight + 2,
+                        textX, TextRenderer.cachedWidth(displayLabel), 10, bgColor);
+                ctx.renderFaded(mask, () -> {
+                    if (familyLabel.isBlank()) {
+                        ctx.drawText(label, textX, textY, textColor, shadow);
+                    } else {
+                        long revision = TextRenderer.metricsRevision();
+                        if (textMetricsRevision != revision) {
+                            familyWidth = tr.getWidth(familyLabel);
+                            separatorWidth = tr.getWidth(separator);
+                            textMetricsRevision = revision;
+                        }
+                        ctx.drawText(familyLabel, textX, textY, mutedTextColor, shadow);
+                        ctx.drawText(separator, textX + familyWidth, textY, mutedTextColor, shadow);
+                        ctx.drawText(label, textX + familyWidth + separatorWidth, textY, textColor, shadow);
+                    }
+                });
             }
 
             @Override
@@ -1257,18 +1272,6 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                 }
             }
 
-            private String ellipsize(String value, int maxWidth) {
-                if (value == null || value.isBlank() || tr.getWidth(value) <= maxWidth) {
-                    return value == null ? "" : value;
-                }
-                String suffix = "...";
-                int suffixWidth = tr.getWidth(suffix);
-                StringBuilder builder = new StringBuilder(value);
-                while (!builder.isEmpty() && tr.getWidth(builder.toString()) + suffixWidth > maxWidth) {
-                    builder.setLength(builder.length() - 1);
-                }
-                return builder + suffix;
-            }
         }
 
         private static class VariantTypeWidget extends AnimatedWidget {
@@ -6697,6 +6700,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                     return false;
                 }
                 current.removeNodeValue(identity, pinId);
+                pruneCoreStringTemplateConnections(current, identity, previous.value(), null);
                 return true;
             }, identity.canonicalText());
         }
@@ -6716,6 +6720,8 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                 }
                 current.setNodeValue(identity, new PinValue(pinId, exact,
                     currentValue != null ? currentValue.unknown() : OpaqueData.empty()));
+                pruneCoreStringTemplateConnections(current, identity,
+                    currentValue != null ? currentValue.value() : null, exact);
                 return true;
             }, identity.canonicalText());
         }
@@ -6771,8 +6777,47 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             }
             current.setNodeValue(identity, new PinValue(pinId, currentReplacement,
                 currentValue != null ? currentValue.unknown() : previous.unknown()));
+            pruneCoreStringTemplateConnections(current, identity,
+                currentValue != null ? currentValue.value() : null, currentReplacement);
             return true;
         }, identity.canonicalText());
+    }
+
+    private static void pruneCoreStringTemplateConnections(CoreGraphEditorSession session, NodeInstanceId nodeId,
+                                                            TypedValue before, TypedValue after) {
+        if (before == null || !StringTemplatePins.STRING.equals(before.type()) || !(before.value() instanceof String oldText)) {
+            return;
+        }
+        Set<String> removed = new HashSet<>(StringTemplatePins.names(oldText));
+        GraphNode currentNode = session.graphDocument().nodes().stream()
+            .filter(node -> node.instanceId().equals(nodeId)).findFirst().orElse(null);
+        if (currentNode == null) {
+            return;
+        }
+        for (PinValue value : currentNode.values().values()) {
+            if (StringTemplatePins.STRING.equals(value.value().type()) && value.value().value() instanceof String text) {
+                removed.removeAll(StringTemplatePins.names(text));
+            }
+        }
+        if (after != null && StringTemplatePins.STRING.equals(after.type()) && after.value() instanceof String text) {
+            removed.removeAll(StringTemplatePins.names(text));
+        }
+        if (removed.isEmpty()) {
+            return;
+        }
+        GraphDocument document = session.graphDocument();
+        List<GraphConnection> connections = document.connections().stream()
+            .filter(connection -> !connection.target().nodeId().equals(nodeId)
+                || !removed.contains(connection.target().pinId().canonicalText())).toList();
+        if (connections.size() != document.connections().size()) {
+            session.setConnections(connections);
+        }
+        List<GraphPassthrough> passthroughs = session.graphDocument().passthroughs().stream()
+            .filter(passthrough -> !passthrough.nodeId().equals(nodeId)
+                || !removed.contains(passthrough.inputPin().canonicalText())).toList();
+        if (passthroughs.size() != session.graphDocument().passthroughs().size()) {
+            session.setPassthroughs(passthroughs);
+        }
     }
 
     private boolean handleCoreRepeatableValueMutation(CoreGraphEditorSession session, GraphNode node,
@@ -8272,8 +8317,11 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             : CoreRepeatableUiProjection.Projection.empty();
         boolean definitionLookupBlocked = catalogAuthorityRequired() && !catalogAuthorityAllowsInteraction()
             || typedProjection && generic == null;
-        boolean typedEditable = definition != null && typedCatalogEditable(definition.getOwner(), definition.getId());
-        boolean descriptorReadOnly = definitionLookupBlocked || !typedEditable || (generic != null ? generic.readOnly()
+        ReSyncGenericDescriptorProjection.Projection coreDescriptor = coreNode != null
+            ? typedInteractionProjection().flatMap(projection -> projection.descriptor(coreNode.definition())).orElse(null) : null;
+        boolean ownedFields = coreDocument && ownsCoreNodeFields(coreNode, coreDescriptor);
+        boolean typedEditable = definition != null && (typedCatalogEditable(definition.getOwner(), definition.getId()) || ownedFields);
+        boolean descriptorReadOnly = definitionLookupBlocked || !typedEditable || !ownedFields && (generic != null ? generic.readOnly()
             : definition != null && typedDescriptorProjection(typedCatalogClient(), definition.getOwner(), definition.getId())
                 .map(ReSyncGenericDescriptorProjection.Projection::readOnly).orElse(false));
         if (coreDocument && !coreCapabilityAllowed(coreSession, nodeId)) {
@@ -10104,7 +10152,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                 + diagnosticCollectionSize(diagnostics, "missingCatalogs");
             addRegistryInspectorRow(builder, "Server", session.serverIdentity(), session.serverIdentity(), "calm");
             addRegistryInspectorRow(builder, "Contract", "v" + session.contractVersion() + (session.fullSync() ? " · Full" : " · Delta"), String.join(", ", capabilities), "nice");
-            addRegistryInspectorRow(builder, "Checksum", abbreviate(session.checksum(), 18), session.checksum(), "calm");
+            addRegistryInspectorRow(builder, "Checksum", session.checksum(), session.checksum(), "calm");
             addRegistryInspectorRow(builder, "Cache", cache.present() ? "Ready · Schema " + cache.schemaVersion() : "Unavailable", cache.invalidationReason(), cache.present() ? "nice" : "warning");
             addRegistryInspectorRow(builder, "Capabilities", String.valueOf(capabilities.size()), String.join(", ", capabilities), "calm");
             addRegistryInspectorRow(builder, "Definitions", String.valueOf(registry.getAuthoritativeDefinitions(nodeRegistryServerId()).size()), diagnosticDetails(diagnostics, "definitionParity"), "calm");
@@ -10204,7 +10252,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         String data = inspection.canonicalData().orElse("No entry data");
         addRegistryInspectorRow(builder, key, status, inspection.reason(), "warning");
         addRegistryInspectorRow(builder, "Revision", String.valueOf(inspection.revision()), key, "calm");
-        addRegistryInspectorRow(builder, "Data", abbreviate(data, 72), data, "calm");
+        addRegistryInspectorRow(builder, "Data", data, data, "calm");
         if (!inspection.requiredCapabilities().isEmpty()) {
             addRegistryInspectorRow(builder, "Required Capabilities", String.valueOf(inspection.requiredCapabilities().size()),
                 inspection.requiredCapabilities().stream().map(value -> value.canonicalText()).sorted().toList().toString(), "warning");
@@ -10282,13 +10330,6 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             + "\nCatalogs: " + diagnosticDetails(diagnostics, "missingCatalogs");
     }
 
-    private String abbreviate(String value, int maximumLength) {
-        if (value == null || value.length() <= maximumLength) {
-            return value != null ? value : "";
-        }
-        return value.substring(0, maximumLength) + "…";
-    }
-
     private void showExtractFunctionPopup() {
         if (isActiveCoreStudioDocument()) {
             coreOperationUnavailable("Extract Function");
@@ -10300,7 +10341,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         }
         PopupWidget.Builder builder = new PopupWidget.Builder("Extract Function").setResizable(false);
         TextInputWidget idInput = new TextInputWidget.Builder()
-                .placeholder("function_id")
+                .placeholder("newFunction")
                 .size(200, 22)
                 .build();
         builder.addRow("ID", idInput);
@@ -17029,6 +17070,13 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (handleHeaderButtonsClick(event, (int) headerCoords[0], (int) headerCoords[1])) {
             return true;
         }
+        if (itemComponentEditor != null && itemComponentEditor.isOpen()) {
+            SidePanel panel = itemComponentEditor.sidePanel();
+            if (panel.isMouseOver(mouseX, mouseY)) {
+                panel.mouseClicked(event.retarget(panel, mouseX, mouseY));
+                return true;
+            }
+        }
         if (studioMode && handleStudioWorkspaceMouseClicked(event)) {
             return true;
         }
@@ -18093,7 +18141,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         }
         PopupWidget.Builder builder = new PopupWidget.Builder(input ? "Add Input" : "Add Output").setResizable(false);
         TextInputWidget nameInput = new TextInputWidget.Builder()
-            .placeholder(input ? "input_name" : "output_name")
+            .placeholder(input ? "inputName" : "outputName")
             .size(200, 20)
             .build();
         List<String> typeOptions = Stream.concat(FlowDataType.values().stream().map(FlowDataType::getId),
@@ -20694,7 +20742,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                 String message = success ? jsonText(object, "message") : jsonText(object, "failureReason");
                 long duration = object.has("durationMillis") && !object.get("durationMillis").isJsonNull() ? object.get("durationMillis").getAsLong() : 0L;
                 String text = action + (world.isBlank() ? "" : " | " + world) + " | " + duration + "ms" + (message.isBlank() ? "" : " | " + message);
-                builder.addRow(status, readOnlyButton(text.length() > 72 ? text.substring(0, 69) + "..." : text));
+                builder.addRow(status, readOnlyButton(text));
                 shown++;
             }
         }

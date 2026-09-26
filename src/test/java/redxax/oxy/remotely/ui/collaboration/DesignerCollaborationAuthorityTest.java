@@ -19,14 +19,17 @@ import restudio.rescreen.ui.widgets.AnimatedButton;
 import restudio.rescreen.ui.widgets.AnimatedWidget;
 import restudio.rescreen.ui.widgets.ColorFieldWidget;
 import restudio.rescreen.ui.widgets.DropDownWidget;
+import restudio.rescreen.ui.widgets.IconButton;
 import restudio.rescreen.ui.widgets.ItemSelectorWidget;
 import restudio.rescreen.ui.widgets.PopupWidget;
 import restudio.rescreen.ui.widgets.ReorderableWidget;
 import restudio.rescreen.ui.widgets.RowWidget;
+import restudio.rescreen.ui.widgets.ScrollSelectorWidget;
 import restudio.rescreen.ui.widgets.TextInputWidget;
 import restudio.rescreen.ui.widgets.TitledRowWidget;
 import restudio.rescreen.ui.widgets.ToggleWidget;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -132,6 +135,91 @@ class DesignerCollaborationAuthorityTest {
             List.of(new DesignerCollaborationAuthority.RemoteWidgetState(publication, 1L)));
 
         assertEquals(state, target.state);
+    }
+
+    @Test
+    void selectorPublicationRetainsOldItemsAfterCatalogMutation() {
+        ThemeManager.initBrowserDefaults();
+        TestScreen screen = new TestScreen();
+        ItemSelectorWidget selector = new ItemSelectorWidget(screen);
+        ItemSelectorWidget.AsyncItemSnapshot[] catalog = {
+            new ItemSelectorWidget.AsyncItemSnapshot(List.of(new ItemSelectorWidget.AsyncItem("Stone", "", "stone", () -> {})), false, "No Items")
+        };
+        selector.setAsyncItems(null, () -> catalog[0]);
+        selector.openEmbedded();
+        screen.addDrawableChild(selector);
+
+        JsonObject first = DesignerCollaborationAuthority.widgetStates(screen);
+        JsonArray firstItems = selectorItems(first);
+        assertEquals(1, firstItems.size());
+        selector.setSelectedItem("Stone");
+        JsonObject selection = DesignerCollaborationAuthority.widgetStates(screen);
+        assertEquals("", selectorState(first).get("selectedItem").getAsString());
+        assertEquals("Stone", selectorState(selection).get("selectedItem").getAsString());
+
+        catalog[0] = new ItemSelectorWidget.AsyncItemSnapshot(List.of(
+            new ItemSelectorWidget.AsyncItem("Stone", "", "stone", () -> {}),
+            new ItemSelectorWidget.AsyncItem("Dirt", "", "dirt", () -> {})
+        ), false, "No Items");
+        selector.setAsyncItems(null, () -> catalog[0]);
+        JsonObject next = DesignerCollaborationAuthority.widgetStates(screen);
+        assertEquals(1, firstItems.size());
+        assertEquals("Stone", firstItems.get(0).getAsJsonObject().get("label").getAsString());
+        assertEquals(2, selectorItems(next).size());
+        assertEquals("Dirt", selectorItems(next).get(1).getAsJsonObject().get("label").getAsString());
+
+        catalog[0] = new ItemSelectorWidget.AsyncItemSnapshot(List.of(new ItemSelectorWidget.AsyncItem("Oak", "", "oak", () -> {})), false, "No Items");
+        selector.setAsyncItems(null, () -> catalog[0]);
+        JsonObject replacement = DesignerCollaborationAuthority.widgetStates(screen);
+        assertEquals(2, selectorItems(next).size());
+        assertEquals(1, selectorItems(replacement).size());
+        assertEquals("Oak", selectorItems(replacement).get(0).getAsJsonObject().get("label").getAsString());
+    }
+
+    @Test
+    void largeAsyncSelectorKeepsVisibleRowPointerAndPublishesAllItems() {
+        ThemeManager.initBrowserDefaults();
+        TestScreen screen = new TestScreen();
+        screen.resize(800, 600);
+        List<ItemSelectorWidget.AsyncItem> catalog = new ArrayList<>();
+        for (int index = 0; index < 1024; index++) {
+            String label = "Item " + index;
+            catalog.add(new ItemSelectorWidget.AsyncItem(label, "", label, () -> {}));
+        }
+        ItemSelectorWidget selector = new ItemSelectorWidget(screen);
+        selector.setPosition(20, 20);
+        selector.setWidth(240);
+        selector.setHeight(140);
+        selector.setAsyncItems(null, () -> new ItemSelectorWidget.AsyncItemSnapshot(catalog, false, "No Items"));
+        ScrollSelectorWidget mode = new ScrollSelectorWidget(0, 0, 240, 20, List.of("None", "Run Flow"));
+        Container panel = new Container("inspector", 20, 20, 300, 500);
+        panel.addWidget(selector);
+        panel.addWidget(mode);
+        screen.addDrawableChild(panel);
+        selector.openEmbedded();
+        mode.setFocused(true);
+
+        Widget visible = selector.getOverlayChildren().stream().filter(IconButton.class::isInstance).findFirst().orElseThrow();
+        Widget hidden = selector.getChildWidgets().getLast();
+        assertFalse(selector.getOverlayChildren().contains(hidden));
+        assertSame(visible, DesignerCollaborationAuthority.hit(screen,
+            visible.getX() + visible.getWidth() / 2, visible.getY() + visible.getHeight() / 2, null));
+        assertSame(mode, DesignerCollaborationAuthority.resolve(screen, DesignerCollaborationAuthority.path(screen, mode)));
+        assertEquals(1024, selectorItems(DesignerCollaborationAuthority.widgetStates(screen)).size());
+    }
+
+    private static JsonArray selectorItems(JsonObject publication) {
+        return selectorState(publication).getAsJsonArray("items");
+    }
+
+    private static JsonObject selectorState(JsonObject publication) {
+        for (var value : publication.entrySet()) {
+            JsonObject state = value.getValue().getAsJsonObject().getAsJsonObject("state");
+            if ("selector".equals(state.get("type").getAsString())) {
+                return state;
+            }
+        }
+        throw new AssertionError("Selector state missing");
     }
 
     @Test

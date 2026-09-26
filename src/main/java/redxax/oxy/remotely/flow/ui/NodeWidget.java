@@ -24,6 +24,7 @@ import redxax.oxy.remotely.flow.registry.NodeDefinition;
 import redxax.oxy.remotely.flow.registry.NodeRegistry;
 import redxax.oxy.remotely.flow.sync.FlowOptionSourceMetadata;
 import restudio.resync.flow.graph.PinValue;
+import restudio.resync.flow.graph.StringTemplatePins;
 import restudio.resync.flow.identity.NodeInstanceId;
 import restudio.resync.flow.identity.NodeId;
 import restudio.resync.flow.identity.PinId;
@@ -264,6 +265,9 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
     private final List<NodeDefinition.PinDefinition> visibleOutputs = new ArrayList<>();
     private final Map<String, NodeDefinition.PinDefinition> visibleInputsById = new HashMap<>();
     private final Set<String> stringTemplateInputNames = new LinkedHashSet<>();
+    private Set<String> hiddenInputs = Set.of();
+    private boolean selectedCoreBranches;
+    private List<String> selectedCoreBranchIds = List.of();
     private final List<FlowBranch> flowBranches = new ArrayList<>();
     private final List<PinRow> inputRows = new ArrayList<>();
     private final List<PinRow> outputRows = new ArrayList<>();
@@ -1110,6 +1114,10 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
         if (resourceReferenceInput(input)) {
             widgetType = NodeDefinition.WidgetType.SEARCHABLE_LIST;
         }
+        if (isCoreWidget() && nodeValueMutationHandler != null && input.getOptionSourceRef() != null
+            && (widgetType == NodeDefinition.WidgetType.DROPDOWN || widgetType == NodeDefinition.WidgetType.SEARCHABLE_LIST)) {
+            return buildCoreSearchableSelector(input);
+        }
 
         switch (widgetType) {
             case DROPDOWN -> {
@@ -1219,14 +1227,31 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
     }
 
     protected boolean shouldShowLiteralInput(NodeDefinition.PinDefinition input) {
-        if (isStringTemplateValuePin(input)) {
+        if (input != null && hiddenInputs.contains(pinId(input)) || isStringTemplateValuePin(input)) {
             return false;
         }
         return true;
     }
 
     protected boolean shouldShowInputPin(NodeDefinition.PinDefinition input) {
-        return true;
+        return input == null || !hiddenInputs.contains(pinId(input));
+    }
+
+    public void configureHiddenInputs(Set<String> hiddenInputs) {
+        Set<String> next = hiddenInputs == null ? Set.of() : Set.copyOf(hiddenInputs);
+        if (!this.hiddenInputs.equals(next)) {
+            this.hiddenInputs = next;
+            refreshInputWidgets();
+        }
+    }
+
+    public void configureSelectedCoreBranches(List<String> branches) {
+        List<String> selected = branches == null ? List.of() : List.copyOf(branches);
+        if (!selectedCoreBranches || !selectedCoreBranchIds.equals(selected)) {
+            selectedCoreBranches = true;
+            selectedCoreBranchIds = selected;
+            refreshInputWidgets();
+        }
     }
 
     private void handleInputValueChanged(NodeDefinition.PinDefinition input) {
@@ -1509,6 +1534,9 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
         if (!accepted) {
             rejectInputValuePreview(mutation);
             return false;
+        }
+        if (updateStringTemplatePins()) {
+            createInputWidgets();
         }
         updatePinVisibility();
         if (onMutation != null) {
@@ -1855,6 +1883,9 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
         if (!accepted) {
             rejectInputValuePreview(mutation);
             return false;
+        }
+        if (updateStringTemplatePins()) {
+            createInputWidgets();
         }
         updatePinVisibility();
         if (onMutation != null) {
@@ -3305,7 +3336,7 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
         boolean callArgument = isFunctionCallNode();
         PopupWidget.Builder builder = new PopupWidget.Builder(callArgument ? "Add Argument" : "Add Parameter").setResizable(false);
         TextInputWidget nameInput = new TextInputWidget.Builder()
-            .placeholder(callArgument ? "argument_name" : "parameter_name")
+            .placeholder(callArgument ? "argumentName" : "parameterName")
             .size(200, 20)
             .build();
         List<FlowDataType> types = getSupportedFunctionTypes().stream()
@@ -5010,12 +5041,6 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
     }
 
     private boolean updateStringTemplatePins() {
-        if (coreResource != null) {
-            boolean changed = !stringTemplateInputNames.isEmpty();
-            inputs.removeIf(input -> stringTemplateInputNames.contains(pinId(input)));
-            stringTemplateInputNames.clear();
-            return changed;
-        }
         if (isFunctionStartNode() || isFunctionEndNode()) {
             return false;
         }
@@ -5040,7 +5065,9 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
         Set<String> nextSet = new LinkedHashSet<>(next);
         Set<String> removed = new LinkedHashSet<>(current);
         removed.removeAll(nextSet);
-        removeStringTemplateConnections(removed);
+        if (coreResource == null) {
+            removeStringTemplateConnections(removed);
+        }
 
         inputs.removeIf(input -> stringTemplateInputNames.contains(pinId(input)));
         for (String name : next) {
@@ -5048,7 +5075,7 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
         }
         stringTemplateInputNames.clear();
         stringTemplateInputNames.addAll(next);
-        if (node.getInputValues() != null) {
+        if (coreResource == null && node.getInputValues() != null) {
             for (String name : removed) {
                 node.getInputValues().remove(name);
             }
@@ -5070,14 +5097,15 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
 
     private Set<String> nodeStringTemplateNames() {
         Set<String> names = new LinkedHashSet<>();
-        if (definition == null || definition.getInputs() == null || node.getInputValues() == null) {
+        if (definition == null || definition.getInputs() == null) {
             return names;
         }
+        Map<String, Object> values = presentationInputValues();
         for (NodeDefinition.PinDefinition input : definition.getInputs()) {
             if (!isStringTemplateSourceInput(input)) {
                 continue;
             }
-            Object value = node.getInputValues().get(pinId(input));
+            Object value = values.get(pinId(input));
             if (value instanceof String text) {
                 names.addAll(stringTemplateNames(text));
             }
@@ -5095,48 +5123,7 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
     }
 
     private Set<String> stringTemplateNames(String template) {
-        Set<String> names = new LinkedHashSet<>();
-        if (template == null || template.isEmpty()) {
-            return names;
-        }
-        int index = 0;
-        while (index < template.length()) {
-            char current = template.charAt(index);
-            if (current == '{') {
-                if (index + 1 < template.length() && template.charAt(index + 1) == '{') {
-                    index += 2;
-                    continue;
-                }
-                int end = template.indexOf('}', index + 1);
-                if (end > index + 1) {
-                    String name = template.substring(index + 1, end).trim();
-                    if (isStringTemplateName(name)) {
-                        names.add(name);
-                        index = end + 1;
-                        continue;
-                    }
-                }
-            }
-            index++;
-        }
-        return names;
-    }
-
-    private boolean isStringTemplateName(String name) {
-        if (name == null || name.isBlank()) {
-            return false;
-        }
-        char first = name.charAt(0);
-        if (!Character.isLetter(first) && first != '_') {
-            return false;
-        }
-        for (int i = 1; i < name.length(); i++) {
-            char c = name.charAt(i);
-            if (!Character.isLetterOrDigit(c) && c != '_') {
-                return false;
-            }
-        }
-        return true;
+        return new LinkedHashSet<>(StringTemplatePins.names(template));
     }
 
     public boolean isFunctionStartOrEnd() {
@@ -5286,8 +5273,18 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
             }
         }
 
-        if (definitionReadOnly || nodeValueMutationHandler != null) {
-            visibleOutputs.addAll(flowOutputs);
+        if (definitionReadOnly || nodeValueMutationHandler != null || selectedCoreBranches) {
+            if (selectedCoreBranches) {
+                for (String branch : resolveFlowBranches(flowOutputs)) {
+                    NodeDefinition.PinDefinition output = findOutputDefinition(branch);
+                    if (output != null && flowOutputs.contains(output)) {
+                        visibleOutputs.add(output);
+                        flowBranches.add(new FlowBranch(branch, null));
+                    }
+                }
+            } else {
+                visibleOutputs.addAll(flowOutputs);
+            }
             visibleOutputs.addAll(otherOutputs);
             visibleOutputs.sort((left, right) -> Boolean.compare(!isFlowOutput(left), !isFlowOutput(right)));
             appendPassthroughOutputs();
@@ -5384,6 +5381,22 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
         }
 
         List<String> selected = new ArrayList<>();
+        if (selectedCoreBranches) {
+            for (String branch : selectedCoreBranchIds) {
+                if (options.contains(branch) && !selected.contains(branch)) {
+                    selected.add(branch);
+                }
+            }
+            if (graph != null && graph.getConnections() != null) {
+                for (FlowConnection connection : graph.getConnections()) {
+                    if (nodeId.equals(connection.getSourceNodeId()) && options.contains(connection.getSourcePinId())
+                        && !selected.contains(connection.getSourcePinId())) {
+                        selected.add(connection.getSourcePinId());
+                    }
+                }
+            }
+            return selected;
+        }
         boolean storedBranchesPresent = false;
         if (node.getInputValues() != null) {
             Object stored = node.getInputValues().get(FLOW_BRANCHES_KEY);
@@ -5409,7 +5422,7 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
             }
         }
 
-        if (selected.isEmpty() && !storedBranchesPresent && !options.isEmpty()) {
+        if (selected.isEmpty() && (!storedBranchesPresent || selectedCoreBranches) && !options.isEmpty()) {
             selected.add(options.getFirst());
         }
         return selected;

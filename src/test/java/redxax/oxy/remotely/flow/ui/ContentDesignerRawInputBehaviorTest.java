@@ -28,6 +28,7 @@ import java.util.concurrent.CountDownLatch;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ContentDesignerRawInputBehaviorTest {
@@ -104,7 +105,52 @@ class ContentDesignerRawInputBehaviorTest {
             designer.renderOverlayPass(new TestDrawContext(), itemX, itemY, 0.0F);
 
             assertTrue(view.mouseClicked(mouse(view, ReMouseEvent.Action.PRESSED, itemX, itemY, 0.0, 0.0)));
+            assertEquals("block", dropdown.getSelectedItem());
+            long deadline = System.nanoTime() + 2_000_000_000L;
+            while (!"block".equals(CustomContentGraphAdapter.contentType(graph)) && System.nanoTime() < deadline) {
+                view.render(new TestDrawContext(), 0, 0, 0.0F);
+                Thread.sleep(2L);
+            }
             assertEquals("block", CustomContentGraphAdapter.contentType(graph));
+        } finally {
+            designer.removed();
+        }
+    }
+
+    @Test
+    void contentPanelKeepsControlsAndScrollWhenItsStructureIsUnchanged() throws Exception {
+        Screen host = new Screen();
+        host.resize(1000, 360);
+        FlowGraph graph = CustomContentGraphAdapter.createContentGraph("panel-test", "item", "Panel Test");
+        ContentDesignerScreen designer = new ContentDesignerScreen("panel-test", graph, host);
+        ScreenBackedStudioView view = new ScreenBackedStudioView(host, designer);
+        try {
+            view.init();
+            DropDownWidget<String> before = awaitDropdown(view, designer, "__type");
+            SidePanel panel = (SidePanel) field(designer, "contentPanel");
+            panel.container().setScrollOffset(20);
+            panel.container().setTargetScrollOffset(20);
+            float scroll = panel.container().getScrollOffset();
+            Object snapshot = field(designer, "contentPanelSnapshot");
+            setProperty(designer, "name", "Updated Panel Test");
+            long deadline = System.nanoTime() + 2_000_000_000L;
+            while (!"Updated Panel Test".equals(CustomContentGraphAdapter.getContentProperty(graph, "name", ""))
+                && System.nanoTime() < deadline) {
+                view.render(new TestDrawContext(), 0, 0, 0.0F);
+                Thread.sleep(2L);
+            }
+            assertEquals("Updated Panel Test", CustomContentGraphAdapter.getContentProperty(graph, "name", ""));
+            Method refresh = ContentDesignerScreen.class.getDeclaredMethod("refreshContentPanel");
+            refresh.setAccessible(true);
+            refresh.invoke(designer);
+            deadline = System.nanoTime() + 2_000_000_000L;
+            while (field(designer, "contentPanelSnapshot") == snapshot && System.nanoTime() < deadline) {
+                view.render(new TestDrawContext(), 0, 0, 0.0F);
+                Thread.sleep(2L);
+            }
+            assertFalse(field(designer, "contentPanelSnapshot") == snapshot);
+            assertSame(before, awaitDropdown(view, designer, "__type"));
+            assertEquals(scroll, panel.container().getScrollOffset(), 0.01F);
         } finally {
             designer.removed();
         }
@@ -125,6 +171,7 @@ class ContentDesignerRawInputBehaviorTest {
             if (panel != null) {
                 panel.animation(false).show();
                 designer.updatePositions();
+                panel.update();
             }
             if (dropdown != null && dropdown.getWidth() > 0 && dropdown.getHeight() > 0 && panel != null
                 && panel.isMouseOver(dropdown.getX() + 4, dropdown.getY() + 4)) {
@@ -139,6 +186,12 @@ class ContentDesignerRawInputBehaviorTest {
         Field field = target.getClass().getDeclaredField(name);
         field.setAccessible(true);
         field.set(target, value);
+    }
+
+    private static Object field(Object target, String name) throws Exception {
+        Field field = target.getClass().getDeclaredField(name);
+        field.setAccessible(true);
+        return field.get(target);
     }
 
     private static FlowGraph graph() {

@@ -24,6 +24,7 @@ import redxax.oxy.remotely.flow.ui.studio.ReSyncResourceCreator;
 import redxax.oxy.remotely.flow.ui.studio.StudioPanel;
 import redxax.oxy.remotely.flow.ui.studio.StudioResourceRenameAware;
 import redxax.oxy.remotely.flow.ui.studio.StudioSaveProvider;
+import redxax.oxy.remotely.flow.ui.studio.ReSyncNaming;
 import redxax.oxy.remotely.flow.ui.studio.StudioScreen;
 import restudio.rescreen.game.MinecraftAssetReference;
 import restudio.rescreen.game.MinecraftGameAssets;
@@ -42,6 +43,7 @@ import restudio.rescreen.ui.desktop.DesktopWindowBehaviorProvider;
 import restudio.rescreen.ui.rescreen.Container;
 import restudio.rescreen.ui.rescreen.SidePanel;
 import restudio.rescreen.ui.widgets.AnimatedButton;
+import restudio.rescreen.ui.widgets.IconButton;
 import restudio.rescreen.ui.widgets.AnimatedWidget;
 import restudio.rescreen.ui.widgets.CompactBindingWidget;
 import restudio.rescreen.ui.widgets.DropDownWidget;
@@ -54,6 +56,7 @@ import restudio.rescreen.util.Notification;
 import restudio.resync.flow.workspace.WorkspacePatch;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -159,7 +162,8 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
     private TextInputWidget descriptionInput;
     private String inspectorEditNodeId = "root";
     private boolean syncingInspector;
-    private AnimatedButton iconButton;
+    private IconButton iconButton;
+    private String iconButtonValue;
     private DropDownWidget<String> frameDropdown;
     private ToggleWidget showToastToggle;
     private ToggleWidget announceChatToggle;
@@ -694,6 +698,26 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
 
     @Override
     public boolean mouseScrolled(ReScrollEvent event) {
+        if (activeSearchSelector != null && activeSearchSelector.visible) {
+            if (activeSearchSelector.mouseScrolled(event.retarget(activeSearchSelector, event.x(), event.y()))
+                || activeSearchSelector.isMouseOver(event.x(), event.y())) {
+                return true;
+            }
+        }
+        for (DropDownWidget<String> dropdown : panelDropdowns) {
+            if (dropdown.isExpanded() && dropdown.isMouseOver(event.x(), event.y())) {
+                dropdown.mouseScrolled(event.retarget(dropdown, event.x(), event.y()));
+                return true;
+            }
+        }
+        if (inspector != null && inspector.isVisible()) {
+            if (inspector.mouseScrolled(event.retarget(inspector, event.x(), event.y()))) {
+                return true;
+            }
+            if (inspector.isMouseOver(event.x(), event.y())) {
+                return true;
+            }
+        }
         if (super.mouseScrolled(event)) {
             return true;
         }
@@ -1141,7 +1165,12 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
             descriptionInput.setText(text(display, "description"));
         }
         if (iconButton != null) {
-            iconButton.setMessage(recipeItemButtonLabel(text(display, "icon")));
+            String value = text(display, "icon");
+            if (!Objects.equals(iconButtonValue, value)) {
+                iconButton.setMessage(recipeItemButtonLabel(value));
+                iconButton.setMinecraftItem(ItemIconPreview.project(serverId, value).toRenderItem());
+                iconButtonValue = value;
+            }
         }
         if (frameDropdown != null) {
             frameDropdown.setSelectedItem(frameValue(display));
@@ -1260,7 +1289,7 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
             case "Asset Name" -> "Remotely asset name.\nUsed by project views.\nDoes not appear in Minecraft advancements.";
             case "Background" -> "Background of the advancement screen.\nJust a cool cosmetic.";
             case "Enabled" -> "Export state for this node.\nOn: included in generated advancement data.\nOff: kept in the designer only.";
-            case "Node ID" -> "Command-facing advancement ID.\nUsed in grant and revoke commands.\nUse a short stable lowercase name.";
+            case "Node ID" -> "Minecraft advancement ID used in grant and revoke commands.\nUse lowercase letters, numbers, dots, dashes, or underscores.";
             case "Parent" -> "Parent advancement link.\nControls tree placement and when the child becomes visible in Minecraft.";
             case "Title" -> "Advancement display title.\nShown in the advancement screen, tooltip, and completion toast.";
             case "Description" -> "Advancement display description.\nShown below the title in the tooltip.\nDescribe the exact player objective.";
@@ -1904,10 +1933,8 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
 
     private String ownedFunctionId(String purpose) {
         String treeId = text(tree, "id");
-        String raw = "advancement_" + treeId + "_" + selectedNode + "_" + purpose;
-        String id = raw.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_./:-]+", "_");
-        id = id.replaceAll("_+", "_");
-        return id.isBlank() ? "advancement_function" : id;
+        String raw = ReSyncNaming.camelCase("advancement " + treeId + " " + selectedNode + " " + purpose);
+        return raw.isBlank() ? "advancementFunction" : raw;
     }
 
     private void openGraphResource(String flowId, ReSyncResourceType type) {
@@ -2178,7 +2205,7 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
     private String uniqueNodeId(String value, String currentId) {
         String base = sanitizeNodeId(value);
         if (base.isBlank()) {
-            base = "advancement";
+            base = "new_advancement";
         }
         String candidate = base;
         int suffix = 2;
@@ -2226,25 +2253,30 @@ public class AdvancementDesignerScreen extends StudioScreen implements DesktopWi
         return displayForNode(selectedNode);
     }
 
-    private AnimatedButton searchableRecipeItemButton(Supplier<String> selectedSupplier, int width, Consumer<String> onChange) {
-        AnimatedButton button = new AnimatedButton.Builder()
-            .label("")
+    private IconButton searchableRecipeItemButton(Supplier<String> selectedSupplier, int width, Consumer<String> onChange) {
+        String selected = selectedSupplier.get();
+        iconButtonValue = selected;
+        IconButton button = new IconButton.Builder()
+            .label(recipeItemButtonLabel(selected))
+            .minecraftItem(ItemIconPreview.project(serverId, selected).toRenderItem())
+            .richText(true)
             .size(width, ReSyncStudioPanelState.FIELD_HEIGHT)
             .entranceAnimation(false)
             .build();
         ReSyncStudioPanelState.disableEntrance(button);
-        button.setAction(() -> {
-            String selected = selectedSupplier.get();
-            button.setMessage(recipeItemButtonLabel(selected));
+        button.setOnClick(() -> {
+            String current = selectedSupplier.get();
+            button.setMessage(recipeItemButtonLabel(current));
             openRecipeItemSearchSelector(selectedSupplier, value -> {
                 if (isRealOption(value)) {
                     button.setMessage(recipeItemButtonLabel(value));
+                    button.setMinecraftItem(ItemIconPreview.project(serverId, value).toRenderItem());
+                    iconButtonValue = value;
                     snapshot();
                     onChange.accept(value);
                 }
             }, button.getX(), button.getY() + button.getHeight());
         });
-        button.setMessage(recipeItemButtonLabel(selectedSupplier.get()));
         return button;
     }
 

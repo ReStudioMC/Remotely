@@ -472,7 +472,7 @@ public class ScoreboardDesignerScreen extends StudioScreen implements DesktopWin
 
         objectiveInput = new TextInputWidget.Builder()
             .text(scoreboard.getObjectiveId() != null ? scoreboard.getObjectiveId() : "")
-            .placeholder("Objective ID")
+            .placeholder("newObjective")
             .forcePlaceholder(false)
             .size(rowWidth, ReSyncStudioPanelState.FIELD_HEIGHT)
             .onChange(this::updateObjective)

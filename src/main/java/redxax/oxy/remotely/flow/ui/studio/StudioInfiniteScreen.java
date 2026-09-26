@@ -86,7 +86,7 @@ public class StudioInfiniteScreen extends InfiniteScreen {
         return popup != null && popup.hasFocusedWidget() && keyboardInput(popup.getFocusedDescendant());
     }
 
-    private static boolean keyboardInput(Widget focused) {
+    static boolean keyboardInput(Widget focused) {
         return focused instanceof TextInputWidget
             || focused instanceof TextAreaWidget
             || focused instanceof CodeEditorWidget

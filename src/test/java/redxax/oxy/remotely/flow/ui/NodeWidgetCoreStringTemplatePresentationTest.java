@@ -8,6 +8,7 @@ import redxax.oxy.remotely.flow.data.FlowNode;
 import redxax.oxy.remotely.flow.registry.NodeDefinition;
 import restudio.rescreen.render.TextRenderer;
 import restudio.rescreen.theme.ThemeManager;
+import restudio.rescreen.ui.widgets.TextInputWidget;
 import restudio.resync.flow.graph.PinValue;
 import restudio.resync.flow.identity.ContractRef;
 import restudio.resync.flow.identity.NodeInstanceId;
@@ -20,21 +21,17 @@ import restudio.resync.flow.type.TypeExpr;
 import restudio.resync.flow.type.TypeReference;
 import restudio.resync.flow.type.TypedValue;
 
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class NodeWidgetCoreStringTemplatePresentationTest {
-    private static final Path NODE_WIDGET = Path.of("src/main/java/redxax/oxy/remotely/flow/ui/NodeWidget.java");
-    private static final Path GRAPH_EDITOR = Path.of("src/main/java/redxax/oxy/remotely/flow/ui/GraphEditorScreen.java");
     private static final PinId MESSAGE = PinId.of("message");
     private static final TypeExpr STRING = TypeExpr.named(TypeReference.of("builtin", "string"));
     private static final ServerResourceLocator RESOURCE = new ServerResourceLocator(
@@ -48,12 +45,12 @@ class NodeWidgetCoreStringTemplatePresentationTest {
     }
 
     @Test
-    void coreStringTemplatePresentationNeverFabricatesAnUppercasePin() {
-        NodeWidget widget = assertDoesNotThrow(() -> widget("{Player}", RESOURCE));
+    void coreStringTemplatePresentationShowsItsRealCamelCasePin() {
+        NodeWidget widget = widget("{extraPin}", RESOURCE);
 
-        assertNull(widget.getPinType("Player", true));
-        assertDoesNotThrow(widget::refreshInputWidgets);
-        assertNull(widget.getPinType("Player", true));
+        assertEquals(FlowDataType.STRING, widget.getPinType("extraPin", true));
+        widget.refreshInputWidgets();
+        assertEquals(FlowDataType.STRING, widget.getPinType("extraPin", true));
     }
 
     @Test
@@ -66,32 +63,38 @@ class NodeWidgetCoreStringTemplatePresentationTest {
     }
 
     @Test
-    void coreContextExistsBeforeDefinitionSetupAndSuppressesLegacyTemplatePins() throws IOException {
-        String nodeWidget = Files.readString(NODE_WIDGET);
-        int terminalConstructor = nodeWidget.indexOf("ServerResourceLocator coreResource, Map<PinId, PinValue> corePinValues)");
-        int resourceAssignment = nodeWidget.indexOf("this.coreResource = coreResource;", terminalConstructor);
-        int definitionSetup = nodeWidget.indexOf("this.definition =", terminalConstructor);
-        int templateUpdate = nodeWidget.indexOf("private boolean updateStringTemplatePins()");
-        int coreGuard = nodeWidget.indexOf("if (coreResource != null)", templateUpdate);
-        int templateParsing = nodeWidget.indexOf("nodeStringTemplateNames()", templateUpdate);
+    void coreStringTemplatePinAppearsDuringValuePreviewAndRollsBackOnRejection() throws Exception {
+        AtomicReference<NodeWidget.NodeValueMutation> proposed = new AtomicReference<>();
+        NodeWidget widget = widget("Player", null, mutation -> {
+            proposed.set(mutation);
+            return true;
+        });
+        widget.configureCoreOptions(RESOURCE, Map.of(MESSAGE,
+            new PinValue(MESSAGE, TypedValue.value(STRING, "Player"))));
+        Field widgets = NodeWidget.class.getDeclaredField("inputWidgets");
+        widgets.setAccessible(true);
+        TextInputWidget input = (TextInputWidget) ((Map<?, ?>) widgets.get(widget)).get(MESSAGE.canonicalText());
+        input.setText("Player {extraPin}");
+        Method changed = NodeWidget.class.getDeclaredMethod("handleInputValueChanged", NodeDefinition.PinDefinition.class);
+        changed.setAccessible(true);
+        changed.invoke(widget, templatePin());
 
-        assertTrue(terminalConstructor >= 0);
-        assertTrue(resourceAssignment > terminalConstructor);
-        assertTrue(resourceAssignment < definitionSetup);
-        assertTrue(coreGuard > templateUpdate);
-        assertTrue(coreGuard < templateParsing);
-        assertTrue(nodeWidget.substring(coreGuard, templateParsing).contains("stringTemplateInputNames.clear();"));
-
-        String graphEditor = Files.readString(GRAPH_EDITOR);
-        int createWidget = graphEditor.indexOf("protected FlowNodeWidget createNodeWidget");
-        int createWidgetEnd = graphEditor.indexOf("private ReSyncGenericWidgetCapabilities.WidgetDefinition", createWidget);
-        String construction = graphEditor.substring(createWidget, createWidgetEnd);
-        assertTrue(construction.contains("coreDocument && coreSession != null ? coreSession.resource() : null"));
-        assertTrue(construction.contains("coreNode != null ? coreNode.values() : Map.of()"));
-        assertFalse(construction.contains("widget.configureCoreOptions"));
+        assertNotNull(proposed.get());
+        assertEquals("Player {extraPin}", proposed.get().value());
+        Method presented = NodeWidget.class.getDeclaredMethod("presentationInputValues");
+        presented.setAccessible(true);
+        assertEquals("Player {extraPin}", ((Map<?, ?>) presented.invoke(widget)).get("message"));
+        assertEquals(FlowDataType.STRING, widget.getPinType("extraPin", true));
+        widget.rejectInputValuePreview(proposed.get());
+        assertNull(widget.getPinType("extraPin", true));
     }
 
     private static NodeWidget widget(String template, ServerResourceLocator resource) {
+        return widget(template, resource, null);
+    }
+
+    private static NodeWidget widget(String template, ServerResourceLocator resource,
+                                     NodeWidget.NodeValueMutationHandler handler) {
         String nodeId = NodeInstanceId.deterministic("string-template:" + template).canonicalText();
         FlowNode node = new FlowNode("test:template", 20, 40,
             new LinkedHashMap<>(Map.of(MESSAGE.canonicalText(), template)));
@@ -99,12 +102,16 @@ class NodeWidgetCoreStringTemplatePresentationTest {
         graph.setNodes(new LinkedHashMap<>(Map.of(nodeId, node)));
         NodeDefinition definition = new NodeDefinition.Builder("template", "Template", NodeDefinition.NodeCategory.TEXT)
             .owner("test")
-            .input(new NodeDefinition.PinDefinition(MESSAGE, "Message", NodeDefinition.PinType.DATA,
-                NodeDefinition.PinDirection.INPUT, FlowDataType.STRING))
+            .input(templatePin())
             .build();
         Map<PinId, PinValue> values = resource == null ? Map.of() : Map.of(MESSAGE,
             new PinValue(MESSAGE, TypedValue.value(STRING, template)));
-        return new NodeWidget(20, 40, node, graph, nodeId, null, null, null, definition, false, false, null,
+        return new NodeWidget(20, 40, node, graph, nodeId, null, null, null, definition, false, false, handler,
             resource, values);
+    }
+
+    private static NodeDefinition.PinDefinition templatePin() {
+        return new NodeDefinition.PinBuilder(MESSAGE, "Message", NodeDefinition.PinType.DATA,
+            NodeDefinition.PinDirection.INPUT, FlowDataType.STRING).widget(NodeDefinition.WidgetType.TEXT).build();
     }
 }

@@ -1,7 +1,6 @@
 package redxax.oxy.remotely.flow.ui.studio;
 
 import java.time.Duration;
-import restudio.rescreen.platform.Async;
 import redxax.oxy.remotely.util.BrowserWork;
 import redxax.oxy.remotely.util.BrowserSafeState;
 import redxax.oxy.remotely.util.TaskIdentities;
@@ -40,7 +39,7 @@ import redxax.oxy.remotely.flow.ui.WorldDesignerScreen;
 import redxax.oxy.remotely.flow.ui.marketplace.ReSyncMarketplaceScreen;
 import redxax.oxy.remotely.ui.collaboration.CollaborationAvatarResolver;
 import redxax.oxy.remotely.ui.collaboration.CollaborationOverlay;
-import redxax.oxy.remotely.ui.integrations.luckperms.LuckPermsDashboardScreen;
+import redxax.oxy.remotely.host.ApplicationHost;
 import redxax.oxy.remotely.worldgen.WorldGenManager;
 import redxax.oxy.remotely.worldgen.data.WorldGenProject;
 import redxax.oxy.remotely.worldgen.data.WorldGenSerializer;
@@ -75,6 +74,7 @@ import restudio.rescreen.ui.widgets.RowWidget;
 import restudio.rescreen.ui.widgets.SquareButtonWidget;
 import restudio.rescreen.ui.widgets.TextInputWidget;
 import restudio.resync.contract.install.ReSyncInstallationStatus;
+import restudio.resync.permissions.LuckPermsManagementContract;
 import restudio.rescreen.ui.widgets.TitledRowWidget;
 import restudio.rescreen.ui.widgets.ToggleWidget;
 import restudio.rescreen.util.Notification;
@@ -360,7 +360,9 @@ public class StudioScreen extends StudioInfiniteScreen {
     private boolean openCollaborationChat(ReKeyEvent event) {
         if (collaborationChatInput != null || event.key() != ReKey.T || event.repeat() || event.modifiers().control()
             || event.modifiers().alt() || event.modifiers().superKey() || event.modifiers().shift()
-            || !studioMode || isStudioKeyboardInputFocused()) {
+            || !studioMode || isStudioKeyboardInputFocused()
+            || ScreenManager.getInstance().getPopupOverlay().getActivePopup() != null
+            || topmostOpenStudioContextMenu() != null) {
             return false;
         }
         ReSyncStudioView view = activeStudioView();
@@ -388,6 +390,15 @@ public class StudioScreen extends StudioInfiniteScreen {
         setFocusedWidget(collaborationChatInput);
         collaborationChatInput.selectAll();
         return true;
+    }
+
+    @Override
+    protected boolean isStudioKeyboardInputFocused() {
+        if (super.isStudioKeyboardInputFocused()) {
+            return true;
+        }
+        ReSyncStudioView view = activeStudioView();
+        return view != null && view != this && view.hasKeyboardInputFocus();
     }
 
     private void sendCollaborationChat() {
@@ -1672,26 +1683,25 @@ public class StudioScreen extends StudioInfiniteScreen {
             new Notification("Permissions", "ReSync Is Not Connected", Notification.Type.ERROR);
             return;
         }
-        ReSyncFlowClient client = manager.ensureFlowClient(serverId);
-        if (client == null) {
-            showFlowAdmissionIssue(manager, "Permissions");
+        ReSyncFlowClient client = manager.existingFlowClient(serverId);
+        if (client == null || !client.isPluginChannelAvailable(LuckPermsManagementContract.CHANNEL_ID)) {
+            new Notification("Permissions", "LuckPerms Unavailable", Notification.Type.ERROR);
             return;
         }
-        LuckPermsDashboardScreen.prepare(this, client.luckPerms())
-            
-            .whenComplete((screen, error) -> ScreenManager.getInstance().execute(() -> {
-                if (error != null || screen == null) {
-                    new Notification("Permissions", "Permissions Unavailable", Notification.Type.ERROR);
-                    return;
-                }
-                if (ScreenManager.getInstance().getCurrentScreen() != this) {
-                    return;
-                }
-                if (!manager.withCurrentFlowClientNow(serverId, client,
-                    current -> ScreenManager.getInstance().setScreen(screen))) {
-                    new Notification("Permissions", "Connection Changed", Notification.Type.ERROR);
-                }
-            }));
+        ApplicationHost host = manager.getApplicationHost();
+        if (host == null) {
+            new Notification("Permissions", "Permissions Unavailable", Notification.Type.ERROR);
+            return;
+        }
+        if (!manager.withCurrentFlowClientNow(serverId, client, current -> {
+            if (current.isPluginChannelAvailable(LuckPermsManagementContract.CHANNEL_ID)) {
+                host.openPermissionManager(this, current.luckPerms());
+            } else {
+                new Notification("Permissions", "LuckPerms Unavailable", Notification.Type.ERROR);
+            }
+        })) {
+            new Notification("Permissions", "Connection Changed", Notification.Type.ERROR);
+        }
     }
 
     protected void showReSyncInstallationStatus(ReSyncInstallationStatus status) {
@@ -4170,6 +4180,9 @@ public class StudioScreen extends StudioInfiniteScreen {
     protected boolean handleStudioWorkspaceKeyPressed(ReKeyEvent event) {
         if (collaborationChatInput != null) {
             return false;
+        }
+        if (openCollaborationChat(event)) {
+            return true;
         }
         if (studioTabsManager != null && Widget.dispatchKeyPressed(studioTabsManager, event)) {
             return true;

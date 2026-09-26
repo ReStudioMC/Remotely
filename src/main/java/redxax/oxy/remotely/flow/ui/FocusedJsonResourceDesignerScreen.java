@@ -52,6 +52,7 @@ import restudio.rescreen.ui.rescreen.Container;
 import restudio.rescreen.ui.widgets.AnimatedButton;
 import restudio.rescreen.ui.widgets.AnimatedWidget;
 import restudio.rescreen.ui.widgets.DropDownWidget;
+import restudio.rescreen.ui.widgets.IconButton;
 import restudio.rescreen.ui.widgets.IconMessage;
 import restudio.rescreen.ui.widgets.ItemSelectorWidget;
 import restudio.rescreen.ui.widgets.MountableButtonWidget;
@@ -90,6 +91,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.UUID;
 import java.util.function.Consumer;
 
 import static redxax.oxy.remotely.flow.ui.GuiEditOverlayState.snapshot;
@@ -111,7 +113,8 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     private final Map<String, CodeEditorWidget> resourceCodeFieldInputs = new LinkedHashMap<>();
     private final Map<String, ToggleWidget> resourceToggleFieldInputs = new LinkedHashMap<>();
     private final Map<String, DropDownWidget<String>> resourceDropdownFieldInputs = new LinkedHashMap<>();
-    private final Map<String, AnimatedButton> resourceSelectorButtons = new LinkedHashMap<>();
+    private final Map<String, AnimatedWidget> resourceSelectorButtons = new LinkedHashMap<>();
+    private final Map<String, String> resourceItemSelections = new LinkedHashMap<>();
     private final List<CompactBindingWidget> resourceBindingWidgets = new ArrayList<>();
     private final Map<AnimatedWidget, Accent> diagnosticAccents = new LinkedHashMap<>();
     private EditorError activeEditorError;
@@ -453,6 +456,7 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
         resourceToggleFieldInputs.clear();
         resourceDropdownFieldInputs.clear();
         resourceSelectorButtons.clear();
+        resourceItemSelections.clear();
         resourceBindingWidgets.clear();
         studioResourcePanelWidgets.clear();
         studioResourcePanelKey = "";
@@ -547,8 +551,10 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
         if (resourceType != null) {
             sanitizeLegacyResourceFields();
             String resourceId = resourceType.extractId(resource);
-            DesignerSaveNotifications.SaveTicket ticket = DesignerSaveNotifications.startExact(serverId, resourceType,
-                resourceId, resourceDisplayName());
+            DesignerSaveNotifications.SaveTicket ticket = resourceType == ReSyncResourceType.LOOT_TABLE
+                ? DesignerSaveNotifications.startResumableExact(serverId, resourceType, resourceId,
+                    resourceDisplayName(), UUID.randomUUID(), UUID.randomUUID())
+                : DesignerSaveNotifications.startExact(serverId, resourceType, resourceId, resourceDisplayName());
             observeSave(ticket);
             if (manager == null || serverId == null) {
                 DesignerSaveNotifications.failExact(ticket, "ReSync Offline");
@@ -639,6 +645,7 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
         resourceToggleFieldInputs.clear();
         resourceDropdownFieldInputs.clear();
         resourceSelectorButtons.clear();
+        resourceItemSelections.clear();
         resourceBindingWidgets.clear();
         studioResourcePanelWidgets.clear();
         studioResourcePanelKey = ReSyncProjectMetadata.resourceKey(type, id);
@@ -820,8 +827,8 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
                 dropdown.setSelectedItem(value);
             }
         }
-        for (Map.Entry<String, AnimatedButton> entry : resourceSelectorButtons.entrySet()) {
-            AnimatedButton button = entry.getValue();
+        for (Map.Entry<String, AnimatedWidget> entry : resourceSelectorButtons.entrySet()) {
+            AnimatedWidget button = entry.getValue();
             String selected;
             String label;
             if (isRecipeItemSelectorField(entry.getKey())) {
@@ -832,8 +839,14 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
                 selected = resolveSelectedOption(normalizedSelectorOptions(options, jsonPathText(entry.getKey())), jsonPathText(entry.getKey()));
                 label = isRealOption(selected) ? selectorLabel(entry.getKey(), selected) : "Select";
             }
-            if (button != null && !Objects.equals(button.getMessage(), label)) {
+            boolean changed = button != null && !Objects.equals(button.getMessage(), label);
+            if (changed) {
                 button.setMessage(label);
+            }
+            if (button instanceof IconButton itemButton && isRecipeItemSelectorField(entry.getKey())
+                && !Objects.equals(resourceItemSelections.get(entry.getKey()), selected)) {
+                itemButton.setMinecraftItem(ItemIconPreview.project(serverId, selected).toRenderItem());
+                resourceItemSelections.put(entry.getKey(), selected);
             }
         }
     }
@@ -905,13 +918,17 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
     protected AnimatedWidget recipeItemFieldRow(String field, String label, int rowWidth) {
         ensureRecipeItemCatalogLoaded();
         String selected = jsonPathText(field);
-        AnimatedButton button = new AnimatedButton.Builder()
-            .label(recipeItemSelectorLabel(selected))
-            .size(174, 18)
+        ItemIconPreview.Projection item = ItemIconPreview.project(serverId, selected);
+        IconButton button = new IconButton.Builder()
+            .label(item.label())
+            .minecraftItem(item.toRenderItem())
+            .richText(true)
+            .size(rowWidth, ReSyncStudioPanelState.FIELD_HEIGHT)
             .entranceAnimation(false)
             .build();
         resourceSelectorButtons.put(field, button);
-        button.setAction(() -> showRecipeMaterialSelector(field, button.getX(), button.getY() + button.getHeight()));
+        resourceItemSelections.put(field, selected);
+        button.setOnClick(() -> showRecipeMaterialSelector(field, button.getX(), button.getY() + button.getHeight()));
         return studioPanelState.row(label, button, rowWidth, jsonResourceDescription(field, label));
     }
 
@@ -1759,6 +1776,7 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
 
     @Override
     public void onStudioCatalogRefreshed() {
+        resourceItemSelections.clear();
         if (!resourcePanelMounted || !resourcePanelWidgetsMounted()) {
             mountResourcePanel();
         } else {

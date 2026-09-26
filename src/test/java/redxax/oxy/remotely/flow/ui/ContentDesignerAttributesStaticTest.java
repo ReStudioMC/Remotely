@@ -25,13 +25,8 @@ class ContentDesignerAttributesStaticTest {
         assertTrue(source.contains("Loading"));
         assertTrue(source.contains("attributeSchemaSource(definition.getMaterial())"));
         assertTrue(source.contains("attributeDesignerPanel"));
-        assertTrue(source.contains("leftStudioPanel(\"attributeDesignerPanel\")"));
-        assertTrue(source.contains("setStudioContentBrowserTemporarilyHidden(true)"));
-        assertTrue(source.contains("setStudioContentBrowserTemporarilyHidden(false)"));
-        assertTrue(source.contains("private boolean attributeDesignerHidContentBrowser;"));
-        assertTrue(source.contains("attributeDesignerHidContentBrowser = true;"));
-        assertTrue(source.contains("if (attributeDesignerHidContentBrowser && contentDesignerParent instanceof StudioScreen studioScreen)"));
-        assertTrue(source.contains("attributeDesignerHidContentBrowser = false;"));
+        assertFalse(source.contains("setStudioContentBrowserTemporarilyHidden("));
+        assertFalse(source.contains("attributeDesignerHidContentBrowser"));
         assertTrue(source.contains("setFocusedWidget(null);"));
         assertTrue(source.contains("attributePanel.hideImmediately();"));
         assertTrue(source.contains("clearAttributePanelWidgets(attributePanel.container());\n            attributePanel.hideImmediately();"));
@@ -98,7 +93,7 @@ class ContentDesignerAttributesStaticTest {
         assertTrue(titledRowSource.contains("dispatchTextInput(focusedWidget, event)"));
         assertTrue(rowSource.contains("dispatchKeyPressed(focusedWidget, event)"));
         assertTrue(rowSource.contains("dispatchTextInput(focusedWidget, event)"));
-        assertTrue(source.contains("contentDesignerParent instanceof StudioScreen"));
+        assertTrue(source.contains("openItemComponentEditor(new ItemComponentEditorPanel.Model(\"Item Components\""));
         assertTrue(source.contains("Item Attributes"));
         assertTrue(source.contains("Attribute Name"));
         assertTrue(source.contains("Search"));

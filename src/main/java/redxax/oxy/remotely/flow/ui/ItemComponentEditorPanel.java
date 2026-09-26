@@ -121,7 +121,7 @@ public final class ItemComponentEditorPanel {
         panel = new StudioPanel(screen, id == null || id.isBlank() ? "itemComponentEditor" : id)
             .right().dismissible("Item Components").padding(3).hide();
         sidePanel = panel.sidePanel();
-        sidePanel.minWidth(360).width(420).maxWidthRatio(55);
+        sidePanel.minWidth(330).maxWidth(380).maxWidthRatio(45).width(340);
         sidePanel.onUserVisibilityChanged(visible -> {
             if (!visible && open && !closing) {
                 close();
@@ -204,7 +204,7 @@ public final class ItemComponentEditorPanel {
     }
 
     private void buildWidgetTree() {
-        editorWidth = Math.max(320, panel.rowWidth());
+        editorWidth = 320;
         MountableButtonWidget.Builder headerBuilder = new MountableButtonWidget.Builder(model.title())
             .description(componentSummary()).iconPath("item.png");
         if (model.saveAction()) {

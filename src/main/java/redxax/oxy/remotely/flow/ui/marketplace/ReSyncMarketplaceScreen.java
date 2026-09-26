@@ -33,7 +33,10 @@ import restudio.rebase.restudio.marketplace.MarketplaceDetailsProvider;
 import restudio.rebase.ui.widgets.editor.TextAreaWidget;
 import restudio.rebase.ui.widgets.marketplace.MarketplaceListingWidget;
 import restudio.rebase.ui.widgets.resources.ResourceWidget;
+import restudio.rescreen.platform.FadeMask;
 import restudio.rescreen.platform.IDrawContext;
+import restudio.rescreen.platform.ITextRenderer;
+import restudio.rescreen.render.TextRenderer;
 import restudio.rescreen.theme.ThemeColor;
 import restudio.rescreen.theme.ThemeManager;
 import restudio.rescreen.ui.core.Screen;
@@ -1545,7 +1548,7 @@ public class ReSyncMarketplaceScreen extends ReScreen {
             int iconY = getY() + (getHeight() - iconSize) / 2;
             int textX = iconX + iconSize + 8;
             int stateWidth = tr.getWidth(selectionLabel()) + 8;
-            int textWidth = Math.max(40, getWidth() - textX + getX() - stateWidth - 12);
+            int textWidth = Math.max(0, getWidth() - textX + getX() - stateWidth - 12);
             if (selected || dependency) {
                 accentType = ThemeManager.getAccent(selected ? "calm" : "nice");
             } else {
@@ -1557,8 +1560,19 @@ public class ReSyncMarketplaceScreen extends ReScreen {
                 ctx.fill(iconX, iconY, iconX + iconSize, iconY + iconSize, 0x80000000);
             }
             ctx.enableScissor(getX() + 1, getY() + 1, getX() + getWidth() - 1, getY() + getHeight() - 1);
-            ctx.drawText(trimToWidth(asset.name, textWidth), textX, getY() + 5, ThemeManager.getColor(ThemeColor.text), shadow);
-            ctx.drawText(asset.typeName(), textX, getY() + 17, ThemeManager.getColor(ThemeColor.textDark), shadow);
+            if (textWidth > 0) {
+                int fadeWidth = Math.min(10, textWidth);
+                String assetName = asset.name == null || asset.name.isBlank() ? "Asset" : asset.name;
+                String assetType = asset.typeName();
+                FadeMask titleMask = FadeMask.text(textX, getY() + 3, textWidth, ITextRenderer.fontHeight + 2,
+                        textX, TextRenderer.cachedWidth(assetName), fadeWidth, bgColor);
+                FadeMask typeMask = FadeMask.text(textX, getY() + 15, textWidth, ITextRenderer.fontHeight + 2,
+                        textX, TextRenderer.cachedWidth(assetType), fadeWidth, bgColor);
+                ctx.renderFaded(titleMask, () -> ctx.drawText(assetName, textX, getY() + 5,
+                        ThemeManager.getColor(ThemeColor.text), shadow));
+                ctx.renderFaded(typeMask, () -> ctx.drawText(assetType, textX, getY() + 17,
+                        ThemeManager.getColor(ThemeColor.textDark), shadow));
+            }
             String state = selectionLabel();
             int stateX = getX() + getWidth() - tr.getWidth(state) - 8;
             ctx.drawText(state, stateX, getY() + 10, hovered ? ThemeManager.getColor(ThemeColor.text) : ThemeManager.getColor(ThemeColor.textDark), shadow);
@@ -1576,17 +1590,6 @@ public class ReSyncMarketplaceScreen extends ReScreen {
             }
         }
 
-        private static String trimToWidth(String value, int width) {
-            String text = value == null || value.isBlank() ? "Asset" : value;
-            if (tr.getWidth(text) <= width) {
-                return text;
-            }
-            String result = text;
-            while (result.length() > 3 && tr.getWidth(result + "...") > width) {
-                result = result.substring(0, result.length() - 1);
-            }
-            return result + "...";
-        }
     }
 
     private static class InfoWidget extends AnimatedWidget {

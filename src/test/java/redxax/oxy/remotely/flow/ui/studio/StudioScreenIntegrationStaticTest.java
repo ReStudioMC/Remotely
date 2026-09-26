@@ -62,18 +62,6 @@ class StudioScreenIntegrationStaticTest {
     }
 
     @Test
-    void permissionsPrepareAsynchronouslyWithABoundedUiMarshaledFailure() throws IOException {
-        String source = Files.readString(SOURCE);
-        String method = section(source, "protected void openReSyncPermissions", "public boolean hasReSyncUpdateAvailable");
-
-        assertTrue(method.contains("LuckPermsDashboardScreen.prepare(this, client.luckPerms())"));
-        assertTrue(method.contains(".orTimeout(LUCKPERMS_PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS)"));
-        assertTrue(method.contains("ScreenManager.getInstance().execute(() ->"));
-        assertTrue(method.contains("new Notification(\"Permissions\", \"Permissions Unavailable\", Notification.Type.ERROR)"));
-        assertFalse(method.contains("new LuckPermsDashboardScreen"));
-    }
-
-    @Test
     void coreCommandSettingsUseCanonicalMetadataBeforeLegacyDependencies() throws IOException {
         String source = Files.readString(SOURCE);
         String build = section(source, "protected void buildCommandResourcePanel()", "protected void buildScoreboardResourcePanel");

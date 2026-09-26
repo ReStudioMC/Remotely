@@ -70,6 +70,13 @@ public class ScreenBackedStudioView implements ReSyncStudioView, ReSyncCollabora
         return screen instanceof ReScreen reScreen && !reScreen.getSidePanels().isEmpty();
     }
 
+    @Override
+    public boolean hasKeyboardInputFocus() {
+        return screen instanceof StudioInfiniteScreen studio
+            ? studio.isStudioKeyboardInputFocused()
+            : StudioInfiniteScreen.keyboardInput(screen.getFocusedDescendant());
+    }
+
     public void applyEditorError(EditorError error) {
         clearEditorError();
         if (screen instanceof ReSyncEditorDiagnosticView diagnosticView) {

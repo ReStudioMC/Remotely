@@ -191,7 +191,7 @@ public class MotdDesignerScreen extends FocusedJsonResourceDesignerScreen {
     }
 
     protected void pickMotdIcon() {
-        ScreenManager.getInstance().hostActions().pickFilesAsData(false, files -> {
+        ScreenManager.getInstance().hostActions().pickImagesAsData(false, files -> {
             if (files == null || files.isEmpty()) {
                 return;
             }
@@ -201,6 +201,10 @@ public class MotdDesignerScreen extends FocusedJsonResourceDesignerScreen {
     }
 
     protected void loadMotdIcon(String dataUrl) {
+        ScreenManager.getInstance().hostActions().resizeImageAsPng(dataUrl, 64, 64, this::applyMotdIcon);
+    }
+
+    private void applyMotdIcon(String dataUrl) {
         try {
             if (dataUrl == null || dataUrl.isBlank()) {
                 throw new IllegalArgumentException("Invalid Image");

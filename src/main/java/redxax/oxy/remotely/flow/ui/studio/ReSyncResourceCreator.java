@@ -60,6 +60,7 @@ public final class ReSyncResourceCreator {
         long startedAt = ReSyncFlowClient.TEMP_LIFECYCLE_DEBUG ? System.nanoTime() : 0L;
         PopupWidget.Builder builder = new PopupWidget.Builder(createPopupTitle(type)).setResizable(false);
         TextInputWidget idInput = new TextInputWidget.Builder()
+            .text(ReSyncResourceDragPayload.FOLDER.equals(type) ? "" : suggestedId(serverId, type, folder))
             .placeholder(createIdPlaceholder(type))
             .size(220, 22)
             .build();
@@ -256,7 +257,14 @@ public final class ReSyncResourceCreator {
             }
             return;
         }
-        if (id == null || !id.matches("^[a-zA-Z0-9_]+$")) {
+        if (ReSyncResourceDragPayload.ADVANCEMENT_TREE.equals(type)
+            && (id == null || !id.matches("^[a-z0-9._-]+$"))) {
+            traceUiCreation(serverId, type, id, "create_rejected", "minecraft_advancement_id_invalid", startedAt);
+            new Notification("Advancement ID", "Minecraft requires lowercase advancement IDs. Use a-z, 0-9, dots, dashes, or underscores.", Notification.Type.ERROR);
+            return;
+        }
+        if (id == null || !id.matches(ReSyncResourceDragPayload.ADVANCEMENT_TREE.equals(type)
+            ? "^[a-z0-9._-]+$" : "^[a-zA-Z0-9_]+$")) {
             traceUiCreation(serverId, type, id, "create_rejected", "resource_id_invalid", startedAt);
             new Notification("Error", "Invalid ID. Alphanumeric only.", Notification.Type.ERROR);
             return;
@@ -470,30 +478,44 @@ public final class ReSyncResourceCreator {
     public static String createIdPlaceholder(String type) {
         return switch (type) {
             case ReSyncResourceDragPayload.FOLDER -> "Folder Name";
-            case ReSyncResourceDragPayload.FUNCTION -> "Function ID";
-            case ReSyncResourceDragPayload.COMMAND -> "Command ID";
-            case ReSyncResourceDragPayload.CUSTOM_CONTENT -> "Content ID";
-            case ReSyncResourceDragPayload.GUI -> "GUI ID";
-            case ReSyncResourceDragPayload.SCOREBOARD -> "Scoreboard ID";
-            case ReSyncResourceDragPayload.TAB -> "Tab ID";
-            case ReSyncResourceDragPayload.CHAT -> "Chat ID";
-            case ReSyncResourceDragPayload.COMPONENT_BUILDER -> "Component Builder ID";
-            case ReSyncResourceDragPayload.MOTD_PROFILE -> "MOTD ID";
-            case ReSyncResourceDragPayload.MESSAGE_RULE -> "Message Rule ID";
-            case ReSyncResourceDragPayload.RECIPE_DEFINITION -> "Recipe ID";
-            case ReSyncResourceDragPayload.TEXT_TEMPLATE -> "Text ID";
-            case ReSyncResourceDragPayload.ADVANCEMENT_TREE -> "Advancement ID";
-            case ReSyncResourceDragPayload.DIALOG -> "Dialog ID";
-            case ReSyncResourceDragPayload.TRADE_PROFILE -> "Trade ID";
-            case ReSyncResourceDragPayload.NPC_DEFINITION -> "NPC ID";
-            case ReSyncResourceDragPayload.LOOT_TABLE -> "Loot Table ID";
-            case ReSyncResourceDragPayload.WORLDGEN -> "Project ID";
-            case ReSyncResourceDragPayload.WORLD -> "World Name";
-            case ReSyncResourceDragPayload.VARIABLE_DEFINITION -> "Variable ID";
-            case ReSyncResourceDragPayload.TIMER_DEFINITION -> "Timer ID";
-            case ReSyncResourceDragPayload.SCHEDULE_DEFINITION -> "Schedule ID";
-            default -> "Flow ID";
+            case ReSyncResourceDragPayload.FUNCTION -> "newFunction";
+            case ReSyncResourceDragPayload.COMMAND -> "newCommand";
+            case ReSyncResourceDragPayload.CUSTOM_CONTENT -> "newContent";
+            case ReSyncResourceDragPayload.GUI -> "newGui";
+            case ReSyncResourceDragPayload.SCOREBOARD -> "newScoreboard";
+            case ReSyncResourceDragPayload.TAB -> "newTab";
+            case ReSyncResourceDragPayload.CHAT -> "newChat";
+            case ReSyncResourceDragPayload.COMPONENT_BUILDER -> "newComponentBuilder";
+            case ReSyncResourceDragPayload.MOTD_PROFILE -> "newMotdProfile";
+            case ReSyncResourceDragPayload.MESSAGE_RULE -> "newMessageRule";
+            case ReSyncResourceDragPayload.RECIPE_DEFINITION -> "newRecipe";
+            case ReSyncResourceDragPayload.TEXT_TEMPLATE -> "newTextTemplate";
+            case ReSyncResourceDragPayload.ADVANCEMENT_TREE -> "new_advancement_tree";
+            case ReSyncResourceDragPayload.DIALOG -> "newDialog";
+            case ReSyncResourceDragPayload.TRADE_PROFILE -> "newTradeProfile";
+            case ReSyncResourceDragPayload.NPC_DEFINITION -> "newNpc";
+            case ReSyncResourceDragPayload.LOOT_TABLE -> "newLootTable";
+            case ReSyncResourceDragPayload.WORLDGEN -> "newWorldGen";
+            case ReSyncResourceDragPayload.WORLD -> "newWorld";
+            case ReSyncResourceDragPayload.VARIABLE_DEFINITION -> "newVariable";
+            case ReSyncResourceDragPayload.TIMER_DEFINITION -> "newTimer";
+            case ReSyncResourceDragPayload.SCHEDULE_DEFINITION -> "newSchedule";
+            default -> "newFlow";
         };
+    }
+
+    public static String suggestedId(String serverId, String type, String folder) {
+        String base = createIdPlaceholder(type);
+        if (ReSyncResourceDragPayload.FOLDER.equals(type)) {
+            return "";
+        }
+        FlowManager manager = FlowManager.getInstance();
+        String candidate = base;
+        int suffix = 2;
+        while (exists(manager, serverId, type, candidate, folder)) {
+            candidate = base + suffix++;
+        }
+        return candidate;
     }
 
     public static String resourceTypeName(String type) {

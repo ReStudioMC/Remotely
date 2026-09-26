@@ -1,5 +1,7 @@
 package redxax.oxy.remotely.flow.ui;
 
+import redxax.oxy.remotely.flow.ui.studio.ReSyncResourceCreator;
+
 import redxax.oxy.remotely.util.BrowserSafeState;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
@@ -755,7 +757,9 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
     }
 
     private TextInputWidget textInput(String field) {
-        TextInputWidget input = new TextInputWidget.Builder().placeholder(fieldLabel(field)).text(raw(field))
+        TextInputWidget input = new TextInputWidget.Builder()
+            .placeholder("id".equals(field) ? ReSyncResourceCreator.createIdPlaceholder(type) : fieldLabel(field))
+            .text(raw(field))
             .onChange(value -> updateField(field, value)).build();
         input.setWidth(CONTROL_WIDTH);
         formControls.add(input);
@@ -1349,7 +1353,7 @@ public final class AutomationDefinitionDesignerScreen extends ReScreen implement
         }
         AutomationDefinitionDraft.Target target = AutomationDefinitionDraft.SCHEDULE.equals(type)
             ? new AutomationDefinitionDraft.Target("function", "select_target") : null;
-        JsonObject seed = AutomationDefinitionDraft.create(type, "new_automation", targetFolder, target);
+        JsonObject seed = AutomationDefinitionDraft.create(type, "newAutomation", targetFolder, target);
         seed.addProperty("id", "");
         seed.addProperty("name", "");
         replaceDraft(seed);

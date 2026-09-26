@@ -29,10 +29,8 @@ import redxax.oxy.remotely.flow.data.FlowGraph;
 import redxax.oxy.remotely.flow.data.FlowNode;
 import redxax.oxy.remotely.flow.registry.NodeDefinition;
 import redxax.oxy.remotely.flow.ui.studio.ReSyncStudioPanelState;
-import redxax.oxy.remotely.flow.ui.studio.StudioDocumentLifecycleScreen;
 import redxax.oxy.remotely.flow.ui.studio.StudioPanel;
 import redxax.oxy.remotely.flow.ui.studio.StudioSelectorView;
-import redxax.oxy.remotely.flow.ui.studio.StudioScreen;
 import restudio.rebase.restudio.api.models.ServerModels.ClientServerView;
 import restudio.rebase.ui.widgets.editor.CodeEditorWidget;
 import restudio.rescreen.platform.IDrawContext;
@@ -51,6 +49,7 @@ import restudio.rescreen.ui.widgets.AnimatedButton;
 import restudio.rescreen.ui.widgets.AnimatedWidget;
 import restudio.rescreen.ui.widgets.DoubleSliderWidget;
 import restudio.rescreen.ui.widgets.DropDownWidget;
+import restudio.rescreen.ui.widgets.IconButton;
 import restudio.rescreen.ui.widgets.ItemSelectorWidget;
 import restudio.rescreen.ui.widgets.MountableButtonWidget;
 import restudio.rescreen.ui.widgets.RowWidget;
@@ -79,7 +78,6 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -91,7 +89,7 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
-public class ContentDesignerScreen extends GraphEditorScreen implements StudioDocumentLifecycleScreen, StudioSelectorView {
+public class ContentDesignerScreen extends GraphEditorScreen implements StudioSelectorView {
     private static final Gson COLLABORATION_GSON = new Gson();
     private final String flowId;
     private String contentId;
@@ -109,7 +107,6 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     private String contentCoreIssue = "Editor Loading";
     private ContentSave pendingContentSave;
     private final java.util.Queue<Runnable> contentCoreCompletions = BrowserSafeState.queue();
-    private final Screen contentDesignerParent;
     private final boolean quickEditMode;
     private final String quickEditSessionId;
     private final List<CustomAbilityBinding> quickEditOriginalAbilities;
@@ -125,22 +122,25 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     private String selectedAttributeComponent = "";
     private MountableButtonWidget summaryWidget;
     private Map<String, MountableButtonWidget> eventRows = new HashMap<>();
-    private Deque<AnimatedWidget> contentPanelWidgets = new ArrayDeque<>();
-    private final Deque<Deque<AnimatedWidget>> contentPanelRetirements = new ArrayDeque<>();
+    private Map<String, ToggleWidget> eventToggles = new HashMap<>();
+    private Map<String, MountableButtonWidget> contentSectionRows = new HashMap<>();
+    private Map<String, MountableButtonWidget> contentComponentRows = new HashMap<>();
+    private Map<String, ToggleWidget> contentComponentToggles = new HashMap<>();
+    private List<AnimatedWidget> contentPanelBuildWidgets;
     private Map<String, Consumer<Object>> contentCollaborationBindings = new LinkedHashMap<>();
+    private Map<String, Widget> contentBindingWidgets = new LinkedHashMap<>();
+    private boolean syncingContentPanel;
     private final List<AnimatedWidget> attributePanelWidgets = new ArrayList<>();
     private List<DropDownWidget<String>> panelDropdowns = new ArrayList<>();
     private Map<String, DropDownWidget<String>> contentDropdowns = new LinkedHashMap<>();
-    private Deque<Runnable> contentPanelDiffs = new ArrayDeque<>();
     private long contentPanelRequestVersion;
+    private long contentPanelGraphVersion;
+    private long contentPanelSnapshotGraphVersion = -1L;
     private volatile long contentPanelCatalogVersion;
     private long contentPanelValidationVersion;
-    private long contentPanelDiffMutationVersion;
-    private long contentPanelDiffRequestVersion;
     private String contentPanelKey = "";
     private boolean contentPanelRefreshPending;
     private boolean contentPanelPreparationPending;
-    private boolean contentPanelStructurePending;
     private List<AnimatedWidget> collectingAttributeEditorWidgets;
     private MountableButtonWidget attributeHeaderWidget;
     private AnimatedWidget selectedAttributeRowWidget;
@@ -148,7 +148,6 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     private int attributePanelStaticWidgetCount;
     private boolean collectingAttributePanelOrder;
     private boolean attributeDesignerOpen;
-    private boolean attributeDesignerHidContentBrowser;
     private boolean attributeRestoreSearchFocus;
     private String activeAttributeQuery = "";
     private Map<String, Object> activeAttributeComponents = new LinkedHashMap<>();
@@ -195,7 +194,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
 
     private record ContentPanelSnapshot(CustomContentDefinition definition, String type, String key,
                                         long generation, long mutationVersion, long requestVersion, long catalogVersion,
-                                        long validationVersion, List<String> branches, Map<String, Integer> actionCounts,
+                                        long validationVersion, long graphVersion, List<String> branches, Map<String, Integer> actionCounts,
                                         List<String> providers, List<String> materials, List<String> providerAssets,
                                         AttributeProjection attributeProjection) {
     }
@@ -467,7 +466,6 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         super(graph, serverId, parent);
         this.flowId = flowId;
         this.contentId = initialContentId(graph, flowId);
-        this.contentDesignerParent = parent;
         this.quickEditMode = quickEditMode;
         this.quickEditSessionId = quickEditSessionId != null ? quickEditSessionId : "";
         this.quickEditOriginalAbilities = quickEditOriginalAbilities != null ? new ArrayList<>(quickEditOriginalAbilities) : List.of();
@@ -625,6 +623,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         if (!sameAuthority) {
             contentCoreSession = result.session();
             setCoreGraphEditorSession(contentCoreSession);
+            contentPanelKey = "";
             contentPanelRefreshPending = true;
         }
     }
@@ -754,6 +753,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
 
     @Override
     protected void onCoreGraphProjectionPublished(FlowGraph previous, FlowGraph current) {
+        contentPanelGraphVersion++;
         contentPanelRefreshPending = true;
     }
 
@@ -830,7 +830,6 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         if ("armor".equals(type)) {
             CustomContentGraphAdapter.setContentConfiguration(graph, "armor_slot", definition != null && definition.getArmorSlot() != null ? definition.getArmorSlot() : "chest");
         }
-        CustomContentGraphAdapter.setContentProperty(graph, CustomContentGraphAdapter.FLOW_BRANCHES_KEY, List.of());
         return graph;
     }
 
@@ -995,22 +994,12 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
 
     @Override
     protected FlowNodeWidget createNodeWidget(String nodeId, FlowNode node) {
-        if (node != null && CustomContentGraphAdapter.typeFromNode(node.getType()) != null) {
-            ReSyncGenericWidgetCapabilities.WidgetDefinition definition = genericWidgetDefinition(node.getType());
-            GraphNode coreNode = contentCoreSession != null ? contentCoreSession.graphDocument().nodes().stream()
-                .filter(value -> value.instanceId().canonicalText().equals(nodeId)).findFirst().orElse(null) : null;
-            ReSyncGenericDescriptorProjection.Projection descriptor = coreNode != null && typedCatalogClient() != null ? typedCatalogClient()
-                .typedInteractionProjection().flatMap(value -> value.descriptor(coreNode.definition())).orElse(null) : null;
-            if (definition != null && ownsCoreNodeFields(coreNode, descriptor)) {
-                definition = new ReSyncGenericWidgetCapabilities.WidgetDefinition(definition.definition(), false,
-                    definition.identity(), definition.inspector());
-            }
-            FlowNodeWidget widget = new StudioRootNodeWidget((int) node.getX(), (int) node.getY(), node, graph,
-                nodeId, serverId, () -> {}, this::markWorkspaceMutation, definition);
-            widget.setEditorDiagnostics(editorDiagnosticsForNode(nodeId));
-            return widget;
+        FlowNodeWidget widget = super.createNodeWidget(nodeId, node);
+        if (node != null && nodeId.equals(contentRootNodeId(graph))) {
+            widget.configureHiddenInputs(STUDIO_ROOT_INPUTS);
+            widget.configureSelectedCoreBranches(CustomContentGraphAdapter.getEnabledTriggerBranches(graph));
         }
-        return super.createNodeWidget(nodeId, node);
+        return widget;
     }
 
     @Override
@@ -1077,9 +1066,12 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         }
         prepareContentCoreSession(false);
         super.renderHandler(context, mouseX, mouseY, delta);
-        drainContentPanelDiffs();
-        if (contentStudioPanel != null) {
+        refreshPendingContentPanel();
+        if (contentStudioPanel != null && !isItemComponentEditorOpen()) {
             renderStudioPanel(contentStudioPanel, context, mouseX, mouseY, delta);
+        } else if (contentStudioPanel != null) {
+            contentStudioPanel.layout();
+            contentPanel.update();
         }
         if (attributeDesignerPanel != null) {
             renderStudioPanel(attributeDesignerPanel, context, mouseX, mouseY, delta);
@@ -1111,14 +1103,15 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         if (isAttributeDesignerInteractive() && attributePanel.mouseClicked(event.retarget(attributePanel, event.x(), event.y()))) {
             return true;
         }
-        if (contentPanel != null && contentPanel.mouseClicked(event.retarget(contentPanel, event.x(), event.y()))) {
+        if (contentPanel != null && !isItemComponentEditorOpen()
+            && contentPanel.mouseClicked(event.retarget(contentPanel, event.x(), event.y()))) {
             return true;
         }
         return super.mouseClicked(event);
     }
 
     private boolean isDesignerPanelMouseOver(double mouseX, double mouseY) {
-        return (contentPanel != null && contentPanel.isMouseOver(mouseX, mouseY))
+        return (contentPanel != null && !isItemComponentEditorOpen() && contentPanel.isMouseOver(mouseX, mouseY))
             || (isAttributeDesignerInteractive() && attributePanel.isMouseOver(mouseX, mouseY));
     }
 
@@ -1133,7 +1126,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         if (isAttributeDesignerInteractive() && attributePanel.mouseReleased(event.retarget(attributePanel, event.x(), event.y()))) {
             return true;
         }
-        if (contentPanel != null && contentPanel.mouseReleased(event.retarget(contentPanel, event.x(), event.y()))) {
+        if (contentPanel != null && !isItemComponentEditorOpen()
+            && contentPanel.mouseReleased(event.retarget(contentPanel, event.x(), event.y()))) {
             return true;
         }
         return super.mouseReleased(event);
@@ -1151,7 +1145,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         if (isAttributeDesignerInteractive() && attributePanel.mouseDragged(event.retarget(attributePanel, event.x(), event.y(), event.deltaX(), event.deltaY()))) {
             return true;
         }
-        if (contentPanel != null && contentPanel.mouseDragged(event.retarget(contentPanel, event.x(), event.y(), event.deltaX(), event.deltaY()))) {
+        if (contentPanel != null && !isItemComponentEditorOpen()
+            && contentPanel.mouseDragged(event.retarget(contentPanel, event.x(), event.y(), event.deltaX(), event.deltaY()))) {
             return true;
         }
         return super.mouseDragged(event);
@@ -1169,7 +1164,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         if (isAttributeDesignerInteractive() && attributePanel.mouseScrolled(event.retarget(attributePanel, event.x(), event.y()))) {
             return true;
         }
-        if (contentPanel != null && contentPanel.mouseScrolled(event.retarget(contentPanel, event.x(), event.y()))) {
+        if (contentPanel != null && !isItemComponentEditorOpen()
+            && contentPanel.mouseScrolled(event.retarget(contentPanel, event.x(), event.y()))) {
             return true;
         }
         return super.mouseScrolled(event);
@@ -1186,7 +1182,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         if (isAttributeDesignerInteractive() && attributePanel.keyPressed(event.retarget(attributePanel))) {
             return true;
         }
-        if (contentPanel != null && contentPanel.keyPressed(event.retarget(contentPanel))) {
+        if (contentPanel != null && !isItemComponentEditorOpen() && contentPanel.keyPressed(event.retarget(contentPanel))) {
             return true;
         }
         return super.keyPressed(event);
@@ -1203,7 +1199,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         if (isAttributeDesignerInteractive() && attributePanel.textInput(event.retarget(attributePanel))) {
             return true;
         }
-        if (contentPanel != null && contentPanel.textInput(event.retarget(contentPanel))) {
+        if (contentPanel != null && !isItemComponentEditorOpen() && contentPanel.textInput(event.retarget(contentPanel))) {
             return true;
         }
         return super.textInput(event);
@@ -1290,10 +1286,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         contentCoreGeneration++;
         contentCoreCompletions.clear();
         contentPanelRequestVersion++;
-        contentPanelDiffs = new ArrayDeque<>();
         contentPanelRefreshPending = false;
         contentPanelPreparationPending = false;
-        contentPanelStructurePending = false;
         closeStudioSelector();
         hideAttributeDesigner();
         contentPanelSnapshot = null;
@@ -1307,29 +1301,13 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         contentCoreGeneration++;
         contentCoreCompletions.clear();
         contentPanelRequestVersion++;
-        contentPanelDiffs = new ArrayDeque<>();
         contentPanelRefreshPending = false;
         contentPanelPreparationPending = false;
-        contentPanelStructurePending = false;
         closeStudioSelector();
-        restoreAttributeDesignerContentBrowser();
         dismissStudioWorkspace();
         contentPanelSnapshot = null;
         contentAttributeProjection = null;
         super.removed();
-    }
-
-    @Override
-    public void studioDocumentSelected() {
-        if (attributeDesignerOpen && contentDesignerParent instanceof StudioScreen studioScreen) {
-            studioScreen.setStudioContentBrowserTemporarilyHidden(true);
-            attributeDesignerHidContentBrowser = true;
-        }
-    }
-
-    @Override
-    public void studioDocumentDeselected() {
-        restoreAttributeDesignerContentBrowser();
     }
 
     private void buildContentPanel() {
@@ -1338,6 +1316,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             .show();
         contentPanel = contentStudioPanel.sidePanel();
         contentStudioPanel.padding(panelState.padding());
+        contentStudioPanel.loading("Loading Content");
     }
 
     public static void handleAttributeValidationErrorsForServer(String serverId, List<Map<String, Object>> errors) {
@@ -1358,55 +1337,64 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         if (contentPanel == null) {
             return;
         }
-        if (contentCoreSession == null) {
-            contentPanelRefreshPending = true;
-            return;
-        }
         if (contentPanelPreparationPending) {
             contentPanelRefreshPending = true;
             return;
         }
-        contentPanelPreparationPending = true;
         contentPanelRefreshPending = false;
-        long requestVersion = ++contentPanelRequestVersion;
         long generation = workspaceSnapshotGeneration();
         long mutationVersion = workspaceMutationVersion();
         long catalogVersion = contentPanelCatalogVersion;
         long validationVersion = contentPanelValidationVersion;
+        long graphVersion = contentPanelGraphVersion;
+        String branch = selectedBranch;
+        if (contentCoreSession == null) {
+            ContentPanelSnapshot current = contentPanelSnapshot;
+            if (current != null && contentPanelSnapshotGraphVersion == graphVersion
+                && current.generation() == generation && current.mutationVersion() == mutationVersion
+                && current.catalogVersion() == catalogVersion && current.validationVersion() == validationVersion
+                && current.key().equals(catalogVersion + "\n" + current.type() + "\n" + current.definition().getProvider() + "\n" + branch)) {
+                return;
+            }
+        }
+        contentPanelPreparationPending = true;
+        long requestVersion = ++contentPanelRequestVersion;
+        if (contentCoreSession == null) {
+            try {
+                ContentPanelSnapshot snapshot = createContentPanelSnapshot(graph, generation, mutationVersion, requestVersion,
+                    catalogVersion, validationVersion, graphVersion, branch);
+                if (snapshot != null) {
+                    applyContentPanel(snapshot);
+                }
+            } finally {
+                contentPanelPreparationPending = false;
+            }
+            return;
+        }
         BrowserSafeState.ReferenceValue<ContentPanelSnapshot> prepared = new BrowserSafeState.ReferenceValue<>();
         boolean submitted = submitContentGraph(frozenGraph -> {
-            CustomContentDefinition definition = CustomContentGraphAdapter.toDefinition(frozenGraph);
-            String type = CustomContentGraphAdapter.contentType(frozenGraph);
-            if (definition == null || type == null) {
-                return false;
-            }
-            List<String> branches = List.copyOf(CustomContentGraphAdapter.getEnabledTriggerBranches(frozenGraph));
-            Map<String, Integer> actionCounts = new LinkedHashMap<>();
-            for (CustomContentGraphAdapter.TriggerDescriptor trigger : CustomContentGraphAdapter.triggersForType(type)) {
-                actionCounts.put(trigger.pin(), branchActionCount(frozenGraph, trigger.pin()));
-            }
-            Set<String> componentKeys = definition.getComponents() != null ? definition.getComponents().keySet() : Set.of();
-            String key = type + "\n" + definition.getProvider() + "\n"
-                + String.join("\n", branches) + "\n"
-                + String.join("\n", componentKeys) + "\n" + Objects.hashCode(definition.getComponents());
-            prepared.set(new ContentPanelSnapshot(definition, type, key, generation, mutationVersion, requestVersion,
-                catalogVersion, validationVersion, branches, Map.copyOf(actionCounts), List.copyOf(providerOptions()),
-                List.copyOf(materialOptions()), List.copyOf(providerAssetOptions(definition.getProvider(), type)),
-                createAttributeProjection(definition)));
-            return true;
+            ContentPanelSnapshot snapshot = createContentPanelSnapshot(frozenGraph, generation, mutationVersion, requestVersion,
+                catalogVersion, validationVersion, graphVersion, branch);
+            prepared.set(snapshot);
+            return snapshot != null;
         }, applied -> {
-            contentPanelPreparationPending = false;
             ContentPanelSnapshot snapshot = prepared.get();
             if (!applied || !OPEN_SCREENS.contains(this) || snapshot == null
                 || snapshot.generation() != workspaceSnapshotGeneration()
                 || snapshot.requestVersion() != contentPanelRequestVersion
                 || snapshot.catalogVersion() != contentPanelCatalogVersion
                 || snapshot.validationVersion() != contentPanelValidationVersion
+                || snapshot.graphVersion() != contentPanelGraphVersion
                 || snapshot.mutationVersion() != workspaceMutationVersion()) {
+                contentPanelPreparationPending = false;
                 contentPanelRefreshPending = true;
                 return;
             }
-            applyContentPanel(snapshot);
+            try {
+                applyContentPanel(snapshot);
+            } finally {
+                contentPanelPreparationPending = false;
+            }
         }, false);
         if (!submitted) {
             contentPanelPreparationPending = false;
@@ -1414,89 +1402,91 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         }
     }
 
+    private ContentPanelSnapshot createContentPanelSnapshot(FlowGraph source, long generation, long mutationVersion,
+                                                            long requestVersion, long catalogVersion, long validationVersion,
+                                                            long graphVersion, String branch) {
+        CustomContentDefinition definition = CustomContentGraphAdapter.toDefinition(source);
+        String type = CustomContentGraphAdapter.contentType(source);
+        if (definition == null || type == null) {
+            return null;
+        }
+        List<String> branches = List.copyOf(CustomContentGraphAdapter.getEnabledTriggerBranches(source));
+        Map<String, Integer> actionCounts = new LinkedHashMap<>();
+        for (CustomContentGraphAdapter.TriggerDescriptor trigger : CustomContentGraphAdapter.triggersForType(type)) {
+            actionCounts.put(trigger.pin(), branchActionCount(source, trigger.pin()));
+        }
+        String key = catalogVersion + "\n" + type + "\n" + definition.getProvider() + "\n" + branch;
+        return new ContentPanelSnapshot(definition, type, key, generation, mutationVersion, requestVersion,
+            catalogVersion, validationVersion, graphVersion, branches, Map.copyOf(actionCounts), List.copyOf(providerOptions()),
+            List.copyOf(materialOptions()), List.copyOf(providerAssetOptions(definition.getProvider(), type)),
+            createAttributeProjection(definition));
+    }
+
     private void applyContentPanel(ContentPanelSnapshot snapshot) {
         contentAttributeProjection = snapshot.attributeProjection();
         contentPanelSnapshot = snapshot;
-        if (contentAttributeProjection != null) {
-            requestCatalog(contentAttributeProjection.schemaSource());
-        }
+        contentPanelSnapshotGraphVersion = snapshot.graphVersion();
         if (attributeDesignerOpen) {
             refreshAttributeDesignerContent(true);
         }
         CustomContentDefinition definition = snapshot.definition();
         String type = snapshot.type();
-        if (snapshot.key().equals(contentPanelKey) && !contentPanelStructurePending) {
-            contentPanelDiffs = new ArrayDeque<>();
-            queueContentPanelValues(snapshot);
+        if (snapshot.key().equals(contentPanelKey)) {
+            syncContentPanelValues(snapshot);
+            requestContentPanelCatalog();
             return;
         }
         Container container = contentPanel.container();
-        Deque<AnimatedWidget> retired = contentPanelWidgets;
-        contentPanelWidgets = new ArrayDeque<>();
-        if (!retired.isEmpty()) {
-            contentPanelRetirements.addLast(retired);
-        }
         contentCollaborationBindings = new LinkedHashMap<>();
+        contentBindingWidgets = new LinkedHashMap<>();
         eventRows = new HashMap<>();
+        eventToggles = new HashMap<>();
+        contentSectionRows = new HashMap<>();
+        contentComponentRows = new HashMap<>();
+        contentComponentToggles = new HashMap<>();
         panelDropdowns = new ArrayList<>();
         contentDropdowns = new LinkedHashMap<>();
-        contentPanelDiffs = new ArrayDeque<>();
-        contentPanelKey = snapshot.key();
-        contentPanelStructurePending = true;
-        contentPanelDiffMutationVersion = snapshot.mutationVersion();
-        contentPanelDiffRequestVersion = snapshot.requestVersion();
+        contentPanelBuildWidgets = new ArrayList<>();
         int rowWidth = contentRowWidth();
-        container.beginBatchAdd();
-        queueContentPanelRetirement(container);
-        queueContentPanelWidget(container, () -> {
-            summaryWidget = new MountableButtonWidget.Builder(definition.getDisplayName())
-                .description(contentSummary(definition)).iconPath(iconForType(type))
-                .onClick(() -> selectedBranch = firstBranch()).build();
-            summaryWidget.setSize(rowWidth, 30);
-            return summaryWidget;
-        });
-        queueContentPanelWidget(container, () -> textRow("Name", definition.getDisplayName(), rowWidth, value -> {
-            setProperty("name", value);
-            updateSummary();
-        }));
-        queueContentPanelWidget(container, () -> dropdownRow("Type", List.of("item", "armor", "block", "projectile"), type, rowWidth,
-            this::setContentType));
-        queueTypeRows(container, snapshot, rowWidth);
-        queueAssetRows(container, snapshot, rowWidth);
-        queueTextRows(container, definition, rowWidth);
-        queueComponentRows(container, definition, rowWidth);
-        queueRuleRows(container, type, rowWidth);
-        queueEventRows(container, snapshot, rowWidth);
-        contentPanelDiffs.addLast(() -> {
-            container.endBatchAdd();
-            contentPanelStructurePending = false;
-        });
+        try {
+            queueContentPanelWidget(container, () -> {
+                summaryWidget = new MountableButtonWidget.Builder(definition.getDisplayName())
+                    .description(contentSummary(definition)).iconPath(iconForType(type))
+                    .onClick(() -> {
+                        selectedBranch = firstBranch();
+                        refreshContentPanel();
+                    }).build();
+                summaryWidget.setSize(rowWidth, 30);
+                return summaryWidget;
+            });
+            queueContentPanelWidget(container, () -> textRow("Name", definition.getDisplayName(), rowWidth, value -> {
+                setProperty("name", value);
+                updateSummary();
+            }));
+            queueContentPanelWidget(container, () -> dropdownRow("Type", List.of("item", "armor", "block", "projectile"), type, rowWidth,
+                this::setContentType));
+            queueTypeRows(container, snapshot, rowWidth);
+            queueAssetRows(container, snapshot, rowWidth);
+            queueTextRows(container, definition, rowWidth);
+            queueComponentRows(container, definition, rowWidth);
+            queueRuleRows(container, type, rowWidth);
+            queueEventRows(container, snapshot, rowWidth);
+            container.replaceWidgets(contentPanelBuildWidgets, true);
+        } finally {
+            contentPanelBuildWidgets = null;
+        }
+        contentPanelKey = snapshot.key();
+        requestContentPanelCatalog();
     }
 
-    private void queueContentPanelRetirement(Container container) {
-        if (contentPanelRetirements.isEmpty()) {
-            return;
+    private void requestContentPanelCatalog() {
+        if (contentAttributeProjection != null) {
+            requestCatalog(contentAttributeProjection.schemaSource());
         }
-        contentPanelDiffs.addLast(new Runnable() {
-            @Override
-            public void run() {
-                Deque<AnimatedWidget> retired = contentPanelRetirements.peekLast();
-                AnimatedWidget widget = retired != null ? retired.peekLast() : null;
-                if (widget != null && container.removeLastWidget(widget)) {
-                    retired.pollLast();
-                }
-                if (retired != null && retired.isEmpty()) {
-                    contentPanelRetirements.pollLast();
-                }
-                if (!contentPanelRetirements.isEmpty()) {
-                    contentPanelDiffs.addFirst(this);
-                }
-            }
-        });
     }
 
     private void queueContentPanelWidget(Container container, Supplier<AnimatedWidget> supplier) {
-        contentPanelDiffs.addLast(() -> insertContentPanelWidget(container, supplier.get()));
+        insertContentPanelWidget(container, supplier.get());
     }
 
     private void queueTypeRows(Container container, ContentPanelSnapshot snapshot, int rowWidth) {
@@ -1606,82 +1596,105 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         if (triggers.isEmpty()) {
             return;
         }
-        contentPanelDiffs.addLast(new Runnable() {
-            private int index;
-
-            @Override
-            public void run() {
-                insertContentPanelWidget(container, eventRow(triggers.get(index++), rowWidth, snapshot));
-                if (index < triggers.size()) {
-                    contentPanelDiffs.addFirst(this);
-                }
-            }
-        });
+        for (CustomContentGraphAdapter.TriggerDescriptor trigger : triggers) {
+            insertContentPanelWidget(container, eventRow(trigger, rowWidth, snapshot));
+        }
     }
 
-    private void drainContentPanelDiffs() {
-        if (contentPanelRefreshPending && contentCoreSession != null
-            && !contentPanelPreparationPending && contentPanelDiffs.isEmpty()) {
+    private void refreshPendingContentPanel() {
+        if (contentPanelRefreshPending && !contentPanelPreparationPending) {
             contentPanelRefreshPending = false;
             refreshContentPanel();
-            return;
-        }
-        if (contentPanelDiffs.isEmpty()) {
-            return;
-        }
-        if (contentPanelDiffRequestVersion != contentPanelRequestVersion
-            || contentPanelDiffMutationVersion != workspaceMutationVersion()) {
-            contentPanelDiffs = new ArrayDeque<>();
-            contentPanelKey = "";
-            contentPanelStructurePending = false;
-            contentPanelRefreshPending = true;
-            return;
-        }
-        long deadline = System.nanoTime() + 1_500_000L;
-        int applied = 0;
-        while (applied < 2 && System.nanoTime() < deadline) {
-            Runnable diff = contentPanelDiffs.pollFirst();
-            if (diff == null) {
-                break;
-            }
-            diff.run();
-            applied++;
         }
     }
 
-    private void queueContentPanelValues(ContentPanelSnapshot snapshot) {
-        contentPanelDiffMutationVersion = snapshot.mutationVersion();
-        contentPanelDiffRequestVersion = snapshot.requestVersion();
+    private void syncContentPanelValues(ContentPanelSnapshot snapshot) {
         CustomContentDefinition definition = snapshot.definition();
         if (summaryWidget != null) {
-            contentPanelDiffs.addLast(() -> {
-                summaryWidget.setName(definition.getDisplayName());
-                summaryWidget.setDescription(contentSummary(definition));
-            });
+            summaryWidget.setName(definition.getDisplayName());
+            summaryWidget.setDescription(contentSummary(definition));
         }
         DropDownWidget<String> provider = contentDropdowns.get("provider");
-        if (provider != null) {
-            contentPanelDiffs.addLast(() -> {
-                List<String> options = normalizedOptions(snapshot.providers(), definition.getProvider());
-                provider.setItems(options, resolveSelectedOption(options, definition.getProvider()));
-            });
-        }
-        Iterator<Map.Entry<String, MountableButtonWidget>> rows = eventRows.entrySet().iterator();
-        if (rows.hasNext()) {
-            contentPanelDiffs.addLast(new Runnable() {
-                @Override
-                public void run() {
-                    Map.Entry<String, MountableButtonWidget> entry = rows.next();
-                    boolean enabled = snapshot.branches().contains(entry.getKey());
-                    MountableButtonWidget row = entry.getValue();
-                    int count = snapshot.actionCounts().getOrDefault(entry.getKey(), 0);
-                    row.setDescription((enabled ? "Enabled" : "Off") + " | " + (count == 1 ? "1 Action" : count + " Actions"));
-                    row.setSelected(entry.getKey().equals(selectedBranch));
-                    if (rows.hasNext()) {
-                        contentPanelDiffs.addFirst(this);
-                    }
+        if (provider != null && provider != getFocusedDescendant()) {
+            List<String> options = normalizedOptions(snapshot.providers(), definition.getProvider());
+            String selected = resolveSelectedOption(options, definition.getProvider());
+            if (!provider.getItems().equals(options) || !Objects.equals(provider.getSelectedItem(), selected)) {
+                syncingContentPanel = true;
+                try {
+                    provider.setItems(options, selected);
+                } finally {
+                    syncingContentPanel = false;
                 }
-            });
+            }
+        }
+        Widget focused = getFocusedDescendant();
+        for (Map.Entry<String, Consumer<Object>> entry : contentCollaborationBindings.entrySet()) {
+            if (contentBindingWidgets.get(entry.getKey()) != focused) {
+                entry.getValue().accept(contentCollaborationValue(entry.getKey()));
+            }
+        }
+        updateContentSectionRows(definition, snapshot);
+        Map<String, Object> components = definition.getComponents() != null ? definition.getComponents() : Map.of();
+        Map<String, Object> visibleComponents = visibleAttributeComponents(definition);
+        syncComponentRow("Consumable", consumableSummary(components),
+            components.containsKey("minecraft:consumable") || components.containsKey("minecraft:food"));
+        syncComponentRow("Glint", glintSummary(components),
+            Boolean.TRUE.equals(components.get("minecraft:enchantment_glint_override")));
+        MountableButtonWidget componentsRow = contentComponentRows.get("Components");
+        if (componentsRow != null) {
+            componentsRow.setDescription(componentCountSummary(visibleComponents));
+        }
+        for (Map.Entry<String, MountableButtonWidget> entry : eventRows.entrySet()) {
+            boolean enabled = snapshot.branches().contains(entry.getKey());
+            MountableButtonWidget row = entry.getValue();
+            int count = snapshot.actionCounts().getOrDefault(entry.getKey(), 0);
+            row.setDescription((enabled ? "Enabled" : "Off") + " | " + (count == 1 ? "1 Action" : count + " Actions"));
+            row.setSelected(entry.getKey().equals(selectedBranch));
+            ToggleWidget toggle = eventToggles.get(entry.getKey());
+            if (toggle != null) {
+                syncingContentPanel = true;
+                try {
+                    toggle.setValue(enabled);
+                } finally {
+                    syncingContentPanel = false;
+                }
+            }
+        }
+    }
+
+    private void updateContentSectionRows(CustomContentDefinition definition, ContentPanelSnapshot snapshot) {
+        MountableButtonWidget display = contentSectionRows.get("Display Text");
+        if (display != null) {
+            display.setDescription(textSummary(definition));
+        }
+        MountableButtonWidget behavior = contentSectionRows.get("Item Behavior");
+        if (behavior != null) {
+            behavior.setDescription(componentCountSummary(visibleAttributeComponents(definition)));
+        }
+        MountableButtonWidget rules = contentSectionRows.get("Trigger Rules");
+        if (rules != null) {
+            rules.setDescription(ruleSummary());
+        }
+        MountableButtonWidget events = contentSectionRows.get("Events");
+        if (events != null) {
+            events.setDescription(snapshot.branches().size() + " Enabled");
+        }
+    }
+
+    private void syncComponentRow(String title, String description, boolean enabled) {
+        MountableButtonWidget row = contentComponentRows.get(title);
+        if (row != null) {
+            row.setDescription(description);
+            row.setSelected(enabled);
+        }
+        ToggleWidget toggle = contentComponentToggles.get(title);
+        if (toggle != null) {
+            syncingContentPanel = true;
+            try {
+                toggle.setValue(enabled);
+            } finally {
+                syncingContentPanel = false;
+            }
         }
     }
 
@@ -1713,6 +1726,17 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             return;
         }
         start.setType(CustomContentGraphAdapter.nodeType(value));
+        List<String> branches = new ArrayList<>(CustomContentGraphAdapter.getEnabledTriggerBranches(graph));
+        branches.removeIf(branch -> CustomContentGraphAdapter.triggerForPin(value, branch) == null);
+        if (branches.isEmpty()) {
+            branches.add(CustomContentGraphAdapter.defaultBranch(value));
+        }
+        CustomContentGraphAdapter.setEnabledTriggerBranches(graph, branches);
+        String startId = findNodeId(start);
+        if (startId != null && graph.getConnections() != null) {
+            graph.getConnections().removeIf(connection -> startId.equals(connection.getSourceNodeId())
+                && CustomContentGraphAdapter.triggerForPin(value, connection.getSourcePin()) == null);
+        }
         updateAttributeProjectionProperty("__type", value);
         if ("armor".equals(value)) {
             CustomContentGraphAdapter.setContentConfiguration(graph, "armor_slot", "chest");
@@ -1739,8 +1763,23 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
 
     private void insertContentPanelWidget(Container container, AnimatedWidget widget) {
         ReSyncStudioPanelState.disableEntrance(widget);
-        container.addWidget(widget);
-        contentPanelWidgets.addLast(widget);
+        if (contentPanelBuildWidgets != null) {
+            contentPanelBuildWidgets.add(widget);
+        } else {
+            container.addWidget(widget);
+        }
+    }
+
+    private void registerContentBinding(String key, Widget widget, Consumer<Object> binding) {
+        contentCollaborationBindings.put(key, value -> {
+            syncingContentPanel = true;
+            try {
+                binding.accept(value);
+            } finally {
+                syncingContentPanel = false;
+            }
+        });
+        contentBindingWidgets.put(key, widget);
     }
 
     private void clearAttributePanelWidgets(Container container) {
@@ -1844,9 +1883,13 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             .placeholder("Worlds")
             .forcePlaceholder(false)
             .size(174, 18)
-            .onChange(value -> setProperty("allowed_worlds", value))
+            .onChange(value -> {
+                if (!syncingContentPanel) {
+                    setProperty("allowed_worlds", value);
+                }
+            })
             .build();
-        contentCollaborationBindings.put("allowed_worlds", next -> worlds.setText(next == null ? "" : String.valueOf(next)));
+        registerContentBinding("allowed_worlds", worlds, next -> worlds.setText(next == null ? "" : String.valueOf(next)));
         ReSyncStudioPanelState.disableEntrance(worlds);
         TitledRowWidget worldsRow = new TitledRowWidget.Builder().title("Worlds").description(contentPanelDescription("Worlds")).size(rowWidth, 36).gap(4).addWidget(searchableInputRow(worlds, worldOptions(), true, "server:minecraft:world")).build();
         ReSyncStudioPanelState.identify(worldsRow, "content-field:allowed_worlds");
@@ -1855,11 +1898,19 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
 
     private RowWidget eventFlagsRow(int rowWidth) {
         ToggleWidget cancel = new ToggleWidget.Builder().label("Cancel").toggled(boolProperty("cancel_event")).size(90, 18).entranceAnimation(false)
-            .onChange(value -> setProperty("cancel_event", value)).build();
+            .onChange(value -> {
+                if (!syncingContentPanel) {
+                    setProperty("cancel_event", value);
+                }
+            }).build();
         ToggleWidget consume = new ToggleWidget.Builder().label("Consume").toggled(boolProperty("consume_event")).size(90, 18).entranceAnimation(false)
-            .onChange(value -> setProperty("consume_event", value)).build();
-        contentCollaborationBindings.put("cancel_event", next -> cancel.setValue(next instanceof Boolean value ? value : Boolean.parseBoolean(String.valueOf(next))));
-        contentCollaborationBindings.put("consume_event", next -> consume.setValue(next instanceof Boolean value ? value : Boolean.parseBoolean(String.valueOf(next))));
+            .onChange(value -> {
+                if (!syncingContentPanel) {
+                    setProperty("consume_event", value);
+                }
+            }).build();
+        registerContentBinding("cancel_event", cancel, next -> cancel.setValue(next instanceof Boolean value ? value : Boolean.parseBoolean(String.valueOf(next))));
+        registerContentBinding("consume_event", consume, next -> consume.setValue(next instanceof Boolean value ? value : Boolean.parseBoolean(String.valueOf(next))));
         RowWidget toggles = new RowWidget.Builder()
             .size(rowWidth, 18)
             .padding(4)
@@ -1889,8 +1940,12 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         lore.setShowSearchMatchHighlight(false);
         lore.setWordWrap(true);
         lore.setText(String.join("\n", definition.getLore() != null ? definition.getLore() : List.of()));
-        lore.onChange = text -> setProperty("lore", text);
-        contentCollaborationBindings.put("lore", next -> lore.setText(next == null ? "" : String.valueOf(next)));
+        lore.onChange = text -> {
+            if (!syncingContentPanel) {
+                setProperty("lore", text);
+            }
+        };
+        registerContentBinding("lore", lore, next -> lore.setText(next == null ? "" : String.valueOf(next)));
         TitledRowWidget loreRow = new TitledRowWidget.Builder()
             .title("Lore")
             .description(contentPanelDescription("Lore"))
@@ -1908,6 +1963,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             .build();
         row.setSize(width, 24);
         row.setAccent(ThemeManager.getAccent("calm"));
+        contentSectionRows.put(title, row);
         return row;
     }
 
@@ -2030,6 +2086,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             .addButton(new SquareButtonWidget.Builder().imagePath("edit.png").hint("Edit Components").entranceAnimation(false).onClick(this::openAttributeDesigner).build())
             .build();
         componentsRow.setSize(rowWidth, 30);
+        contentComponentRows.put("Components", componentsRow);
         return componentsRow;
     }
 
@@ -2037,7 +2094,11 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         ToggleWidget toggle = new ToggleWidget.Builder()
             .toggled(enabled)
             .size(32, 18)
-            .onChange(onChange)
+            .onChange(edited -> {
+                if (!syncingContentPanel) {
+                    onChange.accept(edited);
+                }
+            })
             .entranceAnimation(false)
             .build();
         MountableButtonWidget row = new MountableButtonWidget.Builder(title)
@@ -2047,6 +2108,8 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             .build();
         row.setSize(rowWidth, 30);
         row.setSelected(enabled);
+        contentComponentRows.put(title, row);
+        contentComponentToggles.put(title, toggle);
         return row;
     }
 
@@ -2555,11 +2618,15 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             .placeholder(label)
             .forcePlaceholder(false)
             .size(174, 18)
-            .onChange(onChange)
+            .onChange(edited -> {
+                if (!syncingContentPanel) {
+                    onChange.accept(edited);
+                }
+            })
             .build();
         String collaborationKey = contentCollaborationKey(label);
         if (collaborationKey != null) {
-            contentCollaborationBindings.put(collaborationKey, next -> input.setText(next == null ? "" : String.valueOf(next)));
+            registerContentBinding(collaborationKey, input, next -> input.setText(next == null ? "" : String.valueOf(next)));
         }
         ReSyncStudioPanelState.disableEntrance(input);
         TitledRowWidget row = new TitledRowWidget.Builder().title(label).description(contentPanelDescription(label)).size(width, 36).gap(4).addWidget(input).build();
@@ -2573,7 +2640,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         DropDownWidget<String> dropdown = new DropDownWidget.Builder<>(options)
             .selectedItem(resolveSelectedOption(options, selected))
             .onSelectionChanged(value -> {
-                if (isRealOption(value)) {
+                if (!syncingContentPanel && isRealOption(value)) {
                     onChange.accept(value);
                 }
             })
@@ -2583,7 +2650,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             .build();
         String collaborationKey = contentCollaborationKey(label);
         if (collaborationKey != null) {
-            contentCollaborationBindings.put(collaborationKey, next -> dropdown.setSelectedItem(contentCollaborationDropdownValue(collaborationKey, next)));
+            registerContentBinding(collaborationKey, dropdown, next -> dropdown.setSelectedItem(contentCollaborationDropdownValue(collaborationKey, next)));
             contentDropdowns.put(collaborationKey, dropdown);
         }
         panelDropdowns.add(dropdown);
@@ -2594,6 +2661,9 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
     }
 
     private TitledRowWidget searchableRow(String label, List<String> choices, String selected, int width, Consumer<String> onChange) {
+        if ("Material".equals(label)) {
+            return materialRow(selected, width, onChange);
+        }
         List<String> options = normalizedOptions(choices, selected);
         String initialLabel = resolveSelectedOption(options, selected);
         AnimatedButton button = new AnimatedButton.Builder()
@@ -2603,16 +2673,13 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             .build();
         String collaborationKey = contentCollaborationKey(label);
         if (collaborationKey != null) {
-            contentCollaborationBindings.put(collaborationKey, next -> button.setMessage(next == null || String.valueOf(next).isBlank() ? "Select" : String.valueOf(next)));
+            registerContentBinding(collaborationKey, button, next -> button.setMessage(next == null || String.valueOf(next).isBlank() ? "Select" : String.valueOf(next)));
         }
         button.setAction(() -> {
             String provider = textProperty("provider");
             List<String> currentOptions;
             String currentSelected;
-            if ("Material".equals(label)) {
-                currentOptions = normalizedOptions(materialOptions(), textProperty("material"));
-                currentSelected = textProperty("material");
-            } else if ("External ID".equals(label)) {
+            if ("External ID".equals(label)) {
                 currentOptions = normalizedOptions(providerAssetOptions(provider), textProperty("external_id"));
                 currentSelected = textProperty("external_id");
             } else {
@@ -2625,10 +2692,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
                     onChange.accept(value);
                 }
             };
-            if ("Material".equals(label)) {
-                showCatalogSearchSelector(currentOptions, currentSelected, selection, button.getX(), button.getY() + button.getHeight(),
-                    "server:minecraft:material", Map.of());
-            } else if ("External ID".equals(label)) {
+            if ("External ID".equals(label)) {
                 showCatalogSearchSelector(currentOptions, currentSelected, selection, button.getX(), button.getY() + button.getHeight(),
                     "server:custom_content:asset", customContentCatalogContext(provider));
             } else {
@@ -2639,6 +2703,36 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         ReSyncStudioPanelState.identify(row, "content-field:" + collaborationKey(label));
         ReSyncStudioPanelState.disableEntrance(row);
         return row;
+    }
+
+    private TitledRowWidget materialRow(String selected, int width, Consumer<String> onChange) {
+        ItemIconPreview.Projection initial = ItemIconPreview.project(serverId, selected);
+        IconButton button = new IconButton.Builder()
+            .label(selected == null || selected.isBlank() ? "Select Material" : initial.label())
+            .minecraftItem(selected == null || selected.isBlank() ? null : initial.toRenderItem())
+            .richText(true)
+            .size(Math.max(18, width - 8), 18)
+            .entranceAnimation(false)
+            .build();
+        registerContentBinding("material", button, next -> updateMaterialButton(button, next == null ? "" : String.valueOf(next)));
+        button.setOnClick(() -> showCatalogSearchSelector(normalizedOptions(materialOptions(), textProperty("material")),
+            textProperty("material"), value -> {
+                if (isRealOption(value)) {
+                    updateMaterialButton(button, value);
+                    onChange.accept(value);
+                }
+            }, button.getX(), button.getY() + button.getHeight(), "server:minecraft:material", Map.of()));
+        TitledRowWidget row = new TitledRowWidget.Builder().title("Material").description(contentPanelDescription("Material"))
+            .size(width, 36).gap(4).addWidget(button).build();
+        ReSyncStudioPanelState.identify(row, "content-field:material");
+        ReSyncStudioPanelState.disableEntrance(row);
+        return row;
+    }
+
+    private void updateMaterialButton(IconButton button, String value) {
+        ItemIconPreview.Projection projection = ItemIconPreview.project(serverId, value);
+        button.setMessage(value.isBlank() ? "Select Material" : projection.label());
+        button.setMinecraftItem(value.isBlank() ? null : projection.toRenderItem());
     }
 
     private String contentPanelDescription(String label) {
@@ -2685,7 +2779,11 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         ToggleWidget toggle = new ToggleWidget.Builder()
             .toggled(enabled)
             .size(32, 18)
-            .onChange(value -> setBranchEnabled(trigger.pin(), value))
+            .onChange(value -> {
+                if (!syncingContentPanel) {
+                    setBranchEnabled(trigger.pin(), value);
+                }
+            })
             .entranceAnimation(false)
             .build();
         MountableButtonWidget row = new MountableButtonWidget.Builder(eventTitle(trigger.pin()))
@@ -2693,13 +2791,14 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             .onClick(() -> {
                 selectedBranch = trigger.pin();
                 focusContentBranch(selectedBranch);
-                updateEventRows();
+                refreshContentPanel();
             })
             .addWidget(toggle)
             .build();
         row.setSize(width, 30);
         row.setSelected(selected);
         eventRows.put(trigger.pin(), row);
+        eventToggles.put(trigger.pin(), toggle);
         return row;
     }
 
@@ -2729,10 +2828,6 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         attributeDesignerOpen = true;
         if (contentStudioPanel != null) {
             contentStudioPanel.hide();
-        }
-        if (contentDesignerParent instanceof StudioScreen studioScreen) {
-            studioScreen.setStudioContentBrowserTemporarilyHidden(true);
-            attributeDesignerHidContentBrowser = true;
         }
         openItemComponentEditor(new ItemComponentEditorPanel.Model("Item Components", projection.material(), null,
             activeAttributeComponents, false, snapshot -> {
@@ -2899,12 +2994,10 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         } else if (attributeDesignerPanel != null) {
             attributeDesignerPanel.hide();
         }
-        restoreAttributeDesignerContentBrowser();
         attributeDesignerOpen = false;
         if (contentStudioPanel != null) {
             contentStudioPanel.show();
         }
-        attributeDesignerHidContentBrowser = false;
         activeAttributeComponents = new LinkedHashMap<>();
         attributePreviewValues.clear();
         editedAttributeComponents.clear();
@@ -2917,13 +3010,6 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         attributeStatusRows.clear();
         refreshContentPanel();
         updatePositions();
-    }
-
-    private void restoreAttributeDesignerContentBrowser() {
-        if (attributeDesignerHidContentBrowser && contentDesignerParent instanceof StudioScreen studioScreen) {
-            studioScreen.setStudioContentBrowserTemporarilyHidden(false);
-        }
-        attributeDesignerHidContentBrowser = false;
     }
 
     private boolean isAttributeDesignerInteractive() {
@@ -8128,6 +8214,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         refreshNodeRegistry();
         updateSummary();
         updateEventRows();
+        refreshContentPanel();
     }
 
     private void synchronizeContentIdentity() {
@@ -8156,6 +8243,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         }
         updateAttributeProjectionProperty(key, value);
         markWorkspaceMutation();
+        updateSummary();
     }
 
     @Override
@@ -8239,6 +8327,7 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
 
     @Override
     protected void onWorkspaceGraphApplied(JsonObject document, List<WorkspacePatch<JsonElement>> patches) {
+        contentPanelGraphVersion++;
         String rootNodeId = contentRootNodeId(graph);
         Set<String> changedKeys = contentChangedKeys(patches, rootNodeId);
         if (patches == null || patches.isEmpty()) {
@@ -8295,7 +8384,11 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         if (key.startsWith("projectile.") || "armor_slot".equals(key)) {
             return CustomContentGraphAdapter.getContentConfiguration(graph, key, "");
         }
-        return CustomContentGraphAdapter.getContentProperty(graph, key, "");
+        Object value = CustomContentGraphAdapter.getContentProperty(graph, key, "");
+        if (value instanceof List<?> list && ("lore".equals(key) || "tags".equals(key) || "allowed_worlds".equals(key))) {
+            return String.join("lore".equals(key) ? "\n" : ", ", list.stream().map(String::valueOf).toList());
+        }
+        return value;
     }
 
     private static boolean isStructuralContentKey(String key) {
@@ -8422,6 +8515,22 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
             summaryWidget.setName(name);
             summaryWidget.setDescription((type != null ? type : "item") + " | "
                 + (!provider.isBlank() ? provider : "vanilla"));
+        }
+        updateContentSectionDescriptions();
+    }
+
+    private void updateContentSectionDescriptions() {
+        MountableButtonWidget display = contentSectionRows.get("Display Text");
+        if (display != null) {
+            Object loreValue = contentCollaborationValue("lore");
+            Object tagsValue = contentCollaborationValue("tags");
+            int lore = splitLines(loreValue != null ? String.valueOf(loreValue) : "").size();
+            int tags = splitCsv(tagsValue != null ? String.valueOf(tagsValue) : "").size();
+            display.setDescription(lore + " Lore | " + tags + " Tags");
+        }
+        MountableButtonWidget rules = contentSectionRows.get("Trigger Rules");
+        if (rules != null) {
+            rules.setDescription(ruleSummary());
         }
     }
 
@@ -8652,23 +8761,4 @@ public class ContentDesignerScreen extends GraphEditorScreen implements StudioDo
         }
     }
 
-    private static final class StudioRootNodeWidget extends FlowNodeWidget {
-        StudioRootNodeWidget(int x, int y, FlowNode node, FlowGraph graph, String nodeId, String serverId,
-                             Runnable onClose, Runnable onMutation,
-                             ReSyncGenericWidgetCapabilities.WidgetDefinition definition) {
-            super(x, y, node, graph, nodeId, serverId, onClose, onMutation,
-                FlowNodeWidget.boundaryCatalogForServer(serverId), definition != null ? definition.definition() : null,
-                definition == null || definition.readOnly(), definition == null);
-        }
-
-        @Override
-        protected boolean shouldShowLiteralInput(NodeDefinition.PinDefinition input) {
-            return input == null || !STUDIO_ROOT_INPUTS.contains(input.getName());
-        }
-
-        @Override
-        protected boolean shouldShowInputPin(NodeDefinition.PinDefinition input) {
-            return input == null || !STUDIO_ROOT_INPUTS.contains(input.getName());
-        }
-    }
 }
