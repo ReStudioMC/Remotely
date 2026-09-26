@@ -51,6 +51,7 @@ import restudio.rebase.api.git.data.GitStatus;
 import restudio.rebase.api.git.data.GitStashEntry;
 import restudio.rebase.restudio.api.models.ServerModels;
 import restudio.rebase.resource.ResourcePoolClient;
+import restudio.rebase.resource.marketplace.HostedModpackSelection;
 import restudio.rebase.health.ServerHealth;
 import restudio.rebase.health.ServerHealthJsonCodec;
 import restudio.rebase.schedule.ServerScheduleCapabilityClient;
@@ -1070,6 +1071,44 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
 
     public Async<HostedModpackJob> installHostedModpack(String serverId, HostedModpackRequest request) {
         return submitHostedModpack(serverId, "install", request);
+    }
+
+    @Override
+    public Async<Void> installHostedModpack(String serverId, HostedModpackSelection selection, String requestKey) {
+        HostedModpackRequest request = new HostedModpackRequest(selection.provider(), selection.projectId(),
+                selection.versionId(), null, selection.versionNumber(), selection.downloadUrl(),
+                selection.minecraftVersion(), selection.software(), null, null, requestKey);
+        return installHostedModpack(serverId, request).thenCompose(job -> {
+            Async<Void> result = Async.pending();
+            pollPoolModpack(job, clock.millis() + Duration.ofMinutes(30).toMillis(), result);
+            return result;
+        });
+    }
+
+    private void pollPoolModpack(HostedModpackJob job, long deadline, Async<Void> result) {
+        if (result.isDone()) return;
+        if (job == null || job.id() == null || job.id().isBlank()) {
+            result.fail(new IllegalStateException("Modpack Job Is Unavailable"));
+            return;
+        }
+        String status = job.status() == null ? "" : job.status().toLowerCase(Locale.ROOT);
+        if (status.equals("completed") || status.equals("complete") || status.equals("success")) {
+            result.complete(null);
+            return;
+        }
+        if (status.equals("failed") || status.equals("error") || status.equals("cancelled") || status.equals("canceled")) {
+            result.fail(new IllegalStateException(job.error() == null || job.error().isBlank()
+                    ? "Modpack Installation Failed" : job.error()));
+            return;
+        }
+        if (clock.millis() >= deadline) {
+            result.fail(new IllegalStateException("Modpack Installation Timed Out"));
+            return;
+        }
+        scheduler.schedule(() -> getHostedModpackJob(job.id()).whenComplete((next, failure) -> {
+            if (failure != null) result.fail(failure);
+            else pollPoolModpack(next, deadline, result);
+        }), Duration.ofSeconds(1));
     }
 
     public Async<HostedModpackJob> changeHostedModpack(String serverId, HostedModpackRequest request) {

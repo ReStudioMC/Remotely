@@ -13,10 +13,12 @@ import restudio.rebase.resource.provider.Author;
 import restudio.rebase.resource.provider.OnlineResource;
 import restudio.rebase.resource.provider.OnlineResourceVersion;
 import restudio.rebase.resource.provider.ResourceProviderException;
+import restudio.rebase.resource.provider.ResourceCompatibilityTokens;
 import restudio.rescreen.ui.rescreen.ReScreen;
 import restudio.rescreen.platform.GalleryMediaProvider;
 import restudio.rescreen.platform.browser.BrowserGalleryMediaProvider;
 import restudio.rescreen.ui.core.ScreenManager;
+import restudio.rescreen.util.Notification;
 import restudio.rescreen.util.Identifier;
 
 import java.util.Collections;
@@ -204,6 +206,43 @@ final class HostedResourceOverviewProvider implements ResourceOverviewProvider {
             if (failure != null) context.log("Resource Action Failed", failure);
             else if (actionChanged != null) actionChanged.run();
         });
+    }
+
+    @Override
+    public boolean compatible(OnlineResourceVersion version) {
+        return type != ResourceType.WORLD || ResourceCompatibilityTokens.matches(version,
+                context.providerLoaderTokens(ResourceType.WORLD), context.versionId(), ResourceType.WORLD);
+    }
+
+    @Override
+    public void installWorld(ReScreen screen, OnlineResourceVersion version, String name, boolean replace,
+                             boolean allowIncompatible, Runnable refreshed) {
+        if (disposed || version == null) return;
+        if (!allowIncompatible && !ResourceCompatibilityTokens.matches(version,
+                context.providerLoaderTokens(ResourceType.WORLD), context.versionId(), ResourceType.WORLD)) {
+            new Notification("World Incompatible", "Select A Compatible World Version", Notification.Type.ERROR);
+            return;
+        }
+        Notification progress = new Notification("Installing World", "Downloading And Extracting World Archive", Notification.Type.INFO);
+        progress.update().loading(true).commit();
+        context.installWorld(card, version(version), name, replace).whenComplete((path, failure) ->
+                ScreenManager.getInstance().execute(() -> {
+                    if (failure != null) {
+                        progress.update().message("World Install Failed").description(this.failure(failure))
+                                .type(Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
+                        context.log("World Install Failed", failure);
+                        return;
+                    }
+                    progress.update().message("World Installed").description(path.fileName())
+                            .type(Notification.Type.SUCCESS).loading(false).autoSlideOut(true).commit();
+                    if (disposed) return;
+                    context.state(card).whenComplete((value, refreshFailure) -> {
+                        if (disposed) return;
+                        if (refreshFailure == null && value != null) state = map(value);
+                        if (refreshed != null) refreshed.run();
+                    });
+                    if (actionChanged != null) actionChanged.run();
+                }));
     }
 
     @Override

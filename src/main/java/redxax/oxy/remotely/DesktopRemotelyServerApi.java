@@ -1,5 +1,6 @@
 package redxax.oxy.remotely;
 
+import com.google.gson.Gson;
 import redxax.oxy.remotely.flow.ui.marketplace.ReSyncMarketplaceApi;
 import restudio.rescreen.platform.Async;
 import restudio.rebase.platform.jvm.JvmAsyncBridge;
@@ -12,16 +13,32 @@ import restudio.rebase.restudio.api.models.MarketplaceModels;
 import restudio.rebase.restudio.api.models.ReleaseModels;
 import restudio.rebase.restudio.api.models.ServerModels;
 import restudio.rebase.resource.ResourcePoolClient;
+import restudio.rebase.resource.marketplace.HostedModpackSelection;
 import restudio.rebase.schedule.ServerScheduleModels;
 
+import java.io.IOException;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Supplier;
 
 public final class DesktopRemotelyServerApi implements RemotelyServerApi {
+    private static final Duration MODPACK_JOB_TIMEOUT = Duration.ofMinutes(30);
+    private static final Duration DELETION_RECOVERY_TIMEOUT = Duration.ofMinutes(2);
+    private static final Gson GSON = new Gson();
     private final ReStudioApiClient delegate;
+
+    private record ServerDeletionStatus(String serverId, String status, String failedStep) {}
 
     public DesktopRemotelyServerApi(ReStudioApiClient delegate) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
@@ -37,8 +54,133 @@ public final class DesktopRemotelyServerApi implements RemotelyServerApi {
     }
 
     @Override
+    public Async<Void> installHostedModpack(String serverId, HostedModpackSelection selection, String requestKey) {
+        if (selection == null || requestKey == null || requestKey.isBlank()) {
+            return Async.failed(new IllegalArgumentException("Modpack Selection And Request Key Are Required"));
+        }
+        ServerModels.ModpackJobRequest request = new ServerModels.ModpackJobRequest("install", selection.provider(),
+                selection.projectId(), selection.versionId(), selection.versionNumber(), selection.downloadUrl(),
+                selection.minecraftVersion(), selection.software());
+        long started = System.nanoTime();
+        CompletableFuture<Void> install = retry(() -> delegate.submitHostedModpackJob(serverId, request, requestKey), 2)
+                .thenCompose(job -> pollHostedModpack(serverId, job, started));
+        return JvmAsyncBridge.fromFuture(install);
+    }
+
+    private CompletableFuture<Void> pollHostedModpack(String serverId, ServerModels.HostedModpackJob job, long started) {
+        if (job == null || job.id == null || job.id.isBlank() || !serverId.equals(job.serverId)
+                || !"modpack.install".equals(job.operation)) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Modpack Job Is Unavailable"));
+        }
+        String status = job.status == null ? "" : job.status.toUpperCase(Locale.ROOT);
+        if ("COMPLETED".equals(status)) return CompletableFuture.completedFuture(null);
+        if ("FAILED".equals(status)) {
+            String reason = job.error == null || job.error.isBlank() ? "Modpack Installation Failed" : job.error;
+            return CompletableFuture.failedFuture(new IllegalStateException(reason));
+        }
+        if (!"PENDING".equals(status) && !"RUNNING".equals(status)) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Modpack Job Status Is Unknown"));
+        }
+        if (System.nanoTime() - started >= MODPACK_JOB_TIMEOUT.toNanos()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Modpack Installation Is Still Running: " + job.id));
+        }
+        UUID jobId;
+        try {
+            jobId = UUID.fromString(job.id);
+        } catch (IllegalArgumentException failure) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Modpack Job Identifier Is Invalid", failure));
+        }
+        return delay().thenCompose(ignored -> retry(() -> delegate.getHostedModpackJob(serverId, jobId), 2))
+                .thenCompose(next -> pollHostedModpack(serverId, next, started));
+    }
+
+    private static <T> CompletableFuture<T> retry(Supplier<CompletableFuture<T>> action, int remaining) {
+        return action.get().exceptionallyCompose(failure -> {
+            if (remaining == 0 || !retryable(failure)) return CompletableFuture.failedFuture(failure);
+            return delay().thenCompose(ignored -> retry(action, remaining - 1));
+        });
+    }
+
+    private static boolean retryable(Throwable failure) {
+        Throwable current = failure;
+        while (current != null) {
+            if (current instanceof ReStudioApiClient.ApiException api) return api.getStatus() == 429 || api.getStatus() >= 500;
+            if (current instanceof IOException || current instanceof TimeoutException) return true;
+            if (current.getCause() == current) break;
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    private static boolean uncertainDeletion(Throwable failure) {
+        Throwable current = failure;
+        while (current != null) {
+            if (current instanceof ReStudioApiClient.ApiException api) return api.getStatus() >= 500;
+            if (current instanceof IOException || current instanceof TimeoutException) return true;
+            if (current.getCause() == current) break;
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    private static CompletableFuture<Void> delay() {
+        return CompletableFuture.runAsync(() -> { }, CompletableFuture.delayedExecutor(1, TimeUnit.SECONDS));
+    }
+
+    @Override
     public Async<List<ServerModels.ClientServerView>> getServers() {
         return JvmAsyncBridge.fromFuture(delegate.getServers());
+    }
+
+    @Override
+    public Async<Void> deleteServer(String serverId, String serverName) {
+        if (serverId == null || serverId.isBlank() || serverName == null || serverName.isBlank()) {
+            return Async.failed(new IllegalArgumentException("Server Identity And Name Are Required"));
+        }
+        String path = "/servers/" + URLEncoder.encode(serverId, StandardCharsets.UTF_8);
+        String body = GSON.toJson(Map.of("confirmServerId", serverId, "confirmName", serverName));
+        long started = System.nanoTime();
+        CompletableFuture<Void> deletion = JvmAsyncBridge.toFuture(delegate.async().communityRequest("POST", path + "/delete", body))
+                .thenCompose(response -> settleDeletion(serverId, path, started, response, null))
+                .exceptionallyCompose(failure -> uncertainDeletion(failure)
+                        ? recoverDeletion(serverId, path, started, failure)
+                        : CompletableFuture.failedFuture(failure));
+        return JvmAsyncBridge.fromFuture(deletion);
+    }
+
+    private CompletableFuture<Void> recoverDeletion(String serverId, String path, long started, Throwable originalFailure) {
+        return retry(() -> JvmAsyncBridge.toFuture(delegate.async().communityRequest("GET", path + "/deletion", null)), 2)
+                .thenCompose(response -> settleDeletion(serverId, path, started, response, originalFailure))
+                .exceptionallyCompose(failure -> {
+                    Throwable current = failure;
+                    while (current != null) {
+                        if (current instanceof ReStudioApiClient.ApiException api && api.getStatus() == 404 && originalFailure != null) {
+                            return CompletableFuture.failedFuture(originalFailure);
+                        }
+                        if (current.getCause() == current) break;
+                        current = current.getCause();
+                    }
+                    return CompletableFuture.failedFuture(failure);
+                });
+    }
+
+    private CompletableFuture<Void> settleDeletion(String serverId, String path, long started, String response, Throwable originalFailure) {
+        ServerDeletionStatus status = GSON.fromJson(response, ServerDeletionStatus.class);
+        if (status == null || !serverId.equals(status.serverId()) || status.status() == null) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Server Deletion Status Is Invalid"));
+        }
+        return switch (status.status()) {
+            case "COMPLETED" -> CompletableFuture.completedFuture(null);
+            case "NEEDS_REVIEW" -> CompletableFuture.failedFuture(new IllegalStateException("Server Deletion Needs Review"));
+            case "SUPERSEDED" -> CompletableFuture.failedFuture(new IllegalStateException("Server Deletion Was Superseded"));
+            case "PENDING", "RUNNING", "RETRYING", "FAILED" -> {
+                if (System.nanoTime() - started >= DELETION_RECOVERY_TIMEOUT.toNanos()) {
+                    yield CompletableFuture.failedFuture(new IllegalStateException("Server Deletion Is Still Pending"));
+                }
+                yield delay().thenCompose(ignored -> recoverDeletion(serverId, path, started, originalFailure));
+            }
+            default -> CompletableFuture.failedFuture(new IllegalStateException("Server Deletion Status Is Unknown"));
+        };
     }
 
     @Override

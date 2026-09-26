@@ -4,12 +4,14 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import org.teavm.jso.JSBody;
 import restudio.rebase.backend.CapabilityDescriptor;
+import restudio.rebase.backend.RemotePath;
 import restudio.rescreen.platform.Async;
 import restudio.rescreen.platform.TaskScheduler;
 import restudio.rebase.resource.ResourceIndexOrchestrator;
 import restudio.rebase.resource.ResourceIndexEntries;
 import restudio.rebase.resource.ResourceIndexRequests;
 import restudio.rebase.resource.ResourceType;
+import restudio.rebase.resource.WorldArchiveInstaller;
 import restudio.rebase.resource.marketplace.ResourceBrowserContext;
 import restudio.rebase.resource.marketplace.ResourceMarketplaceProvider;
 import restudio.rebase.resource.marketplace.ResourceMarketplaceProviderAdapter;
@@ -1162,13 +1164,21 @@ final class HostedResourceContext implements ResourceBrowserContext {
     private Async<Void> install(ResourceMarketplaceProvider.Card resource, ResourceMarketplaceProvider.Version selected,
                                 ResourceMarketplaceProvider.VersionFile selectedFile, Runnable refreshed, OperationFence fence) {
         if (creationModpack(resource)) {
-            return latestVersion(resource, selected, fence).thenApply(version -> {
+            return latestVersion(resource, selected, fence).thenCompose(version -> resolveDownload(resource, version, selectedFile).thenApply(download -> {
                 if (!isCurrent(fence)) return null;
                 String selectedLoader = version.loaders() == null || version.loaders().isEmpty() ? "" : version.loaders().getFirst();
-                modpackSelection.accept(new ModpackSelection(resource.provider(), resource.id(), version.id(), version.number(), selectedLoader));
+                selectedLoader = selectedLoader == null ? "" : selectedLoader.replace("-", "").replace("_", "").toUpperCase(Locale.ROOT);
+                String minecraftVersion = version.gameVersions() == null ? "" : version.gameVersions().stream()
+                        .filter(value -> value != null && value.matches("[0-9]+\\.[0-9]+(?:\\.[0-9]+)?"))
+                        .findFirst().orElse("");
+                if (!Set.of("FABRIC", "FORGE", "NEOFORGE", "QUILT").contains(selectedLoader) || minecraftVersion.isBlank()) {
+                    throw new IllegalStateException("This Modpack Version Has No Server Software");
+                }
+                modpackSelection.accept(new ModpackSelection(resource.title() + " Server", resource.provider(), resource.id(),
+                        version.id(), version.number(), selectedLoader, minecraftVersion, download.url()));
                 if (refreshed != null) refreshed.run();
                 return null;
-            });
+            }));
         }
         if (!installEligible(resource)) {
             return Async.failed(new UnsupportedOperationException("Resource Install Is Unavailable For This Server"));
@@ -1181,6 +1191,89 @@ final class HostedResourceContext implements ResourceBrowserContext {
                     if (refreshed != null) refreshed.run();
                     return null;
                 }), "files.read", "files.list", "files.pull");
+    }
+
+    Async<RemotePath> installWorld(ResourceMarketplaceProvider.Card resource, ResourceMarketplaceProvider.Version selected,
+                                   String name, boolean replace) {
+        if (!hasInstance() || resource == null || ResourceType.getTypeFromString(resource.type()) != ResourceType.WORLD
+                || !marketplace.supportsType(resource.provider(), ResourceType.WORLD)) {
+            return Async.failed(new UnsupportedOperationException("World Installation Is Unavailable"));
+        }
+        OperationFence fence = captureFence();
+        return withCapabilities(() -> {
+            Async<ServerModels.ServerStatus> status = replace ? api.getServerStatus(serverId)
+                    : Async.completed(null);
+            return status.thenCompose(value -> {
+                if (replace && (value == null || value.currentState == null
+                        || !Set.of("offline", "stopped").contains(value.currentState.toLowerCase(Locale.ROOT)))) {
+                    return Async.failed(new IllegalStateException("Stop The Server Before Replacing Its Active World"));
+                }
+                return api.getFileContentAllowMissing(serverId, "server.properties")
+                        .thenCompose(properties -> api.getFileContentAllowMissing(serverId, "bukkit.yml")
+                                .thenCompose(bukkit -> {
+                                    WorldArchiveInstaller.ServerLocation location = WorldArchiveInstaller.serverLocation(RemotePath.root(), properties, bukkit);
+                                    return installVersion(resource, selected, fence).thenCompose(version ->
+                                            resolveDownload(resource, version, null).thenCompose(download -> {
+                                                WorldArchiveInstaller.Files files = worldFiles(download.url(), location, fence);
+                                                String worldName = replace ? location.activeWorld() : name;
+                                                return WorldArchiveInstaller.install(files, location.container(), download.filename(), worldName, replace)
+                                                        .thenApply(path -> {
+                                                            invalidateFileCache();
+                                                            return path;
+                                                        });
+                                            }));
+                                }));
+            });
+        }, "files.read", "files.list", "files.pull", "files.create-folder", "files.rename", "files.delete", "files.decompress");
+    }
+
+    private WorldArchiveInstaller.Files worldFiles(String url, WorldArchiveInstaller.ServerLocation location, OperationFence fence) {
+        return new WorldArchiveInstaller.Files() {
+            @Override public Async<Void> createDirectory(RemotePath path) {
+                if (path.isRoot()) return Async.completed(null);
+                return createDirectory(path.parent()).thenCompose(ignored -> exists(path).thenCompose(found -> found
+                        ? Async.completed(null) : api.createFolder(serverId, path.parent().asString(), path.fileName())));
+            }
+            @Override public Async<Void> download(RemotePath path) {
+                return api.pullFile(serverId, url, path.parent().asString(), path.fileName());
+            }
+            @Override public Async<Void> extract(RemotePath archive) {
+                return api.decompressFile(serverId, archive.parent().asString(), archive.fileName());
+            }
+            @Override public Async<List<WorldArchiveInstaller.Entry>> list(RemotePath path) {
+                return api.listResourceFiles(serverId, path.asString()).thenApply(entries -> (entries == null ? List.<ServerModels.PteroFileObjectAttributes>of() : entries).stream()
+                        .map(entry -> new WorldArchiveInstaller.Entry(entry.name, !entry.isFile)).toList());
+            }
+            @Override public Async<Boolean> exists(RemotePath path) {
+                if (path.isRoot()) return Async.completed(true);
+                return api.listResourceFiles(serverId, path.parent().asString()).thenApply(entries -> entries != null && entries.stream()
+                        .anyMatch(entry -> path.fileName().equals(entry.name)));
+            }
+            @Override public Async<Void> rename(RemotePath source, RemotePath target) {
+                ServerModels.PteroFileRenameItem item = new ServerModels.PteroFileRenameItem();
+                item.from = source.asString();
+                item.to = target.asString();
+                return api.renameFiles(serverId, "/", List.of(item));
+            }
+            @Override public Async<Void> delete(RemotePath path) {
+                return api.deleteFiles(serverId, path.parent().asString(), List.of(path.fileName()));
+            }
+            @Override public Async<Void> beforeReplace() {
+                if (!isDataCurrent(fence) || !isHostCurrent(fence)) {
+                    return Async.failed(new IllegalStateException("Server Session Changed During Installation"));
+                }
+                return api.getServerStatus(serverId).thenCompose(status -> {
+                    if (status == null || status.currentState == null
+                            || !Set.of("offline", "stopped").contains(status.currentState.toLowerCase(Locale.ROOT))) {
+                        return Async.failed(new IllegalStateException("Stop The Server Before Replacing Its Active World"));
+                    }
+                    return api.getFileContentAllowMissing(serverId, "server.properties")
+                            .thenCompose(properties -> api.getFileContentAllowMissing(serverId, "bukkit.yml")
+                                    .thenCompose(bukkit -> location.equals(WorldArchiveInstaller.serverLocation(RemotePath.root(), properties, bukkit))
+                                            ? Async.completed(null) : Async.failed(new IllegalStateException("World Settings Changed During Installation"))));
+                });
+            }
+        };
     }
 
     private Async<Void> update(ResourceMarketplaceProvider.Card resource, ResourceMarketplaceProvider.Version selected,
@@ -1910,7 +2003,8 @@ final class HostedResourceContext implements ResourceBrowserContext {
         }
     }
 
-    record ModpackSelection(String provider, String projectId, String versionId, String versionNumber, String loader) {
+    record ModpackSelection(String name, String provider, String projectId, String versionId, String versionNumber,
+                            String loader, String minecraftVersion, String downloadUrl) {
     }
 
     private Async<ResourceMarketplaceProvider.Version> installVersion(ResourceMarketplaceProvider.Card resource,

@@ -7,6 +7,7 @@ import redxax.oxy.remotely.flow.ui.marketplace.ReSyncMarketplaceApi;
 import redxax.oxy.remotely.ui.server.NetworkOverviewProvider;
 import restudio.rebase.restudio.api.models.ServerModels;
 import restudio.rebase.resource.ResourcePoolClient;
+import restudio.rebase.resource.marketplace.HostedModpackSelection;
 import restudio.rebase.schedule.ServerScheduleModels;
 
 import java.util.List;
@@ -24,6 +25,10 @@ public interface RemotelyServerApi {
     default ResourcePoolClient resourcePools() {
         return new ResourcePoolClient((method, path, body) ->
                 Async.failed(new UnsupportedOperationException("Resource Pools Are Unavailable")));
+    }
+
+    default Async<Void> installHostedModpack(String serverId, HostedModpackSelection selection, String requestKey) {
+        return Async.failed(new UnsupportedOperationException("Hosted Modpack Installation Is Unavailable"));
     }
 
     default Async<ServerCapabilities> getServerCapabilities(String serverId) {
