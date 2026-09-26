@@ -18,6 +18,7 @@ import redxax.oxy.remotely.ui.server.NetworkOverviewProvider;
 import redxax.oxy.remotely.ui.server.NewTerminalTargetProvider;
 import redxax.oxy.remotely.ui.server.ServerDetailsScreen;
 import redxax.oxy.remotely.ui.server.ResourcePoolScreen;
+import restudio.rebase.resource.marketplace.HostedModpackSelection;
 import redxax.oxy.remotely.network.NetworkLifecycleOperation;
 import redxax.oxy.remotely.ui.server.ServerIconManager;
 import redxax.oxy.remotely.ui.server.ServerIconProvider;
@@ -97,6 +98,7 @@ import restudio.rebase.ui.screens.resources.ResourceBrowserScreen;
 import restudio.rebase.ui.screens.resources.ResourceContainer;
 import restudio.rebase.ui.screens.auth.ReStudioLoginScreen;
 import restudio.rescreen.ui.core.Screen;
+import restudio.rescreen.ui.core.ScreenManager;
 import restudio.rescreen.ui.rescreen.ReScreen;
 import restudio.rescreen.ui.widgets.IconButton;
 import restudio.rescreen.ui.widgets.PopupWidget;
@@ -126,6 +128,11 @@ import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
 public final class BrowserServerScreenHost implements ServerScreenHost {
+    @Override
+    public HttpTransport weatherTransport() {
+        BrowserRemotelyServerApi api = browserApi();
+        return api == null ? null : api.transport();
+    }
     private static final int MAX_CACHED_SERVER_STATES = 128;
     private static final long POWER_TRANSITION_GRACE_MS = 25_000;
 
@@ -1268,6 +1275,14 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     }
 
     @Override
+    public StorageFiles storageFiles(Object target) {
+        ServerModels.ClientServerView server = serverView(target);
+        BrowserRemotelyServerApi api = browserApi();
+        if (server == null || api == null) return ServerScreenHost.super.storageFiles(target);
+        return new StorageFiles(new BrowserServerFileSystemProvider(this, api, capabilities(server), server), RemotePath.root());
+    }
+
+    @Override
     public void openDevelopment(Screen current, ServerModels.ClientServerView server) {
         if (demo()) {
             unavailable(Action.DEVELOPMENT);
@@ -1324,6 +1339,17 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         withCapability(server, "settings.read", () -> {
             openServerConfiguration(current, (Object) server);
         });
+    }
+
+    @Override
+    public void openServerConfiguration(Screen current, ServerModels.ClientServerView server, String initialTab,
+                                        String diskMiB) {
+        if (demo()) {
+            unavailable(Action.SERVER_CONFIGURATION);
+            return;
+        }
+        withCapability(server, "settings.read", () -> ScreenManager.getInstance().navigate(current,
+                new ServerConfigurationScreen(current, server, null, remotelyClient, initialTab, diskMiB)));
     }
 
     @Override
@@ -1907,7 +1933,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
             return;
         }
         application.setScreen(SettingsScreenFactory.createGlobalSettingsScreen(parent, config,
-                BrowserGlobalSettingsProviders.create(parent, config)));
+                BrowserGlobalSettingsProviders.create(parent, config, browserApi())));
     }
 
     @Override
@@ -1965,7 +1991,10 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         ResourceMarketplaceProviderAdapter marketplace = resourceMarketplace();
         HostedResourceContext context = new HostedResourceContext(marketplace, api, "", "", "", this,
                 configStore(), null, null, selection -> application.setScreen(
-                        new ServerConfigurationScreen(current, remotelyClient, true, selection)));
+                        new ResourcePoolScreen(current, remotelyClient,
+                                new HostedModpackSelection(selection.name(), selection.provider(), selection.projectId(),
+                                        selection.versionId(), selection.versionNumber(), selection.downloadUrl(),
+                                        selection.minecraftVersion(), selection.loader()))));
         application.setScreen(new ResourceBrowserScreen(current, marketplace, context, ResourceType.MODPACK, true,
                 remoteHost, true, null));
     }
@@ -2109,6 +2138,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
 
     void onAuthenticationInvalidated() {
         if (closed) return;
+        remotelyClient.storageBreakdownIndex().clear();
         authenticationCleanupInProgress = true;
         authenticationObserved = false;
         observedAuthenticated = false;
@@ -2837,20 +2867,6 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         }
     }
 
-    private static FileExplorerRuntime.ArchiveResolver unavailableArchiveResolver() {
-        return new FileExplorerRuntime.ArchiveResolver() {
-            @Override
-            public Async<Void> compress(String targetServerId, String root, List<String> files) {
-                return Async.failed(new UnsupportedOperationException("Archive Operations Are Unavailable"));
-            }
-
-            @Override
-            public Async<Void> decompress(String targetServerId, String root, String file) {
-                return Async.failed(new UnsupportedOperationException("Archive Operations Are Unavailable"));
-            }
-        };
-    }
-
     private static final class BrowserServerFileSystemProvider implements RemoteFileSystemProvider,
             BrowserFileExplorerAdapters.BrowserDownloadDragSource {
         private final BrowserServerScreenHost owner;
@@ -2868,17 +2884,6 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
             this.server = server == null ? new ServerModels.ClientServerView() : server;
             this.serverId = serverId(this.server);
             this.transfer = new BrowserServerFileTransfer(api, this.serverId);
-            FileExplorerRuntime.installReStudioArchiveResolver(owner, new FileExplorerRuntime.ArchiveResolver() {
-                @Override
-                public Async<Void> compress(String targetServerId, String root, List<String> files) {
-                    return owner.capabilityOperation(server(targetServerId), "files.compress", () -> api.compressFiles(targetServerId, root, files));
-                }
-
-                @Override
-                public Async<Void> decompress(String targetServerId, String root, String file) {
-                    return owner.capabilityOperation(server(targetServerId), "files.decompress", () -> api.decompressFile(targetServerId, root, file));
-                }
-            });
         }
 
         @Override
@@ -2886,6 +2891,8 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
             return Map.of(
                     CapabilityIds.FILES, capability(CapabilityIds.FILES, "files.list"),
                     CapabilityIds.TRASH, capability(CapabilityIds.TRASH, "files.version", "files.trash", "files.trash-list", "files.restore", "files.purge"),
+                    CapabilityIds.COMPRESS, capability(CapabilityIds.COMPRESS, "files.compress"),
+                    CapabilityIds.DECOMPRESS, capability(CapabilityIds.DECOMPRESS, "files.decompress"),
                     CapabilityIds.TRANSFER, capability(CapabilityIds.TRANSFER, "files.upload", "files.download"),
                     CapabilityIds.DOWNLOAD, capability(CapabilityIds.DOWNLOAD, "files.download"),
                     CapabilityIds.EXTERNAL_OPEN, capability(CapabilityIds.EXTERNAL_OPEN, "files.download"));
@@ -2986,6 +2993,23 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
                 result = result.thenCompose(ignored -> operation("files.delete", () -> capabilities.deleteFiles(server, remoteDirectory(parent(path)), List.of(path.fileName()))));
             }
             return owner.guardCurrent(result);
+        }
+
+        @Override
+        public Async<Void> compress(List<RemotePath> paths) {
+            if (paths == null || paths.isEmpty()) return unsupported("Select Files To Archive");
+            RemotePath parent = parent(paths.getFirst());
+            if (paths.stream().anyMatch(path -> path == null || !parent.equals(parent(path)))) {
+                return unsupported("Archive Sources Must Share A Folder");
+            }
+            List<String> names = paths.stream().map(RemotePath::fileName).toList();
+            return operation("files.compress", () -> api.compressFiles(serverId, remoteDirectory(parent), names));
+        }
+
+        @Override
+        public Async<Void> decompress(RemotePath path) {
+            if (path == null || path.isRoot()) return unsupported("Select An Archive To Unarchive");
+            return operation("files.decompress", () -> api.decompressFile(serverId, remoteDirectory(parent(path)), path.fileName()));
         }
 
         @Override

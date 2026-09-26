@@ -343,6 +343,7 @@ public final class BrowserApplicationHost implements ApplicationHost {
 
     @Override
     public void signOut(Screen current) {
+        if (serverScreenClient != null) serverScreenClient.storageBreakdownIndex().clear();
         if (serverScreenHost != null) {
             serverScreenHost.onAuthenticationInvalidated();
         }

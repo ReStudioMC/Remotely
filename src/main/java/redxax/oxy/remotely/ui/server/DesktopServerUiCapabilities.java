@@ -756,6 +756,15 @@ public interface DesktopServerUiCapabilities extends ServerUiCapabilityProvider 
                 ServerModels.PteroFileObjectAttributes result = new ServerModels.PteroFileObjectAttributes();
                 result.name = entry.displayName;
                 result.isFile = !entry.isDirectory;
+                if (result.isFile) {
+                    String exact = entry.metadata == null ? null : entry.metadata.get("sizeBytes");
+                    if (exact == null || exact.isBlank()) exact = entry.size;
+                    try {
+                        result.size = exact == null ? null : Long.parseLong(exact);
+                    } catch (NumberFormatException ignored) {
+                        result.size = null;
+                    }
+                }
                 return result;
             }).toList()));
         }

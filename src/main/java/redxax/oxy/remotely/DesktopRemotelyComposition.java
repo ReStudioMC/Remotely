@@ -19,6 +19,7 @@ import redxax.oxy.remotely.metadata.catalog.ServerSettingsCatalogService;
 import redxax.oxy.remotely.network.DesktopNetworkManager;
 import redxax.oxy.remotely.network.DesktopNetworkAccess;
 import redxax.oxy.remotely.ui.server.DesktopServerUiCapabilities;
+import restudio.rebase.platform.jvm.DesktopStorageBreakdownStore;
 import redxax.oxy.remotely.ui.server.DesktopPanelServerProvider;
 import redxax.oxy.remotely.ui.server.DesktopRemoteHostConnectionProvider;
 import redxax.oxy.remotely.ui.server.DesktopServerIconProvider;
@@ -59,6 +60,7 @@ public final class DesktopRemotelyComposition {
                 .environment(RemotelyComposition.Environment.DESKTOP)
                 .capabilities(RemotelyComposition.Capabilities.desktop())
                 .applicationDirectory(applicationDirectory)
+                .storageBreakdownStore(new DesktopStorageBreakdownStore(applicationDirectory.resolve("cache").resolve("storage-breakdown")), 6_000_000)
                 .reSyncFlowClientFactory(flowClientFactory)
                 .configManagerFactory(DesktopRemotelyComposition::configManager)
                 .scheduler(new JvmTaskScheduler())

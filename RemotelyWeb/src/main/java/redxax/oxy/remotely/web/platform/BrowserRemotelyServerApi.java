@@ -2770,7 +2770,8 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         ServerModels.PteroFileObjectAttributes result = new ServerModels.PteroFileObjectAttributes();
         result.name = BrowserJson.string(value, "name");
         result.isFile = firstBoolean(value, false, "isFile", "is_file");
-        result.size = BrowserJson.longValue(value, "size", 0);
+        result.size = value.has("size") && !value.get("size").isJsonNull()
+                ? BrowserJson.longValue(value, "size", 0) : null;
         result.mimetype = BrowserJson.string(value, "mimetype");
         result.sha1 = BrowserJson.string(value, "sha1");
         result.murmur2 = BrowserJson.string(value, "murmur2");

@@ -16,6 +16,7 @@ import redxax.oxy.remotely.ui.server.PanelServerProvider;
 import redxax.oxy.remotely.ui.server.RemoteHostConnectionProvider;
 import redxax.oxy.remotely.ui.server.ServerManagerScreen;
 import redxax.oxy.remotely.ui.server.ServerTerminal;
+import restudio.rebase.storage.StorageBreakdownIndex;
 import redxax.oxy.remotely.ui.server.ServerUiCapabilityProvider;
 import restudio.rescreen.config.Config;
 import restudio.rescreen.platform.ITextRenderer;
@@ -49,9 +50,15 @@ public class RemotelyClient {
     private RemotelyServerApi apiClient;
     private ServerManagerScreen serverManagerScreen;
     private final Map<String, ClientServerView> restudioServerViews = BrowserSafeState.map();
+    private final StorageBreakdownIndex storageBreakdownIndex;
+
+    public StorageBreakdownIndex storageBreakdownIndex() {
+        return storageBreakdownIndex;
+    }
 
     public RemotelyClient(RemotelyComposition composition) {
         this.composition = Objects.requireNonNull(composition, "composition");
+        this.storageBreakdownIndex = new StorageBreakdownIndex(composition.storageBreakdownStore(), composition.storageBreakdownMaxChars());
         this.host = composition.host();
         ApplicationHostRegistry.install(this.host);
         this.serverUiCapabilityProvider = Objects.requireNonNull(composition.serverUiCapabilityProvider(), "serverUiCapabilityProvider");

@@ -20,6 +20,7 @@ import redxax.oxy.remotely.ui.server.ServerIconProvider;
 import redxax.oxy.remotely.ui.server.ServerUiCapabilityProvider;
 import restudio.rebase.backend.FileExplorerProviders;
 import restudio.rescreen.platform.Clock;
+import restudio.rescreen.platform.KeyValueStore;
 import restudio.rescreen.platform.TaskScheduler;
 import restudio.rescreen.ui.core.Screen;
 
@@ -109,6 +110,8 @@ public final class RemotelyComposition {
     private final Consumer<RemotelyClient> initializationHook;
     private final ServerSettingsRegistry.StorageSnapshot serverSettingsRegistryStorageSnapshot;
     private final ServerSettingsCatalogService serverSettingsCatalogService;
+    private final KeyValueStore storageBreakdownStore;
+    private final int storageBreakdownMaxChars;
 
     private RemotelyComposition(Builder builder) {
         application = builder.application;
@@ -147,6 +150,8 @@ public final class RemotelyComposition {
         apiClientFactory = builder.apiClientFactory;
         initializationHook = builder.initializationHook;
         serverSettingsCatalogService = builder.serverSettingsCatalogService;
+        storageBreakdownStore = builder.storageBreakdownStore;
+        storageBreakdownMaxChars = builder.storageBreakdownMaxChars;
         ServerSettingsRegistry registry = ServerSettingsRegistry.getInstance();
         ServerSettingsRegistryStorage storage = builder.serverSettingsRegistryStorageFactory.apply(registry);
         if (environment == Environment.BROWSER) {
@@ -285,6 +290,14 @@ public final class RemotelyComposition {
         return serverSettingsCatalogService;
     }
 
+    public KeyValueStore storageBreakdownStore() {
+        return storageBreakdownStore;
+    }
+
+    public int storageBreakdownMaxChars() {
+        return storageBreakdownMaxChars;
+    }
+
     public static final class Builder {
         private final ApplicationHost host;
         private RemotelyApplication application = RemotelyApplication.APP;
@@ -314,6 +327,8 @@ public final class RemotelyComposition {
         private Consumer<RemotelyClient> initializationHook;
         private Function<ServerSettingsRegistry, ServerSettingsRegistryStorage> serverSettingsRegistryStorageFactory;
         private ServerSettingsCatalogService serverSettingsCatalogService;
+        private KeyValueStore storageBreakdownStore;
+        private int storageBreakdownMaxChars = 1_500_000;
 
         private Builder(ApplicationHost host) {
             this.host = Objects.requireNonNull(host, "host");
@@ -388,6 +403,12 @@ public final class RemotelyComposition {
 
         public Builder serverIconProvider(ServerIconProvider provider) {
             this.serverIconProvider = Objects.requireNonNull(provider, "serverIconProvider");
+            return this;
+        }
+
+        public Builder storageBreakdownStore(KeyValueStore store, int maxChars) {
+            storageBreakdownStore = store;
+            storageBreakdownMaxChars = Math.max(1, maxChars);
             return this;
         }
 
