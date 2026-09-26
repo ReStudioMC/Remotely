@@ -3,24 +3,33 @@ package redxax.oxy.remotely.ui.widgets;
 import restudio.rebase.instance.Instance;
 import restudio.rebase.instance.InstanceState;
 import restudio.rescreen.config.Config;
+import restudio.rescreen.platform.FadeMask;
 import restudio.rescreen.platform.IDrawContext;
+import restudio.rescreen.platform.ITextRenderer;
 import restudio.rescreen.platform.input.ReMouseEvent;
+import restudio.rescreen.render.TextRenderer;
 import restudio.rescreen.theme.Accent;
+import restudio.rescreen.theme.ThemeColor;
 import restudio.rescreen.theme.ThemeManager;
 import restudio.rescreen.ui.core.WidgetCleanup;
 import restudio.rescreen.ui.widgets.AnimatedWidget;
 import restudio.rescreen.util.Identifier;
 import restudio.rescreen.util.ResourceManager;
 
+import java.util.Objects;
 import java.util.function.BiConsumer;
 
 import static redxax.oxy.remotely.RemotelyClient.tr;
 
 public class DesktopIconWidget extends AnimatedWidget implements WidgetCleanup {
+    private static final int TEXT_FADE_WIDTH = 10;
     private Instance serverInfo;
     private Identifier iconId;
     private boolean ownsIconId;
     private final boolean isCreateButton;
+    private String cachedName;
+    private int cachedNameWidth;
+    private long nameMetricsRevision = Long.MIN_VALUE;
 
     private BiConsumer<DesktopIconWidget, Integer> onClick;
 
@@ -60,19 +69,23 @@ public class DesktopIconWidget extends AnimatedWidget implements WidgetCleanup {
         }
 
         String name = getMessage();
-        String trimmed = tr.trimToWidth(name, getWidth() + 4);
-        if (!name.equals(trimmed)) {
-            trimmed = trimmed + "..";
-        }
-        int textWidth = tr.getWidth(trimmed);
-        int textX = getX() + (getWidth() - textWidth) / 2;
         int textY = iconY + iconSize + 4;
+        int textWidth = getWidth() + 4;
+        int textX = getX() - 2;
+        int nameWidth = getNameWidth(name);
+        if (nameWidth <= textWidth) {
+            textX += (textWidth - nameWidth) / 2;
+        }
+        int resolvedTextX = textX;
 
         Accent niceAccent = ThemeManager.getAccent("nice");
         Accent dangerAccent = ThemeManager.getAccent("danger");
         Accent defaultAccent = ThemeManager.getDefaultAccent();
 
-        ctx.drawText((trimmed), textX, textY, textColor, Config.shadow);
+        int fadeWidth = Math.min(TEXT_FADE_WIDTH, textWidth);
+        FadeMask mask = FadeMask.text(getX() - 2, textY - 2, textWidth, ITextRenderer.fontHeight + 2,
+                resolvedTextX, nameWidth, fadeWidth, ThemeManager.getColor(ThemeColor.background));
+        ctx.renderFaded(mask, () -> ctx.drawText(name, resolvedTextX, textY, textColor, Config.shadow));
         if (hint.isEmpty()) {
             setHint(name);
         }
@@ -106,6 +119,16 @@ public class DesktopIconWidget extends AnimatedWidget implements WidgetCleanup {
 
     public Instance getInstance() {
         return serverInfo;
+    }
+
+    private int getNameWidth(String name) {
+        long revision = TextRenderer.metricsRevision();
+        if (!Objects.equals(cachedName, name) || nameMetricsRevision != revision) {
+            cachedName = name;
+            nameMetricsRevision = revision;
+            cachedNameWidth = tr.getWidth(name);
+        }
+        return cachedNameWidth;
     }
 
     public void setInstance(Instance serverInfo) {

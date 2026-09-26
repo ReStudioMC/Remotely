@@ -65,6 +65,11 @@ public final class MinecraftHostActionHandler implements DesktopFileActionHandle
     }
 
     @Override
+    public void resizeImageAsPng(String dataUrl, int width, int height, Consumer<String> callback) {
+        desktop.resizeImageAsPng(dataUrl, width, height, callback);
+    }
+
+    @Override
     public KeyValueStore persistentStore(String namespace) {
         return desktop.persistentStore(namespace);
     }

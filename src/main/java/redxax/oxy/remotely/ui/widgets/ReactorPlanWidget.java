@@ -1,6 +1,7 @@
 package redxax.oxy.remotely.ui.widgets;
 
 import restudio.rescreen.config.Config;
+import restudio.rescreen.platform.FadeMask;
 import restudio.rescreen.platform.IDrawContext;
 import restudio.rescreen.platform.ITextRenderer;
 import restudio.rescreen.platform.input.ReMouseButton;
@@ -12,7 +13,13 @@ import restudio.rescreen.ui.widgets.AnimatedWidget;
 import restudio.rescreen.util.Identifier;
 import restudio.rescreen.util.ImageUtils;
 
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.Map;
+
 public class ReactorPlanWidget extends AnimatedWidget {
+    private static final int TEXT_FADE_WIDTH = 10;
+    private static final int TEXT_WIDTH_CACHE_LIMIT = 8;
     private static final int PADDING_X = 12;
     private static final int PADDING_Y = 4;
     private static final int CONTENT_Y_OFFSET = 4;
@@ -26,6 +33,8 @@ public class ReactorPlanWidget extends AnimatedWidget {
     private String specs;
     private String price;
     private Runnable onAction;
+    private final Map<String, Integer> textWidths = new LinkedHashMap<>(TEXT_WIDTH_CACHE_LIMIT, 0.75f, true);
+    private long textWidthRevision = Long.MIN_VALUE;
 
     public ReactorPlanWidget(int x, int y, int width, int height, Runnable onSelect) {
         super(x, y, width, height, "");
@@ -66,23 +75,29 @@ public class ReactorPlanWidget extends AnimatedWidget {
         }
 
         String displayTitle = title == null ? "" : title.trim();
-        ctx.drawText(fitText(displayTitle, metrics.titleMaxWidth()), metrics.textLeftX(), metrics.titleY(), primaryColor, Config.shadow);
+        drawFadedText(ctx, displayTitle, metrics.textLeftX(), metrics.textLeftX(), metrics.titleY(),
+                metrics.titleMaxWidth(), primaryColor, false, true);
 
         String displaySubtitle = subtitle == null ? "" : subtitle.trim();
-        ctx.drawText(displaySubtitle, metrics.textLeftX(), metrics.subtitleY(), dimText, Config.shadow);
+        drawFadedText(ctx, displaySubtitle, metrics.textLeftX(), metrics.textLeftX(), metrics.subtitleY(),
+                metrics.priceRightX() - metrics.textLeftX(), dimText, false, true);
 
         String rawPrice = price == null ? "" : price.trim();
-        String displayPrice = fitText(rawPrice, metrics.priceMaxWidth());
-        if (!displayPrice.isBlank()) {
-            int priceX = metrics.priceRightX() - TextRenderer.tr.getWidth(displayPrice);
-            ctx.drawText(displayPrice, priceX, metrics.priceY(), accent, Config.shadow);
+        if (!rawPrice.isBlank()) {
+            int priceBoundX = metrics.priceRightX() - metrics.priceMaxWidth();
+            int priceX = metrics.priceRightX() - textWidth(rawPrice);
+            drawFadedText(ctx, rawPrice, priceBoundX, priceX, metrics.priceY(), metrics.priceMaxWidth(), accent, true, false);
         }
 
         ctx.fill(metrics.dividerX1(), metrics.dividerY(), metrics.dividerX2(), metrics.dividerY() + 1, borderColor);
 
-        String displaySpecs = fitText(specs, metrics.specsMaxWidth());
-        int specsX = metrics.centerX() - (TextRenderer.tr.getWidth(displaySpecs) / 2);
-        ctx.drawText(displaySpecs, specsX, metrics.specsY(), dimText, Config.shadow);
+        String displaySpecs = specs == null || specs.isBlank() ? "" : specs.trim();
+        int specsBoundX = metrics.centerX() - metrics.specsMaxWidth() / 2;
+        int specsWidth = textWidth(displaySpecs);
+        int specsX = specsWidth <= metrics.specsMaxWidth()
+                ? metrics.centerX() - specsWidth / 2
+                : specsBoundX;
+        drawFadedText(ctx, displaySpecs, specsBoundX, specsX, metrics.specsY(), metrics.specsMaxWidth(), dimText, false, true);
     }
 
     private LayoutMetrics computeLayout() {
@@ -129,11 +144,35 @@ public class ReactorPlanWidget extends AnimatedWidget {
         return super.mouseClicked(event);
     }
 
-    private String fitText(String text, int maxWidth) {
-        if (text == null || text.isBlank()) {
-            return "";
+    private void drawFadedText(IDrawContext context, String text, int boundX, int textX, int y, int width, int color,
+                               boolean fadeLeft, boolean fadeRight) {
+        if (text == null || text.isEmpty() || width <= 0) return;
+        int fadeWidth = Math.min(TEXT_FADE_WIDTH, width);
+        int measuredWidth = textWidth(text);
+        float leftStrength = fadeLeft ? Math.clamp((boundX - textX) / (float) fadeWidth, 0f, 1f) : 0f;
+        float rightStrength = fadeRight ? Math.clamp((textX + measuredWidth - boundX - width) / (float) fadeWidth, 0f, 1f) : 0f;
+        FadeMask mask = new FadeMask(boundX, y - 2, width, ITextRenderer.fontHeight + 2,
+                fadeLeft ? fadeWidth : 0, fadeRight ? fadeWidth : 0, 0, 0,
+                leftStrength, rightStrength, 0f, 0f,
+                ThemeManager.getColor(ThemeColor.background));
+        context.renderFaded(mask, () -> context.drawText(text, textX, y, color, Config.shadow));
+    }
+
+    private int textWidth(String text) {
+        long revision = TextRenderer.metricsRevision();
+        if (revision != textWidthRevision) {
+            textWidths.clear();
+            textWidthRevision = revision;
         }
-        String fitted = TextRenderer.tr.trimToWidth(text.trim(), Math.max(40, maxWidth));
-        return fitted == null ? "" : fitted.trim();
+        Integer cached = textWidths.get(text);
+        if (cached != null) return cached;
+        int width = TextRenderer.tr.getWidth(text);
+        textWidths.put(text, width);
+        if (textWidths.size() > TEXT_WIDTH_CACHE_LIMIT) {
+            Iterator<String> oldest = textWidths.keySet().iterator();
+            oldest.next();
+            oldest.remove();
+        }
+        return width;
     }
 }

@@ -7,6 +7,7 @@ import redxax.oxy.remotely.rematrix.ReScissorStack;
 import redxax.oxy.remotely.rematrix.mc.RematrixContext;
 import restudio.rescreen.game.tooltip.MinecraftTooltip;
 import restudio.rescreen.platform.ClipRect;
+import restudio.rescreen.platform.FadeMask;
 import restudio.rescreen.platform.IDrawContext;
 import restudio.rescreen.platform.IMatrixStack;
 import restudio.rescreen.platform.TextDraw;
@@ -90,6 +91,26 @@ public class MinecraftDrawContextAdapter implements IDrawContext {
     @Override
     public void enableScissor(float x1, float y1, float x2, float y2) {
         ctx.scissors().enable(x1, y1, x2, y2);
+    }
+
+    @Override
+    public void renderFaded(FadeMask mask, Runnable content) {
+        if (mask.width() == 0 || mask.height() == 0) return;
+        pushScissorState();
+        try {
+            enableScissor(mask.x(), mask.y(), mask.x() + mask.width(), mask.y() + mask.height());
+            content.run();
+            if (mask.leftStrength() > 0f || mask.rightStrength() > 0f) {
+                new FadeMask(mask.x(), mask.y(), mask.width(), mask.height(), mask.left(), mask.right(), 0, 0,
+                    mask.leftStrength(), mask.rightStrength(), 0f, 0f, mask.background()).drawFallback(this);
+            }
+            if (mask.top() > 0 && mask.topStrength() > 0f || mask.bottom() > 0 && mask.bottomStrength() > 0f) {
+                new FadeMask(mask.x(), mask.y() - 1, mask.width(), mask.height() + 2, 0, 0, mask.top() + 1, mask.bottom() + 1,
+                    0f, 0f, mask.topStrength(), mask.bottomStrength(), mask.background()).drawFallback(this);
+            }
+        } finally {
+            popScissorState();
+        }
     }
 
     @Override

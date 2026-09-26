@@ -25,6 +25,11 @@ final class BrowserServerTerminalPlatform implements ServerTerminalPlatform {
         renderer = new GlyphPreviewRenderer(access, null, null);
         terminal.setTextDecoration(new TerminalTextDecoration() {
             @Override
+            public Prepared prepare(String text) {
+                return renderer.prepareTerminal(text, mode.get());
+            }
+
+            @Override
             public boolean draw(TerminalTextDecorationContext context) {
                 return renderer.replaceTerminal(context, mode.get());
             }
