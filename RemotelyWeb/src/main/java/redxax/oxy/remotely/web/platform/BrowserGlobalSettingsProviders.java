@@ -55,7 +55,7 @@ final class BrowserGlobalSettingsProviders {
     private BrowserGlobalSettingsProviders() {
     }
 
-    static GlobalSettingsProviders create(ReScreen parent, BrowserRemotelyConfigStore config) {
+    static GlobalSettingsProviders create(ReScreen parent, BrowserRemotelyConfigStore config, BrowserRemotelyServerApi api) {
         Objects.requireNonNull(parent, "parent");
         Objects.requireNonNull(config, "config");
         BrowserSettingsRuntime runtime = new BrowserSettingsRuntime(parent);
@@ -82,6 +82,7 @@ final class BrowserGlobalSettingsProviders {
                     public boolean available(String control) { return false; }
                 },
                 browserLogSettings(config),
+                new BrowserConnectionSettings(api)::getSettings,
                 runtime);
     }
 

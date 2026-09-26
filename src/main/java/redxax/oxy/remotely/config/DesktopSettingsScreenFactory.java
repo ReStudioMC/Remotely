@@ -8,6 +8,7 @@ import redxax.oxy.remotely.ui.settings.controllers.CollaborationSettingsProvider
 import redxax.oxy.remotely.ui.settings.controllers.DesktopPackContentSettingsProvider;
 import redxax.oxy.remotely.ui.settings.controllers.DesktopReProxySettingsCapability;
 import redxax.oxy.remotely.ui.settings.controllers.DesktopServerClientSettingsProvider;
+import restudio.rebase.Rebase;
 import restudio.rebase.platform.jvm.JvmAppearanceSettingsProvider;
 import restudio.rebase.platform.jvm.JvmBackupSettingsProvider;
 import restudio.rebase.platform.jvm.JvmInstanceStorageSettingsProvider;
@@ -48,6 +49,9 @@ public final class DesktopSettingsScreenFactory {
                 if (listenerRegistered.compareAndSet(false, true)) {
                     settingsScreen[0] = screen;
                     if (serverHost != null) serverHost.addAuthStateListener(authStateListener);
+                    Rebase.get().getJavaManager().ensureRuntimes().thenRun(() -> ScreenManager.getInstance().execute(() -> {
+                        if (settingsScreen[0] == screen) screen.refreshTab("Java");
+                    }));
                 }
             }
 
@@ -81,6 +85,7 @@ public final class DesktopSettingsScreenFactory {
                 new JvmReStudioAccountSettingsProvider(),
                 new CollaborationSettingsProvider() {},
                 new JvmLogSettingsProvider(),
+                null,
                 runtime);
         return SettingsScreenFactory.createGlobalSettingsScreen(parent, config, providers);
     }

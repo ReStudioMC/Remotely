@@ -84,6 +84,7 @@ public final class SettingsScreenFactory {
             return settings;
         });
         settingsByTab.put("Membership", account::getMembershipSettings);
+        if (providers.connections() != null) settingsByTab.put("Connections", providers.connections());
         settingsByTab.put("Logs", logs::getSettings);
         settingsByTab.put("Development", development::getSettings);
         boolean[] active = {false};

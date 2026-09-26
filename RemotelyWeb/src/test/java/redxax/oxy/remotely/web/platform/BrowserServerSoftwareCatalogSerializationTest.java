@@ -158,7 +158,9 @@ class BrowserServerSoftwareCatalogSerializationTest {
         ServerScreenHost.ConfigurationUi composition = ServerConfigurationUiComposition.create(new TestScreen(), state,
                 null, Map.of(), List.of(), () -> {}, () -> true, "", platform);
 
-        assertTrue(composition.settings().containsKey("Server Software"));
+        assertTrue(composition.settings().containsKey("General"));
+        assertEquals("General", composition.settings().keySet().iterator().next());
+        assertFalse(composition.settings().containsKey("Server Software"));
         assertFalse(composition.settings().containsKey("Software Settings"));
         composition.cleanup().run();
     }

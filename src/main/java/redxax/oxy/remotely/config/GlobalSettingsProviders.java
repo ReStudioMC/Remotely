@@ -16,6 +16,10 @@ import restudio.rebase.settings.controllers.PresetSettingsProvider;
 import restudio.rebase.settings.controllers.ReStudioAccountSettingsProvider;
 import restudio.rebase.settings.controllers.SettingsActionCapability;
 import restudio.rebase.settings.controllers.ThemeSettingsProvider;
+import restudio.rescreen.ui.settings.Setting;
+
+import java.util.List;
+import java.util.function.Supplier;
 
 public record GlobalSettingsProviders(
         AppearanceSettingsProvider appearance,
@@ -36,5 +40,6 @@ public record GlobalSettingsProviders(
         ReStudioAccountSettingsProvider account,
         CollaborationSettingsProvider collaboration,
         LogSettingsProvider logs,
+        Supplier<List<Setting>> connections,
         SettingsScreenRuntime runtime) {
 }

@@ -435,7 +435,24 @@ public final class BrowserFileExplorerAdapters {
         return new FileExplorerProviders.EditorResolver() {
             @Override
             public Async<Boolean> canOpen(RemoteFileSystemProvider provider, RemotePath path) {
-                return FileEditorScreen.canOpen(provider, path);
+                String authority = BrowserLaunchSession.authorityKey();
+                String subject = BrowserLaunchSession.authenticated() ? BrowserLaunchSession.metadata().subjectId() : null;
+                if (BrowserLaunchSession.renewing()) {
+                    return BrowserLaunchSession.renewAsync().thenCompose(ignored -> sameAuthority(authority, subject)
+                            ? FileEditorScreen.canOpen(provider, path)
+                            : Async.failed(new IllegalStateException("Browser Session Changed")));
+                }
+                String ticket = BrowserLaunchSession.ticket();
+                return FileEditorScreen.canOpen(provider, path).exceptionallyCompose(failure -> {
+                    if (!sameAuthority(authority, subject)) return Async.failed(failure);
+                    if (BrowserLaunchSession.renewing()) {
+                        return BrowserLaunchSession.renewAsync().thenCompose(ignored -> sameAuthority(authority, subject)
+                                ? FileEditorScreen.canOpen(provider, path)
+                                : Async.failed(new IllegalStateException("Browser Session Changed")));
+                    }
+                    return !Objects.equals(ticket, BrowserLaunchSession.ticket())
+                            ? FileEditorScreen.canOpen(provider, path) : Async.failed(failure);
+                });
             }
 
             @Override
@@ -463,5 +480,11 @@ public final class BrowserFileExplorerAdapters {
     static FileEditorScreen createEditor(Screen parent, Object context, RemoteFileSystemProvider provider,
                                          RemotePath workspaceRoot, RemotePath initialFile, RemotePath configDir) {
         return new FileEditorScreen(parent, context, provider, workspaceRoot, initialFile, configDir);
+    }
+
+    private static boolean sameAuthority(String authority, String subject) {
+        return BrowserLaunchSession.authenticated()
+                && Objects.equals(authority, BrowserLaunchSession.authorityKey())
+                && Objects.equals(subject, BrowserLaunchSession.metadata().subjectId());
     }
 }

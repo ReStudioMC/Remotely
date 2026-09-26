@@ -260,6 +260,10 @@ public final class BrowserLaunchSession {
         renewAsync();
     }
 
+    public static boolean renewing() {
+        return renewalInFlight;
+    }
+
     public static Async<Metadata> renewAsync() {
         if (!authenticated()) return Async.failed(new IllegalStateException("Browser Session Expired"));
         if (renewalInFlight) {

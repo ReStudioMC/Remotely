@@ -622,6 +622,33 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
                 .thenApply(value -> value == null || value.token == null ? "" : value.token);
     }
 
+    public Async<List<PersonalCredential>> getPersonalCredentials() {
+        return apiRequest("GET", "/sftp/personal-credentials", null).thenApply(response -> {
+            List<PersonalCredential> credentials = new ArrayList<>();
+            BrowserJson.array(response).forEach(element -> {
+                if (!element.isJsonObject()) return;
+                JsonObject value = element.getAsJsonObject();
+                credentials.add(new PersonalCredential(BrowserJson.string(value, "id"), BrowserJson.string(value, "name"),
+                        BrowserJson.string(value, "createdAt"), BrowserJson.string(value, "lastUsedAt"),
+                        BrowserJson.string(value, "revokedAt")));
+            });
+            return List.copyOf(credentials);
+        });
+    }
+
+    public Async<IssuedPersonalCredential> createPersonalCredential(String name) {
+        return apiRequest("POST", "/sftp/personal-credentials", json(Map.of("name", name == null ? "" : name)))
+                .thenApply(response -> {
+                    JsonObject value = BrowserJson.object(response);
+                    return new IssuedPersonalCredential(BrowserJson.string(value, "id"), BrowserJson.string(value, "name"),
+                            BrowserJson.string(value, "token"), BrowserJson.string(value, "createdAt"));
+                });
+    }
+
+    public Async<Void> revokePersonalCredential(String id) {
+        return apiRequest("DELETE", "/sftp/personal-credentials/" + path(id), null).thenApply(ignored -> null);
+    }
+
     @Override
     public Async<ServerModels.ServerStats> getServerResources(String serverId) {
         return get("/servers/" + path(serverId) + "/stats", BrowserRemotelyServerApi::serverStats);
@@ -2740,6 +2767,9 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         result.subdomain = BrowserJson.string(value, "subdomain");
         result.fullDomain = first(value, "fullDomain", "full_domain");
         result.nodeName = first(value, "nodeName", "node_name");
+        result.sftpIp = first(value, "sftpIp", "sftp_ip");
+        result.sftpPort = BrowserJson.integer(value, "sftpPort", BrowserJson.integer(value, "sftp_port", 0));
+        result.sftpUser = first(value, "sftpUser", "sftp_user");
         result.limits = limits(child(value, "limits"));
         result.invocation = BrowserJson.string(value, "invocation");
         result.dockerImage = first(value, "dockerImage", "docker_image");
@@ -4506,6 +4536,13 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
     public record TerminalTicket(String ticket, String serverId, String scope, String expiresAt) {
     }
 
+    public record PersonalCredential(String id, String name, String createdAt, String lastUsedAt, String revokedAt) {
+        public boolean active() { return revokedAt == null || revokedAt.isBlank(); }
+    }
+
+    public record IssuedPersonalCredential(String id, String name, String token, String createdAt) {
+    }
+
     public record DeveloperDevice(UUID id, String name, String approvedRoots, String capabilities, String agentVersion,
                                   boolean online, boolean updateRequired, boolean revoked) {
     }
@@ -4521,6 +4558,9 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         private String subdomain;
         private String fullDomain;
         private String nodeName;
+        private String sftpIp;
+        private int sftpPort;
+        private String sftpUser;
         private ServerModels.Limits limits;
         private String invocation;
         private String dockerImage;
@@ -4544,6 +4584,9 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
             model.subdomain = subdomain;
             model.fullDomain = fullDomain;
             model.nodeName = nodeName;
+            model.sftpIp = sftpIp;
+            model.sftpPort = sftpPort;
+            model.sftpUser = sftpUser;
             model.limits = limits;
             model.invocation = invocation;
             model.dockerImage = dockerImage;
