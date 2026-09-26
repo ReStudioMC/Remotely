@@ -20,6 +20,7 @@ import restudio.rebase.restudio.api.models.ServerModels;
 import restudio.rescreen.platform.Async;
 import restudio.rescreen.config.Config;
 import restudio.rescreen.platform.IDrawContext;
+import restudio.rescreen.platform.http.HttpTransport;
 import restudio.rescreen.platform.input.ReKey;
 import restudio.rescreen.platform.input.ReKeyEvent;
 import restudio.rescreen.platform.input.ReMouseEvent;
@@ -51,6 +52,8 @@ import java.util.stream.Stream;
 import static restudio.rescreen.util.SoundUtils.playSound;
 
 public class ServerManagerScreen extends DesktopShellScreen {
+    @Override
+    protected HttpTransport desktopWeatherTransport() { return serverHost().weatherTransport(); }
     private final RemotelyClient remotelyClient;
     private ServerScreenHost cachedServerHost;
     private PopupWidget createChoicePopup;
@@ -364,11 +367,12 @@ public class ServerManagerScreen extends DesktopShellScreen {
 
     protected void setupNoServersOverlay(Container overlayContainer) {
         localNoServersIcon = new IconMessage(width / 2 - 32, height / 4, 64, 64, "Welcome To Remotely!\nI Guess We're Locally Now...\nClick Create To Start!\n\n\n Quick Tips:\nMiddle Click To Close Tabs\nSign In To Report Bugs & Give Feedback\nThere's A Very Powerfull Desktop Mode In The Settings!", "remotely.png");
-        reactorsNoServersIcon = new IconMessage(width / 2 - 32, height / 4, 64, 64, "Reactor By ReStudio\nHigh-End & Affordable Hosting For Everyone.\nOrder And Control Your Server Right Here & Now!", "Reactor.png");
+        reactorsNoServersIcon = new IconMessage(width / 2 - 32, height / 4, 64, 64,
+            "Reactor By ReStudio\nHigh-End & Affordable\nHosting For Everyone.\nOrder And Control Your\nServer Right Here & Now!", "Reactor.png");
         pteroNoServersIcon = new IconMessage(width / 2 - 32, height / 4, 64, 64, "Panel Host\nLoading Servers...\nOpen Your Panel If No Servers Appear.", "server.png");
         reactorInfo = new IconButton.Builder().size(300, 18).label(authenticated() ? "Learn More Here" : "Sign In").imagePath("external").autoWidthOnTextChange(true).onClick(this::openReactorAccessAction).build();
         reactorInfo.setX(width / 2 - (reactorInfo.getWidth() / 2));
-        reactorInfo.setY(reactorsNoServersIcon.getY() + reactorsNoServersIcon.getHeight() + (12 * 5));
+        reactorInfo.setY(reactorsNoServersIcon.getY() + reactorsNoServersIcon.getContentHeight() + 5);
         pteroInfo = new IconButton.Builder().size(300, 18).label("Open Panel").imagePath("external").autoWidthOnTextChange(true).onClick(this::openActivePteroPanel).build();
         pteroInfo.setX(width / 2 - (pteroInfo.getWidth() / 2));
         pteroInfo.setY(pteroNoServersIcon.getY() + pteroNoServersIcon.getHeight() + (12 * 5));
@@ -441,10 +445,10 @@ public class ServerManagerScreen extends DesktopShellScreen {
             builder.addHeaderButton("report.png", () -> serverHost().openReports(this), "Reports And Feedback");
         }
         if (serverHost().supports(ServerScreenHost.Action.RESOURCES)) {
-            builder.addHeaderButton("resources.png", () -> serverHost().openResources(this), "Resources");
+            builder.addHeaderButton("pool.png", () -> serverHost().openResources(this), "Resources");
         }
         if (serverHost().supports(ServerScreenHost.Action.SIGN_OUT)) {
-            builder.addHeaderButton("close.png", () -> serverHost().signOut(this), "Sign Out", ThemeManager.getAccent("danger"));
+            builder.addConfirmHeaderButton("close.png", () -> serverHost().signOut(this), "Sign Out", ThemeManager.getAccent("danger"));
         }
 
         showContextMenu(userButton.getX(), desktopBounds().taskbar().y(), builder);
@@ -2206,7 +2210,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
             .onClick(() -> {
                 Object data = (tabs().getActiveTab() != null) ? tabs().getActiveTab().getData() : null;
                 if ("RESTUDIO_MARKER".equals(data)) {
-                    openReactorPlanSelection();
+                    ResourcePoolScreen.openCreate(this, remotelyClient);
                 } else if (data instanceof ServerScreenHost.HostView host && host.panel()) {
                     new Notification("Panel Managed", "Create Servers In Your Panel", Notification.Type.WARN);
                 } else {
@@ -3048,7 +3052,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
             reactorsNoServersIcon.setX(width / 2 - (reactorsNoServersIcon.getWidth() / 2));
             reactorsNoServersIcon.setY(height / 4);
             reactorInfo.setX(width / 2 - (reactorInfo.getWidth() / 2));
-            reactorInfo.setY(reactorsNoServersIcon.getY() + reactorsNoServersIcon.getHeight() + (12 * 5));
+            reactorInfo.setY(reactorsNoServersIcon.getY() + reactorsNoServersIcon.getContentHeight() + 5);
             localNoServersIcon.setX(width / 2 - (localNoServersIcon.getWidth() / 2));
             localNoServersIcon.setY(height / 4);
             pteroNoServersIcon.setX(width / 2 - (pteroNoServersIcon.getWidth() / 2));

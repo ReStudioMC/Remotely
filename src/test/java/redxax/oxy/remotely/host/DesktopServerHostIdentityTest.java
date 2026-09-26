@@ -3,7 +3,9 @@ package redxax.oxy.remotely.host;
 import org.junit.jupiter.api.Test;
 import restudio.rebase.backend.BackendConfig;
 import restudio.rebase.instance.Instance;
+import restudio.rebase.instance.InstanceOperation;
 import restudio.rebase.restudio.api.models.ServerModels;
+import redxax.oxy.remotely.ui.server.ServerScreenHost;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -78,5 +80,33 @@ class DesktopServerHostIdentityTest {
                 List.of(first, hidden, last), List.of("reactor-hidden"));
 
         assertEquals(List.of(first, last), visible);
+    }
+
+    @Test
+    void oldControllerResponsesCannotReverseNewPowerRequests() {
+        InstanceOperation start = operation(InstanceOperation.Type.START, 2_000);
+        InstanceOperation stop = operation(InstanceOperation.Type.STOP, 4_000);
+        ServerScreenHost.LocalStatus oldStop = status("STOPPED", "STOPPED", 1_000);
+        ServerScreenHost.LocalStatus oldStopping = new ServerScreenHost.LocalStatus(true, true, false, "STOPPING", "STOPPED",
+                null, "", 42, 42, 42, List.of(42L), 1_000);
+        ServerScreenHost.LocalStatus newCrash = status("CRASHED", "RUNNING", 2_500);
+        ServerScreenHost.LocalStatus oldStart = status("STARTING", "RUNNING", 2_500);
+        ServerScreenHost.LocalStatus stopping = status("STOPPING", "STOPPED", 2_500);
+
+        assertTrue(DesktopServerHost.isStaleLocalStatus(start, oldStop));
+        assertTrue(DesktopServerHost.isStaleLocalStatus(start, oldStopping));
+        assertFalse(DesktopServerHost.isStaleLocalStatus(start, newCrash));
+        assertTrue(DesktopServerHost.isStaleLocalStatus(stop, oldStart));
+        assertFalse(DesktopServerHost.isStaleLocalStatus(stop, stopping));
+    }
+
+    private static InstanceOperation operation(InstanceOperation.Type type, long startedAt) {
+        return new InstanceOperation(type.name(), type, InstanceOperation.Status.ACTIVE, "Working", "Working", -1,
+                startedAt, startedAt, 0, null);
+    }
+
+    private static ServerScreenHost.LocalStatus status(String state, String desiredState, long startTimeMs) {
+        return new ServerScreenHost.LocalStatus(true, true, false, state, desiredState, null, "", 0, 0, 0,
+                List.of(), startTimeMs);
     }
 }

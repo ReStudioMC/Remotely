@@ -60,6 +60,11 @@ public final class DesktopServerTerminalPlatform implements ServerTerminalPlatfo
         glyphPreviewRenderer = new GlyphPreviewRenderer(access, null, null);
         terminal.setTextDecoration(new TerminalTextDecoration() {
             @Override
+            public Prepared prepare(String text) {
+                return glyphPreviewRenderer.prepareTerminal(text, RemotelyPackContentIntegration.mode());
+            }
+
+            @Override
             public boolean draw(TerminalTextDecoration.TerminalTextDecorationContext context) {
                 return glyphPreviewRenderer.replaceTerminal(context, RemotelyPackContentIntegration.mode());
             }
@@ -156,11 +161,17 @@ public final class DesktopServerTerminalPlatform implements ServerTerminalPlatfo
         Thread.ofVirtual().name("Remotely Local Server Stop").start(() -> {
             try {
                 LocalServerControllerModels.StatusResponse status = LocalServerControllerClient.stop(instance);
-                QuickServerSyncManager.syncBackAfterStop(instance);
-                ScreenManager.getInstance().execute(() -> applyLocalStatus(terminal, status));
+                if (isCurrentStopRequest(stopOperationId)) {
+                    QuickServerSyncManager.syncBackAfterStop(instance);
+                }
+                ScreenManager.getInstance().execute(() -> {
+                    if (!isCurrentStopRequest(stopOperationId)) return;
+                    applyLocalStatus(terminal, status);
+                });
             } catch (Exception exception) {
                 LocalServerControllerModels.StatusResponse status = LocalServerControllerClient.status(instance);
                 ScreenManager.getInstance().execute(() -> {
+                    if (!isCurrentStopRequest(stopOperationId)) return;
                     boolean stoppedStatus = status != null && ("STOPPED".equalsIgnoreCase(status.state)
                             || "CRASHED".equalsIgnoreCase(status.state));
                     boolean noKnownSession = exception.getMessage() != null
@@ -194,6 +205,11 @@ public final class DesktopServerTerminalPlatform implements ServerTerminalPlatfo
                 });
             }
         });
+    }
+
+    private boolean isCurrentStopRequest(String operationId) {
+        InstanceOperation operation = instance == null ? null : instance.getOperation();
+        return operation != null && operation.type() == InstanceOperation.Type.STOP && operation.id().equals(operationId);
     }
 
     @Override
@@ -345,6 +361,7 @@ public final class DesktopServerTerminalPlatform implements ServerTerminalPlatfo
         String operationId = LifecycleManager.activeOperationId(instance);
         if (operationId == null || operationId.isBlank()) operationId = LifecycleManager.requestStart(instance);
         if (operationId == null || operationId.isBlank() || operationId.equals(recoveredStartOperationId)) return false;
+        if (operationId.equals(localStartGateOperationId.get()) || localServerStartIssued.get()) return false;
         recoveredStartOperationId = operationId;
         localServerStartIssued.set(false);
         localLaunchAllowed.set(false);

@@ -84,6 +84,7 @@ import restudio.rebase.localcontrol.LocalServerControllerClient;
 import restudio.rebase.localcontrol.LocalServerControllerModels;
 import restudio.rebase.localcontrol.LifecycleManager;
 import restudio.rebase.instance.Instance;
+import restudio.rebase.instance.InstanceOperation;
 import restudio.rebase.health.ServerHealth;
 import restudio.rebase.instance.InstanceFactory;
 import restudio.rebase.instance.InstanceManager;
@@ -97,6 +98,7 @@ import restudio.rebase.util.FileUtils;
 import restudio.rebase.util.ssh.SSHManager;
 import restudio.rescreen.platform.Async;
 import restudio.rebase.platform.jvm.JvmAsyncBridge;
+import restudio.rebase.platform.jvm.JvmHttpTransport;
 import restudio.rebase.platform.jvm.JvmMinecraftAssetsSettingsProvider;
 import restudio.rebase.platform.jvm.JvmStandardOutputStateParser;
 import restudio.rebase.restudio.api.models.ServerModels;
@@ -116,6 +118,8 @@ import restudio.rebase.ui.widgets.TerminalWidget;
 import restudio.rebase.ui.worldmap.WorldMapScreen;
 import restudio.rebase.util.VersionUtil;
 import restudio.rescreen.ui.core.Screen;
+import restudio.rescreen.ui.core.ScreenManager;
+import restudio.rescreen.platform.http.HttpTransport;
 import restudio.rescreen.ui.rescreen.ReScreen;
 import restudio.rescreen.util.Notification;
 import restudio.rescreen.util.BrowserUtils;
@@ -147,6 +151,10 @@ import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 public final class DesktopServerHost implements ServerScreenHost {
+    private final HttpTransport weatherTransport = new JvmHttpTransport();
+
+    @Override
+    public HttpTransport weatherTransport() { return weatherTransport; }
     private static final String DESKTOP_HOST_ID = "remotely.desktopHostId";
     private final RemotelyClient client;
     private final Map<Runnable, Consumer<List<NetworkDefinition>>> networkListeners = new IdentityHashMap<>();
@@ -308,8 +316,30 @@ public final class DesktopServerHost implements ServerScreenHost {
             if (status == null) return null;
             return new ServerScreenHost.LocalStatus(status.ok, status.knownSession, status.ready, status.state,
                     status.desiredState, status.exitCode, status.lastError, status.pid, status.wrapperPid,
-                    status.serverPid, status.pids);
+                    status.serverPid, status.pids, status.startTimeMs);
         }));
+    }
+
+    @Override
+    public boolean isStaleLocalStatus(Object value, ServerScreenHost.LocalStatus status) {
+        Instance instance = instance(value);
+        if (instance == null && value instanceof ServerModels.ClientServerView server) instance = resolve(server);
+        return instance != null && isStaleLocalStatus(instance.getOperation(), status);
+    }
+
+    static boolean isStaleLocalStatus(InstanceOperation operation, ServerScreenHost.LocalStatus status) {
+        if (status == null) return false;
+        if (operation == null || !operation.isActive()) return false;
+        if (operation.type() == InstanceOperation.Type.START) {
+            String state = status.state().trim().toUpperCase(Locale.ROOT);
+            return status.startTimeMs() < operation.startedAt()
+                    && ("STOPPING".equals(state) || "STOPPED".equals(state) || "CRASHED".equals(state));
+        }
+        if (operation.type() == InstanceOperation.Type.STOP && "RUNNING".equalsIgnoreCase(status.desiredState())) {
+            String state = status.state().trim().toUpperCase(Locale.ROOT);
+            return "STARTING".equals(state) || "RUNNING".equals(state) || "STOPPING".equals(state);
+        }
+        return false;
     }
 
     @Override
@@ -318,7 +348,8 @@ public final class DesktopServerHost implements ServerScreenHost {
         if (instance == null && value instanceof ServerModels.ClientServerView server) {
             instance = resolve(server);
         }
-        if (instance == null || status == null || !status.controllerAvailable() || !status.knownSession()) return;
+        if (instance == null || status == null || !status.controllerAvailable() || !status.knownSession()
+                || isStaleLocalStatus(instance, status)) return;
         String state = status.state().trim().toUpperCase(Locale.ROOT);
         switch (state) {
             case "STARTING" -> {
@@ -2615,10 +2646,31 @@ public final class DesktopServerHost implements ServerScreenHost {
     }
 
     @Override
+    public StorageFiles storageFiles(Object target) {
+        Instance instance = instance(target);
+        if (instance == null) return ServerScreenHost.super.storageFiles(target);
+        String path = instance.getPath();
+        return new StorageFiles(FileExplorerProviders.forInstance(instance),
+                RemotePath.of(path == null || path.isBlank() ? "/" : path));
+    }
+
+    @Override
     public void openServerConfiguration(Screen current, ServerModels.ClientServerView server) {
         Instance instance = resolve(server);
         if (instance != null) {
             application().setScreen(new ServerConfigurationScreen(current, instance, findHost(instance), client));
+            return;
+        }
+        unavailable(Action.SERVER_CONFIGURATION);
+    }
+
+    @Override
+    public void openServerConfiguration(Screen current, ServerModels.ClientServerView server, String initialTab,
+                                        String diskMiB) {
+        Instance instance = resolve(server);
+        if (instance != null) {
+            ScreenManager.getInstance().navigate(current, new ServerConfigurationScreen(current, instance,
+                    findHost(instance), client, initialTab, diskMiB));
             return;
         }
         unavailable(Action.SERVER_CONFIGURATION);
@@ -2819,6 +2871,7 @@ public final class DesktopServerHost implements ServerScreenHost {
 
     @Override
     public void signOut(Screen current) {
+        client.storageBreakdownIndex().clear();
         if (ReStudio.getInstance() != null) {
             ReStudio.getInstance().logoutFromWorkOs();
         }
@@ -2826,8 +2879,9 @@ public final class DesktopServerHost implements ServerScreenHost {
 
     @Override
     public void openSettings(Screen current) {
-         if (application().getCurrentScreen() instanceof ReScreen parentScreen && config() != null) {
-            application().setScreen(DesktopSettingsScreenFactory.createGlobalSettingsScreen(parentScreen, config()));
+        RemotelyConfigManager settingsConfig = config();
+        if (current instanceof ReScreen parentScreen && settingsConfig != null) {
+            application().setScreen(DesktopSettingsScreenFactory.createGlobalSettingsScreen(parentScreen, settingsConfig));
             return;
         }
         unavailable(Action.HOST_SETTINGS);
@@ -2839,6 +2893,11 @@ public final class DesktopServerHost implements ServerScreenHost {
     }
 
     public void openModpackBrowser(Screen current, RemoteHost remoteHost, boolean reStudioContext) {
+        if (reStudioContext) {
+            application().setScreen(JvmResourceMarketplaceAdapter.hostedModpackBrowser(current,
+                    selection -> application().setScreen(new ResourcePoolScreen(current, client, selection))));
+            return;
+        }
         application().setScreen(JvmResourceMarketplaceAdapter.browser(current, null, ResourceType.MODPACK, true, remoteHost, reStudioContext));
     }
 

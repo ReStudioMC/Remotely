@@ -349,9 +349,10 @@ public class ServerTerminal extends TerminalWidget implements ServerTerminalLife
         state = "starting";
         clearLog();
         broadcastNotice("Start Requested...");
-        platform.startRequested(this);
         stopProcess();
         lastConnectAttempt = System.currentTimeMillis();
+        platform.startRequested(this);
+        if (platform.replacesStatusPolling()) return;
         if (shouldStartServerProcess()) startServerProcess();
         else start();
     }
@@ -428,7 +429,8 @@ public class ServerTerminal extends TerminalWidget implements ServerTerminalLife
                 lastStartRequested = 0;
                 lastStopRequested = 0;
             }
-            if (!isTerminalReady() && !reconnecting && System.currentTimeMillis() - lastConnectAttempt >= CONNECT_ATTEMPT_COOLDOWN_MS) {
+            if (!platform.replacesStatusPolling() && !isTerminalReady() && !reconnecting
+                    && System.currentTimeMillis() - lastConnectAttempt >= CONNECT_ATTEMPT_COOLDOWN_MS) {
                 lastConnectAttempt = System.currentTimeMillis();
                 if ("running".equals(state) || "starting".equals(state)) {
                     if (shouldStartServerProcess()) startServerProcess();
@@ -449,7 +451,8 @@ public class ServerTerminal extends TerminalWidget implements ServerTerminalLife
             if (withinStartGrace) {
                 state = "starting";
                 setObservedState(ServerScreenHost.ServerState.STARTING);
-                if (!isTerminalReady() && !reconnecting && System.currentTimeMillis() - lastConnectAttempt >= CONNECT_ATTEMPT_COOLDOWN_MS) {
+                if (!platform.replacesStatusPolling() && !isTerminalReady() && !reconnecting
+                        && System.currentTimeMillis() - lastConnectAttempt >= CONNECT_ATTEMPT_COOLDOWN_MS) {
                     lastConnectAttempt = System.currentTimeMillis();
                     if (shouldStartServerProcess()) startServerProcess();
                     else start();
@@ -527,7 +530,8 @@ public class ServerTerminal extends TerminalWidget implements ServerTerminalLife
             explicitDisconnect = false;
             forceStoppedView = false;
             if ("running".equals(normalized)) lastStartRequested = 0;
-            if (!isTerminalReady() && !reconnecting && System.currentTimeMillis() - lastConnectAttempt >= CONNECT_ATTEMPT_COOLDOWN_MS) {
+            if (!platform.replacesStatusPolling() && !isTerminalReady() && !reconnecting
+                    && System.currentTimeMillis() - lastConnectAttempt >= CONNECT_ATTEMPT_COOLDOWN_MS) {
                 lastConnectAttempt = System.currentTimeMillis();
                 if (shouldStartServerProcess()) startServerProcess();
                 else start();

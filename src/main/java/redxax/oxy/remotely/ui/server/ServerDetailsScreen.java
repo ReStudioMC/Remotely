@@ -2479,7 +2479,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
                                 if (localControllerFailureNotices.add(key)) {
                                     screenHost().application().notify("Local Controller", message(localFailure), ReSyncNotificationLevel.WARN);
                                 }
-                            } else if (status != null) {
+                            } else if (status != null && !screenHost().isStaleLocalStatus(ctx.instance, status)) {
                                 if (status.lastError().isBlank()) clearLocalControllerFailureNotice(ctx.instance);
                                 else notifyLocalControllerFailure(ctx, status);
                                 applyLocalControllerState(ctx, contextInfos.get(ctx), status);
