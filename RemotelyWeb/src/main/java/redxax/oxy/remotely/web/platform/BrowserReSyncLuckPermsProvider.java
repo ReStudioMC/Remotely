@@ -23,8 +23,7 @@ public final class BrowserReSyncLuckPermsProvider implements ReSyncLuckPermsProv
 
     @Override
     public void close(ReSyncFlowClient client) {
-        ReSyncLuckPermsClient value = clients.remove(client);
-        if (value != null) value.close();
+        clients.remove(client);
     }
 
     @Override

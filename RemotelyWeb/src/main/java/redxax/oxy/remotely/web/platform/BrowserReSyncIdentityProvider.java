@@ -19,11 +19,13 @@ public final class BrowserReSyncIdentityProvider implements ReSyncIdentityProvid
 
     @Override
     public CollaborationService.Identity collaborationIdentity(String fallbackClientId) {
-        String subject = metadata().subjectId();
+        BrowserLaunchSession.Metadata identity = metadata();
+        String subject = identity.subjectId();
         if (subject == null || subject.isBlank()) subject = fallbackClientId;
         if (subject == null || subject.isBlank()) subject = "remotely-web";
         subject = sanitize(subject);
-        return new CollaborationService.Identity(subject, "Browser Collaborator", "", "restudio-web");
+        String displayName = firstNonBlank(identity.displayName(), identity.username(), identity.sessionLabel(), "Browser Collaborator");
+        return new CollaborationService.Identity(subject, displayName, identity.avatarUrl(), "restudio-web");
     }
 
     private BrowserLaunchSession.Metadata metadata() {
@@ -33,5 +35,12 @@ public final class BrowserReSyncIdentityProvider implements ReSyncIdentityProvid
     private String sanitize(String value) {
         String result = value.length() > 128 ? value.substring(0, 128) : value;
         return result.replaceAll("[^A-Za-z0-9._-]", "_");
+    }
+
+    private String firstNonBlank(String... values) {
+        for (String value : values) {
+            if (value != null && !value.isBlank()) return value;
+        }
+        return "";
     }
 }

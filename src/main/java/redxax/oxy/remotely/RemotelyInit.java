@@ -3,6 +3,7 @@ package redxax.oxy.remotely;
 import redxax.oxy.remotely.host.ApplicationHost;
 import redxax.oxy.remotely.config.RemotelyConfigManager;
 import redxax.oxy.remotely.config.DesktopRemotelyConfigManager;
+import redxax.oxy.remotely.data.flow.ReSyncDesktopIdentityProvider;
 import redxax.oxy.remotely.packcontent.RemotelyPackContentIntegration;
 import redxax.oxy.remotely.servers.ReProxyAutoStartService;
 import restudio.rebase.Rebase;
@@ -39,6 +40,9 @@ public class RemotelyInit {
 
     public static void initCommon(RemotelyApplication application, LogConsole console) {
         if (isRebaseInitialized()) {
+            if (Config.applicationDir instanceof Path applicationDirectory) {
+                ReSyncDesktopIdentityProvider.initialize(applicationDirectory);
+            }
             return;
         }
 
@@ -60,6 +64,7 @@ public class RemotelyInit {
         RemotelyManager remotelyManager = new RemotelyManager(remotelyDir, configManager);
         Rebase.initialize(remotelyManager, JvmRebasePlatform.create());
         ReStudio.getInstance().init(remotelyDir, application.reStudioClientId());
+        ReSyncDesktopIdentityProvider.initialize(remotelyDir);
         new ReProxyAutoStartService(InstanceManager.getInstance()).start();
         RemotelyPackContentIntegration.install();
     }

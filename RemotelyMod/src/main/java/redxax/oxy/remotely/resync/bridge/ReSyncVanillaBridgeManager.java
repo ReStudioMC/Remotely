@@ -45,10 +45,10 @@ public class ReSyncVanillaBridgeManager {
     private static final int MAX_LIFECYCLE_TASKS = 64;
     private static final int MAX_OUTBOUND_PACKETS = 2_048;
     private static final long MAX_OUTBOUND_BYTES = 48L * 1_024L * 1_024L;
-    private static final int MAX_OUTBOUND_PACKETS_PER_TICK = 32;
+    private static final int MAX_OUTBOUND_PACKETS_PER_TICK = 2;
     private static final int MAX_OUTBOUND_BYTES_PER_TICK = 768 * 1_024;
     private static final long MAX_OUTBOUND_NANOS_PER_TICK = 2_000_000L;
-    private static final long MAX_OUTBOUND_DELIVERY_NANOS = TimeUnit.SECONDS.toNanos(30L);
+    private static final long MAX_OUTBOUND_DELIVERY_NANOS = TimeUnit.SECONDS.toNanos(75L);
     private static final int MAX_ACTIVATION_FRAMES = 2048;
     private static final int MAX_ACTIVATION_BYTES = 32 * 1_024 * 1_024;
     private static final int MAX_ACTIVATION_CALLBACKS = 64;

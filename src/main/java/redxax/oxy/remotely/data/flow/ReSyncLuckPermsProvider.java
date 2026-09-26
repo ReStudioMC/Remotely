@@ -12,7 +12,7 @@ public interface ReSyncLuckPermsProvider {
         return new ReSyncLuckPermsProvider() {
             @Override
             public ReSyncLuckPermsClient get(ReSyncFlowClient client) {
-                return null;
+                return new ReSyncLuckPermsClient(client);
             }
         };
     }

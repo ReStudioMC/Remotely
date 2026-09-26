@@ -72,6 +72,28 @@ class ReSyncCollaborationClientTest {
     }
 
     @Test
+    void ignoresOlderPresenceSnapshotsAndAcceptsNewConnectionRevisions() {
+        ReSyncCollaborationClient client = new ReSyncCollaborationClient(new Gson(), "remotely-app");
+        assertTrue(client.applySnapshot("""
+            {"selfSessionId":"app","revision":5,"collaborators":[
+              {"sessionId":"player","clientId":"bridge:player:remotely-mod","identity":{"subjectId":"player","displayName":"Alex","avatar":"","source":"minecraft"},"active":true}
+            ]}
+            """));
+        assertFalse(client.applySnapshot("""
+            {"selfSessionId":"app","revision":4,"collaborators":[]}
+            """));
+        assertEquals(List.of("player"), client.snapshot().stream().map(ReSyncCollaborationClient.Presence::sessionId).toList());
+
+        client.connectionLost();
+        assertTrue(client.applySnapshot("""
+            {"selfSessionId":"app","revision":1,"collaborators":[
+              {"sessionId":"player-next","clientId":"bridge:player:remotely-mod","identity":{"subjectId":"player","displayName":"Alex","avatar":"","source":"minecraft"},"active":true}
+            ]}
+            """));
+        assertEquals(List.of("player-next"), client.snapshot().stream().map(ReSyncCollaborationClient.Presence::sessionId).toList());
+    }
+
+    @Test
     void doesNotInferResourceOwnershipFromAccountIdentity() {
         ReSyncCollaborationClient client = new ReSyncCollaborationClient(new Gson(), "remotely-device");
         client.identify(new ReSyncCollaborationClient.Identity("user", "Alex", "", "restudio"));

@@ -11,11 +11,14 @@ import java.util.ArrayList;
 import java.util.List;
 
 public final class ReSyncCollaborationClient extends CollaborationService {
+    private String presenceSessionId = "";
+    private long presenceRevision;
+
     public ReSyncCollaborationClient(Gson gson, String clientId) {
         super(clientId);
     }
 
-    public boolean applySnapshot(String json) {
+    public synchronized boolean applySnapshot(String json) {
         JsonObject root;
         try {
             JsonElement parsed = JsonTreeParser.parse(json);
@@ -26,6 +29,14 @@ public final class ReSyncCollaborationClient extends CollaborationService {
         if (root == null) {
             return false;
         }
+        String selfSessionId = FlowJson.string(root, "selfSessionId", "");
+        long revision = FlowJson.longValue(root, "revision", 0L);
+        if (revision > 0L && selfSessionId.equals(presenceSessionId) && revision <= presenceRevision) {
+            return false;
+        }
+        if (revision == 0L && presenceRevision > 0L && selfSessionId.equals(presenceSessionId)) {
+            return false;
+        }
         List<String> selfSessionIds = FlowJson.stringList(root, "selfSessionIds");
         List<Presence> collaborators = new ArrayList<>();
         FlowJson.array(root, "collaborators").forEach(value -> {
@@ -33,8 +44,17 @@ public final class ReSyncCollaborationClient extends CollaborationService {
                 collaborators.add(presence(value.getAsJsonObject()));
             }
         });
-        return acceptSnapshot(FlowJson.string(root, "selfSessionId", ""), identity(FlowJson.object(root, "selfIdentity")),
-            selfSessionIds, collaborators);
+        presenceSessionId = selfSessionId;
+        presenceRevision = revision;
+        return acceptSnapshot(selfSessionId, identity(FlowJson.object(root, "selfIdentity")), selfSessionIds,
+            collaborators);
+    }
+
+    @Override
+    public synchronized void connectionLost() {
+        presenceSessionId = "";
+        presenceRevision = 0L;
+        super.connectionLost();
     }
 
     public void applyResourceChange(ResourceChange change) {
