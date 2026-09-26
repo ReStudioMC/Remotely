@@ -11,8 +11,11 @@ import redxax.oxy.remotely.session.TerminalSession;
 import redxax.oxy.remotely.ui.settings.data.ServerSettingsDataController;
 import redxax.oxy.remotely.settings.server.ServerSettingsSnapshot;
 import restudio.rescreen.platform.Async;
+import restudio.rescreen.platform.http.HttpTransport;
 import restudio.rebase.api.unified.internal.StandardOutputStateParser;
 import restudio.rebase.backend.TerminalSessionProvider;
+import restudio.rebase.backend.RemoteFileSystemProvider;
+import restudio.rebase.backend.RemotePath;
 import restudio.rebase.restudio.api.models.ServerModels;
 import restudio.rebase.resource.ResourcePoolModels;
 import restudio.rebase.health.ServerHealth;
@@ -39,6 +42,18 @@ import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 public interface ServerScreenHost {
+    record StorageFiles(RemoteFileSystemProvider provider, RemotePath root) {
+        public StorageFiles {
+            provider = Objects.requireNonNull(provider, "provider");
+            root = Objects.requireNonNull(root, "root");
+        }
+    }
+
+    default StorageFiles storageFiles(Object target) {
+        return new StorageFiles(RemoteFileSystemProvider.unavailable(), RemotePath.root());
+    }
+
+    default HttpTransport weatherTransport() { return null; }
     enum ServerManagerMode {
         FULL,
         REACTOR_ONLY
@@ -95,16 +110,16 @@ public interface ServerScreenHost {
     }
 
     record LocalStatus(boolean controllerAvailable, boolean knownSession, boolean ready, String state, String desiredState,
-                       Integer exitCode, String lastError, long pid, long wrapperPid, long serverPid, List<Long> pids) {
+                       Integer exitCode, String lastError, long pid, long wrapperPid, long serverPid, List<Long> pids, long startTimeMs) {
         public LocalStatus(boolean knownSession, boolean ready, String state, String desiredState, Integer exitCode,
                            String lastError, boolean hasActiveProcesses) {
             this(true, knownSession, ready, state, desiredState, exitCode, lastError, 0, 0, 0,
-                    hasActiveProcesses ? List.of(1L) : List.of());
+                    hasActiveProcesses ? List.of(1L) : List.of(), 0);
         }
 
         public LocalStatus(boolean knownSession, boolean ready, String state, String desiredState, Integer exitCode,
                            String lastError) {
-            this(true, knownSession, ready, state, desiredState, exitCode, lastError, 0, 0, 0, List.of());
+            this(true, knownSession, ready, state, desiredState, exitCode, lastError, 0, 0, 0, List.of(), 0);
         }
 
         public LocalStatus {
@@ -126,6 +141,10 @@ public interface ServerScreenHost {
             String normalized = state.trim().toUpperCase(Locale.ROOT);
             return !hasActiveProcesses() && ("STOPPED".equals(normalized) || "CRASHED".equals(normalized));
         }
+    }
+
+    default boolean isStaleLocalStatus(Object target, LocalStatus status) {
+        return false;
     }
 
     default void applyLocalStatus(Object target, LocalStatus status, TerminalSession session) {
@@ -283,19 +302,28 @@ public interface ServerScreenHost {
     record ConfigurationState(Object original, Object draft, HostView remoteHost, boolean editMode,
                                boolean restudioBackend, boolean restudioCreation, String serverIdentifier,
                                String preselectedPlanName, boolean resourcePoolCreation,
-                               ResourcePoolModels.DraftOptions poolOptions) {
+                               ResourcePoolModels.DraftOptions poolOptions,
+                               ResourcePoolController.PoolView poolView) {
+        public ConfigurationState(Object original, Object draft, HostView remoteHost, boolean editMode,
+                                  boolean restudioBackend, boolean restudioCreation, String serverIdentifier,
+                                  String preselectedPlanName, boolean resourcePoolCreation,
+                                  ResourcePoolModels.DraftOptions poolOptions) {
+            this(original, draft, remoteHost, editMode, restudioBackend, restudioCreation, serverIdentifier,
+                    preselectedPlanName, resourcePoolCreation, poolOptions, null);
+        }
+
         public ConfigurationState(Object original, Object draft, HostView remoteHost, boolean editMode,
                                   boolean restudioBackend, boolean restudioCreation, String serverIdentifier,
                                   String preselectedPlanName, boolean resourcePoolCreation) {
             this(original, draft, remoteHost, editMode, restudioBackend, restudioCreation, serverIdentifier,
-                    preselectedPlanName, resourcePoolCreation, new ResourcePoolModels.DraftOptions(List.of()));
+                    preselectedPlanName, resourcePoolCreation, new ResourcePoolModels.DraftOptions(List.of()), null);
         }
 
         public ConfigurationState(Object original, Object draft, HostView remoteHost, boolean editMode,
                                   boolean restudioBackend, boolean restudioCreation, String serverIdentifier,
                                   String preselectedPlanName) {
             this(original, draft, remoteHost, editMode, restudioBackend, restudioCreation, serverIdentifier,
-                    preselectedPlanName, false, new ResourcePoolModels.DraftOptions(List.of()));
+                    preselectedPlanName, false, new ResourcePoolModels.DraftOptions(List.of()), null);
         }
 
         public ConfigurationState {
@@ -1298,6 +1326,11 @@ public interface ServerScreenHost {
 
     default void openServerConfiguration(Screen current, ServerModels.ClientServerView server) {
         unavailable(Action.SERVER_CONFIGURATION);
+    }
+
+    default void openServerConfiguration(Screen current, ServerModels.ClientServerView server, String initialTab,
+                                         String diskMiB) {
+        openServerConfiguration(current, server);
     }
 
     default void openServerConfiguration(Screen current, Object instance) {

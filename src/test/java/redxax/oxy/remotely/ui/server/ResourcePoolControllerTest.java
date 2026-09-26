@@ -21,6 +21,23 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ResourcePoolControllerTest {
     @Test
+    void invalidActivationResourcesCannotCreateAnOrphanDraft() {
+        int[] requests = {0};
+        ResourcePoolClient client = new ResourcePoolClient((method, path, body) -> {
+            requests[0]++;
+            return Async.failed(new AssertionError("Unexpected Request"));
+        });
+        ResourcePoolController controller = controller(client, new AtomicReference<>("account"));
+        ResourcePoolController.Creation creation = controller.begin(UUID.randomUUID());
+        ServerScreenHost.PoolResources invalid = new ServerScreenHost.PoolResources(
+                "minecraft", "paper", "2048", "200", "2048", "200", "", "0");
+
+        assertThrows(IllegalArgumentException.class,
+                () -> controller.createDraft(creation, "QA", invalid, Map.of(), Map.of()));
+        assertEquals(0, requests[0]);
+    }
+
+    @Test
     void snapshotReportsEveryPendingResourceState() {
         ResourcePoolModels.Pool pool = pool();
         ResourcePoolModels.Draft draft = draft(pool.id(), ResourcePoolModels.DraftState.ACTIVATING, null);
@@ -81,6 +98,29 @@ class ResourcePoolControllerTest {
         assertEquals("second", controller.snapshot().accountId());
         assertFalse(controller.snapshot().loading());
         assertTrue(controller.snapshot().pools().isEmpty());
+    }
+
+    @Test
+    void explicitRefreshReplacesAStalledRead() {
+        List<Async<String>> responses = new ArrayList<>();
+        ResourcePoolClient client = new ResourcePoolClient((method, path, body) -> {
+            if (path.equals("/billing/resource-pools/offers")) return Async.completed("[]");
+            if (path.startsWith("/billing/resource-pools/purchases?")) return Async.completed(emptyPage());
+            Async<String> response = Async.pending();
+            responses.add(response);
+            return response;
+        });
+        ResourcePoolController controller = controller(client, new AtomicReference<>("account"));
+
+        controller.refresh();
+        Async<String> stalled = responses.getFirst();
+        controller.refresh();
+
+        assertTrue(stalled.isCancelled());
+        assertEquals(2, responses.size());
+        responses.get(1).complete(emptyPage());
+        assertFalse(controller.snapshot().loading());
+        assertTrue(controller.snapshot().message().isBlank());
     }
 
     @Test
@@ -388,7 +428,7 @@ class ResourcePoolControllerTest {
         });
         ResourcePoolController controller = controller(client, account);
         Async<ResourcePoolModels.Progress> result = controller.assign(
-                allocation(poolId, ResourcePoolModels.AllocationState.DISABLED, null), "2048", "200");
+                allocation(poolId, ResourcePoolModels.AllocationState.DISABLED, null), "2048", "200", "10240");
 
         account.set("second");
         refreshed.complete(allocationJson(poolId));
@@ -396,6 +436,51 @@ class ResourcePoolControllerTest {
         assertTrue(result.isDone());
         assertTrue(ResourcePoolController.message(result.failure()).contains("Account Changed"));
         assertEquals(0, assignments[0]);
+    }
+
+    @Test
+    void settledAssignmentAllowsANewAssignmentWithANewRequestIdentity() {
+        UUID poolId = UUID.randomUUID();
+        List<UUID> posts = new ArrayList<>();
+        boolean[] settled = {false};
+        ResourcePoolClient client = new ResourcePoolClient((method, path, body) -> {
+            if (path.endsWith("/refresh")) return Async.completed(allocationJson(poolId));
+            if (method.equals("POST") && path.endsWith("/assign")) {
+                UUID requestId = UUID.fromString(field(body, "requestId"));
+                posts.add(requestId);
+                String operation = operationJson(requestId, field(body, "ramMiB"), field(body, "cpuQuotaPercent"),
+                        field(body, "diskMiB"), ResourcePoolModels.OperationState.PENDING);
+                return Async.completed("{\"pool\":" + poolJson(poolId) + ",\"allocation\":" + allocationJson(poolId)
+                        + ",\"operation\":" + operation + ",\"hosting\":null,\"replayed\":false}");
+            }
+            if (path.startsWith("/resource-pools/") && path.contains("/operations/")) {
+                UUID requestId = UUID.fromString(path.substring(path.lastIndexOf('/') + 1));
+                return Async.completed("{\"operation\":" + operationJson(requestId, "2048", "200", "10240",
+                        settled[0] ? ResourcePoolModels.OperationState.SETTLED : ResourcePoolModels.OperationState.PENDING)
+                        + ",\"hosting\":null}");
+            }
+            if (path.equals("/resource-pools?page=0&size=25")) return Async.completed(page(poolJson(poolId)));
+            if (path.contains("/drafts?")) return Async.completed(emptyPage());
+            if (path.contains("/allocations?")) return Async.completed(page(allocationJson(poolId)));
+            if (path.equals("/billing/resource-pools/offers")) return Async.completed("[]");
+            if (path.startsWith("/billing/resource-pools/purchases?")) return Async.completed(emptyPage());
+            return Async.failed(new AssertionError("Unexpected Request " + method + " " + path));
+        });
+        ResourcePoolController controller = controller(client, new AtomicReference<>("account"));
+        ResourcePoolModels.Allocation server = allocation(poolId, ResourcePoolModels.AllocationState.DISABLED, null);
+        controller.refresh();
+
+        assertEquals(ResourcePoolModels.OperationState.PENDING,
+                controller.assign(server, "2048", "200", "10240").join().operation().state());
+        assertTrue(controller.assign(server, "3072", "300", "10240").failure() != null);
+        assertEquals(1, posts.size());
+
+        settled[0] = true;
+        controller.refresh();
+        assertEquals(ResourcePoolModels.OperationState.PENDING,
+                controller.assign(server, "3072", "300", "10240").join().operation().state());
+        assertEquals(2, posts.size());
+        assertFalse(posts.getFirst().equals(posts.getLast()));
     }
 
     @Test
@@ -413,6 +498,25 @@ class ResourcePoolControllerTest {
         assertEquals(121, purchaseReads[0]);
         assertTrue(controller.snapshot().message().contains("Automatic Refresh Paused"));
         assertFalse(scheduler.runPoll());
+    }
+
+    @Test
+    void unchangedPendingPollDoesNotNotifyTheScreen() {
+        PollScheduler scheduler = new PollScheduler();
+        int[] purchaseReads = {0};
+        ResourcePoolController controller = new ResourcePoolController(pollingClient(purchaseReads), scheduler,
+                () -> "account");
+        int[] notifications = {0};
+        controller.listen(ignored -> notifications[0]++);
+
+        controller.refresh();
+        int beforePoll = notifications[0];
+        long generation = controller.snapshot().generation();
+        assertTrue(scheduler.runPoll());
+
+        assertEquals(2, purchaseReads[0]);
+        assertEquals(beforePoll, notifications[0]);
+        assertTrue(controller.snapshot().generation() > generation);
     }
 
     @Test
@@ -540,6 +644,15 @@ class ResourcePoolControllerTest {
                 + "\"effective\":{\"ramMiB\":\"0\",\"cpuQuotaPercent\":\"0\"},"
                 + "\"retained\":{\"diskMiB\":\"0\",\"backupMiB\":\"0\"},\"state\":\"DISABLED\","
                 + "\"currentRequestId\":null,\"providerRevision\":\"2\"}";
+    }
+
+    private static String operationJson(UUID requestId, String ram, String cpu, String disk,
+                                        ResourcePoolModels.OperationState state) {
+        return "{\"requestId\":\"" + requestId + "\",\"serverId\":\"server\",\"allocationRevision\":\"1\","
+                + "\"action\":\"ASSIGN\",\"desired\":{\"ramMiB\":\"" + ram + "\",\"cpuQuotaPercent\":\"" + cpu + "\"},"
+                + "\"reserved\":{\"ramMiB\":\"" + ram + "\",\"cpuQuotaPercent\":\"" + cpu + "\"},"
+                + "\"retained\":{\"diskMiB\":\"" + disk + "\",\"backupMiB\":\"0\"},\"state\":\"" + state + "\","
+                + "\"hostingRevision\":null,\"providerRevision\":\"2\",\"nodeId\":\"node\"}";
     }
 
     private static String poolJson(UUID poolId) {

@@ -173,15 +173,17 @@ public final class ResourcePoolController {
         private final String accountId;
         private final String ramMiB;
         private final String cpuPercent;
+        private final String diskMiB;
         private ResourcePoolModels.Allocation authority;
 
         private PendingMutation(MutationKind kind, ResourcePoolModels.Allocation allocation, String accountId,
-                                String ramMiB, String cpuPercent) {
+                                String ramMiB, String cpuPercent, String diskMiB) {
             this.kind = kind;
             this.allocation = allocation;
             this.accountId = accountId;
             this.ramMiB = ramMiB;
             this.cpuPercent = cpuPercent;
+            this.diskMiB = diskMiB;
         }
     }
 
@@ -221,7 +223,7 @@ public final class ResourcePoolController {
     private final TaskScheduler scheduler;
     private final Supplier<String> account;
     private Consumer<Snapshot> listener = ignored -> {};
-    private Snapshot snapshot = Snapshot.empty();
+    private volatile Snapshot snapshot = Snapshot.empty();
     private TaskScheduler.ScheduledTask pollTask;
     private Async<?> read;
     private final Map<String, Async<?>> pageReads = new LinkedHashMap<>();
@@ -282,20 +284,19 @@ public final class ResourcePoolController {
             clearPageLoading();
         }
         String accountId = currentAccount();
+        Async<?> previous = null;
         if (read != null && !read.isDone()) {
-            if (accountId.equals(snapshot.accountId())) {
-                if (!visibleLoading) {
-                    refreshQueued = true;
-                }
+            if (accountId.equals(snapshot.accountId()) && !visibleLoading) {
+                refreshQueued = true;
                 return;
             }
-            Async<?> previous = read;
+            previous = read;
             read = null;
             refreshQueued = false;
-            previous.cancel();
         }
         cancelPoll();
         long ticket = ++generation;
+        if (previous != null) previous.cancel();
         boolean sameAccount = accountId.equals(snapshot.accountId());
         boolean resetPages = visibleLoading || !sameAccount;
         if (!sameAccount) {
@@ -1106,10 +1107,7 @@ public final class ResourcePoolController {
                                                        Map<String, String> settings,
                                                        Map<String, String> initialFiles) {
         Objects.requireNonNull(creation, "creation");
-        Objects.requireNonNull(resources, "resources");
-        if (resources.gameId().isBlank() || resources.profileId().isBlank()) {
-            throw new IllegalArgumentException("Game And Profile Are Required");
-        }
+        validate(resources);
         ResourcePoolModels.CreateDraftRequest request = new ResourcePoolModels.CreateDraftRequest(
                 creation.createRequestId(), creation.draftId(), name, resources.gameId(), resources.profileId(),
                 settings == null ? Map.of() : settings, initialFiles == null ? Map.of() : initialFiles);
@@ -1208,27 +1206,29 @@ public final class ResourcePoolController {
     }
 
     public Async<ResourcePoolModels.Progress> assign(ResourcePoolModels.Allocation allocation,
-                                                      String ramMiB, String cpuPercent) {
+                                                      String ramMiB, String cpuPercent, String diskMiB) {
         positive(ramMiB, "RAM");
         positive(cpuPercent, "CPU");
-        return mutate(allocation, MutationKind.ASSIGN, ramMiB, cpuPercent);
+        positive(diskMiB, "Disk");
+        return mutate(allocation, MutationKind.ASSIGN, ramMiB, cpuPercent, diskMiB);
     }
 
     public Async<ResourcePoolModels.Progress> disable(ResourcePoolModels.Allocation allocation) {
-        return mutate(allocation, MutationKind.DISABLE, "0", "0");
+        return mutate(allocation, MutationKind.DISABLE, "0", "0", "0");
     }
 
     private Async<ResourcePoolModels.Progress> mutate(ResourcePoolModels.Allocation allocation, MutationKind kind,
-                                                       String ramMiB, String cpuPercent) {
+                                                       String ramMiB, String cpuPercent, String diskMiB) {
         Objects.requireNonNull(allocation, "allocation");
         String key = allocation.poolId() + ":" + allocation.serverId();
         PendingMutation pending = mutations.get(key);
         if (pending == null) {
-            pending = new PendingMutation(kind, allocation, currentAccount(), ramMiB, cpuPercent);
+            pending = new PendingMutation(kind, allocation, currentAccount(), ramMiB, cpuPercent, diskMiB);
             mutations.put(key, pending);
         } else if (!pending.accountId.equals(currentAccount())) {
             return Async.failed(new IllegalStateException("Account Changed During Resource Request"));
-        } else if (pending.kind != kind || !pending.ramMiB.equals(ramMiB) || !pending.cpuPercent.equals(cpuPercent)) {
+        } else if (pending.kind != kind || !pending.ramMiB.equals(ramMiB) || !pending.cpuPercent.equals(cpuPercent)
+                || !pending.diskMiB.equals(diskMiB)) {
             return Async.failed(new IllegalStateException("Refresh Before Changing This Resource Request"));
         }
         PendingMutation request = pending;
@@ -1265,7 +1265,7 @@ public final class ResourcePoolController {
             mutation = request.kind == MutationKind.ASSIGN
                     ? api.assign(allocation.poolId(), allocation.serverId(), new ResourcePoolModels.AssignRequest(
                     request.requestId, allocation.nodeId(), allocation.revision(), allocation.providerRevision(),
-                    request.ramMiB, request.cpuPercent))
+                    request.ramMiB, request.cpuPercent, request.diskMiB))
                     : api.disable(allocation.poolId(), allocation.serverId(), new ResourcePoolModels.DisableRequest(
                     request.requestId, allocation.nodeId(), allocation.revision(), allocation.providerRevision()));
         } catch (RuntimeException failure) {
@@ -1338,8 +1338,26 @@ public final class ResourcePoolController {
     }
 
     private void publish(Snapshot next) {
+        Snapshot previous = snapshot;
         snapshot = next;
-        listener.accept(next);
+        if (!previous.accountId().equals(next.accountId()) || !sameVisiblePools(previous.pools(), next.pools())
+                || !previous.offers().equals(next.offers()) || !previous.purchases().equals(next.purchases())
+                || !previous.poolPages().equals(next.poolPages()) || !previous.purchasePages().equals(next.purchasePages())
+                || previous.loading() != next.loading() || !previous.message().equals(next.message())) {
+            listener.accept(next);
+        }
+    }
+
+    private static boolean sameVisiblePools(List<PoolView> left, List<PoolView> right) {
+        if (left.size() != right.size()) return false;
+        for (int i = 0; i < left.size(); i++) {
+            PoolView a = left.get(i);
+            PoolView b = right.get(i);
+            if (!a.pool().equals(b.pool()) || !a.drafts().equals(b.drafts())
+                    || !a.allocations().equals(b.allocations()) || !a.draftPages().equals(b.draftPages())
+                    || !a.allocationPages().equals(b.allocationPages())) return false;
+        }
+        return true;
     }
 
     private void cancelPoll() {

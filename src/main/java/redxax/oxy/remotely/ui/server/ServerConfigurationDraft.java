@@ -86,7 +86,6 @@ final class ServerConfigurationDraft {
                 () -> draft[0] == null || draft[0].allowSoftwareChange());
             List<Setting> sections = new ArrayList<>();
             add(ui.settings(), "General", sections);
-            add(ui.settings(), "Server Software", sections);
             add(ui.settings(), "Features", sections);
             add(ui.settings(), "Java", sections);
             draft[0] = new ServerConfigurationDraft(target, settings, ui, sections);

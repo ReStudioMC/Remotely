@@ -14,6 +14,12 @@ import redxax.oxy.remotely.settings.server.ServerSettingsRegistry;
 import redxax.oxy.remotely.settings.server.ServerSettingsSnapshot;
 import redxax.oxy.remotely.ui.settings.data.ServerSettingsDataController;
 import restudio.rebase.resource.ResourcePoolModels;
+import restudio.rebase.storage.StorageBreakdownController;
+import restudio.rebase.resource.marketplace.HostedModpackSelection;
+import restudio.rebase.backend.CapabilityIds;
+import restudio.rebase.backend.FileSpace;
+import restudio.rebase.backend.RemoteFileSystemProvider;
+import restudio.rebase.backend.RemotePath;
 import restudio.rescreen.config.Config;
 import restudio.rescreen.theme.ThemeManager;
 import restudio.rescreen.platform.input.ReKey;
@@ -24,6 +30,8 @@ import restudio.rescreen.ui.rescreen.ReScreen;
 import restudio.rescreen.ui.screens.DesktopWindowsOverlay;
 import restudio.rescreen.ui.settings.Setting;
 import restudio.rescreen.ui.settings.SettingsScreen;
+import restudio.rescreen.ui.widgets.IconButton;
+import restudio.rescreen.ui.widgets.MountableButtonWidget;
 import restudio.rescreen.ui.widgets.ScreenWindowWidget;
 import restudio.rescreen.util.Identifier;
 import restudio.rescreen.util.Notification;
@@ -31,6 +39,7 @@ import restudio.rescreen.util.Sound;
 
 import java.io.IOException;
 import java.io.StringWriter;
+import java.math.BigInteger;
 import java.time.Duration;
 import java.util.*;
 import restudio.rescreen.platform.Async;
@@ -43,6 +52,8 @@ import static restudio.rescreen.util.SoundUtils.playSound;
 
 @SuppressWarnings("unchecked")
 public class ServerConfigurationScreen extends ReScreen {
+    static final String STORAGE_TAB = "Storage Breakdown";
+
     private ServerScreenHost screenHost() {
         return remotelyClient == null ? ServerScreenHost.of(null) : remotelyClient.getHost().serverScreenHost(remotelyClient);
     }
@@ -62,6 +73,10 @@ public class ServerConfigurationScreen extends ReScreen {
     private final Consumer<Object> creationInitializer;
     private final Consumer<Object> creationCallback;
     private final ResourcePoolController.Creation poolCreation;
+    private final HostedModpackSelection modpackSelection;
+    private String initialTab;
+    private String storageDiskMiB;
+    private StorageBreakdownController storageBreakdownController;
     private ResourcePoolModels.DraftOptions poolOptions = new ResourcePoolModels.DraftOptions(List.of());
 
     private final Map<String, String> remoteVariables = Collections.synchronizedMap(new LinkedHashMap<>());
@@ -80,6 +95,9 @@ public class ServerConfigurationScreen extends ReScreen {
     private final BrowserSafeState.LongValue configurationLoadRevision = new BrowserSafeState.LongValue();
     private ServerSettingsDataController pendingSettingsController;
     private Runnable settingsCleanup = () -> {};
+    private Runnable poolActionCleanup = () -> {};
+    private IconButton applyPoolChanges;
+    private IconButton discardPoolChanges;
     private boolean settingsHandoff;
     private boolean settingsControllerRetained;
     private boolean settingsControllerClosePending;
@@ -92,6 +110,13 @@ public class ServerConfigurationScreen extends ReScreen {
 
     public <T> ServerConfigurationScreen(Screen parent, T instance, Object remoteHostContext, RemotelyClient remotelyClient) {
         this(parent, instance, remoteHostContext, remotelyClient, false);
+    }
+
+    public <T> ServerConfigurationScreen(Screen parent, T instance, Object remoteHostContext, RemotelyClient remotelyClient,
+                                         String initialTab, String storageDiskMiB) {
+        this(parent, instance, remoteHostContext, remotelyClient);
+        this.initialTab = initialTab;
+        this.storageDiskMiB = storageDiskMiB;
     }
 
     public <T> ServerConfigurationScreen(Screen parent, T instance, Object remoteHostContext, RemotelyClient remotelyClient, boolean isReStudioCreation) {
@@ -120,14 +145,27 @@ public class ServerConfigurationScreen extends ReScreen {
     }
 
     public ServerConfigurationScreen(Screen parent, RemotelyClient remotelyClient, ResourcePoolController.Creation poolCreation) {
+        this(parent, remotelyClient, poolCreation, (HostedModpackSelection) null);
+    }
+
+    public ServerConfigurationScreen(Screen parent, RemotelyClient remotelyClient, ResourcePoolController.Creation poolCreation,
+                                     HostedModpackSelection modpackSelection) {
         this(parent, null, null, remotelyClient, true, null, null, null, null,
-                Objects.requireNonNull(poolCreation, "poolCreation"));
+                Objects.requireNonNull(poolCreation, "poolCreation"), modpackSelection);
     }
 
     private <T> ServerConfigurationScreen(Screen parent, T instance, Object remoteHostContext, RemotelyClient remotelyClient,
                                           boolean isReStudioCreation, String preselectedPlanName, Object preset,
                                           Consumer<T> creationInitializer, Consumer<T> creationCallback,
                                           ResourcePoolController.Creation poolCreation) {
+        this(parent, instance, remoteHostContext, remotelyClient, isReStudioCreation, preselectedPlanName, preset,
+                creationInitializer, creationCallback, poolCreation, null);
+    }
+
+    private <T> ServerConfigurationScreen(Screen parent, T instance, Object remoteHostContext, RemotelyClient remotelyClient,
+                                          boolean isReStudioCreation, String preselectedPlanName, Object preset,
+                                          Consumer<T> creationInitializer, Consumer<T> creationCallback,
+                                          ResourcePoolController.Creation poolCreation, HostedModpackSelection modpackSelection) {
         super();
         this.parent = parent;
         this.isEditMode = instance != null;
@@ -140,6 +178,7 @@ public class ServerConfigurationScreen extends ReScreen {
         this.creationInitializer = creationInitializer == null ? null : value -> creationInitializer.accept((T) value);
         this.creationCallback = creationCallback == null ? null : value -> creationCallback.accept((T) value);
         this.poolCreation = poolCreation;
+        this.modpackSelection = modpackSelection;
 
         if (isEditMode) {
             this.tempInstance = host.copyConfigurationTarget(instance, originalInstance.name());
@@ -156,6 +195,7 @@ public class ServerConfigurationScreen extends ReScreen {
             this.tempInstance = host.createConfigurationTarget();
             host.configureTargetDefaults(this.tempInstance);
             host.applyTargetPreset(this.tempInstance, preset);
+            if (modpackSelection != null) this.tempInstance.name(modpackSelection.name());
             this.isReStudioBackend = false;
             if (this.remoteHostContext != null) {
                 host.configureRemoteTarget(this.tempInstance, this.remoteHostContext, null);
@@ -175,6 +215,14 @@ public class ServerConfigurationScreen extends ReScreen {
         return "change.png";
     }
 
+    String poolServerName(String serverId) {
+        return parent instanceof ResourcePoolScreen resources ? resources.poolServerName(serverId) : serverId;
+    }
+
+    ResourcePoolScreen poolResources() {
+        return parent instanceof ResourcePoolScreen resources ? resources : null;
+    }
+
     @Override
     public void init() {
         super.init();
@@ -188,33 +236,64 @@ public class ServerConfigurationScreen extends ReScreen {
         if (!isEditMode && creationInitializer != null) {
             creationInitializer.accept(tempInstance.raw());
         }
-        ServerSettingsDataController controller = screenHost().createServerSettingsController(tempInstance.raw(),
-                ServerSettingsRegistry.getInstance().snapshot(tempInstance.raw()));
         if (poolCreation == null) {
+            ServerSettingsDataController controller = screenHost().createServerSettingsController(tempInstance.raw(),
+                    ServerSettingsRegistry.getInstance().snapshot(tempInstance.raw()));
             setupSettingsUI(extraFiles, controller);
             startInitialConfigLoad();
             return;
         }
+        ServerSettingsSnapshot snapshot = ServerSettingsRegistry.getInstance().snapshot(tempInstance.raw());
+        Async<ServerSettingsDataController> controllerLoad = Async.pending();
+        TaskSchedulers.current().execute(() -> {
+            try {
+                controllerLoad.complete(screenHost().createServerSettingsController(tempInstance.raw(), snapshot));
+            } catch (RuntimeException failure) {
+                controllerLoad.fail(failure);
+            }
+        });
         RemotelyServerApi api = serverApi();
         Async<ResourcePoolModels.DraftOptions> options = api == null
                 ? Async.failed(new IllegalStateException("Server Profiles Are Unavailable"))
                 : AsyncTools.withTimeout(api.resourcePools().getDraftOptions(), TaskSchedulers.current(), Duration.ofSeconds(20));
         options.whenComplete((available, failure) -> ScreenManager.getInstance().execute(() -> {
             if (screenClosed) {
-                controller.close();
+                controllerLoad.whenComplete((controller, ignored) -> {
+                    if (controller != null) controller.close();
+                });
                 return;
             }
-            if (failure != null || available == null || available.games().isEmpty()
-                    || available.games().stream().allMatch(game -> game.profiles().isEmpty())) {
-                controller.close();
-                new Notification("Configuration Unavailable", failure == null ? "No Server Profiles Are Available"
+            if (failure != null || available == null || available.games().stream()
+                    .noneMatch(game -> "minecraft:java".equals(game.id()) && !game.profiles().isEmpty())) {
+                controllerLoad.whenComplete((controller, ignored) -> {
+                    if (controller != null) controller.close();
+                });
+                new Notification("Configuration Unavailable", failure == null ? "No Minecraft Server Images Are Available"
                         : configurationFailureMessage(failure), Notification.Type.ERROR);
                 return;
             }
-            poolOptions = available;
-            setupSettingsUI(extraFiles, controller);
-            startInitialConfigLoad();
+            controllerLoad.whenComplete((controller, controllerFailure) -> ScreenManager.getInstance().execute(() -> {
+                if (screenClosed || controllerFailure != null || controller == null
+                        || !(parent instanceof ResourcePoolScreen resources)
+                        || resources.poolView(poolCreation.poolId()) == null) {
+                    if (controller != null) controller.close();
+                    if (!screenClosed) new Notification("Configuration Unavailable",
+                            controllerFailure != null ? configurationFailureMessage(controllerFailure)
+                                    : "Resource Pool Capacity Is Unavailable", Notification.Type.ERROR);
+                    return;
+                }
+                poolOptions = available;
+                setupSettingsUI(extraFiles, controller);
+                startInitialConfigLoad();
+            }));
         }));
+    }
+
+    private void updatePoolActions() {
+        ResourcePoolScreen resources = poolResources();
+        if (resources == null || poolCreation == null) return;
+        if (applyPoolChanges != null) applyPoolChanges.setActive(resources.canApplyChanges(poolCreation.poolId()));
+        if (discardPoolChanges != null) discardPoolChanges.setActive(resources.hasChanges(poolCreation.poolId()));
     }
 
     private static String configurationFailureMessage(Throwable failure) {
@@ -234,11 +313,16 @@ public class ServerConfigurationScreen extends ReScreen {
         long revision = configurationLoadRevision.incrementAndGet();
         ServerScreenHost host = screenHost();
         boolean remote = tempInstance.remote();
-        if (isReStudioCreation && poolCreation == null) {
+        if (isReStudioCreation) {
             remoteVariables.put("SOFTWARE", "PAPER");
             remoteVariables.put("VERSION", "latest");
             remoteVariables.put("BUILD", "latest");
+            if (modpackSelection != null) {
+                remoteVariables.put("SOFTWARE", modpackSelection.software());
+                remoteVariables.put("VERSION", modpackSelection.minecraftVersion());
+            }
         }
+        if (poolCreation != null) return;
 
         observeConfigurationLoad(revision, "Server Properties",
                 host.configurationLoad("Server Properties", host.loadInstanceProperties(tempInstance.raw(), isEditMode && remote), () -> null),
@@ -250,7 +334,7 @@ public class ServerConfigurationScreen extends ReScreen {
                 fixedSettingsSuppliers.keySet());
         observeConfigurationLoad(revision, "Modpack Settings",
                 host.configurationLoad("Modpack Settings", host.loadInstanceModpack(tempInstance.raw()), () -> null),
-                Set.of("Server Software", "General"));
+                Set.of("General"));
         host.configurationLoad("Server Files", host.listInstanceFiles(tempInstance.raw()), List::of)
                 .whenComplete((files, failure) -> ScreenManager.getInstance().execute(() -> {
                     if (!acceptConfigurationLoad(revision, "Server Files", failure)) return;
@@ -269,7 +353,7 @@ public class ServerConfigurationScreen extends ReScreen {
             });
             observeConfigurationLoad(revision, "Startup Configuration",
                     host.configurationLoad("Startup Configuration", startup, () -> null),
-                    Set.of("Server Software", "Software Settings", "Java"));
+                    Set.of("General", "Software Settings", "Java"));
         }
 
         settingsController.load().whenComplete((ignored, failure) -> ScreenManager.getInstance().execute(() -> {
@@ -318,12 +402,15 @@ public class ServerConfigurationScreen extends ReScreen {
         ServerScreenHost.ConfigurationState state = new ServerScreenHost.ConfigurationState(
                 originalInstance == null ? null : originalInstance.raw(), tempInstance.raw(), remoteHostContext,
                 isEditMode, isReStudioBackend, isReStudioCreation, serverIdentifier, preselectedPlanName,
-                poolCreation != null, poolOptions);
+                poolCreation != null, poolOptions, parent instanceof ResourcePoolScreen resources && poolCreation != null
+                ? resources.poolView(poolCreation.poolId()) : null);
         configurationUi = screenHost().createConfigurationUi(this, state, settingsController, remoteVariables, extraFiles,
                 this::reloadDataDrivenSettings, () -> allowServerSoftwareChange(null));
         Map<String, Supplier<List<Setting>>> settingsByTab = new LinkedHashMap<>(configurationUi.settings());
+        if (isEditMode) settingsByTab.put(STORAGE_TAB, this::storageSettings);
         List<Runnable> cleanupActions = new ArrayList<>();
         cleanupActions.add(() -> screenClosed = true);
+        cleanupActions.add(() -> { if (storageBreakdownController != null) storageBreakdownController.close(); });
 
         fixedSettingsSuppliers = new LinkedHashMap<>(settingsByTab);
         mergeDataDrivenTabs(settingsByTab);
@@ -348,13 +435,36 @@ public class ServerConfigurationScreen extends ReScreen {
         };
         settingsCleanup = combinedCleanup;
 
-        settingsScreen = new SettingsScreen(parent, configurationUi.title(), settingsByTab, this::saveConfiguration, combinedCleanup) {
+        settingsScreen = new SettingsScreen(parent, configurationUi.title(), settingsByTab, this::saveConfiguration,
+                combinedCleanup, initialTab) {
+            @Override
+            public void init() {
+                super.init();
+                ResourcePoolScreen resources = poolResources();
+                if (poolCreation == null || resources == null) return;
+                applyPoolChanges = new IconButton.Builder().size(18, 18)
+                        .imagePath("checkmark.png").hint("Apply All Previewed Server Changes")
+                        .onClick(() -> resources.applyChanges(poolCreation.poolId())).build();
+                discardPoolChanges = new IconButton.Builder().size(18, 18)
+                        .imagePath("delete.png").hint("Discard All Resource Previews")
+                        .onClick(() -> resources.discardChanges(poolCreation.poolId())).build();
+                header().addRight(discardPoolChanges).addRight(applyPoolChanges)
+                        .addRight("reload.png", resources::refreshPool, "Refresh Pool").build();
+                poolActionCleanup.run();
+                poolActionCleanup = resources.watchChanges(ServerConfigurationScreen.this::updatePoolActions);
+            }
+
             @Override
             public void removed() {
+                poolActionCleanup.run();
+                poolActionCleanup = () -> {};
                 settingsCleanup.run();
                 super.removed();
             }
         };
+        if (poolCreation != null || parent instanceof ResourcePoolScreen) {
+            settingsScreen.enableNavigation(parent);
+        }
         ServerSettingsDataController publishedController = settingsController;
         Runnable publicationCleanup = publishedController.onTabsPublished(tabs -> ScreenManager.getInstance().execute(() -> {
             if (screenClosed || this.settingsController != publishedController) return;
@@ -367,6 +477,11 @@ public class ServerConfigurationScreen extends ReScreen {
             }
         }));
         cleanupActions.add(publicationCleanup);
+        if (poolCreation != null || parent instanceof ResourcePoolScreen) {
+            settingsHandoff = true;
+            ScreenManager.getInstance().replaceScreen(this, settingsScreen);
+            return;
+        }
         if (Config.desktopMode) {
             DesktopWindowsOverlay overlay = ScreenManager.getInstance().getDesktopWindowsOverlay();
             if (overlay != null) {
@@ -382,6 +497,48 @@ public class ServerConfigurationScreen extends ReScreen {
         }
         settingsHandoff = true;
         screenHost().application().setScreen(settingsScreen);
+    }
+
+    private List<Setting> storageSettings() {
+        if (storageBreakdownController == null) {
+            ServerScreenHost.StorageFiles files = screenHost().storageFiles(originalInstance.raw());
+            RemoteFileSystemProvider provider = files.provider();
+            RemotePath root = files.root();
+            String unavailable = null;
+            String sourceId = null;
+            var capability = provider.operationCapability(CapabilityIds.FILES, List.of(), root);
+            if (!capability.available()) {
+                unavailable = capability.detail() == null || capability.detail().isBlank()
+                        ? "Server Files Are Unavailable" : capability.detail();
+            } else {
+                try {
+                    FileSpace space = FileSpace.from(provider);
+                    root = provider.canonicalPath(root);
+                    if (space == null || root == null) unavailable = "This File Source Has No Stable Identity";
+                    else sourceId = space + "|" + root.asString();
+                } catch (RuntimeException failure) {
+                    unavailable = "This File Source Has No Stable Identity";
+                }
+            }
+            BigInteger capacity = null;
+            if (storageDiskMiB != null && !storageDiskMiB.isBlank()) {
+                try {
+                    capacity = new BigInteger(storageDiskMiB).max(BigInteger.ZERO).multiply(BigInteger.valueOf(1024L * 1024));
+                } catch (NumberFormatException ignored) {
+                    capacity = null;
+                }
+            }
+            storageBreakdownController = new StorageBreakdownController(remotelyClient.storageBreakdownIndex(),
+                    screenHost().accountIdentity().subjectId(), sourceId, provider, root, capacity, unavailable,
+                    () -> screenHost().accountIdentity().subjectId(),
+                    (parts, size) -> {
+                        ResourceAllocationBarWidget bar = new ResourceAllocationBarWidget("Disk",
+                                parts.stream().map(part -> new ResourceAllocationBarWidget.StoragePart(part.name(), part.bytes())).toList(), size);
+                        bar.entranceAnimationEnabled = false;
+                        return bar;
+                    });
+        }
+        return storageBreakdownController.settings();
     }
 
     private void mergeDataDrivenTabs(Map<String, Supplier<List<Setting>>> settingsByTab) {
@@ -542,40 +699,110 @@ public class ServerConfigurationScreen extends ReScreen {
     }
 
     private void createPoolServer() {
-        if (configurationUi == null) {
+        if (configurationUi == null || creationInFlight) {
             return;
         }
-        Map<String, String> files = new LinkedHashMap<>(settingsController.changedFileContents());
-        ResourcePoolController controller = parent instanceof ResourcePoolScreen resources
-                ? resources.controller() : null;
+        PoolAllocationEditor editor = parent instanceof ResourcePoolScreen resources
+                ? resources.poolEditor(poolCreation.poolId()) : null;
+        if (editor != null && (editor.hasChanges() || editor.hasPending())) {
+            new Notification("Existing Server Change Pending", editor.hasChanges()
+                    ? "Apply Or Reset The Resource Change Before Creating This Server"
+                    : "Wait For Updated Pool Capacity Before Creating This Server", Notification.Type.WARN);
+            return;
+        }
+        creationInFlight = true;
+        ServerScreenHost.PoolResources limits = configurationUi.poolResources().get();
+        if ("0".equals(limits.runtimeRamMiB()) || "0".equals(limits.runtimeCpuPercent())
+                || "0".equals(limits.diskMiB())) {
+            creationInFlight = false;
+            new Notification("Not Enough Pool Capacity", "Add Free RAM, CPU, And Disk Before Creating A Server", Notification.Type.WARN);
+            return;
+        }
+        ResourcePoolController.PoolView pool = parent instanceof ResourcePoolScreen resources
+                ? resources.poolView(poolCreation.poolId()) : null;
+        if (pool == null || new BigInteger(limits.installerRamMiB()).compareTo(
+                new BigInteger(pool.pool().balance().available().ramMiB())) > 0
+                || new BigInteger(limits.installerCpuPercent()).compareTo(
+                new BigInteger(pool.pool().balance().available().cpuQuotaPercent())) > 0) {
+            creationInFlight = false;
+            new Notification("Not Enough Pool Capacity", "Setup Needs More Free RAM Or CPU", Notification.Type.WARN);
+            return;
+        }
+        Map<String, String> files;
+        try {
+            files = initialFiles();
+        } catch (IOException failure) {
+            creationInFlight = false;
+            new Notification("Server Creation Error", configurationFailureMessage(failure), Notification.Type.ERROR);
+            return;
+        }
+        ResourcePoolController controller = parent instanceof ResourcePoolScreen resourceScreen
+                ? resourceScreen.controller() : null;
         if (controller == null) {
+            creationInFlight = false;
             new Notification("Server Draft Error", "Resource Pool Session Is Unavailable", Notification.Type.ERROR);
             return;
         }
-        Notification notice = new Notification.Builder().message("Creating Server Draft").description(tempInstance.name())
+        Notification notice = new Notification.Builder().message("Creating Server").description(tempInstance.name())
                 .type(Notification.Type.INFO).loading(true).autoSlideOut(false).build();
         Async<ResourcePoolModels.Draft> request;
         try {
-            request = controller.createDraft(poolCreation, tempInstance.name(), configurationUi.poolResources().get(),
+            request = controller.createDraft(poolCreation, tempInstance.name(), limits,
                     new LinkedHashMap<>(remoteVariables), files);
         } catch (RuntimeException failure) {
+            creationInFlight = false;
             notice.update().message("Server Draft Invalid").description(ResourcePoolController.message(failure))
                     .type(Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
             return;
         }
         request.whenComplete((draft, failure) -> ScreenManager.getInstance().execute(() -> {
-            if (screenClosed) {
-                return;
-            }
             if (failure != null) {
+                creationInFlight = false;
                 notice.update().message("Server Creation Needs Attention").description(ResourcePoolController.message(failure))
                         .type(Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
                 return;
             }
-            notice.update().message("Server Draft Created").description(draft.metadata().name())
-                    .type(Notification.Type.SUCCESS).loading(false).autoSlideOut(true).commit();
-            settingsCleanup.run();
-            close();
+            notice.update().message("Allocating Server").description(draft.metadata().name()).commit();
+            controller.activate(draft, limits).whenComplete((activated, activationFailure) -> ScreenManager.getInstance().execute(() -> {
+                creationInFlight = false;
+                if (activationFailure != null) {
+                    String failureMessage = ResourcePoolController.message(activationFailure);
+                    String description = failureMessage.contains("Server Address Is Unavailable")
+                            ? "No Free Server Address Is Available. Your Draft Is Saved. Contact Support To Add An Address."
+                            : failureMessage + ". Open Server Drafts To Retry Activation.";
+                    notice.update().message("Server Draft Needs Attention")
+                            .description(description)
+                            .type(Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
+                    return;
+                }
+                boolean active = activated.state() == ResourcePoolModels.DraftState.ACTIVE;
+                boolean review = activated.state() == ResourcePoolModels.DraftState.UNKNOWN;
+                if (active && modpackSelection != null) {
+                    notice.update().message("Installing Modpack").description(activated.metadata().name()).commit();
+                    serverApi().installHostedModpack(activated.serverId(), modpackSelection, activated.id().toString())
+                            .whenComplete((ignored, installFailure) -> ScreenManager.getInstance().execute(() -> {
+                                notice.update().message(installFailure == null ? "Modpack Server Ready" : "Modpack Installation Needs Attention")
+                                        .description(installFailure == null ? activated.metadata().name()
+                                                : ResourcePoolController.message(installFailure))
+                                        .type(installFailure == null ? Notification.Type.SUCCESS : Notification.Type.ERROR)
+                                        .loading(false).autoSlideOut(true).commit();
+                                if (!screenClosed) {
+                                    settingsCleanup.run();
+                                    close();
+                                }
+                            }));
+                    return;
+                }
+                notice.update().message(active ? "Server Created" : review ? "Activation Needs Review" : "Activation Submitted")
+                        .description(review ? activated.reason() == null ? "Setup Did Not Complete" : activated.reason()
+                                : activated.metadata().name())
+                        .type(active ? Notification.Type.SUCCESS : review ? Notification.Type.WARN : Notification.Type.INFO)
+                        .loading(false).autoSlideOut(true).commit();
+                if (!screenClosed) {
+                    settingsCleanup.run();
+                    close();
+                }
+            }));
         }));
     }
 
@@ -873,7 +1100,11 @@ public class ServerConfigurationScreen extends ReScreen {
 
     public void close() {
         screenClosed = true;
-        screenHost().application().openParentScreen(this, parent);
+        if (poolCreation != null || parent instanceof ResourcePoolScreen) {
+            ScreenManager.getInstance().goBack(settingsScreen == null ? this : settingsScreen, parent);
+        } else {
+            screenHost().application().openParentScreen(this, parent);
+        }
     }
 
     @Override
@@ -881,6 +1112,8 @@ public class ServerConfigurationScreen extends ReScreen {
         if (!settingsHandoff) {
             screenClosed = true;
             settingsCleanup.run();
+            poolActionCleanup.run();
+            poolActionCleanup = () -> {};
         }
         super.removed();
     }
