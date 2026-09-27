@@ -10,18 +10,20 @@ import redxax.oxy.remotely.data.player.model.BanInfo;
 import redxax.oxy.remotely.data.player.model.UnifiedPlayer;
 import restudio.rebase.instance.Instance;
 
-import java.util.Map;
-import java.util.UUID;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.Map;
+import java.util.UUID;
+import java.util.function.BiConsumer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class StandardLogSource implements IPlayerSource {
     private final Instance instance;
     private final IPlayerHistoryCollector historyCollector;
     private PlayerService service;
     private boolean enabled = false;
+    private final BiConsumer<Integer, String> logListener = this::processLogLine;
 
     private final Map<String, UUID> nameToUuid = BrowserSafeState.map();
 
@@ -58,7 +60,7 @@ public class StandardLogSource implements IPlayerSource {
     @Override
     public void enable() {
         if (!enabled) {
-            instance.addLogListener(this::processLogLine);
+            instance.addLogListener(logListener);
             enabled = true;
         }
     }
@@ -66,7 +68,7 @@ public class StandardLogSource implements IPlayerSource {
     @Override
     public void disable() {
         if (enabled) {
-            instance.removeLogListener(this::processLogLine);
+            instance.removeLogListener(logListener);
             enabled = false;
         }
     }
@@ -82,7 +84,7 @@ public class StandardLogSource implements IPlayerSource {
 
     private void processLogLine(int lineNum, String line) {
         if (line == null) return;
-        line = ANSI_PATTERN.matcher(line).replaceAll("").trim();
+        line = (line.indexOf('\u001B') < 0 ? line : ANSI_PATTERN.matcher(line).replaceAll("")).trim();
         if (line.isEmpty()) return;
         if (BASELINE_START_MARKER.equals(line)) {
             baselineMode = true;
@@ -98,8 +100,8 @@ public class StandardLogSource implements IPlayerSource {
             return;
         }
 
-        Matcher uuidMatcher = PLAYER_UUID_PATTERN.matcher(line);
-        if (uuidMatcher.matches()) {
+        Matcher uuidMatcher = line.contains("UUID of player ") ? PLAYER_UUID_PATTERN.matcher(line) : null;
+        if (uuidMatcher != null && uuidMatcher.matches()) {
             String name = uuidMatcher.group(1);
             UUID uuid = UUID.fromString(uuidMatcher.group(2));
             nameToUuid.put(name, uuid);
@@ -112,8 +114,8 @@ public class StandardLogSource implements IPlayerSource {
             return;
         }
 
-        Matcher joinMatcher = PLAYER_JOIN_PATTERN.matcher(line);
-        if (joinMatcher.matches()) {
+        Matcher joinMatcher = line.contains(" logged in with entity id ") ? PLAYER_JOIN_PATTERN.matcher(line) : null;
+        if (joinMatcher != null && joinMatcher.matches()) {
             String name = joinMatcher.group(1);
             String ip = joinMatcher.group(2);
             UUID uuid = resolveUuid(name);
@@ -133,8 +135,8 @@ public class StandardLogSource implements IPlayerSource {
             return;
         }
 
-        Matcher fastJoin = PLAYER_LOGIN_FAST_PATTERN.matcher(line);
-        if (fastJoin.matches()) {
+        Matcher fastJoin = line.contains(" joined the game") ? PLAYER_LOGIN_FAST_PATTERN.matcher(line) : null;
+        if (fastJoin != null && fastJoin.matches()) {
             String name = fastJoin.group(1);
             UUID uuid = resolveUuid(name);
             if (uuid != null) {
@@ -151,8 +153,8 @@ public class StandardLogSource implements IPlayerSource {
             return;
         }
 
-        Matcher leaveMatcher = PLAYER_LEAVE_PATTERN.matcher(line);
-        if (leaveMatcher.matches()) {
+        Matcher leaveMatcher = line.contains(" left the game") ? PLAYER_LEAVE_PATTERN.matcher(line) : null;
+        if (leaveMatcher != null && leaveMatcher.matches()) {
             String name = leaveMatcher.group(1);
             UUID uuid = resolveUuid(name);
             if (uuid != null) {
@@ -169,8 +171,8 @@ public class StandardLogSource implements IPlayerSource {
             return;
         }
 
-        Matcher opMatcher = PLAYER_OP_PATTERN.matcher(line);
-        if (opMatcher.matches()) {
+        Matcher opMatcher = line.contains(" server operator") ? PLAYER_OP_PATTERN.matcher(line) : null;
+        if (opMatcher != null && opMatcher.matches()) {
             String name = opMatcher.group(1);
             UUID uuid = resolveUuid(name);
             if (uuid != null) {
@@ -184,8 +186,8 @@ public class StandardLogSource implements IPlayerSource {
             return;
         }
 
-        Matcher deopMatcher = PLAYER_DEOP_PATTERN.matcher(line);
-        if (deopMatcher.matches()) {
+        Matcher deopMatcher = line.contains(" no longer a server operator") ? PLAYER_DEOP_PATTERN.matcher(line) : null;
+        if (deopMatcher != null && deopMatcher.matches()) {
             String name = deopMatcher.group(1);
             UUID uuid = resolveUuid(name);
             if (uuid != null) {
@@ -199,13 +201,13 @@ public class StandardLogSource implements IPlayerSource {
             return;
         }
 
-        if (OP_ALREADY_PATTERN.matcher(line).find() || OP_NOT_PATTERN.matcher(line).find()) {
+        if (line.contains("Nothing changed.") && (OP_ALREADY_PATTERN.matcher(line).find() || OP_NOT_PATTERN.matcher(line).find())) {
             if (service != null) service.refreshSources();
             return;
         }
 
-        Matcher banMatcher = PLAYER_BAN_PATTERN.matcher(line);
-        if (banMatcher.matches()) {
+        Matcher banMatcher = line.contains("Banned ") ? PLAYER_BAN_PATTERN.matcher(line) : null;
+        if (banMatcher != null && banMatcher.matches()) {
             String name = banMatcher.group(1);
             String reason = banMatcher.group(2);
             UUID uuid = resolveUuid(name);
@@ -221,8 +223,8 @@ public class StandardLogSource implements IPlayerSource {
             return;
         }
 
-        Matcher unbanMatcher = PLAYER_UNBAN_PATTERN.matcher(line);
-        if (unbanMatcher.matches()) {
+        Matcher unbanMatcher = line.contains("Unbanned ") ? PLAYER_UNBAN_PATTERN.matcher(line) : null;
+        if (unbanMatcher != null && unbanMatcher.matches()) {
             String name = unbanMatcher.group(1);
             UUID uuid = resolveUuid(name);
             if (uuid != null) {

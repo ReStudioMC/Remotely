@@ -10,16 +10,17 @@ import redxax.oxy.remotely.data.player.IPlayerHistoryCollector;
 import redxax.oxy.remotely.data.player.IPlayerHistoryProvider;
 import restudio.rebase.api.RebaseAPI;
 import restudio.rebase.instance.Instance;
+import restudio.rebase.platform.jvm.JvmAsyncBridge;
 import restudio.rebase.ui.widgets.TerminalWidget;
 import restudio.rescreen.logging.LogSource;
 import restudio.rescreen.logging.LogTypes;
 import restudio.rescreen.logging.ReLog;
+import restudio.rescreen.platform.Async;
 
 import java.lang.reflect.Type;
 import java.nio.file.Path;
 import java.util.*;
-import restudio.rescreen.platform.Async;
-import restudio.rebase.platform.jvm.JvmAsyncBridge;
+import java.util.function.BiConsumer;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -34,6 +35,8 @@ public class StandardPlayerHistoryProvider implements IPlayerHistoryProvider, IP
     private final Map<UUID, List<PlayerSession>> sessionsCache = new HashMap<>();
     private final Map<UUID, PlayerSession> activeSessions = new HashMap<>();
     private final List<PatternHandler> patternHandlers = new ArrayList<>();
+    private final BiConsumer<Integer, String> logListener = this::onLogLine;
+    private final TerminalWidget.OutputListener terminalListener = line -> onLogLine(-1, line);
     private final Function<String, UUID> nameResolver;
     private final Map<UUID, Map<String, Long>> lastCommandSeen = new HashMap<>();
     private final Map<UUID, Map<String, Long>> lastAccessSeen = new HashMap<>();
@@ -48,7 +51,7 @@ public class StandardPlayerHistoryProvider implements IPlayerHistoryProvider, IP
     private static final Pattern COMMAND_ISSUED_PATTERN_1 = Pattern.compile("(?:.*\\[INFO]: )?.*?(\\w+) issued server command: (.+)");
     private static final Pattern COMMAND_ISSUED_PATTERN_2 = Pattern.compile("(?:.*\\[INFO]: )?.*?(\\w+) executed command: (.+)");
 
-    private record PatternHandler(Pattern pattern, PatternConsumer consumer) { }
+    private record PatternHandler(Pattern pattern, PatternConsumer consumer, String marker) { }
 
     public interface PatternConsumer {
         void accept(Matcher matcher, String line, long timestamp, int lineNum);
@@ -84,16 +87,18 @@ public class StandardPlayerHistoryProvider implements IPlayerHistoryProvider, IP
         loadMeta();
         registerDefaultPatterns();
         if (instance != null) {
-            instance.addLogListener(this::onLogLine);
+            instance.addLogListener(logListener);
         } else if (terminalWidget != null) {
-            terminalWidget.addOutputListener(line -> onLogLine(-1, line));
+            terminalWidget.addOutputListener(terminalListener);
         }
     }
 
     @Override
     public void shutdown() {
         if (instance != null) {
-            instance.removeLogListener(this::onLogLine);
+            instance.removeLogListener(logListener);
+        } else if (terminalWidget != null) {
+            terminalWidget.removeOutputListener(terminalListener);
         }
 
         saveMeta();
@@ -117,16 +122,21 @@ public class StandardPlayerHistoryProvider implements IPlayerHistoryProvider, IP
             maxProcessedLine = lineNum;
         }
 
-        line = ANSI_PATTERN.matcher(line).replaceAll("");
+        if (line.indexOf('\u001B') >= 0) line = ANSI_PATTERN.matcher(line).replaceAll("");
         long now = System.currentTimeMillis();
         for (PatternHandler ph : patternHandlers) {
-            Matcher m = ph.pattern.matcher(line);
-            if (m.matches()) ph.consumer.accept(m, line, now, lineNum);
+            if (ph.marker() != null && !line.contains(ph.marker())) continue;
+            Matcher m = ph.pattern().matcher(line);
+            if (m.matches()) ph.consumer().accept(m, line, now, lineNum);
         }
     }
 
     public void registerPattern(Pattern pattern, PatternConsumer consumer) {
-        patternHandlers.add(new PatternHandler(pattern, consumer));
+        registerPattern(pattern, consumer, null);
+    }
+
+    private void registerPattern(Pattern pattern, PatternConsumer consumer, String marker) {
+        patternHandlers.add(new PatternHandler(pattern, consumer, marker));
     }
 
     @Override
@@ -220,8 +230,8 @@ public class StandardPlayerHistoryProvider implements IPlayerHistoryProvider, IP
     }
 
     private void registerDefaultPatterns() {
-        registerPattern(COMMAND_ISSUED_PATTERN_1, (m, line, ts, ln) -> recordCommandByName(m.group(1), m.group(2), ts, ln));
-        registerPattern(COMMAND_ISSUED_PATTERN_2, (m, line, ts, ln) -> recordCommandByName(m.group(1), m.group(2), ts, ln));
+        registerPattern(COMMAND_ISSUED_PATTERN_1, (m, line, ts, ln) -> recordCommandByName(m.group(1), m.group(2), ts, ln), " issued server command: ");
+        registerPattern(COMMAND_ISSUED_PATTERN_2, (m, line, ts, ln) -> recordCommandByName(m.group(1), m.group(2), ts, ln), " executed command: ");
     }
 
     private void ensureDir() {

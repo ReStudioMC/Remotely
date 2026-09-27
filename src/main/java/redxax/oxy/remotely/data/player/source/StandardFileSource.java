@@ -30,6 +30,7 @@ import java.io.StringReader;
 import java.lang.reflect.Type;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -41,6 +42,7 @@ public class StandardFileSource implements IPlayerSource {
     private static final Duration RETRY_DELAY = Duration.ofMillis(250L);
 
     private final RebaseAPI api;
+    private final Path instancePath;
     private final Gson gson = new GsonBuilder().setLenient().create();
     private final WatchedFile<OpEntry> opsFile;
     private final WatchedFile<BanEntry> bannedPlayersFile;
@@ -53,7 +55,7 @@ public class StandardFileSource implements IPlayerSource {
 
     public StandardFileSource(Instance instance, RebaseAPI api) {
         this.api = api;
-        Path instancePath = Path.of(instance.getPath());
+        instancePath = Path.of(instance.getPath());
         opsFile = new WatchedFile<>("ops.json", instancePath.resolve("ops.json"), new TypeToken<List<OpEntry>>() { }.getType(), this::processOps);
         bannedPlayersFile = new WatchedFile<>("banned-players.json", instancePath.resolve("banned-players.json"),
                 new TypeToken<List<BanEntry>>() { }.getType(), this::processBans);
@@ -97,7 +99,24 @@ public class StandardFileSource implements IPlayerSource {
 
     public void refreshAll() {
         if (!enabled) return;
-        watchedFiles.forEach(WatchedFile::refresh);
+        List<Long> generations = new ArrayList<>(watchedFiles.size());
+        for (WatchedFile<?> file : watchedFiles) generations.add(file.refresh());
+        api.listDirectory(instancePath).whenComplete((entries, failure) -> {
+            if (!enabled) return;
+            if (failure != null || entries == null) {
+                watchedFiles.getFirst().reject(generations.getFirst(), PlayerFileSnapshotState.MAX_RETRY_ATTEMPT,
+                        failure == null ? new IllegalStateException("Player Data Directory Is Unavailable") : failure);
+                return;
+            }
+            Set<String> names = new HashSet<>();
+            for (RebaseAPI.FileEntry entry : entries) {
+                if (entry != null && !entry.isDirectory && entry.displayName != null) names.add(entry.displayName);
+            }
+            for (int i = 0; i < watchedFiles.size(); i++) {
+                WatchedFile<?> file = watchedFiles.get(i);
+                if (names.contains(file.name)) file.read(generations.get(i), 0);
+            }
+        });
     }
 
     public void updateFromContent(String fileName, String content) {
@@ -244,10 +263,10 @@ public class StandardFileSource implements IPlayerSource {
             this.consumer = consumer;
         }
 
-        private void refresh() {
+        private long refresh() {
             long generation = state.observe();
             cancelRetry();
-            read(generation, 0);
+            return generation;
         }
 
         private void observe(String content) {
@@ -261,7 +280,7 @@ public class StandardFileSource implements IPlayerSource {
             readContent().whenComplete((content, failure) -> {
                 if (!enabled || !state.current(generation)) return;
                 if (failure != null) {
-                    reject(generation, attempt, failure);
+                    reject(generation, PlayerFileSnapshotState.MAX_RETRY_ATTEMPT, failure);
                 } else if (content != null) {
                     parse(content, generation, attempt);
                 }
@@ -269,10 +288,7 @@ public class StandardFileSource implements IPlayerSource {
         }
 
         private Async<String> readContent() {
-            return JvmAsyncBridge.fromFuture(api.fileExists(path)).thenCompose(exists -> {
-                if (!exists) return Async.completed(null);
-                return JvmAsyncBridge.fromFuture(api.readFile(path));
-            });
+            return JvmAsyncBridge.fromFuture(api.readFile(path));
         }
 
         private void parse(String content, long generation, int attempt) {
