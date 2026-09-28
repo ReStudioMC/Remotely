@@ -1014,14 +1014,28 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
                 }
                 Map<String, Instance> instancesById = indexInstances(instances);
                 preflight = configurationTransaction.prepare(plan, instances).thenCompose(prepared -> {
-                    if (prepared.plan().changes().isEmpty()) {
+                    List<NetworkJobDocument> changes = configurationTransaction.describe(prepared, current, instances).stream().filter(NetworkJobDocument::changed).toList();
+                    if (changes.isEmpty()) {
                         return Async.completed(null);
                     }
                     boolean allStopped = current.members().stream().map(NetworkMember::instanceId).map(instancesById::get).filter(Objects::nonNull).allMatch(this::isStopped);
                     if (!allStopped) {
-                        return Async.failed(new IllegalStateException("Stop The Network Before Applying Pending Configuration"));
+                        String paths = changes.stream().map(change -> change.key().path()).limit(3).collect(Collectors.joining(", "));
+                        return Async.failed(new IllegalStateException("Stop The Network Before Applying Pending Configuration In " + paths));
                     }
-                    return jobManager.executePrepared(current, prepared, instances, NetworkJobType.RECONCILE, initiator + " Preflight");
+                    return jobManager.executePrepared(current, prepared, instances, NetworkJobType.RECONCILE, initiator + " Preflight").thenCompose(job -> {
+                        if (job.status() != NetworkJobStatus.SUCCEEDED) {
+                            return Async.completed(job);
+                        }
+                        return configurationTransaction.prepare(plan, instances).thenApply(verified -> {
+                            List<NetworkJobDocument> remaining = configurationTransaction.describe(verified, current, instances).stream().filter(NetworkJobDocument::changed).toList();
+                            if (!remaining.isEmpty()) {
+                                String paths = remaining.stream().map(change -> change.key().path()).limit(3).collect(Collectors.joining(", "));
+                                throw new IllegalStateException("Network Configuration Still Differs After Apply: " + paths);
+                            }
+                            return job;
+                        });
+                    });
                 });
             }
             return preflight.thenCompose(configurationJob -> {

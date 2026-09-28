@@ -1,10 +1,40 @@
 package redxax.oxy.remotely.network.config;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 public class PropertiesConfigurationAdapter implements NetworkConfigurationAdapter {
+    @Override
+    public Reader prepare(String content) {
+        List<PhysicalLine> lines = lines(content);
+        Map<String, PropertyEntry> entries = new HashMap<>();
+        for (int index = 0; index < lines.size();) {
+            PropertyEntry entry = parseEntry(lines, index);
+            if (entry == null) {
+                index++;
+                continue;
+            }
+            entries.put(entry.key(), entry);
+            entries.put(entry.rawKey(), entry);
+            index = entry.endLineExclusive();
+        }
+        return new Reader() {
+            @Override
+            public String read(String key) {
+                PropertyEntry entry = entries.get(Objects.requireNonNull(key, "key"));
+                return entry == null ? "" : value(lines, entry).trim();
+            }
+
+            @Override
+            public boolean contains(String key) {
+                return entries.containsKey(Objects.requireNonNull(key, "key"));
+            }
+        };
+    }
+
     @Override
     public String read(String content, String key) {
         List<PhysicalLine> lines = lines(content);

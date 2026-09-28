@@ -13,7 +13,6 @@ import java.util.stream.Collectors;
 
 public class NetworkDesiredStatePlanner {
     private static final Set<SyncDataFamily> SUPPORTED_TRANSFER_FAMILIES = Set.copyOf(EnumSet.allOf(SyncDataFamily.class));
-    private static final String VELOCITY_CONFIG_VERSION = "2.8";
     private final NetworkClock clock;
 
     public NetworkDesiredStatePlanner() {
@@ -71,28 +70,32 @@ public class NetworkDesiredStatePlanner {
 
     private void planProxy(NetworkDefinition network, NetworkServerDescriptor proxy, NetworkMember proxyMember, String forwardingSecret, NetworkSecrets secrets, Map<String, NetworkEnrollment> enrollments, List<NetworkConfigMutation> mutations, List<NetworkValidationIssue> issues) {
         String bind = network.entryPoints().isEmpty() ? "0.0.0.0:" + proxyMember.port() : network.entryPoints().getFirst().bindAddress() + ":" + network.entryPoints().getFirst().port();
-        add(mutations, proxy, "velocity.toml", ConfigurationFormat.TOML, "config-version", "", quote(VELOCITY_CONFIG_VERSION), false, true, "Set Velocity Config Version");
         add(mutations, proxy, "velocity.toml", ConfigurationFormat.TOML, "bind", "", quote(bind), false, true, "Set Proxy Address");
         add(mutations, proxy, "velocity.toml", ConfigurationFormat.TOML, "online-mode", "", String.valueOf(network.forwarding().proxyOnlineMode()), false, true, "Set Proxy Online Mode");
         add(mutations, proxy, "velocity.toml", ConfigurationFormat.TOML, "player-info-forwarding-mode", "", quote(forwardingValue(network.forwarding().mode())), false, true, "Set Forwarding Mode");
         remove(mutations, proxy, "velocity.toml", ConfigurationFormat.TOML, "forwarding-secret", true, true, "Remove Deprecated Forwarding Secret");
         add(mutations, proxy, "velocity.toml", ConfigurationFormat.TOML, "forwarding-secret-file", "", quote("forwarding.secret"), false, true, "Set Forwarding Secret File");
         add(mutations, proxy, "forwarding.secret", ConfigurationFormat.SECRET, "content", "", forwardingSecret, true, true, "Write Forwarding Secret");
-        remove(mutations, proxy, "velocity.toml", ConfigurationFormat.TOML, "servers.*", false, true, "Replace Proxy Routes");
+        Map<String, String> routes = new LinkedHashMap<>();
         for (NetworkMember member : network.members()) {
             if (!member.isProxy()) {
-                add(mutations, proxy, "velocity.toml", ConfigurationFormat.TOML, "servers." + member.routeName(), "", quote(member.address() + ":" + member.port()), false, true, "Register " + member.routeName());
+                if (member.routeName().equals("try")) {
+                    issues.add(new NetworkValidationIssue(NetworkValidationIssue.Severity.ERROR, "member.route.reserved", member.nodeId(), "Backend route name try is reserved for Velocity fallback routing"));
+                }
+                routes.put(member.routeName(), quote(member.address() + ":" + member.port()));
             }
         }
         List<String> fallbackRoutes = network.routingGroups().stream().filter(group -> group.id().equals("fallback")).flatMap(group -> group.nodeIds().stream()).map(nodeId -> routeForNode(network, nodeId)).filter(value -> !value.isBlank()).toList();
-        add(mutations, proxy, "velocity.toml", ConfigurationFormat.TOML, "servers.try", "", tomlArray(fallbackRoutes), false, true, "Set Fallback Order");
-        remove(mutations, proxy, "velocity.toml", ConfigurationFormat.TOML, "forced-hosts.*", false, true, "Replace Forced Hosts");
+        routes.put("try", tomlArray(fallbackRoutes));
+        add(mutations, proxy, "velocity.toml", ConfigurationFormat.TOML, "servers.*", "", tomlSection(routes), false, true, "Set Proxy Routes");
+        Map<String, String> forcedHosts = new LinkedHashMap<>();
         for (RoutingGroup group : network.routingGroups()) {
             for (String forcedHost : group.forcedHosts()) {
-                List<String> routes = group.nodeIds().stream().map(nodeId -> routeForNode(network, nodeId)).filter(value -> !value.isBlank()).toList();
-                add(mutations, proxy, "velocity.toml", ConfigurationFormat.TOML, "forced-hosts." + forcedHost, "", tomlArray(routes), false, true, "Route " + forcedHost);
+                List<String> hostsRoutes = group.nodeIds().stream().map(nodeId -> routeForNode(network, nodeId)).filter(value -> !value.isBlank()).toList();
+                forcedHosts.put(forcedHost, tomlArray(hostsRoutes));
             }
         }
+        add(mutations, proxy, "velocity.toml", ConfigurationFormat.TOML, "forced-hosts.*", "", tomlSection(forcedHosts), false, true, "Set Forced Hosts");
         planRuntimeHub(network, proxy, secrets, enrollments, mutations, issues);
     }
 
@@ -348,6 +351,14 @@ public class NetworkDesiredStatePlanner {
 
     private String tomlArray(List<String> values) {
         return values.stream().map(this::quote).collect(Collectors.joining(", ", "[", "]"));
+    }
+
+    private String tomlSection(Map<String, String> values) {
+        return values.entrySet().stream().map(entry -> yamlKey(entry.getKey()) + ": " + entry.getValue()).collect(Collectors.joining(", ", "{", "}"));
+    }
+
+    private String yamlKey(String value) {
+        return value.matches("[A-Za-z0-9_-]+") ? value : "'" + value.replace("'", "''") + "'";
     }
 
 }

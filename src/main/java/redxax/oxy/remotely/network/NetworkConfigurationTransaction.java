@@ -19,11 +19,12 @@ import java.util.Map;
 import java.util.Objects;
 
 public class NetworkConfigurationTransaction {
+    private final NetworkConfigurationAdapters adapters;
     private final NetworkExecutionPlan executionPlan;
 
     public NetworkConfigurationTransaction() {
-        this.executionPlan = new NetworkExecutionPlan(new NetworkMutationEngine(
-                new NetworkConfigurationAdapters(new DesktopStructuredDocumentParser())));
+        this.adapters = new NetworkConfigurationAdapters(new DesktopStructuredDocumentParser());
+        this.executionPlan = new NetworkExecutionPlan(new NetworkMutationEngine(adapters));
     }
 
     public Async<NetworkPreparedPlan> prepare(NetworkReconciliationPlan plan, Collection<Instance> instances) {
@@ -37,10 +38,18 @@ public class NetworkConfigurationTransaction {
             Path target = resolve(instance, key.path());
             reads.add(exists(fileSystem, target).thenCompose(exists -> {
                 if (!exists) {
+                    if (key.path().equals("velocity.toml")) {
+                        return Async.failed(new IllegalStateException("Start Velocity Once To Generate velocity.toml Before Applying Network Configuration"));
+                    }
                     snapshots.put(key, new NetworkDocumentSnapshot(key, "", false));
                     return Async.completed(null);
                 }
-                return read(fileSystem, target).thenAccept(content -> snapshots.put(key, new NetworkDocumentSnapshot(key, content, true)));
+                return read(fileSystem, target).thenAccept(content -> {
+                    if (key.path().equals("velocity.toml") && !adapters.get(ConfigurationFormat.TOML).contains(content, "config-version")) {
+                        throw new IllegalStateException("Start Velocity Once To Migrate velocity.toml Before Applying Network Configuration");
+                    }
+                    snapshots.put(key, new NetworkDocumentSnapshot(key, content, true));
+                });
             }));
         }
         return Async.allOf(reads.toArray(Async[]::new)).thenApply(unused -> executionPlan.prepare(plan, snapshots));
@@ -94,6 +103,7 @@ public class NetworkConfigurationTransaction {
         List<DocumentOperation> changedOperations = operations.stream().filter(operation -> operation.change().changed()).toList();
         Map<NetworkConfigDocumentKey, NetworkJobDocument> recoveryByKey = indexRecoveryDocuments(recoveryDocuments);
         List<DocumentOperation> applied = Collections.synchronizedList(new ArrayList<>());
+        List<DocumentOperation> attempted = Collections.synchronizedList(new ArrayList<>());
         Async<Void> execution = Async.completed(null);
         for (DocumentOperation operation : changedOperations) {
             NetworkJobDocument recovery = recoveryByKey.get(operation.change().key());
@@ -101,10 +111,13 @@ public class NetworkConfigurationTransaction {
                     || recovery.state() == NetworkJobDocumentState.UNCHANGED)) {
                 continue;
             }
-            execution = execution.thenCompose(unused -> applyOperation(plan.planId(), operation, recovery).thenRun(() -> {
-                applied.add(operation);
-                notifyListener(() -> resolvedListener.onDocumentApplied(operation.change().key()));
-            }));
+            execution = execution.thenCompose(unused -> {
+                attempted.add(operation);
+                return applyOperation(plan.planId(), operation, recovery).thenRun(() -> {
+                    applied.add(operation);
+                    notifyListener(() -> resolvedListener.onDocumentApplied(operation.change().key()));
+                });
+            });
         }
         return execution.handle((unused, throwable) -> {
             if (throwable == null) {
@@ -113,7 +126,7 @@ public class NetworkConfigurationTransaction {
                         applied.stream().map(operation -> operation.change().key()).toList(), "Network configuration applied"));
             }
             notifyListener(resolvedListener::onRollbackStarted);
-            return rollback(applied, resolvedListener).handle((rollbackUnused, rollbackError) -> {
+            return rollback(plan.planId(), attempted.stream().map(operation -> operation.change().document()).toList(), instances, resolvedListener).handle((rollbackUnused, rollbackError) -> {
                 String message = rootMessage(throwable);
                 if (rollbackError != null) {
                     message += "; rollback failed: " + rootMessage(rollbackError);
@@ -202,24 +215,6 @@ public class NetworkConfigurationTransaction {
                     ? Async.completed(null)
                     : Async.failed(new IllegalStateException("Recovery backup changed for " + operation.change().key().path())));
         });
-    }
-
-    private Async<Void> rollback(List<DocumentOperation> applied, NetworkTransactionListener listener) {
-        List<DocumentOperation> reverse = new ArrayList<>(applied);
-        Collections.reverse(reverse);
-        Async<Void> rollback = Async.completed(null);
-        for (DocumentOperation operation : reverse) {
-            rollback = rollback.thenCompose(unused -> {
-                Async<Void> restoration;
-                if (operation.change().original().exists()) {
-                    restoration = writeAtomic(operation.fileSystem(), operation.target(), operation.change().original().content());
-                } else {
-                    restoration = delete(operation.fileSystem(), List.of(operation.target()));
-                }
-                return restoration.thenRun(() -> notifyListener(() -> listener.onDocumentRolledBack(operation.change().key())));
-            });
-        }
-        return rollback;
     }
 
     private Async<Void> rollbackDocument(String planId, NetworkJobDocument document, Map<String, Instance> instances) {

@@ -9,6 +9,47 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class NetworkConfigurationAdaptersTest {
     @Test
+    void preparedReadersKeepTheirDocumentSnapshotAcrossEdits() {
+        assertPrepared(new PropertiesConfigurationAdapter(), "name=first\nname=second\n", "name", "second", "name=third\n");
+        assertPrepared(new TomlConfigurationAdapter(BrowserSafeYaml::parse),
+                "[server]\nname = \"first\"\nname = \"second\"\n", "server.name", "\"first\"", "[server]\nname = \"third\"\n");
+        assertPrepared(new YamlConfigurationAdapter(BrowserSafeYaml::parse),
+                "server:\n  name: first\n  name: second\n", "server.name", "first", "server:\n  name: third\n");
+    }
+
+    private void assertPrepared(NetworkConfigurationAdapter adapter, String before, String key, String expected, String after) {
+        NetworkConfigurationAdapter.Reader reader = adapter.prepare(before);
+        assertTrue(reader.contains(key));
+        assertEquals(expected, reader.read(key));
+        assertEquals(adapter.contains(before, key), reader.contains(key));
+        assertEquals(adapter.read(before, key), reader.read(key));
+        assertFalse(reader.contains("missing"));
+        assertEquals("", reader.read("missing"));
+
+        NetworkConfigurationAdapter.Reader updated = adapter.prepare(after);
+        assertEquals(expected, reader.read(key));
+        assertEquals(adapter.read(after, key), updated.read(key));
+        assertTrue(updated.contains(key));
+    }
+
+    @Test
+    void preparedReadersPreserveSectionAndWildcardBoundaries() {
+        TomlConfigurationAdapter toml = new TomlConfigurationAdapter(BrowserSafeYaml::parse);
+        String tomlText = "[servers]\ntry = [\n[other]\nname = \"keep\"\n";
+        NetworkConfigurationAdapter.Reader tomlReader = toml.prepare(tomlText);
+        assertEquals(toml.read(tomlText, "servers.try"), tomlReader.read("servers.try"));
+        assertEquals(toml.read(tomlText, "other.name"), tomlReader.read("other.name"));
+        assertEquals(toml.contains(tomlText, "servers.*"), tomlReader.contains("servers.*"));
+
+        YamlConfigurationAdapter yaml = new YamlConfigurationAdapter(BrowserSafeYaml::parse);
+        String yamlText = "world-settings:\n  default:\n    verbose: false\n  world:\n    verbose: true\n";
+        NetworkConfigurationAdapter.Reader yamlReader = yaml.prepare(yamlText);
+        assertEquals(yaml.read(yamlText, "world-settings.*"), yamlReader.read("world-settings.*"));
+        assertEquals(yaml.contains(yamlText, "world-settings.*"), yamlReader.contains("world-settings.*"));
+        assertEquals(yaml.read(yamlText, "world-settings.default.verbose"), yamlReader.read("world-settings.default.verbose"));
+    }
+
+    @Test
     void propertiesPreservesUnmanagedLines() {
         PropertiesConfigurationAdapter adapter = new PropertiesConfigurationAdapter();
         String source = "# Server\r\nonline-mode=true\r\nmotd=Keep Me\r\n";

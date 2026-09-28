@@ -84,6 +84,7 @@ public final class NetworkValidator {
         if (member.instanceId().isBlank()) issues.add(error("member.instance.missing", member.nodeId(), "Member instance ID is required"));
         if (!isUuid(member.nodeId())) issues.add(error("member.node.invalid", member.nodeId(), "Member node ID must be a UUID"));
         if (member.routeName().isBlank()) issues.add(error("member.route.missing", member.nodeId(), "Member route name is required"));
+        if (!member.isProxy() && member.routeName().equals("try")) issues.add(error("member.route.reserved", member.nodeId(), "Backend route name try is reserved for Velocity fallback routing"));
         if (member.hostScope().isBlank()) issues.add(error("member.host.missing", member.nodeId(), "Member host scope is required"));
         if (member.address().isBlank()) issues.add(error("member.address.missing", member.nodeId(), "Member address is required"));
         if (member.port() < 1 || member.port() > 65535) issues.add(error("member.port.invalid", member.nodeId(), "Member port must be between 1 and 65535"));

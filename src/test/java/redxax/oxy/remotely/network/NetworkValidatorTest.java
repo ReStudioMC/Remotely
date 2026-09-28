@@ -35,6 +35,16 @@ class NetworkValidatorTest {
     }
 
     @Test
+    void rejectsVelocityFallbackRouteAsBackendName() {
+        NetworkDefinition valid = validNetwork();
+        NetworkMember backend = valid.members().get(1);
+        NetworkMember reserved = new NetworkMember(backend.instanceId(), backend.nodeId(), "try", backend.role(), backend.hostScope(), backend.address(), backend.port(), backend.capacity(), backend.resyncEnabled());
+        NetworkDefinition invalid = valid.nextRevision(List.of(valid.members().getFirst(), reserved), valid.routingGroups(), valid.syncRealms(), valid.desiredState());
+
+        assertTrue(NetworkValidator.validate(invalid).stream().anyMatch(issue -> issue.code().equals("member.route.reserved")));
+    }
+
+    @Test
     void requiresPersistentDataAllowlist() {
         NetworkDefinition valid = validNetwork();
         SyncRealm realm = new SyncRealm("survival", "Survival", Set.of(valid.members().get(1).nodeId()), Set.of(SyncDataFamily.PERSISTENT_DATA), SyncLocationPolicy.NEVER, Set.of(), 10, 30);

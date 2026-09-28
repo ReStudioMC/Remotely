@@ -1,6 +1,8 @@
 package redxax.oxy.remotely.network;
 
 import org.junit.jupiter.api.Test;
+import redxax.oxy.remotely.network.config.TomlConfigurationAdapter;
+import redxax.oxy.remotely.settings.server.BrowserSafeYaml;
 import restudio.rebase.instance.Instance;
 import restudio.rebase.instance.loaders.ModLoader;
 
@@ -13,6 +15,19 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class NetworkForwardingPlannerTest {
+    @Test
+    void browserParserAppliesForcedHostSection() {
+        TomlConfigurationAdapter adapter = new TomlConfigurationAdapter(BrowserSafeYaml::parse);
+        String source = "[forced-hosts]\n\"old.example.com\" = [\"old\"]\n";
+        String desired = "{'play.example.com': [\"lobby\"]}";
+
+        String updated = adapter.apply(source, "forced-hosts.*", desired);
+
+        assertTrue(updated.contains("\"play.example.com\" = [\"lobby\"]"));
+        assertFalse(updated.contains("old.example.com"));
+        assertTrue(updated.equals(adapter.apply(updated, "forced-hosts.*", desired)));
+    }
+
     @Test
     void configuresFabricProxyLiteWithoutWritingPaperFiles() {
         Instance proxy = instance("Proxy", ModLoader.VELOCITY);
@@ -81,8 +96,8 @@ class NetworkForwardingPlannerTest {
 
         NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(DesktopNetworkPlanInput.from(discovery(routed, proxy, backend)), secrets());
 
-        assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.key().equals("servers.try") && mutation.desiredValue().contains("backend")));
-        assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.key().equals("forced-hosts.play.example.com") && mutation.desiredValue().contains("backend")));
+        assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.key().equals("servers.*") && mutation.desiredValue().contains("try: [\"backend\"]")));
+        assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.key().equals("forced-hosts.*") && mutation.desiredValue().contains("'play.example.com': [\"backend\"]")));
     }
 
     @Test
@@ -205,10 +220,25 @@ class NetworkForwardingPlannerTest {
 
         NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(DesktopNetworkPlanInput.from(discovery(network(proxy, backend), proxy, backend)), secrets());
 
-        assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.key().equals("config-version") && mutation.desiredValue().equals("\"2.8\"")));
+        assertFalse(plan.mutations().stream().anyMatch(mutation -> mutation.key().equals("config-version")));
         assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.action() == NetworkMutationAction.REMOVE && mutation.key().equals("forwarding-secret")));
-        assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.action() == NetworkMutationAction.REMOVE && mutation.key().equals("servers.*")));
-        assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.action() == NetworkMutationAction.REMOVE && mutation.key().equals("forced-hosts.*")));
+        assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.action() == NetworkMutationAction.SET && mutation.key().equals("servers.*")));
+        assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.action() == NetworkMutationAction.SET && mutation.key().equals("forced-hosts.*")));
+    }
+
+    @Test
+    void blocksBackendRouteThatWouldReplaceVelocityFallbackList() {
+        Instance proxy = instance("Proxy", ModLoader.VELOCITY);
+        Instance backend = instance("Backend", ModLoader.PAPER);
+        NetworkDefinition base = network(proxy, backend);
+        NetworkMember member = base.members().get(1);
+        NetworkMember reserved = new NetworkMember(member.instanceId(), member.nodeId(), "try", member.role(), member.hostScope(), member.address(), member.port(), member.capacity(), member.resyncEnabled());
+        NetworkDefinition network = base.nextRevision(List.of(base.members().getFirst(), reserved), base.routingGroups(), base.syncRealms(), base.desiredState());
+
+        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(DesktopNetworkPlanInput.from(discovery(network, proxy, backend)), secrets());
+
+        assertFalse(plan.canApply());
+        assertTrue(plan.issues().stream().anyMatch(issue -> issue.code().equals("member.route.reserved")));
     }
 
     private NetworkDefinition network(Instance proxy, Instance backend) {

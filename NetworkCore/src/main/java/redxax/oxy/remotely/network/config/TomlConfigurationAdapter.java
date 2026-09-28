@@ -3,6 +3,8 @@ package redxax.oxy.remotely.network.config;
 import redxax.oxy.remotely.util.TextLines;
 
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -18,6 +20,57 @@ public class TomlConfigurationAdapter implements NetworkConfigurationAdapter {
         this.structuredParser = Objects.requireNonNull(structuredParser, "structuredParser");
     }
     private static final Pattern SECTION = Pattern.compile("^\\s*\\[([^]]+)]\\s*(?:#.*)?$");
+
+    @Override
+    public Reader prepare(String content) {
+        List<String> lines = lines(content);
+        int[] sectionEnds = new int[lines.size()];
+        int nextSection = lines.size();
+        for (int index = lines.size() - 1; index >= 0; index--) {
+            sectionEnds[index] = nextSection;
+            if (SECTION.matcher(lines.get(index)).matches()) nextSection = index;
+        }
+        Map<String, Map<String, String>> sections = new HashMap<>();
+        HashSet<String> seen = new HashSet<>();
+        String section = "";
+        boolean first = true;
+        sections.put(section, new HashMap<>());
+        for (int index = 0; index < lines.size(); index++) {
+            Matcher header = SECTION.matcher(lines.get(index));
+            if (header.matches()) {
+                section = unquote(header.group(1).trim());
+                first = seen.add(section);
+                if (first) sections.put(section, new HashMap<>());
+                continue;
+            }
+            if (!first) continue;
+            Assignment assignment = parseAssignment(lines.get(index));
+            if (assignment == null) continue;
+            int end = valueEnd(lines, index, sectionEnds[index], assignment.value());
+            StringBuilder value = new StringBuilder(assignment.value());
+            for (int continuation = index + 1; continuation <= end; continuation++) {
+                value.append(' ').append(lines.get(continuation).trim());
+            }
+            sections.get(section).putIfAbsent(assignment.key(), value.toString());
+            index = end;
+        }
+        return new Reader() {
+            @Override
+            public String read(String key) {
+                KeyLocation location = locate(key);
+                Map<String, String> entries = sections.get(location.section());
+                if (location.key().equals("*")) return readSectionMap(lines, bounds(lines, location.section()));
+                return entries == null ? "" : entries.getOrDefault(location.key(), "");
+            }
+
+            @Override
+            public boolean contains(String key) {
+                KeyLocation location = locate(key);
+                Map<String, String> entries = sections.get(location.section());
+                return entries != null && (location.key().equals("*") ? !entries.isEmpty() : entries.containsKey(location.key()));
+            }
+        };
+    }
 
     @Override
     public String read(String content, String key) {

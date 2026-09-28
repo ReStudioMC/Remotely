@@ -24,6 +24,7 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 import restudio.rescreen.platform.Async;
 import restudio.rebase.platform.jvm.JvmAsyncBridge;
 
@@ -56,7 +57,7 @@ public class NetworkPreflightService {
         immediate.addAll(findingChecks(discovery.issues()));
         immediate.add(routingCheck(network));
         immediate.add(securityCheck(network));
-        Async<NetworkPreflightCheck> configuration = configurationCheck(plan, instances);
+        Async<NetworkPreflightCheck> configuration = configurationCheck(network, plan, instances);
         NetworkMember proxyMember = network.proxyMember();
         Instance proxy = proxyMember == null ? null : instancesById.get(proxyMember.instanceId());
         List<Async<NetworkPreflightCheck>> memberChecks = network.members().stream().map(member -> memberCheck(member, instancesById.get(member.instanceId()), proxy)).toList();
@@ -86,18 +87,19 @@ public class NetworkPreflightService {
         return List.copyOf(checks);
     }
 
-    private Async<NetworkPreflightCheck> configurationCheck(NetworkReconciliationPlan plan, Collection<Instance> instances) {
+    private Async<NetworkPreflightCheck> configurationCheck(NetworkDefinition network, NetworkReconciliationPlan plan, Collection<Instance> instances) {
         if (!plan.canApply()) {
             String detail = plan.issues().stream().filter(NetworkValidationIssue::blocksPersistence).map(NetworkValidationIssue::message).findFirst().orElse("Configuration validation failed");
             return Async.completed(NetworkPreflightCheck.failed("configuration", plan.networkId(), "Configuration Applied", detail));
         }
-        return configurationTransaction.prepare(plan, instances).handle((prepared, throwable) -> {
-            if (throwable != null) {
-                return NetworkPreflightCheck.failed("configuration", plan.networkId(), "Configuration Applied", rootMessage(throwable));
+        return configurationTransaction.prepare(plan, instances).thenApply(prepared -> {
+            List<NetworkJobDocument> changes = configurationTransaction.describe(prepared, network, instances).stream().filter(NetworkJobDocument::changed).toList();
+            if (changes.isEmpty()) {
+                return NetworkPreflightCheck.passed("configuration", plan.networkId(), "Configuration Applied", prepared.documents().size() + " Managed Files Match");
             }
-            int changes = prepared.plan().changes().size();
-            return changes == 0 ? NetworkPreflightCheck.passed("configuration", plan.networkId(), "Configuration Applied", prepared.documents().size() + " Documents Match") : NetworkPreflightCheck.failed("configuration", plan.networkId(), "Configuration Applied", changes + " Pending Changes");
-        });
+            String paths = changes.stream().map(document -> document.key().path()).limit(3).collect(Collectors.joining(", "));
+            return NetworkPreflightCheck.failed("configuration", plan.networkId(), "Configuration Applied", changes.size() + " Pending Files: " + paths + ". Stop The Network And Reapply");
+        }).handle((check, throwable) -> throwable == null ? check : NetworkPreflightCheck.failed("configuration", plan.networkId(), "Configuration Applied", rootMessage(throwable)));
     }
 
     private Async<NetworkPreflightCheck> memberCheck(NetworkMember member, Instance instance, Instance proxy) {

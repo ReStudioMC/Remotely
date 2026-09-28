@@ -4,6 +4,7 @@ import redxax.oxy.remotely.util.TextLines;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -15,68 +16,100 @@ public class YamlConfigurationAdapter implements NetworkConfigurationAdapter {
     public YamlConfigurationAdapter(StructuredDocumentParser structuredParser) {
         this.structuredParser = Objects.requireNonNull(structuredParser, "structuredParser");
     }
+
+    @Override
+    public Reader prepare(String content) {
+        return new Prepared(lines(content));
+    }
+
     @Override
     public String read(String content, String key) {
-        List<String> lines = lines(content);
-        String[] segments = segments(key);
-        if (isWildcard(segments)) {
-            return readWildcard(lines, segments);
-        }
-        int start = 0;
-        int end = lines.size();
-        int indent = 0;
-        for (int depth = 0; depth < segments.length; depth++) {
-            int lineIndex = find(lines, segments[depth], start, end, indent);
-            if (lineIndex < 0) {
-                return "";
-            }
-            String mappingValue = mappingValue(lines.get(lineIndex), indent);
-            if (depth == segments.length - 1) {
-                String scalar = scalarWithoutComment(mappingValue);
-                if (!scalar.isBlank()) {
-                    return decodeScalar(scalar);
-                }
-                Bounds child = childBounds(lines, lineIndex, end, indent);
-                return blockValue(lines, child);
-            }
-            if (!scalarWithoutComment(mappingValue).isBlank()) {
-                return "";
-            }
-            Bounds child = childBounds(lines, lineIndex, end, indent);
-            start = child.start();
-            end = child.end();
-            indent = child.indent();
-        }
-        return "";
+        return prepare(content).read(key);
     }
 
     @Override
     public boolean contains(String content, String key) {
-        List<String> lines = lines(content);
-        String[] segments = segments(key);
-        if (isWildcard(segments)) {
-            return containsWildcard(lines, segments);
+        return prepare(content).contains(key);
+    }
+
+    private final class Prepared implements Reader {
+        private final List<String> lines;
+        private final Map<Scope, Map<String, Integer>> scopes = new HashMap<>();
+        private final Map<Child, Bounds> children = new HashMap<>();
+
+        private Prepared(List<String> lines) {
+            this.lines = lines;
         }
-        int start = 0;
-        int end = lines.size();
-        int indent = 0;
-        for (int depth = 0; depth < segments.length; depth++) {
-            int lineIndex = find(lines, segments[depth], start, end, indent);
-            if (lineIndex < 0) {
-                return false;
+
+        @Override
+        public String read(String key) {
+            String[] segments = segments(key);
+            if (isWildcard(segments)) return readWildcard(lines, segments);
+            int start = 0;
+            int end = lines.size();
+            int indent = 0;
+            for (int depth = 0; depth < segments.length; depth++) {
+                int lineIndex = find(segments[depth], start, end, indent);
+                if (lineIndex < 0) return "";
+                String mappingValue = mappingValue(lines.get(lineIndex), indent);
+                if (depth == segments.length - 1) {
+                    String scalar = scalarWithoutComment(mappingValue);
+                    if (!scalar.isBlank()) return decodeScalar(scalar);
+                    return blockValue(lines, child(lineIndex, end, indent));
+                }
+                if (!scalarWithoutComment(mappingValue).isBlank()) return "";
+                Bounds child = child(lineIndex, end, indent);
+                start = child.start();
+                end = child.end();
+                indent = child.indent();
             }
-            if (depth == segments.length - 1) {
-                return true;
-            }
-            if (!scalarWithoutComment(mappingValue(lines.get(lineIndex), indent)).isBlank()) {
-                return false;
-            }
-            Bounds child = childBounds(lines, lineIndex, end, indent);
-            start = child.start();
-            end = child.end();
-            indent = child.indent();
+            return "";
         }
-        return false;
+
+        @Override
+        public boolean contains(String key) {
+            String[] segments = segments(key);
+            if (isWildcard(segments)) return containsWildcard(lines, segments);
+            int start = 0;
+            int end = lines.size();
+            int indent = 0;
+            for (int depth = 0; depth < segments.length; depth++) {
+                int lineIndex = find(segments[depth], start, end, indent);
+                if (lineIndex < 0) return false;
+                if (depth == segments.length - 1) return true;
+                if (!scalarWithoutComment(mappingValue(lines.get(lineIndex), indent)).isBlank()) return false;
+                Bounds child = child(lineIndex, end, indent);
+                start = child.start();
+                end = child.end();
+                indent = child.indent();
+            }
+            return false;
+        }
+
+        private int find(String key, int start, int end, int indent) {
+            Scope scope = new Scope(start, end, indent);
+            Map<String, Integer> entries = scopes.computeIfAbsent(scope, ignored -> {
+                Map<String, Integer> indexed = new HashMap<>();
+                for (int index = start; index < end; index++) {
+                    String line = lines.get(index);
+                    if (line.isBlank() || line.stripLeading().startsWith("#") || indentation(line) != indent) continue;
+                    indexed.putIfAbsent(mappingName(line, indent), index);
+                }
+                return indexed;
+            });
+            return entries.getOrDefault(key, -1);
+        }
+
+        private Bounds child(int parentIndex, int parentEnd, int parentIndent) {
+            return children.computeIfAbsent(new Child(parentIndex, parentEnd, parentIndent),
+                ignored -> childBounds(lines, parentIndex, parentEnd, parentIndent));
+        }
+    }
+
+    private record Scope(int start, int end, int indent) {
+    }
+
+    private record Child(int parentIndex, int parentEnd, int parentIndent) {
     }
 
     @Override
