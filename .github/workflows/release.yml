@@ -261,7 +261,7 @@ jobs:
         working-directory: ReProjects/Remotely
         shell: pwsh
         run: |
-          .\gradlew.bat "-Premotely.version=$env:RELEASE_VERSION" createInstaller --no-daemon --stacktrace
+          .\gradlew.bat "-Premotely.version=$env:RELEASE_VERSION" "-Premotely.releaseInstallerBuild=true" createInstaller --no-daemon --stacktrace
           New-Item -ItemType Directory -Force -Path release-artifacts | Out-Null
           $installer = Get-ChildItem -LiteralPath build/dist -Filter '*.exe' | Select-Object -First 1
           if ($null -eq $installer) { throw 'Remotely Installer Was Not Created' }

@@ -26,8 +26,6 @@ public class RemotelyConfigManager extends DesktopRebaseConfigManager implements
             setInstancesDir(DesktopRemotelyPaths.instancesDir());
         }
         properties.remove("remotely.background");
-        if (!properties.containsKey("update.projectId")) properties.setProperty("update.projectId", "remotely");
-        if (!properties.containsKey("update.channel")) properties.setProperty("update.channel", "stable");
         migrateReSyncKeybind();
     }
 

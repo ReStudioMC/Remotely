@@ -644,7 +644,7 @@ val packageJarName = "Remotely-App.jar"
 val cleanVersion = version.toString().substringBefore('-').replace(Regex("[^0-9.]"), "")
 val developerWindowsUpgradeUuid = UUID.nameUUIDFromBytes("net.restudiomc.remotely.windows.development".toByteArray()).toString()
 
-fun developmentInstallerVersion(version: String, buildNumber: Int): String {
+fun sequencedInstallerVersion(version: String, buildNumber: Int): String {
     require(buildNumber in 1..65535) { "Installer build number must be between 1 and 65535" }
     val components = version.split('.').filter(String::isNotBlank)
     val major = components.getOrElse(0) { "0" }
@@ -680,6 +680,9 @@ val installerBuildNumber = providers.gradleProperty("remotely.buildNumber")
 val developerBuild = providers.gradleProperty("remotely.devBuild").map { value ->
     value.toBooleanStrictOrNull() ?: throw GradleException("remotely.devBuild must be true or false")
 }.orElse(false)
+val releaseInstallerBuild = providers.gradleProperty("remotely.releaseInstallerBuild").map { value ->
+    value.toBooleanStrictOrNull() ?: throw GradleException("remotely.releaseInstallerBuild must be true or false")
+}.orElse(false)
 
 val javaLauncher = extensions.getByType<JavaToolchainService>().launcherFor {
     languageVersion.set(JavaLanguageVersion.of(21))
@@ -713,14 +716,16 @@ tasks.register<Exec>("createInstaller") {
         preparePackageInput(stagingDir, installerOutputDir, "Remotely Windows Installer")
         val isDeveloperBuild = developerBuild.get()
         val requestedBuildNumber = installerBuildNumber.orNull
-        val buildNumber = if (!isDeveloperBuild) {
+        val buildNumber = if (!isDeveloperBuild && !releaseInstallerBuild.get()) {
             null
         } else if (requestedBuildNumber != null) {
             requestedBuildNumber.toIntOrNull() ?: throw GradleException("Installer build number must be numeric")
+        } else if (releaseInstallerBuild.get()) {
+            throw GradleException("Public installer build number is required")
         } else {
             nextLocalInstallerBuildNumber(cleanVersion)
         }
-        val installerVersion = buildNumber?.let { developmentInstallerVersion(cleanVersion, it) } ?: cleanVersion
+        val installerVersion = buildNumber?.let { sequencedInstallerVersion(cleanVersion, it) } ?: cleanVersion
         val packageName = if (isDeveloperBuild) "Remotely Developer" else "Remotely"
         val upgradeArguments = if (isDeveloperBuild) arrayOf("--win-upgrade-uuid", developerWindowsUpgradeUuid) else emptyArray()
 

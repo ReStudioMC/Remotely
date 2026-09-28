@@ -31,11 +31,6 @@ public class RemotelyEntry extends ReStudioEntry {
         if (session == null || !session.isInitialized()) {
             session = RemotelyInit.startSession(DesktopRemotelyComposition.create(new ReScreenApplicationHost()).build());
             if (Rebase.get().getConfigManager().isUpdateCheckOnStartup()) {
-                if (Rebase.get().getConfigManager().getUpdateChannel().equalsIgnoreCase("alpha"))  {
-                    Rebase.get().getConfigManager().setUpdateChannel("stable");
-                    Rebase.get().getConfigManager().save();
-                    Rebase.get().getConfigManager().apply();
-                }
                 Rebase.get().getApplicationUpdateManager().checkForUpdates().thenAccept(updateOpt -> updateOpt.ifPresent(releaseInfo -> ScreenManager.getInstance().execute(() -> UpdateAvailablePopup.show(releaseInfo, Rebase.get().getApplicationUpdateManager()))));
             }
         }

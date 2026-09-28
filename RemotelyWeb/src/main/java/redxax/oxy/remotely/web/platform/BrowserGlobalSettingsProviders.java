@@ -198,6 +198,7 @@ final class BrowserGlobalSettingsProviders {
             public String applicationName() { return "Remotely"; }
             public String applicationVersion() { return "Browser"; }
             public String updateChannel() { return "Browser"; }
+            public void setUpdateChannel(String channel) { throw new UnsupportedOperationException("Browser Updates Are Unavailable"); }
             public String updateMode() { return "Web"; }
             public String runtimeName() { return "Browser"; }
             public String runtimeVendor() { return "Web Runtime"; }

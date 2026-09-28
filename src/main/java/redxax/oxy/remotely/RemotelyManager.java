@@ -49,21 +49,21 @@ import com.google.gson.JsonParser;
 import restudio.rescreen.logging.LogSource;
 import restudio.rescreen.logging.LogTypes;
 import restudio.rescreen.logging.ReLog;
-
-import java.nio.file.Path;
-import java.util.List;
-import java.util.Map;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.Arrays;
-import java.util.Objects;
 import restudio.rescreen.platform.Async;
 import restudio.rebase.platform.jvm.JvmAsyncBridge;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
-import java.nio.file.Files;
-import java.io.IOException;
-import java.time.Duration;
 
 public class RemotelyManager implements IRebaseManager {
     private final InstanceManager instanceManager;
@@ -110,7 +110,7 @@ public class RemotelyManager implements IRebaseManager {
         this.resourceListManager = new ResourceListManager(applicationDir);
         this.resourceMetadataManager = new ResourceMetadataManager(applicationDir);
         this.resourceStateManager = new ResourceStateManager();
-        this.applicationUpdateManager = new ApplicationUpdateManager(applicationDir, this);
+        this.applicationUpdateManager = new ApplicationUpdateManager(applicationDir, this, "remotely", "remotely-dev");
         this.twinManager = new ServerTwinManager(applicationDir);
 
 
@@ -335,8 +335,12 @@ public class RemotelyManager implements IRebaseManager {
     }
 
     @Override
-    public Path getLauncherJarPath() {
-        throw new UnsupportedOperationException("getLauncherJarPath is not applicable for Remotely as a mod.");
+    public Path getLauncherJarPath() throws IOException {
+        try {
+            return Path.of(RemotelyInit.class.getProtectionDomain().getCodeSource().getLocation().toURI());
+        } catch (Exception error) {
+            throw new IOException("Could not determine launcher JAR path", error);
+        }
     }
 
     @Override
