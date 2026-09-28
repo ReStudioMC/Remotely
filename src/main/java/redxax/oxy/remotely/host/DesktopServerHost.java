@@ -72,6 +72,7 @@ import restudio.rebase.backend.CapabilityIds;
 import restudio.rebase.backend.FileExplorerProviders;
 import restudio.rebase.backend.RemoteFileSystemProvider;
 import restudio.rebase.backend.RemotePath;
+import restudio.rebase.storage.StorageBreakdownIndex;
 import restudio.rebase.backend.TerminalSessionProvider;
 import restudio.rebase.backend.ExecutionProvider;
 import restudio.rebase.backend.impl.LocalBackend;
@@ -2650,8 +2651,14 @@ public final class DesktopServerHost implements ServerScreenHost {
         Instance instance = instance(target);
         if (instance == null) return ServerScreenHost.super.storageFiles(target);
         String path = instance.getPath();
-        return new StorageFiles(FileExplorerProviders.forInstance(instance),
-                RemotePath.of(path == null || path.isBlank() ? "/" : path));
+        RemotePath root = RemotePath.of(path == null || path.isBlank() ? "/" : path);
+        if (instance.getBackend() instanceof ReStudioBackend backend && (path == null || path.isBlank() || path.equals("/"))) {
+            return new StorageFiles(FileExplorerProviders.forInstance(instance), root,
+                    directory -> JvmAsyncBridge.fromFuture(ReStudio.getInstance().getApi()
+                            .storageDirectory(backend.getServerId(), directory))
+                            .thenApply(StorageBreakdownIndex::fromStorageDirectory));
+        }
+        return new StorageFiles(FileExplorerProviders.forInstance(instance), root);
     }
 
     @Override

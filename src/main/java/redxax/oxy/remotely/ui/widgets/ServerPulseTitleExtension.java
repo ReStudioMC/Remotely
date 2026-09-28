@@ -235,7 +235,7 @@ public final class ServerPulseTitleExtension extends ExpandableWindowTitleWidget
         if (now >= nextDiscoveryAt) {
             nextDiscoveryAt = now + DISCOVERY_INTERVAL_MS;
             for (RemoteHost host : manager.getRemoteHosts()) {
-                manager.fetchRemoteInstances(host).whenComplete((ignored, throwable) -> nextRefreshAt = 0L);
+                manager.fetchRemoteInstances(host);
             }
             discoveries.add(AsyncTools.withTimeout(refreshReactorInstances(), TaskSchedulers.current(), Duration.ofSeconds(8)).exceptionally(ignored -> null));
         }

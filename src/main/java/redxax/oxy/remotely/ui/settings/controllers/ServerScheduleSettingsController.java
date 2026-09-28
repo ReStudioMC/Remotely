@@ -5,6 +5,7 @@ import restudio.rebase.schedule.ServerScheduleModels;
 import restudio.rescreen.theme.ThemeManager;
 import restudio.rescreen.ui.core.Screen;
 import restudio.rescreen.ui.core.ScreenManager;
+import restudio.rescreen.ui.core.Widget;
 import restudio.rescreen.ui.rescreen.ReScreen;
 import restudio.rescreen.ui.settings.Setting;
 import restudio.rescreen.ui.settings.SettingsScreen;
@@ -16,13 +17,16 @@ import restudio.rescreen.ui.widgets.ScrollSelectorWidget;
 import restudio.rescreen.ui.widgets.SquareButtonWidget;
 import restudio.rescreen.ui.widgets.TextInputWidget;
 import restudio.rescreen.ui.widgets.ToggleWidget;
+import restudio.rescreen.ui.widgets.PopupWidget.PopupRow;
 import restudio.rescreen.util.Notification;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.time.Instant;
 import java.time.ZoneId;
 
@@ -32,12 +36,21 @@ public final class ServerScheduleSettingsController {
     private final ReScreen owner;
     private final AsyncServerScheduleFeature feature;
     private long operationSequence;
+    private long taskRowSequence;
     private final List<ServerScheduleModels.Schedule> schedules = new ArrayList<>();
     private boolean loaded;
     private boolean loading;
     private boolean action;
+    private boolean closed;
     private String loadError = "";
     private long generation;
+    private Setting setting;
+    private final Map<String, PopupRow> rows = new LinkedHashMap<>();
+    private final Map<String, ScheduleRow> scheduleRows = new LinkedHashMap<>();
+    private AnimatedButton addButton;
+    private AnimatedButton statusButton;
+    private AnimatedButton retryButton;
+    private AnimatedButton reasonButton;
 
     public ServerScheduleSettingsController(ReScreen owner, AsyncServerScheduleFeature feature) {
         this.owner = owner;
@@ -45,50 +58,103 @@ public final class ServerScheduleSettingsController {
     }
 
     public List<Setting> getSettings() {
+        if (closed) return List.of();
         ServerScheduleModels.Capabilities capabilities = feature == null
                 ? ServerScheduleModels.Capabilities.unavailable("Scheduling Is Unavailable") : feature.scheduleCapabilities();
-        Setting.Builder builder = new Setting.Builder("Server Schedules");
+        if (setting == null) setting = new Setting.Builder("Server Schedules").build();
+        List<PopupRow> next = new ArrayList<>();
         if (!capabilities.available()) {
-            builder.addRow("", new AnimatedButton.Builder().label("Scheduling Unavailable").active(false)
-                    .hint(capabilities.reason()).build());
-            return List.of(builder.build());
+            statusButton = statusButton == null ? new AnimatedButton.Builder().active(false).build() : statusButton;
+            statusButton.setMessage("Scheduling Unavailable");
+            statusButton.setHint(capabilities.reason());
+            next.add(row("status", statusButton));
+            showRows(next);
+            return List.of(setting);
         }
         if (!capabilities.reason().isBlank()) {
-            builder.addRow("", new AnimatedButton.Builder().label(capabilities.reason()).active(false).build());
+            if (reasonButton == null) reasonButton = new AnimatedButton.Builder().active(false).build();
+            reasonButton.setMessage(capabilities.reason());
+            next.add(row("reason", reasonButton));
         }
-        builder.addRow("", new AnimatedButton.Builder().label("Add Schedule").active(!action)
+        if (addButton == null) addButton = new AnimatedButton.Builder().label("Add Schedule")
                 .accentType(ThemeManager.getAccent("nice")).onClick(() -> showEditor(null,
-                        ScheduleEditorDraft.create(null, List.of(defaultTask())))).build());
+                        ScheduleEditorDraft.create(null, List.of(defaultTask())))).build();
+        addButton.active = !action;
+        next.add(row("add", addButton));
         ensureLoaded();
         if (!loaded) {
             String label = loading ? "Loading Schedules" : loadError.isBlank() ? "Schedules Unavailable" : "Load Failed";
-            builder.addRow("", new AnimatedButton.Builder().label(label).active(false).hint(loadError).build());
-            if (!loading) builder.addRow("", new AnimatedButton.Builder().label("Retry Load").onClick(this::load).build());
-            return List.of(builder.build());
+            statusButton = statusButton == null ? new AnimatedButton.Builder().active(false).build() : statusButton;
+            statusButton.setMessage(label);
+            statusButton.setHint(loadError);
+            next.add(row("status", statusButton));
+            if (!loading) {
+                if (retryButton == null) retryButton = new AnimatedButton.Builder().label("Retry Load").onClick(this::load).build();
+                next.add(row("retry", retryButton));
+            }
+            if (schedules.isEmpty()) {
+                showRows(next);
+                return List.of(setting);
+            }
         }
         if (schedules.isEmpty()) {
-            builder.addRow("", new AnimatedButton.Builder().label("No Schedules").active(false).build());
-            return List.of(builder.build());
+            statusButton = statusButton == null ? new AnimatedButton.Builder().active(false).build() : statusButton;
+            statusButton.setMessage("No Schedules");
+            statusButton.setHint("");
+            next.add(row("status", statusButton));
+            showRows(next);
+            return List.of(setting);
         }
         schedules.stream().sorted(Comparator.comparing(ServerScheduleModels.Schedule::name, String.CASE_INSENSITIVE_ORDER))
-                .forEach(schedule -> addSchedule(builder, schedule));
-        return List.of(builder.build());
+                .forEach(schedule -> {
+                    ScheduleRow current = scheduleRows.computeIfAbsent(schedule.id(), ignored -> new ScheduleRow(schedule));
+                    current.update(schedule, capabilities.runNow());
+                    next.add(row("schedule:" + schedule.id(), current.widget));
+                });
+        scheduleRows.keySet().removeIf(id -> schedules.stream().noneMatch(schedule -> schedule.id().equals(id)));
+        showRows(next);
+        return List.of(setting);
     }
 
-    private void addSchedule(Setting.Builder builder, ServerScheduleModels.Schedule schedule) {
-        String state = schedule.enabled() ? "Enabled" : "Disabled";
-        String next = schedule.nextRunAt().isBlank() ? "No Next Run" : "Next " + displayTime(schedule.nextRunAt());
-        String last = schedule.lastResult().isBlank() ? "Never Run" : schedule.lastResult();
-        SquareButtonWidget run = new SquareButtonWidget.Builder().imagePath("start.png").hint("Run Now")
-                .active(!action && feature.scheduleCapabilities().runNow()).accentType(ThemeManager.getAccent("nice"))
-                .onClick(() -> run(schedule)).size(18, 18).build();
-        SquareButtonWidget edit = new SquareButtonWidget.Builder().imagePath("edit.png").hint("Edit Schedule")
-                .active(!action).onClick(() -> showEditor(schedule, ScheduleEditorDraft.create(schedule, schedule.tasks()))).size(18, 18).build();
-        SquareButtonWidget delete = new SquareButtonWidget.Builder().imagePath("delete.png").hint("Delete Schedule")
-                .active(!action).accentType(ThemeManager.getAccent("danger")).onClick(() -> confirmDelete(schedule)).size(18, 18).build();
-        MountableButtonWidget row = new MountableButtonWidget.Builder(schedule.name()).description(state + " · " + next)
-                .hiddenText(last).addButton(run).addButton(edit).addButton(delete).build();
-        builder.addRow("", row);
+    private PopupRow row(String id, Widget widget) {
+        return rows.computeIfAbsent(id, ignored -> new PopupRow.Builder("", widget).id(id).build());
+    }
+
+    private void showRows(List<PopupRow> next) {
+        if (!setting.getRows().equals(next)) setting.setRows(next);
+        rows.keySet().removeIf(id -> next.stream().noneMatch(row -> id.equals(row.id)));
+    }
+
+    private final class ScheduleRow {
+        private ServerScheduleModels.Schedule schedule;
+        private final SquareButtonWidget run;
+        private final SquareButtonWidget edit;
+        private final SquareButtonWidget delete;
+        private final MountableButtonWidget widget;
+
+        private ScheduleRow(ServerScheduleModels.Schedule initial) {
+            schedule = initial;
+            run = new SquareButtonWidget.Builder().imagePath("start.png").hint("Run Now")
+                    .accentType(ThemeManager.getAccent("nice")).onClick(() -> ServerScheduleSettingsController.this.run(schedule)).size(18, 18).build();
+            edit = new SquareButtonWidget.Builder().imagePath("edit.png").hint("Edit Schedule")
+                    .onClick(() -> showEditor(schedule, ScheduleEditorDraft.create(schedule, schedule.tasks()))).size(18, 18).build();
+            delete = new SquareButtonWidget.Builder().imagePath("delete.png").hint("Delete Schedule")
+                    .accentType(ThemeManager.getAccent("danger")).onClick(() -> confirmDelete(schedule)).size(18, 18).build();
+            widget = new MountableButtonWidget.Builder(initial.name()).addButton(run).addButton(edit).addButton(delete).build();
+        }
+
+        private void update(ServerScheduleModels.Schedule current, boolean canRun) {
+            schedule = current;
+            String state = current.enabled() ? "Enabled" : "Disabled";
+            String next = current.nextRunAt().isBlank() ? "No Next Run" : "Next " + displayTime(current.nextRunAt());
+            widget.setName(current.name());
+            widget.setMessage(current.name());
+            widget.setDescription(state + " · " + next);
+            widget.setHiddenText(current.lastResult().isBlank() ? "Never Run" : current.lastResult());
+            run.active = !action && canRun;
+            edit.active = !action;
+            delete.active = !action;
+        }
     }
 
     private void ensureLoaded() {
@@ -96,12 +162,12 @@ public final class ServerScheduleSettingsController {
     }
 
     private void load() {
-        if (loading || feature == null) return;
+        if (closed || loading || feature == null) return;
         loading = true;
         loadError = "";
         long request = ++generation;
         feature.listSchedules().whenComplete((values, failure) -> ScreenManager.getInstance().execute(() -> {
-            if (request != generation) return;
+            if (closed || request != generation) return;
             loading = false;
             if (failure == null) {
                 schedules.clear();
@@ -160,72 +226,93 @@ public final class ServerScheduleSettingsController {
 
         List<ServerScheduleModels.Task> tasks = draft.tasks().isEmpty() ? List.of(defaultTask()) : draft.tasks();
         List<TaskEditor> editors = new ArrayList<>();
-        for (int index = 0; index < tasks.size(); index++) {
-            ServerScheduleModels.Task task = tasks.get(index);
-            List<String> actions = actionOptions(capabilities.backup());
-            int selected = Math.max(0, actions.indexOf(label(task.action())));
-            ScrollSelectorWidget taskAction = new ScrollSelectorWidget.Builder().options(actions).selectedIndex(selected).size(95, 20).build();
-            TextInputWidget payload = input(task.payload(), task.action() == ServerScheduleModels.Action.COMMAND ? "Command" : "Value", 135);
-            TextInputWidget delay = input(String.valueOf(task.delaySeconds()), "Delay", 50);
-            ToggleWidget continueOnFailure = new ToggleWidget.Builder().toggled(task.continueOnFailure()).size(36, 18).build();
-            int taskIndex = index;
-            TaskEditor editor = new TaskEditor(task.id(), taskAction, payload, delay, continueOnFailure);
-            editors.add(editor);
-            SquareButtonWidget up = new SquareButtonWidget.Builder().imagePath("up.png").hint("Move Up").active(index > 0)
-                    .onClick(() -> reopenMoved(popup, schedule, name, enabled, onlyOnline, timing, preset, when, recurringTime,
-                            weekDay, monthDay, advancedCron, zone, editors, taskIndex, -1)).size(18, 18).build();
-            SquareButtonWidget down = new SquareButtonWidget.Builder().imagePath("down.png").hint("Move Down").active(index + 1 < tasks.size())
-                    .onClick(() -> reopenMoved(popup, schedule, name, enabled, onlyOnline, timing, preset, when, recurringTime,
-                            weekDay, monthDay, advancedCron, zone, editors, taskIndex, 1)).size(18, 18).build();
-            SquareButtonWidget remove = new SquareButtonWidget.Builder().imagePath("delete.png").hint("Remove Task")
-                    .active(tasks.size() > 1).accentType(ThemeManager.getAccent("danger"))
-                    .onClick(() -> reopenWithout(popup, schedule, name, enabled, onlyOnline, timing, preset, when, recurringTime,
-                            weekDay, monthDay, advancedCron, zone, editors, taskIndex)).size(18, 18).build();
-            popup.addRow("task-" + index, "Task " + (index + 1), taskAction, payload, delay, continueOnFailure, up, down, remove);
-        }
-        AnimatedButton addTask = new AnimatedButton.Builder().label("Add Task").active(tasks.size() < 32).onClick(() -> {
-            ScheduleEditorDraft value = captureDraft(name, enabled, onlyOnline, timing, preset, when, recurringTime, weekDay,
-                    monthDay, advancedCron, zone, editors);
-            if (value == null) return;
-            List<ServerScheduleModels.Task> values = new ArrayList<>(value.tasks());
-            values.add(defaultTask());
-            popup.getWidget().setVisible(false);
-            showEditor(schedule, withTasks(value, values));
+        AnimatedButton addTask = new AnimatedButton.Builder().label("Add Task").onClick(() -> {
+            if (editors.size() >= 32) return;
+            editors.add(new TaskEditor(popup.getWidget(), editors, defaultTask(), capabilities.backup()));
+            updateTaskRows(popup.getWidget(), editors);
         }).build();
         popup.addRow("add-task", "", addTask);
         popup.addTitleAction("Save", () -> save(popup, schedule, name, enabled, timing, when, preset, recurringTime,
                         weekDay, monthDay, advancedCron, zone, onlyOnline, editors),
                 PopupWidget.TitleActionRole.PRIMARY);
         PopupWidget widget = popup.build();
+        for (ServerScheduleModels.Task task : tasks) editors.add(new TaskEditor(widget, editors, task, capabilities.backup()));
+        updateTaskRows(widget, editors);
         screen.addDrawableChild(widget);
         widget.show();
     }
 
-    private void reopenWithout(PopupWidget.Builder popup, ServerScheduleModels.Schedule schedule, TextInputWidget name, ToggleWidget enabled,
-                               ToggleWidget onlyOnline, ScrollSelectorWidget timing, ScrollSelectorWidget preset, TextInputWidget when,
-                               TextInputWidget recurringTime, ScrollSelectorWidget weekDay, TextInputWidget monthDay, TextInputWidget cron,
-                               TextInputWidget zone, List<TaskEditor> editors, int index) {
-        ScheduleEditorDraft draft = captureDraft(name, enabled, onlyOnline, timing, preset, when, recurringTime, weekDay, monthDay, cron, zone, editors);
-        if (draft == null) return;
-        List<ServerScheduleModels.Task> values = new ArrayList<>(draft.tasks());
-        if (values.size() <= 1) return;
-        values.remove(index);
-        popup.getWidget().setVisible(false);
-        showEditor(schedule, withTasks(draft, values));
+    private void updateTaskRows(PopupWidget popup, List<TaskEditor> editors) {
+        List<PopupRow> next = new ArrayList<>(popup.getRows());
+        next.removeIf(row -> row.id.startsWith("task-row:"));
+        int addIndex = 0;
+        while (addIndex < next.size() && !"add-task".equals(next.get(addIndex).id)) addIndex++;
+        for (int index = 0; index < editors.size(); index++) {
+            TaskEditor editor = editors.get(index);
+            editor.number.setMessage("Task " + (index + 1));
+            editor.up.active = index > 0;
+            editor.down.active = index + 1 < editors.size();
+            editor.remove.active = editors.size() > 1;
+            next.add(addIndex + index, editor.row);
+        }
+        for (PopupRow row : next) {
+            if ("add-task".equals(row.id) && row.getWidgets().getFirst() instanceof AnimatedButton add) {
+                add.active = editors.size() < 32;
+            }
+        }
+        if (!popup.getRows().equals(next)) popup.setRows(next);
     }
 
-    private void reopenMoved(PopupWidget.Builder popup, ServerScheduleModels.Schedule schedule, TextInputWidget name, ToggleWidget enabled,
-                             ToggleWidget onlyOnline, ScrollSelectorWidget timing, ScrollSelectorWidget preset, TextInputWidget when,
-                             TextInputWidget recurringTime, ScrollSelectorWidget weekDay, TextInputWidget monthDay, TextInputWidget cron,
-                             TextInputWidget zone, List<TaskEditor> editors, int index, int movement) {
-        ScheduleEditorDraft draft = captureDraft(name, enabled, onlyOnline, timing, preset, when, recurringTime, weekDay, monthDay, cron, zone, editors);
-        if (draft == null) return;
-        List<ServerScheduleModels.Task> values = new ArrayList<>(draft.tasks());
-        int target = index + movement;
-        if (target < 0 || target >= values.size()) return;
-        Collections.swap(values, index, target);
-        popup.getWidget().setVisible(false);
-        showEditor(schedule, withTasks(draft, values));
+    private final class TaskEditor {
+        private final String id;
+        private final ScrollSelectorWidget action;
+        private final TextInputWidget payload;
+        private final TextInputWidget delay;
+        private final ToggleWidget continueOnFailure;
+        private final AnimatedButton number;
+        private final SquareButtonWidget up;
+        private final SquareButtonWidget down;
+        private final SquareButtonWidget remove;
+        private final PopupRow row;
+
+        private TaskEditor(PopupWidget popup, List<TaskEditor> editors, ServerScheduleModels.Task task, boolean backup) {
+            id = task.id();
+            List<String> actions = actionOptions(backup);
+            action = new ScrollSelectorWidget.Builder().options(actions)
+                    .selectedIndex(Math.max(0, actions.indexOf(label(task.action())))).size(95, 20).build();
+            payload = input(task.payload(), task.action() == ServerScheduleModels.Action.COMMAND ? "Command" : "Value", 135);
+            delay = input(String.valueOf(task.delaySeconds()), "Delay", 50);
+            continueOnFailure = new ToggleWidget.Builder().toggled(task.continueOnFailure()).size(36, 18).build();
+            number = new AnimatedButton.Builder().label("Task").active(false).size(54, 20).build();
+            up = new SquareButtonWidget.Builder().imagePath("up.png").hint("Move Up").size(18, 18).onClick(() -> {
+                int index = editors.indexOf(this);
+                if (index > 0) {
+                    Collections.swap(editors, index, index - 1);
+                    updateTaskRows(popup, editors);
+                }
+            }).build();
+            down = new SquareButtonWidget.Builder().imagePath("down.png").hint("Move Down").size(18, 18).onClick(() -> {
+                int index = editors.indexOf(this);
+                if (index >= 0 && index + 1 < editors.size()) {
+                    Collections.swap(editors, index, index + 1);
+                    updateTaskRows(popup, editors);
+                }
+            }).build();
+            remove = new SquareButtonWidget.Builder().imagePath("delete.png").hint("Remove Task")
+                    .accentType(ThemeManager.getAccent("danger")).size(18, 18).onClick(() -> {
+                        if (editors.size() <= 1) return;
+                        editors.remove(this);
+                        updateTaskRows(popup, editors);
+                    }).build();
+            row = new PopupRow.Builder("", number, action, payload, delay, continueOnFailure, up, down, remove)
+                    .id("task-row:" + (++taskRowSequence)).build();
+        }
+
+        private String id() { return id; }
+        private ScrollSelectorWidget action() { return action; }
+        private TextInputWidget payload() { return payload; }
+        private TextInputWidget delay() { return delay; }
+        private ToggleWidget continueOnFailure() { return continueOnFailure; }
     }
 
     private void save(PopupWidget.Builder popup, ServerScheduleModels.Schedule schedule, TextInputWidget name,
@@ -233,6 +320,7 @@ public final class ServerScheduleSettingsController {
                       TextInputWidget recurringTime, ScrollSelectorWidget weekDay, TextInputWidget monthDay,
                       TextInputWidget advancedCron, TextInputWidget zone,
                       ToggleWidget onlyOnline, List<TaskEditor> editors) {
+        if (closed || action) return;
         String scheduleName = name.getText().trim();
         if (scheduleName.isBlank()) {
             new Notification("Invalid Schedule", "Name Is Required", Notification.Type.WARN);
@@ -278,13 +366,14 @@ public final class ServerScheduleSettingsController {
         ServerScheduleModels.Mutation mutation = new ServerScheduleModels.Mutation(scheduleName, enabled.getValue(), scheduleTiming,
                 onlyOnline.getValue(), tasks);
         action = true;
-        popup.getWidget().setVisible(false);
         String key = operationKey();
         var operation = schedule == null ? feature.createSchedule(mutation, key)
                 : feature.updateSchedule(schedule.id(), mutation, schedule.revision(), key);
         operation.whenComplete((updated, failure) -> ScreenManager.getInstance().execute(() -> {
+            if (closed) return;
             action = false;
             if (failure == null && updated != null) {
+                popup.getWidget().setVisible(false);
                 upsert(updated);
                 new Notification("Schedule Saved", timingSummary + " · Next " + displayTime(updated.nextRunAt()), Notification.Type.SUCCESS);
             } else {
@@ -316,30 +405,11 @@ public final class ServerScheduleSettingsController {
         return tasks;
     }
 
-    private ScheduleEditorDraft captureDraft(TextInputWidget name, ToggleWidget enabled, ToggleWidget onlyOnline,
-                                             ScrollSelectorWidget timing, ScrollSelectorWidget preset, TextInputWidget when,
-                                             TextInputWidget recurringTime, ScrollSelectorWidget weekDay, TextInputWidget monthDay,
-                                             TextInputWidget cron, TextInputWidget zone, List<TaskEditor> editors) {
-        try {
-            return new ScheduleEditorDraft(name.getText(), enabled.getValue(), onlyOnline.getValue(), timing.getSelectedOption(),
-                    preset.getSelectedOption(), when.getText(), recurringTime.getText(),
-                    Math.max(0, ScheduleTimingGuide.WEEKDAYS_LIST.indexOf(weekDay.getSelectedOption())), monthDay.getText(), cron.getText(),
-                    zone.getText(), capture(editors));
-        } catch (RuntimeException failure) {
-            new Notification("Invalid Task", failure.getMessage(), Notification.Type.WARN);
-            return null;
-        }
-    }
-
-    private ScheduleEditorDraft withTasks(ScheduleEditorDraft draft, List<ServerScheduleModels.Task> tasks) {
-        return new ScheduleEditorDraft(draft.name(), draft.enabled(), draft.onlyOnline(), draft.timing(), draft.preset(), draft.oneTime(),
-                draft.recurringTime(), draft.weekDay(), draft.monthDay(), draft.cron(), draft.zone(), tasks);
-    }
-
     private void run(ServerScheduleModels.Schedule schedule) {
         if (action) return;
         action = true;
         feature.runSchedule(schedule.id(), operationKey()).whenComplete((run, failure) -> ScreenManager.getInstance().execute(() -> {
+            if (closed) return;
             action = false;
             new Notification(failure == null ? "Schedule Started" : "Run Failed",
                     failure == null ? schedule.name() : error(failure), failure == null ? Notification.Type.SUCCESS : Notification.Type.ERROR);
@@ -359,6 +429,7 @@ public final class ServerScheduleSettingsController {
             action = true;
             feature.deleteSchedule(schedule.id(), schedule.revision(), operationKey()).whenComplete((ignored, failure) ->
                     ScreenManager.getInstance().execute(() -> {
+                        if (closed) return;
                         action = false;
                         if (failure == null) {
                             schedules.removeIf(value -> value.id().equals(schedule.id()));
@@ -380,6 +451,7 @@ public final class ServerScheduleSettingsController {
     }
 
     private void refresh() {
+        if (closed) return;
         ScreenManager manager = ScreenManager.getInstance();
         List<SettingsScreen> screens = new ArrayList<>();
         if (manager.getCurrentScreen() instanceof SettingsScreen settings) screens.add(settings);
@@ -447,10 +519,8 @@ public final class ServerScheduleSettingsController {
     }
 
     public void cleanup() {
+        closed = true;
         generation++;
     }
 
-    private record TaskEditor(String id, ScrollSelectorWidget action, TextInputWidget payload, TextInputWidget delay,
-                              ToggleWidget continueOnFailure) {
-    }
 }

@@ -5,6 +5,7 @@ import org.junit.jupiter.api.BeforeAll;
 import restudio.rebase.platform.jvm.JvmAsyncBridge;
 import restudio.rescreen.platform.Async;
 import redxax.oxy.remotely.settings.server.ServerSettingsDocument;
+import redxax.oxy.remotely.settings.server.BrowserSafeYaml;
 import redxax.oxy.remotely.settings.server.ServerSettingsField;
 import redxax.oxy.remotely.settings.server.ServerSettingsFieldType;
 import redxax.oxy.remotely.settings.server.ServerSettingsFormat;
@@ -63,6 +64,42 @@ class ServerSettingsDataControllerTest {
     static void initializeTheme() {
         ThemeManager.initBrowserDefaults();
         TextRenderer.ensureDefaultRenderer();
+    }
+
+    @Test
+    void scheduledDocumentLoadPublishesOnlyAfterPreparationAndRejectsClose() {
+        List<Runnable> tasks = new ArrayList<>();
+        ServerSettingsField field = new ServerSettingsField("name", "name", ServerSettingsFieldType.TEXT, "Server",
+                "Configuration", "Name", "Server name", "", null, null, List.of());
+        ServerSettingsDocument document = new ServerSettingsDocument("server.properties", ServerSettingsFormat.PROPERTIES,
+                true, false, List.of(field));
+        ServerSettingsPack pack = new ServerSettingsPack("settings", "Settings", "Settings", 0,
+                List.of("test"), List.of(document));
+        ServerSettingsDocumentTarget target = new ServerSettingsDocumentTarget() {
+            @Override public Collection<String> softwareTokens() { return List.of("test"); }
+            @Override public String property(String key) { return null; }
+            @Override public void property(String key, String value) { }
+            @Override public void removeProperty(String key) { }
+            @Override public void replaceProperties(Map<String, String> properties) { }
+        };
+        ServerSettingsDocumentStore store = new ServerSettingsDocumentStore() {
+            @Override public Async<Document> read(String path) { return Async.completed(new Document(true, "name=before\n")); }
+            @Override public Async<Void> write(String path, String content) { return Async.completed(null); }
+        };
+
+        ServerSettingsDocumentDataController ready = new ServerSettingsDocumentDataController(target,
+                new ServerSettingsSnapshot(List.of(pack)), store, BrowserSafeYaml::parse, null, tasks::add);
+        assertFalse(ready.load().isDone());
+        while (!tasks.isEmpty()) tasks.removeFirst().run();
+        assertTrue(ready.load().isDone());
+        assertEquals(List.of("Server"), ready.tabNames());
+        assertEquals("before", textOption(ready, "Server").get());
+
+        ServerSettingsDocumentDataController closed = new ServerSettingsDocumentDataController(target,
+                new ServerSettingsSnapshot(List.of(pack)), store, BrowserSafeYaml::parse, null, tasks::add);
+        closed.close();
+        while (!tasks.isEmpty()) tasks.removeFirst().run();
+        assertTrue(closed.tabNames().isEmpty());
     }
 
     @Test
@@ -419,13 +456,10 @@ class ServerSettingsDataControllerTest {
         controller.load().join();
 
         ConfigOption<String> option = textOption(controller, "Server");
-        assertNotNull(option.getOptions());
-        assertEquals(3, option.getOptions().size());
-        assertFalse(option.isItemSelector());
         assertEquals("world", option.get());
-
         SettingEntryWidget entry = entryWidget(controller, "Server");
-        assertInstanceOf(DropDownWidget.class, entry.mountedWidgets.getLast());
+        DropDownWidget<?> worlds = assertInstanceOf(DropDownWidget.class, entry.mountedWidgets.getLast());
+        assertEquals(List.of("world", "world_nether", "world_the_end"), worlds.getItems());
 
         option.set("world_nether");
         option.apply();
@@ -436,7 +470,7 @@ class ServerSettingsDataControllerTest {
     }
 
     @Test
-    void routesWorldFieldToItemSelectorWhenManyWorlds() {
+    void keepsCustomWorldInputAlongsideDiscoveredChoices() {
         Path root = Path.of("settings-source-" + UUID.randomUUID()).toAbsolutePath();
         MemoryFiles files = new MemoryFiles();
         Path propertiesPath = root.resolve("server.properties");
@@ -449,6 +483,7 @@ class ServerSettingsDataControllerTest {
         ServerSettingsPack pack = new ServerSettingsPack("server", "Server", "Server", 0, List.of("velocity"), List.of(document));
 
         List<String> manyWorlds = List.of("world1", "world2", "world3", "world4", "world5", "world6", "world7", "world8", "world9", "world10", "world11", "world12");
+        Map<String, String> properties = new LinkedHashMap<>(Map.of("level-name", "world1"));
         ServerSettingsDocumentTarget target = new ServerSettingsDocumentTarget() {
             @Override
             public Collection<String> softwareTokens() {
@@ -456,14 +491,14 @@ class ServerSettingsDataControllerTest {
             }
             @Override
             public String property(String key) {
-                return "world1";
+                return properties.get(key);
             }
             @Override
-            public void property(String key, String value) {}
+            public void property(String key, String value) { properties.put(key, value); }
             @Override
-            public void removeProperty(String key) {}
+            public void removeProperty(String key) { properties.remove(key); }
             @Override
-            public void replaceProperties(Map<String, String> properties) {}
+            public void replaceProperties(Map<String, String> values) { properties.clear(); properties.putAll(values); }
         };
 
         ServerSettingsDataController controller = new ServerSettingsDocumentDataController(target, new ServerSettingsSnapshot(List.of(pack)),
@@ -471,11 +506,13 @@ class ServerSettingsDataControllerTest {
         controller.load().join();
 
         ConfigOption<String> option = textOption(controller, "Server");
-        assertTrue(option.isItemSelector());
-        assertEquals(12, option.getOptions().size());
-
         SettingEntryWidget entry = entryWidget(controller, "Server");
-        assertInstanceOf(IconButton.class, entry.mountedWidgets.getLast());
+        DropDownWidget<?> worlds = assertInstanceOf(DropDownWidget.class, entry.mountedWidgets.getLast());
+        assertEquals(12, worlds.getItems().size());
+        option.set("custom-world");
+        option.apply();
+        controller.save(instance).join();
+        assertTrue(files.read(propertiesPath).join().contains("level-name=custom-world"));
     }
 
     @Test
@@ -491,6 +528,7 @@ class ServerSettingsDataControllerTest {
         ServerSettingsDocument document = new ServerSettingsDocument("server.properties", ServerSettingsFormat.PROPERTIES, true, false, List.of(field));
         ServerSettingsPack pack = new ServerSettingsPack("server", "Server", "Server", 0, List.of("velocity"), List.of(document));
         Async<List<ServerSettingsDocumentStore.Entry>> stalledDiscovery = Async.pending();
+        AtomicInteger listings = new AtomicInteger();
         ServerSettingsDocumentStore filesStore = memoryStore(root, files);
         ServerSettingsDocumentStore store = new ServerSettingsDocumentStore() {
             @Override
@@ -505,7 +543,8 @@ class ServerSettingsDataControllerTest {
 
             @Override
             public Async<List<Entry>> list(String relativePath) {
-                return stalledDiscovery;
+                listings.incrementAndGet();
+                return relativePath.equals(".") ? stalledDiscovery : Async.completed(List.of(new Entry("level.dat", false)));
             }
         };
         ServerSettingsDocumentTarget target = new ServerSettingsDocumentTarget() {
@@ -538,12 +577,24 @@ class ServerSettingsDataControllerTest {
         ServerSettingsDataController controller = new ServerSettingsDocumentDataController(target, new ServerSettingsSnapshot(List.of(pack)), store);
 
         controller.load().join();
+        assertEquals(0, listings.get());
         ConfigOption<String> option = textOption(controller, "Server");
+        assertEquals(1, listings.get());
         assertEquals("world", option.get());
         assertNull(option.getOptions());
 
-        stalledDiscovery.complete(List.of(new ServerSettingsDocumentStore.Entry("world", true)));
+        SettingEntryWidget entry = entryWidget(controller, "Server");
+        DropDownWidget<?> selector = (DropDownWidget<?>) entry.mountedWidgets.getLast();
+        option.set("custom-world");
+        stalledDiscovery.complete(List.of(new ServerSettingsDocumentStore.Entry("world", true),
+                new ServerSettingsDocumentStore.Entry("discovered", true)));
         assertEquals(option, textOption(controller, "Server"));
+        assertEquals(entry, entryWidget(controller, "Server"));
+        assertEquals("custom-world", option.get());
+        assertTrue(selector.getItems().contains("discovered"));
+        option.apply();
+        controller.save(instance).join();
+        assertTrue(files.read(propertiesPath).join().contains("level-name=custom-world"));
     }
 
     @Test

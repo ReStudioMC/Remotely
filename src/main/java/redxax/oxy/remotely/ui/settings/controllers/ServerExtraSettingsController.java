@@ -15,13 +15,18 @@ import restudio.rescreen.platform.Async;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashSet;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.List;
 import java.util.Locale;
 
 public class ServerExtraSettingsController {
 
-    private final List<String> existingFiles;
-    private final List<String> configurationFiles;
+    private List<String> existingFiles;
+    private List<String> configurationFiles;
+    private Setting setting;
+    private final Map<String, PopupWidget.PopupRow> fileRows = new LinkedHashMap<>();
+    private PopupWidget.PopupRow emptyRow;
     private final DocumentAccess documentAccess;
 
     private static final List<String> CONFIG_FILES = List.of(
@@ -37,31 +42,32 @@ public class ServerExtraSettingsController {
 
     public ServerExtraSettingsController(List<String> existingFiles, Collection<String> configurationFiles, DocumentAccess documentAccess) {
         this.documentAccess = documentAccess;
-        this.existingFiles = existingFiles != null ? existingFiles : new ArrayList<>();
+        updateFiles(existingFiles, configurationFiles);
+    }
+
+    public void updateFiles(List<String> existingFiles, Collection<String> configurationFiles) {
+        this.existingFiles = existingFiles == null ? List.of() : List.copyOf(existingFiles);
         LinkedHashSet<String> files = new LinkedHashSet<>(CONFIG_FILES);
         if (configurationFiles != null) files.addAll(configurationFiles);
         this.configurationFiles = List.copyOf(files);
     }
 
     public List<Setting> getSettings() {
-        Setting.Builder builder = new Setting.Builder("Configuration Files");
-
-        List<MountableButtonWidget> fileButtons = new ArrayList<>();
-        for (String fileName : configurationFiles) {
-            if (existingFiles.contains(fileName) || existingFiles.contains(fileName(fileName))) {
-                fileButtons.add(createFileEditButton(fileName));
+        if (setting == null) {
+            setting = new Setting.Builder("Configuration Files").build();
+            emptyRow = new PopupWidget.PopupRow.Builder("No Extra Configuration Files Found").build();
+        }
+        List<PopupWidget.PopupRow> rows = new ArrayList<>();
+        LinkedHashSet<String> available = new LinkedHashSet<>();
+        for (String file : configurationFiles) {
+            if (existingFiles.contains(file) || existingFiles.contains(fileName(file))) {
+                available.add(file);
+                rows.add(fileRows.computeIfAbsent(file, path -> new PopupWidget.PopupRow.Builder("", createFileEditButton(path)).id(path).build()));
             }
         }
-
-        if (fileButtons.isEmpty()) {
-            builder.addRow("No extra configuration files found.");
-        } else {
-            for(MountableButtonWidget button : fileButtons) {
-                builder.addRow("", button);
-            }
-        }
-
-        return List.of(builder.build());
+        fileRows.keySet().retainAll(available);
+        setting.setRows(rows.isEmpty() ? List.of(emptyRow) : rows);
+        return List.of(setting);
     }
 
     private MountableButtonWidget createFileEditButton(String fileName) {

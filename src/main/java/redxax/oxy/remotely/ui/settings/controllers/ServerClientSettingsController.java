@@ -18,10 +18,13 @@ import restudio.rescreen.ui.settings.options.ConfigOption;
 import restudio.rescreen.ui.widgets.IconButton;
 import restudio.rescreen.ui.widgets.MountableButtonWidget;
 import restudio.rescreen.ui.widgets.ScreenWindowWidget;
+import restudio.rescreen.ui.widgets.PopupWidget;
 import restudio.rescreen.util.Notification;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -41,6 +44,12 @@ public class ServerClientSettingsController {
     private boolean restudioInventoryRetryScheduled;
     private boolean restudioInventoryRetryUsed;
     private long restudioInventoryRetryGeneration;
+    private List<Setting> residentSettings;
+    private Setting quickSetting;
+    private Setting hiddenSetting;
+    private List<PopupWidget.PopupRow> quickOptions = List.of();
+    private final Map<String, PopupWidget.PopupRow> quickRows = new LinkedHashMap<>();
+    private final Map<String, PopupWidget.PopupRow> hiddenRows = new LinkedHashMap<>();
 
     public ServerClientSettingsController(RemotelyConfigStore configManager, ServerClientSettingsProvider provider) {
         this.configManager = configManager;
@@ -48,6 +57,10 @@ public class ServerClientSettingsController {
     }
 
     public List<Setting> getSettings() {
+        if (residentSettings != null) {
+            reconcileServers();
+            return List.copyOf(residentSettings);
+        }
         List<Setting> settings = new ArrayList<>();
         Setting.Builder servers = new Setting.Builder("Servers");
 
@@ -116,21 +129,74 @@ public class ServerClientSettingsController {
                 .defaultValue(true)
                 .dependsOn(() -> provider.available(ServerClientSettingsProvider.QUICK_MIRROR_MODS))
                 .build());
+        quickSetting = quickServer.build();
+        quickOptions = quickSetting.getRows();
+        settings.add(quickSetting);
+        residentSettings = settings;
+        reconcileServers();
+        return List.copyOf(residentSettings);
+    }
+
+    private void reconcileServers() {
+        List<PopupWidget.PopupRow> quick = new ArrayList<>(quickOptions);
+        Map<String, PopupWidget.PopupRow> nextQuick = new LinkedHashMap<>();
+        Map<String, Integer> quickOccurrences = new LinkedHashMap<>();
         for (ServerClientSettingsProvider.QuickServer server : provider.quickServers()) {
-            quickServer.addRow("", createQuickServerWidget(server));
+            String identity = server.name();
+            int occurrence = quickOccurrences.merge(identity, 1, Integer::sum);
+            String key = "quick:" + identity + ":" + occurrence;
+            PopupWidget.PopupRow row = quickRows.get(key);
+            if (row == null) row = new PopupWidget.PopupRow.Builder("", createQuickServerWidget(server)).id(key).build();
+            updateQuickServerWidget((MountableButtonWidget) row.getWidgets().getFirst(), server);
+            nextQuick.put(key, row);
+            quick.add(row);
         }
-        settings.add(quickServer.build());
+        quickRows.clear();
+        quickRows.putAll(nextQuick);
+        quickSetting.setRows(quick);
 
-        List<ServerClientSettingsProvider.HiddenServer> hiddenServers = getHiddenServers();
-        if (!hiddenServers.isEmpty()) {
-            Setting.Builder hiddenServersBuilder = new Setting.Builder("Hidden Servers");
-            for (ServerClientSettingsProvider.HiddenServer server : hiddenServers) {
-                hiddenServersBuilder.addRow("", createHiddenServerWidget(server));
-            }
-            settings.add(hiddenServersBuilder.build());
+        List<PopupWidget.PopupRow> hidden = new ArrayList<>();
+        Map<String, PopupWidget.PopupRow> nextHidden = new LinkedHashMap<>();
+        Map<String, Integer> hiddenOccurrences = new LinkedHashMap<>();
+        for (ServerClientSettingsProvider.HiddenServer server : getHiddenServers()) {
+            String identity = server.location() + ":" + server.name();
+            int occurrence = hiddenOccurrences.merge(identity, 1, Integer::sum);
+            String key = "hidden:" + identity + ":" + occurrence;
+            PopupWidget.PopupRow row = hiddenRows.get(key);
+            if (row == null) row = new PopupWidget.PopupRow.Builder("", createHiddenServerWidget(server)).id(key).build();
+            updateHiddenServerWidget((MountableButtonWidget) row.getWidgets().getFirst(), server);
+            nextHidden.put(key, row);
+            hidden.add(row);
         }
+        hiddenRows.clear();
+        hiddenRows.putAll(nextHidden);
+        if (hidden.isEmpty()) {
+            if (hiddenSetting != null) residentSettings.remove(hiddenSetting);
+            hiddenSetting = null;
+            hiddenRows.clear();
+        } else {
+            if (hiddenSetting == null) hiddenSetting = new Setting.Builder("Hidden Servers").build();
+            hiddenSetting.setRows(hidden);
+            if (!residentSettings.contains(hiddenSetting)) residentSettings.add(hiddenSetting);
+        }
+    }
 
-        return settings;
+    private void updateQuickServerWidget(MountableButtonWidget widget, ServerClientSettingsProvider.QuickServer server) {
+        String visibility = server.hidden() ? "Hidden" : "Visible";
+        widget.setName(server.name());
+        widget.setHiddenText(server.version() == null || server.version().isBlank() ? visibility : visibility + " | " + server.version());
+        IconButton visibilityButton = (IconButton) widget.mountedWidgets.get(0);
+        visibilityButton.setIcon(server.hidden() ? "add.png" : "hide.png");
+        visibilityButton.setHint(server.hidden() ? "Show Quick Server" : "Hide Quick Server");
+        visibilityButton.setOnClick(server.toggleVisibility());
+        ((IconButton) widget.mountedWidgets.get(1)).setOnClick(() -> deleteQuickServer(server));
+    }
+
+    private void updateHiddenServerWidget(MountableButtonWidget widget, ServerClientSettingsProvider.HiddenServer server) {
+        widget.setName(server.name());
+        widget.setDescription(server.location());
+        widget.setHiddenText("Version: " + (server.version() == null ? "" : server.version()));
+        ((IconButton) widget.mountedWidgets.getFirst()).setOnClick(server.show());
     }
 
     private List<ServerClientSettingsProvider.HiddenServer> getHiddenServers() {

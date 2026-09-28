@@ -16,6 +16,7 @@ import restudio.rebase.api.unified.internal.StandardOutputStateParser;
 import restudio.rebase.backend.TerminalSessionProvider;
 import restudio.rebase.backend.RemoteFileSystemProvider;
 import restudio.rebase.backend.RemotePath;
+import restudio.rebase.storage.StorageBreakdownIndex;
 import restudio.rebase.restudio.api.models.ServerModels;
 import restudio.rebase.resource.ResourcePoolModels;
 import restudio.rebase.health.ServerHealth;
@@ -39,10 +40,16 @@ import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 public interface ServerScreenHost {
-    record StorageFiles(RemoteFileSystemProvider provider, RemotePath root) {
+    record StorageFiles(RemoteFileSystemProvider provider, RemotePath root,
+                        Function<String, Async<StorageBreakdownIndex.IndexedDirectory>> indexed) {
+        public StorageFiles(RemoteFileSystemProvider provider, RemotePath root) {
+            this(provider, root, null);
+        }
+
         public StorageFiles {
             provider = Objects.requireNonNull(provider, "provider");
             root = Objects.requireNonNull(root, "root");
@@ -350,7 +357,14 @@ public interface ServerScreenHost {
     record ConfigurationUi(Map<String, Supplier<List<Setting>>> settings,
                            Runnable cleanup, String title, Supplier<String> planName,
                            Supplier<String> subdomain, Supplier<ServerModels.CustomPlanRequest> customPlan,
-                           Supplier<String> localLocation, Supplier<PoolResources> poolResources) {
+                           Supplier<String> localLocation, Supplier<PoolResources> poolResources, Runnable startupLoaded) {
+        public ConfigurationUi(Map<String, Supplier<List<Setting>>> settings,
+                               Runnable cleanup, String title, Supplier<String> planName,
+                               Supplier<String> subdomain, Supplier<ServerModels.CustomPlanRequest> customPlan,
+                               Supplier<String> localLocation, Supplier<PoolResources> poolResources) {
+            this(settings, cleanup, title, planName, subdomain, customPlan, localLocation, poolResources, null);
+        }
+
         public ConfigurationUi(Map<String, Supplier<List<Setting>>> settings,
                                Runnable cleanup, String title, Supplier<String> planName,
                                Supplier<String> subdomain, Supplier<ServerModels.CustomPlanRequest> customPlan,
@@ -369,6 +383,7 @@ public interface ServerScreenHost {
             localLocation = localLocation == null ? () -> "" : localLocation;
             poolResources = poolResources == null
                     ? () -> new PoolResources("", "", "", "", "", "", "", "") : poolResources;
+            startupLoaded = startupLoaded == null ? () -> {} : startupLoaded;
         }
     }
 
@@ -1212,6 +1227,14 @@ public interface ServerScreenHost {
 
     default Async<Void> reloadInstanceSettings(Object instance, boolean remote) {
         return Async.completed(null);
+    }
+
+    default boolean usesInstanceMetadataReloads() {
+        return true;
+    }
+
+    default boolean refreshGeneralAfterProperties() {
+        return true;
     }
 
     default Async<List<String>> listInstanceFiles(Object instance) {

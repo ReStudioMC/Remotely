@@ -9,12 +9,31 @@ import restudio.rebase.instance.loaders.ModLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ServerSettingsRegistryTest {
+    @Test
+    void hostedSettingsPublishOnlyWhenSelectedPacksChange() {
+        try (ServerSettingsRegistry registry = ServerSettingsRegistry.empty()) {
+            Object owner = new Object();
+            AtomicInteger publications = new AtomicInteger();
+            registry.addListener(ignored -> publications.incrementAndGet());
+            registry.replaceHosted(owner, Map.of("hosted", new ServerSettingsMetadata("hosted", 10,
+                    List.of(pack("shared", "First", 0, "paper")))));
+            registry.replaceHosted(owner, Map.of("hosted", new ServerSettingsMetadata("hosted", 10,
+                    List.of(pack("shared", "First", 0, "paper")))));
+            assertEquals(1, publications.get());
+            registry.replaceHosted(owner, Map.of("hosted", new ServerSettingsMetadata("hosted", 10,
+                    List.of(pack("shared", "Updated", 0, "paper")))));
+            assertEquals(2, publications.get());
+        }
+    }
+
     @Test
     void higherPriorityExternalPackOverridesProgrammaticPackWithoutDeletingIt(@TempDir Path directory) throws Exception {
         ServerSettingsRegistry registry = ServerSettingsRegistry.empty();

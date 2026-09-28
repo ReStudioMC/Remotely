@@ -18,7 +18,14 @@ public class ServerGeneralSettingsController {
         this.editMode = editMode;
     }
 
+    private List<Setting> residentSettings;
+
     public List<Setting> getSettings() {
+        if (residentSettings == null) residentSettings = List.copyOf(createSettings());
+        return residentSettings;
+    }
+
+    private List<Setting> createSettings() {
         Setting.Builder general = new Setting.Builder("Server");
 
         general.addOption(ConfigOption.<String>builder("Server Name")

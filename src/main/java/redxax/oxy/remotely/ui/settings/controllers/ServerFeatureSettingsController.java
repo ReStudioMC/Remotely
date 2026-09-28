@@ -11,7 +11,14 @@ public class ServerFeatureSettingsController {
         this.provider = provider;
     }
 
+    private List<Setting> residentSettings;
+
     public List<Setting> getSettings() {
+        if (residentSettings == null) residentSettings = List.copyOf(createSettings());
+        return residentSettings;
+    }
+
+    private List<Setting> createSettings() {
         Setting.Builder builder = new Setting.Builder("Features & Integrations");
         if (provider.local()) {
             builder.addOption(ConfigOption.<Boolean>builder("Keep Running")

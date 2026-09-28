@@ -10,6 +10,7 @@ import restudio.rescreen.ui.settings.Setting;
 import restudio.rescreen.ui.settings.SettingsScreen;
 import restudio.rescreen.ui.widgets.AnimatedButton;
 import restudio.rescreen.ui.widgets.MountableButtonWidget;
+import restudio.rescreen.ui.widgets.PopupWidget.PopupRow;
 import restudio.rescreen.ui.widgets.PopupWidget;
 import restudio.rescreen.ui.widgets.ScreenWindowWidget;
 import restudio.rescreen.ui.widgets.SquareButtonWidget;
@@ -25,6 +26,8 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 
 import static restudio.rescreen.util.SoundUtils.playSound;
@@ -42,16 +45,49 @@ public class ReProxySettingsController {
     private volatile String loadError;
     private volatile long loadStartedAt;
     private volatile long loadRequestId;
+    private volatile long generation;
+    private volatile boolean closed;
+    private Setting statusSetting;
+    private Setting domainsSetting;
+    private PopupRow overviewRow;
+    private PopupRow addressRow;
+    private PopupRow limitsRow;
+    private PopupRow stateRow;
+    private PopupRow retryRow;
+    private PopupRow emptyDomainsRow;
+    private List<PopupRow> unavailableStatusRows;
+    private PopupRow unavailableDomainRow;
+    private PopupRow loginRow;
+    private final Map<String, PopupRow> domainRows = new LinkedHashMap<>();
 
     public ReProxySettingsController(ReProxySettingsCapability capability) {
         this.capability = capability == null ? ReProxySettingsCapability.unavailable(false, "ReProxy Is Unavailable") : capability;
     }
 
+    public void cleanup() {
+        closed = true;
+        generation++;
+        loadRequestId++;
+        loadingData = false;
+        loadingAction = false;
+    }
+
+    public void activate() {
+        generation++;
+        loadRequestId++;
+        loadingData = false;
+        loadingAction = false;
+        closed = false;
+        if (statusSetting != null && capability.authenticated() && capability.availability().available()) loadData();
+    }
+
     public List<Setting> getSettings() {
+        if (closed) return statusSetting == null ? List.of() : domainsSetting == null ? List.of(statusSetting) : List.of(statusSetting, domainsSetting);
         if (!capability.authenticated()) {
-            Setting.Builder builder = new Setting.Builder("ReProxy");
-            builder.addRow("", new AnimatedButton.Builder().label("ReStudio Login Required").active(false).build());
-            return List.of(builder.build());
+            if (statusSetting == null) statusSetting = new Setting.Builder("ReProxy").build();
+            if (loginRow == null) loginRow = new PopupRow.Builder("", new AnimatedButton.Builder().label("ReStudio Login Required").active(false).build()).build();
+            if (!statusSetting.getRows().equals(List.of(loginRow))) statusSetting.setRows(List.of(loginRow));
+            return List.of(statusSetting);
         }
 
         ReProxySettingsCapability.Availability availability = capability.availability();
@@ -60,43 +96,126 @@ public class ReProxySettingsController {
         }
 
         ensureDataLoaded();
+        if (overviewRow == null) {
+            overviewRow = new PopupRow.Builder("Status", createOverviewWidget()).build();
+            if (statusSetting == null) statusSetting = new Setting.Builder("ReProxy").build();
+            statusSetting.setRows(List.of(overviewRow));
+            stateRow = new PopupRow.Builder("", new AnimatedButton.Builder().label("Loading Domains").active(false).build()).build();
+            retryRow = new PopupRow.Builder("", new AnimatedButton.Builder().label("Retry Load")
+                    .accentType(ThemeManager.getDefaultAccent()).onClick(this::loadData).build()).build();
+            emptyDomainsRow = new PopupRow.Builder("", new MountableButtonWidget.Builder("No Domains")
+                    .description("Create Domain To Start").hiddenText(domainLimitText()).build()).build();
+            if (domainsSetting == null) domainsSetting = new Setting.Builder("Domains").build();
+        }
+        refreshRows();
+        return dataLoaded ? List.of(statusSetting, domainsSetting) : List.of(statusSetting);
+    }
 
-        Setting.Builder statusBuilder = new Setting.Builder("ReProxy");
-        statusBuilder.addRow("Status", createOverviewWidget());
+    private void refreshRows() {
+        if (overviewRow == null) return;
+        MountableButtonWidget overview = (MountableButtonWidget) overviewRow.getWidgets().getFirst();
+        String title = loadingData ? "Loading" : dataLoaded ? "Ready" : "Unavailable";
+        if (!safe(loadError).isBlank()) title = "Load Failed";
+        overview.setName(title);
+        overview.setDescription(summary != null && summary.activeTunnel != null && summary.activeTunnel.domain != null
+                ? "Online | " + safeDomain(summary.activeTunnel.domain) : domainCountText());
+        overview.setHiddenText(loadingAction ? "Working" : "");
+        ((SquareButtonWidget) overview.mountedWidgets.get(0)).setActive(dataLoaded && canCreateDomain() && !loadingAction);
+        ((SquareButtonWidget) overview.mountedWidgets.get(1)).setActive(!loadingData);
 
+        List<PopupRow> statusRows = new ArrayList<>();
+        statusRows.add(overviewRow);
         if (!dataLoaded) {
-            renderLoadingState(statusBuilder);
-            return List.of(statusBuilder.build());
-        }
-
-        if (summary != null && summary.activeTunnel != null) {
-            statusBuilder.addRow("Address", createActiveTunnelWidget(summary.activeTunnel));
+            ((AnimatedButton) stateRow.getWidgets().getFirst()).setMessage(loadingData ? "Loading Domains" : safe(loadError).isBlank() ? "Domains Unavailable" : "Load Failed");
+            statusRows.add(stateRow);
+            if (!safe(loadError).isBlank()) statusRows.add(retryRow);
         } else {
-            statusBuilder.addRow("Address", new MountableButtonWidget.Builder("No Active Tunnel")
-                    .description("Start ReProxy From A Server")
-                    .hiddenText(tunnelLimitText())
-                    .build());
+            ServerModels.ReProxyTunnel tunnel = summary == null ? null : summary.activeTunnel;
+            if (addressRow == null || (tunnel != null) != (((MountableButtonWidget) addressRow.getWidgets().getFirst()).mountedWidgets.size() > 0)) {
+                MountableButtonWidget address = tunnel == null
+                        ? new MountableButtonWidget.Builder("No Active Tunnel").description("Start ReProxy From A Server").hiddenText(tunnelLimitText()).build()
+                        : createActiveTunnelWidget(tunnel);
+                addressRow = new PopupRow.Builder("Address", address).build();
+            } else {
+                MountableButtonWidget address = (MountableButtonWidget) addressRow.getWidgets().getFirst();
+                if (tunnel == null) {
+                    address.setHiddenText(tunnelLimitText());
+                } else {
+                    address.setName(tunnel.domain == null ? "Unknown Domain" : safeDomain(tunnel.domain));
+                    address.setDescription("Port " + tunnel.localPort + " | " + safeStatus(tunnel.status));
+                    address.setHiddenText(tunnel.connectionCount + " Connections | " + formatBytes(tunnel.bytesIn) + "/" + formatBytes(tunnel.bytesOut));
+                }
+            }
+            statusRows.add(addressRow);
+            if (limitsRow == null) limitsRow = new PopupRow.Builder("Limits", new AnimatedButton.Builder().label(limitText()).active(false).build()).build();
+            ((AnimatedButton) limitsRow.getWidgets().getFirst()).setMessage(limitText());
+            statusRows.add(limitsRow);
+            refreshDomains();
         }
-        statusBuilder.addRow("Limits", new AnimatedButton.Builder().label(limitText()).active(false).build());
+        if (!statusSetting.getRows().equals(statusRows)) statusSetting.setRows(statusRows);
+    }
 
-        Setting.Builder domainsBuilder = new Setting.Builder("Domains");
-        renderDomains(domainsBuilder, new ArrayList<>(domainCache));
-        return List.of(statusBuilder.build(), domainsBuilder.build());
+    private void refreshDomains() {
+        if (domainsSetting == null) return;
+        List<PopupRow> rows = new ArrayList<>();
+        if (domainCache.isEmpty()) {
+            domainRows.clear();
+            MountableButtonWidget empty = (MountableButtonWidget) emptyDomainsRow.getWidgets().getFirst();
+            empty.setHiddenText(domainLimitText());
+            rows.add(emptyDomainsRow);
+        } else {
+            List<ServerModels.ReProxyDomain> domains = new ArrayList<>(domainCache);
+            domains.sort(Comparator.comparing((ServerModels.ReProxyDomain domain) -> !"ACTIVE".equalsIgnoreCase(safe(domain.status)))
+                    .thenComparing(domain -> safe(domain.subdomain).toLowerCase(Locale.ROOT)));
+            Map<String, PopupRow> next = new LinkedHashMap<>();
+            for (ServerModels.ReProxyDomain domain : domains) {
+                if (safe(domain.id).isBlank()) continue;
+                PopupRow row = domainRows.get(domain.id);
+                ServerModels.ReProxyTunnel tunnel = activeTunnelForDomain(domain);
+                boolean active = "ACTIVE".equalsIgnoreCase(safe(domain.status));
+                if (row == null) {
+                    row = new PopupRow.Builder("", createDomainWidget(domain)).build();
+                } else {
+                    MountableButtonWidget widget = (MountableButtonWidget) row.getWidgets().getFirst();
+                    widget.setName(safeDomain(domain));
+                    widget.setDescription(tunnel != null ? "Online | Port " + tunnel.localPort : safeStatus(domain.status) + " | " + safe(domain.subdomain));
+                    widget.setHiddenText(tunnel != null
+                            ? tunnel.connectionCount + " Connections | " + formatBytes(tunnel.bytesIn) + "/" + formatBytes(tunnel.bytesOut)
+                            : domainTimeline(domain));
+                    widget.setActive(active);
+                }
+                MountableButtonWidget widget = (MountableButtonWidget) row.getWidgets().getFirst();
+                widget.mountedWidgets.get(1).setVisible(tunnel != null);
+                widget.mountedWidgets.get(2).setVisible(tunnel == null && active);
+                next.put(domain.id, row);
+                rows.add(row);
+            }
+            domainRows.clear();
+            domainRows.putAll(next);
+        }
+        if (!domainsSetting.getRows().equals(rows)) domainsSetting.setRows(rows);
     }
 
     private List<Setting> unavailableSettings(String reason) {
         String message = safe(reason).isBlank() ? "ReProxy Is Unavailable" : reason;
-        Setting.Builder statusBuilder = new Setting.Builder("ReProxy");
-        statusBuilder.addRow("Status", createUnavailableOverviewWidget(message));
-        statusBuilder.addRow("Address", new MountableButtonWidget.Builder("No Active Tunnel")
-                .description(message)
-                .hiddenText("Tunnel Limit Unknown")
-                .build());
-        statusBuilder.addRow("Limits", new AnimatedButton.Builder().label("Domain Limit Unknown | Tunnel Limit Unknown").active(false).hint(message).build());
-
-        Setting.Builder domainsBuilder = new Setting.Builder("Domains");
-        domainsBuilder.addRow("", new MountableButtonWidget.Builder("No Domains").description(message).hiddenText("Domain Limit Unknown").build());
-        return List.of(statusBuilder.build(), domainsBuilder.build());
+        if (unavailableStatusRows == null) {
+            unavailableStatusRows = List.of(
+                    new PopupRow.Builder("Status", createUnavailableOverviewWidget(message)).build(),
+                    new PopupRow.Builder("Address", new MountableButtonWidget.Builder("No Active Tunnel")
+                            .description(message).hiddenText("Tunnel Limit Unknown").build()).build(),
+                    new PopupRow.Builder("Limits", new AnimatedButton.Builder()
+                            .label("Domain Limit Unknown | Tunnel Limit Unknown").active(false).hint(message).build()).build());
+            unavailableDomainRow = new PopupRow.Builder("", new MountableButtonWidget.Builder("No Domains")
+                    .description(message).hiddenText("Domain Limit Unknown").build()).build();
+        }
+        ((MountableButtonWidget) unavailableStatusRows.get(0).getWidgets().getFirst()).setDescription(message);
+        ((MountableButtonWidget) unavailableStatusRows.get(1).getWidgets().getFirst()).setDescription(message);
+        ((MountableButtonWidget) unavailableDomainRow.getWidgets().getFirst()).setDescription(message);
+        if (statusSetting == null) statusSetting = new Setting.Builder("ReProxy").build();
+        if (domainsSetting == null) domainsSetting = new Setting.Builder("Domains").build();
+        if (!statusSetting.getRows().equals(unavailableStatusRows)) statusSetting.setRows(unavailableStatusRows);
+        if (!domainsSetting.getRows().equals(List.of(unavailableDomainRow))) domainsSetting.setRows(List.of(unavailableDomainRow));
+        return List.of(statusSetting, domainsSetting);
     }
 
     private MountableButtonWidget createUnavailableOverviewWidget(String reason) {
@@ -110,10 +229,11 @@ public class ReProxySettingsController {
     private void ensureDataLoaded() {
         if (loadingData && hasLoadTimedOut()) {
             loadingData = false;
-            dataLoaded = false;
             loadError = "Load timed out";
             loadStartedAt = 0L;
-            ScreenManager.getInstance().execute(() -> new Notification("Load Failed", loadError, Notification.Type.ERROR));
+            ScreenManager.getInstance().execute(() -> {
+                if (!closed) new Notification("Load Failed", loadError, Notification.Type.ERROR);
+            });
             refreshReProxyTab();
         }
         if (!dataLoaded && !loadingData && safe(loadError).isBlank()) {
@@ -122,7 +242,7 @@ public class ReProxySettingsController {
     }
 
     private void loadData() {
-        if (loadingData) {
+        if (closed || loadingData) {
             return;
         }
         long requestId = ++loadRequestId;
@@ -131,7 +251,7 @@ public class ReProxySettingsController {
         loadStartedAt = System.currentTimeMillis();
         AsyncTools.withTimeout(capability.summary(), TaskSchedulers.current(), Duration.ofSeconds(20))
                 .whenComplete((value, error) -> ScreenManager.getInstance().execute(() -> {
-                    if (requestId != loadRequestId) {
+                    if (closed || requestId != loadRequestId) {
                         return;
                     }
                     if (error == null && value != null) {
@@ -143,7 +263,6 @@ public class ReProxySettingsController {
                         dataLoaded = true;
                         loadError = null;
                     } else {
-                        dataLoaded = false;
                         loadError = sanitizeError(error);
                         new Notification("Load Failed", loadError, Notification.Type.ERROR);
                     }
@@ -187,21 +306,6 @@ public class ReProxySettingsController {
         return builder.build();
     }
 
-    private void renderLoadingState(Setting.Builder builder) {
-        if (loadingData) {
-            builder.addRow("", new AnimatedButton.Builder().label("Loading Domains").active(false).build());
-        } else if (!safe(loadError).isBlank()) {
-            builder.addRow("", new AnimatedButton.Builder().label("Load Failed").active(false).build());
-            builder.addRow("", new AnimatedButton.Builder()
-                    .label("Retry Load")
-                    .accentType(ThemeManager.getDefaultAccent())
-                    .onClick(this::loadData)
-                    .build());
-        } else {
-            builder.addRow("", new AnimatedButton.Builder().label("Domains Unavailable").active(false).build());
-        }
-    }
-
     private MountableButtonWidget createActiveTunnelWidget(ServerModels.ReProxyTunnel tunnel) {
         String domain = tunnel.domain == null ? "Unknown Domain" : safeDomain(tunnel.domain);
         String description = "Port " + tunnel.localPort + " | " + safeStatus(tunnel.status);
@@ -213,35 +317,23 @@ public class ReProxySettingsController {
                 .addButton(new SquareButtonWidget.Builder()
                         .imagePath("clipboard.png")
                         .hint("Copy Address")
-                        .onClick(() -> copyAddress(domain))
+                        .onClick(() -> {
+                            if (summary != null && summary.activeTunnel != null && summary.activeTunnel.domain != null) {
+                                copyAddress(safeDomain(summary.activeTunnel.domain));
+                            }
+                        })
                         .size(18, 18)
                         .build())
                 .addButton(new SquareButtonWidget.Builder()
                         .imagePath("closeReverse.png")
                         .hint("Stop ReProxy")
-                        .onClick(() -> stopTunnel(tunnel))
+                        .onClick(() -> {
+                            if (summary != null && summary.activeTunnel != null) stopTunnel(summary.activeTunnel);
+                        })
                         .accentType(ThemeManager.getAccent("danger"))
                         .size(18, 18)
                         .build())
                 .build();
-    }
-
-    private void renderDomains(Setting.Builder builder, List<ServerModels.ReProxyDomain> domains) {
-        if (domains.isEmpty()) {
-            builder.addRow("", new MountableButtonWidget.Builder("No Domains")
-                    .description("Create Domain To Start")
-                    .hiddenText(domainLimitText())
-                    .build());
-            return;
-        }
-
-        domains.sort(Comparator
-                .comparing((ServerModels.ReProxyDomain domain) -> !"ACTIVE".equalsIgnoreCase(safe(domain.status)))
-                .thenComparing(domain -> safe(domain.subdomain).toLowerCase(Locale.ROOT)));
-
-        for (ServerModels.ReProxyDomain domain : domains) {
-            builder.addRow("", createDomainWidget(domain));
-        }
     }
 
     private MountableButtonWidget createDomainWidget(ServerModels.ReProxyDomain domain) {
@@ -256,33 +348,36 @@ public class ReProxySettingsController {
         MountableButtonWidget.Builder builder = new MountableButtonWidget.Builder(safeDomain(domain))
                 .description(description)
                 .hiddenText(hiddenText)
-                .onClick(() -> copyAddress(safeDomain(domain)))
+                .onClick(() -> copyAddress(safeDomain(currentDomain(domain.id))))
                 .addButton(new SquareButtonWidget.Builder()
                         .imagePath("clipboard.png")
                         .hint("Copy Address")
-                        .onClick(() -> copyAddress(safeDomain(domain)))
+                        .onClick(() -> copyAddress(safeDomain(currentDomain(domain.id))))
                         .size(18, 18)
                         .build());
 
-        if (online) {
-            builder.addButton(new SquareButtonWidget.Builder()
+        SquareButtonWidget stopButton = new SquareButtonWidget.Builder()
                     .imagePath("closeReverse.png")
                     .hint("Stop ReProxy")
-                    .onClick(() -> stopTunnel(activeTunnel))
+                    .onClick(() -> {
+                        ServerModels.ReProxyTunnel current = activeTunnelForDomain(currentDomain(domain.id));
+                        if (current != null) stopTunnel(current);
+                    })
                     .accentType(ThemeManager.getAccent("danger"))
                     .size(18, 18)
-                    .build());
-        } else if (active) {
-            builder.addButton(new SquareButtonWidget.Builder()
+                    .build();
+        SquareButtonWidget deleteButton = new SquareButtonWidget.Builder()
                     .imagePath("delete.png")
                     .hint("Delete Domain")
-                    .onClick(() -> showDeletePopup(domain))
+                    .onClick(() -> showDeletePopup(currentDomain(domain.id)))
                     .accentType(ThemeManager.getAccent("danger"))
                     .size(18, 18)
-                    .build());
-        }
+                    .build();
+        builder.addButton(stopButton).addButton(deleteButton);
 
         MountableButtonWidget widget = builder.build();
+        stopButton.setVisible(online);
+        deleteButton.setVisible(!online && active);
         if (!active) {
             widget.setActive(false);
         }
@@ -301,6 +396,13 @@ public class ReProxySettingsController {
             return summary.activeTunnel;
         }
         return null;
+    }
+
+    private ServerModels.ReProxyDomain currentDomain(String id) {
+        for (ServerModels.ReProxyDomain domain : domainCache) {
+            if (id != null && id.equals(domain.id)) return domain;
+        }
+        return new ServerModels.ReProxyDomain();
     }
 
     private void showCreatePopup() {
@@ -362,13 +464,15 @@ public class ReProxySettingsController {
     }
 
     private void createDomain(String subdomain) {
-        if (loadingAction) {
+        if (closed || loadingAction) {
             return;
         }
+        long actionGeneration = generation;
         loadingAction = true;
         refreshReProxyTab();
         capability.createDomain(subdomain)
                 .whenComplete((domain, error) -> ScreenManager.getInstance().execute(() -> {
+                    if (closed || actionGeneration != generation) return;
                     loadingAction = false;
                     if (error == null && domain != null) {
                         upsertDomain(domain);
@@ -383,13 +487,15 @@ public class ReProxySettingsController {
     }
 
     private void deleteDomain(ServerModels.ReProxyDomain domain) {
-        if (domain == null || safe(domain.id).isBlank() || loadingAction) {
+        if (closed || domain == null || safe(domain.id).isBlank() || loadingAction) {
             return;
         }
+        long actionGeneration = generation;
         loadingAction = true;
         refreshReProxyTab();
         capability.deleteDomain(domain.id)
                 .whenComplete((ignored, error) -> ScreenManager.getInstance().execute(() -> {
+                    if (closed || actionGeneration != generation) return;
                     loadingAction = false;
                     if (error == null) {
                         domain.status = "DISABLED";
@@ -403,13 +509,15 @@ public class ReProxySettingsController {
     }
 
     private void stopTunnel(ServerModels.ReProxyTunnel tunnel) {
-        if (tunnel == null || safe(tunnel.id).isBlank() || loadingAction) {
+        if (closed || tunnel == null || safe(tunnel.id).isBlank() || loadingAction) {
             return;
         }
+        long actionGeneration = generation;
         loadingAction = true;
         refreshReProxyTab();
         capability.stopTunnel(tunnel.id)
                 .whenComplete((ignored, error) -> ScreenManager.getInstance().execute(() -> {
+                    if (closed || actionGeneration != generation) return;
                     loadingAction = false;
                     if (error == null) {
                         new Notification("ReProxy Stopped", safeDomain(tunnel.domain), Notification.Type.SUCCESS);
@@ -568,6 +676,8 @@ public class ReProxySettingsController {
     }
 
     private void refreshReProxyTab() {
+        if (closed) return;
+        refreshRows();
         ScreenManager screenManager = ScreenManager.getInstance();
         Screen current = screenManager.getCurrentScreen();
         List<SettingsScreen> targets = new ArrayList<>();

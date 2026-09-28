@@ -146,57 +146,58 @@ public final class MetadataRepository {
     }
 
     private Async<Bundle> admit(MetadataBundleDescriptor descriptor) {
+        Async<Bundle> admission;
         synchronized (this) {
             Bundle resident = admitted.get(descriptor.bundleId());
             if (resident != null) return Async.completed(requireDescriptor(resident, descriptor));
             Async<Bundle> existing = admissions.get(descriptor.bundleId());
             if (existing != null) return existing.thenApply(bundle -> requireDescriptor(bundle, descriptor));
-            Async<Bundle> admission = Async.pending();
+            admission = Async.pending();
             admissions.put(descriptor.bundleId(), admission);
-            Async<byte[]> read;
-            try {
-                read = storage.read(descriptor.bundleId());
-            } catch (Throwable failure) {
-                read = Async.failed(failure);
-            }
-            read.whenComplete((stored, storageFailure) -> {
-                if (storageFailure == null && stored != null) {
-                    try {
-                        settleAdmission(descriptor, admission, verify(descriptor, stored), false);
-                        return;
-                    } catch (Throwable ignored) {
-                        noteWarning("Cached metadata failed verification and was replaced");
-                    }
-                }
-                Async<byte[]> download;
-                try {
-                    download = transport.bundle(descriptor.bundleId());
-                } catch (Throwable failure) {
-                    download = Async.failed(failure);
-                }
-                download.whenComplete((downloaded, downloadFailure) -> {
-                    if (downloadFailure != null) {
-                        failAdmission(descriptor.bundleId(), admission, downloadFailure);
-                        return;
-                    }
-                    Bundle bundle;
-                    try {
-                        bundle = verify(descriptor, downloaded);
-                    } catch (Throwable invalid) {
-                        failAdmission(descriptor.bundleId(), admission, invalid);
-                        return;
-                    }
-                    Async<Void> write;
-                    try {
-                        write = storage.write(descriptor.bundleId(), bundle.bytes());
-                    } catch (Throwable failure) {
-                        write = Async.failed(failure);
-                    }
-                    write.whenComplete((unused, writeFailure) -> settleAdmission(descriptor, admission, bundle, writeFailure != null));
-                });
-            });
-            return admission;
         }
+        Async<byte[]> read;
+        try {
+            read = storage.read(descriptor.bundleId());
+        } catch (Throwable failure) {
+            read = Async.failed(failure);
+        }
+        read.whenComplete((stored, storageFailure) -> {
+            if (storageFailure == null && stored != null) {
+                try {
+                    settleAdmission(descriptor, admission, verify(descriptor, stored), false);
+                    return;
+                } catch (Throwable ignored) {
+                    noteWarning("Cached metadata failed verification and was replaced");
+                }
+            }
+            Async<byte[]> download;
+            try {
+                download = transport.bundle(descriptor.bundleId());
+            } catch (Throwable failure) {
+                download = Async.failed(failure);
+            }
+            download.whenComplete((downloaded, downloadFailure) -> {
+                if (downloadFailure != null) {
+                    failAdmission(descriptor.bundleId(), admission, downloadFailure);
+                    return;
+                }
+                Bundle bundle;
+                try {
+                    bundle = verify(descriptor, downloaded);
+                } catch (Throwable invalid) {
+                    failAdmission(descriptor.bundleId(), admission, invalid);
+                    return;
+                }
+                Async<Void> write;
+                try {
+                    write = storage.write(descriptor.bundleId(), bundle.bytes());
+                } catch (Throwable failure) {
+                    write = Async.failed(failure);
+                }
+                write.whenComplete((unused, writeFailure) -> settleAdmission(descriptor, admission, bundle, writeFailure != null));
+            });
+        });
+        return admission;
     }
 
     private Bundle verify(MetadataBundleDescriptor descriptor, byte[] bytes) {
@@ -225,26 +226,34 @@ public final class MetadataRepository {
         return new Bundle(descriptor, canonical, value);
     }
 
-    private synchronized void settleAdmission(MetadataBundleDescriptor descriptor, Async<Bundle> admission, Bundle bundle,
-                                              boolean storageWarning) {
-        if (admissions.get(descriptor.bundleId()) != admission) return;
-        admissions.remove(descriptor.bundleId());
-        Bundle existing = admitted.putIfAbsent(descriptor.bundleId(), bundle);
-        if (storageWarning) noteWarning("Verified metadata could not be cached");
-        admission.complete(existing == null ? bundle : requireDescriptor(existing, descriptor));
+    private void settleAdmission(MetadataBundleDescriptor descriptor, Async<Bundle> admission, Bundle bundle,
+                                 boolean storageWarning) {
+        Bundle result;
+        synchronized (this) {
+            if (admissions.get(descriptor.bundleId()) != admission) return;
+            admissions.remove(descriptor.bundleId());
+            Bundle existing = admitted.putIfAbsent(descriptor.bundleId(), bundle);
+            if (storageWarning) diagnostic = new Diagnostic(State.READY, "Verified metadata could not be cached", generation, diagnostic.stamp());
+            result = existing == null ? bundle : requireDescriptor(existing, descriptor);
+        }
+        admission.complete(result);
     }
 
-    private synchronized void failAdmission(MetadataBundleId id, Async<Bundle> admission, Throwable failure) {
-        if (admissions.get(id) != admission) return;
-        admissions.remove(id);
+    private void failAdmission(MetadataBundleId id, Async<Bundle> admission, Throwable failure) {
+        synchronized (this) {
+            if (admissions.get(id) != admission) return;
+            admissions.remove(id);
+        }
         admission.fail(failure);
     }
 
-    private synchronized void settleSuccess(Request request, Async<Snapshot> owner, Snapshot snapshot) {
-        if (refreshes.get(request) != owner) return;
-        refreshes.remove(request);
-        String message = diagnostic.state() == State.READY ? diagnostic.message() : "";
-        diagnostic = new Diagnostic(State.READY, message, generation, snapshot.stamp());
+    private void settleSuccess(Request request, Async<Snapshot> owner, Snapshot snapshot) {
+        synchronized (this) {
+            if (refreshes.get(request) != owner) return;
+            refreshes.remove(request);
+            String message = diagnostic.state() == State.READY ? diagnostic.message() : "";
+            diagnostic = new Diagnostic(State.READY, message, generation, snapshot.stamp());
+        }
         owner.complete(snapshot);
     }
 
@@ -252,14 +261,17 @@ public final class MetadataRepository {
         diagnostic = new Diagnostic(State.READY, message, generation, diagnostic.stamp());
     }
 
-    private synchronized void settleFailure(Request request, Async<Snapshot> owner, Throwable failure) {
-        if (refreshes.get(request) != owner) return;
-        refreshes.remove(request);
-        Snapshot fallback = snapshots.get(request);
-        String message = failure.getMessage() == null || failure.getMessage().isBlank()
-            ? "Metadata refresh failed" : failure.getMessage();
-        diagnostic = new Diagnostic(fallback == null ? State.UNAVAILABLE : State.STALE, message, generation,
-            fallback == null ? "" : fallback.stamp());
+    private void settleFailure(Request request, Async<Snapshot> owner, Throwable failure) {
+        Snapshot fallback;
+        synchronized (this) {
+            if (refreshes.get(request) != owner) return;
+            refreshes.remove(request);
+            fallback = snapshots.get(request);
+            String message = failure.getMessage() == null || failure.getMessage().isBlank()
+                ? "Metadata refresh failed" : failure.getMessage();
+            diagnostic = new Diagnostic(fallback == null ? State.UNAVAILABLE : State.STALE, message, generation,
+                fallback == null ? "" : fallback.stamp());
+        }
         if (fallback == null) owner.fail(failure);
         else owner.complete(fallback);
     }

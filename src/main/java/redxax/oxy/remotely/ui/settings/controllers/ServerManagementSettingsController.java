@@ -15,7 +15,14 @@ public class ServerManagementSettingsController {
         this.provider = provider;
     }
 
+    private List<Setting> residentSettings;
+
     public List<Setting> getSettings() {
+        if (residentSettings == null) residentSettings = List.copyOf(createSettings());
+        return residentSettings;
+    }
+
+    private List<Setting> createSettings() {
         ServerManagementSettingsProvider p = provider;
         boolean isRemote = p.remote();
 

@@ -2,12 +2,11 @@ package redxax.oxy.remotely.ui.settings.controllers;
 
 import redxax.oxy.remotely.util.BrowserSafeState;
 import redxax.oxy.remotely.ui.settings.controllers.ServerJvmSettingsProvider.RuntimeOption;
-import restudio.rescreen.ui.core.Screen;
 import restudio.rescreen.ui.core.ScreenManager;
 import restudio.rescreen.ui.settings.Setting;
-import restudio.rescreen.ui.settings.SettingsScreen;
 import restudio.rescreen.ui.widgets.DoubleSliderWidget;
 import restudio.rescreen.ui.widgets.DropDownWidget;
+import restudio.rescreen.ui.widgets.PopupWidget;
 import restudio.rescreen.ui.widgets.TextInputWidget;
 import restudio.rescreen.util.Notification;
 
@@ -22,6 +21,11 @@ public class ServerJvmSettingsController {
     private ServerJvmSettingsProvider provider;
     private static final int MIN_RAM_MB = 512;
     private Map<String, String> remoteVariables;
+    private Setting setting;
+    private TextInputWidget jarFileInput;
+    private TextInputWidget maxRamInput;
+    private DropDownWidget<RuntimeOption> runtimeDropdown;
+    private boolean runtimeLoading;
 
     public ServerJvmSettingsController(Object instance) {
         if (instance instanceof ServerJvmSettingsProvider settingsProvider) provider = settingsProvider;
@@ -41,28 +45,13 @@ public class ServerJvmSettingsController {
     }
 
     public List<Setting> getSettings() {
+        if (setting != null) {
+            admitRemoteRows();
+            return remoteVariables != null && setting.getRows().isEmpty() ? List.of() : List.of(setting);
+        }
         Setting.Builder builder = new Setting.Builder("Java Configuration");
 
-        if (remoteVariables != null) {
-            if (remoteVariables.containsKey("SERVER_JARFILE")) {
-                TextInputWidget jarFile = new TextInputWidget.Builder()
-                        .text(remoteVariables.get("SERVER_JARFILE"))
-                        .onChange(t -> remoteVariables.put("SERVER_JARFILE", t))
-                        .size(500, 20)
-                        .build();
-                builder.addRow("Server Jar File", jarFile);
-            }
-
-            if (remoteVariables.containsKey("MAXIMUM_RAM")) {
-                TextInputWidget maxRam = new TextInputWidget.Builder()
-                        .text(remoteVariables.get("MAXIMUM_RAM"))
-                        .onChange(t -> remoteVariables.put("MAXIMUM_RAM", t))
-                        .size(60, 20)
-                        .build();
-                builder.addRow("Max RAM (%)", maxRam);
-            }
-
-        } else {
+        if (remoteVariables == null) {
             ServerJvmSettingsProvider provider = provider();
             boolean isRemote = provider.remote();
             int maxSystemRamMb = provider.maximumMemoryMb();
@@ -76,14 +65,16 @@ public class ServerJvmSettingsController {
                 runtimes.add(defaultRuntime);
                 List<RuntimeOption> remoteRuntimes = provider.remoteRuntimes();
                 runtimes.addAll(remoteRuntimes);
-                if (remoteRuntimes.isEmpty()) {
-                    provider.refreshRemoteRuntimes().thenRun(() -> ScreenManager.getInstance().execute(this::refreshSettings)).exceptionally(e -> null);
-                }
                 RuntimeOption selectedRuntime = runtimes.stream()
                         .filter(r -> Objects.equals(r.path(), remoteJavaPath))
                         .findFirst()
-                        .orElse(defaultRuntime);
-                DropDownWidget<RuntimeOption> javaDropdown = new DropDownWidget.Builder<>(runtimes)
+                        .orElse(null);
+                if (selectedRuntime == null && remoteJavaPath != null) {
+                    selectedRuntime = new RuntimeOption(remoteJavaPath, remoteJavaPath, 0);
+                    runtimes.add(selectedRuntime);
+                }
+                if (selectedRuntime == null) selectedRuntime = defaultRuntime;
+                runtimeDropdown = new DropDownWidget.Builder<>(runtimes)
                         .displayFunction(RuntimeOption::name)
                         .selectedItem(selectedRuntime)
                         .onSelectionChanged(runtime -> {
@@ -92,7 +83,8 @@ public class ServerJvmSettingsController {
                         })
                         .size(300, 20)
                         .build();
-                builder.addRow("Remote Java Runtime", javaDropdown);
+                builder.addRow("Remote Java Runtime", runtimeDropdown);
+                if (remoteRuntimes.isEmpty()) refreshRemoteRuntimes();
 
                 TextInputWidget remoteJavaInput = new TextInputWidget.Builder()
                         .text(remoteJavaPath != null ? remoteJavaPath : "")
@@ -110,9 +102,14 @@ public class ServerJvmSettingsController {
                 RuntimeOption selectedRuntime = runtimes.stream()
                         .filter(r -> Objects.equals(r.path(), currentJavaPath))
                         .findFirst()
-                        .orElse(defaultRuntime);
+                        .orElse(null);
+                if (selectedRuntime == null && currentJavaPath != null) {
+                    selectedRuntime = new RuntimeOption(currentJavaPath, currentJavaPath, 0);
+                    runtimes.add(selectedRuntime);
+                }
+                if (selectedRuntime == null) selectedRuntime = defaultRuntime;
 
-                DropDownWidget<RuntimeOption> javaDropdown = new DropDownWidget.Builder<>(runtimes)
+                runtimeDropdown = new DropDownWidget.Builder<>(runtimes)
                         .displayFunction(RuntimeOption::name)
                         .selectedItem(selectedRuntime)
                         .onSelectionChanged(runtime -> {
@@ -121,7 +118,7 @@ public class ServerJvmSettingsController {
                         })
                         .size(300, 20)
                         .build();
-                builder.addRow("Java Runtime", javaDropdown);
+                builder.addRow("Java Runtime", runtimeDropdown);
             }
 
             int currentRamMb = parseRam(currentJvmArgs);
@@ -168,7 +165,52 @@ public class ServerJvmSettingsController {
             builder.addRow("Additional JVM Arguments", jvmArgsInput);
         }
 
-        return List.of(builder.build());
+        setting = builder.build();
+        admitRemoteRows();
+        return remoteVariables != null && setting.getRows().isEmpty() ? List.of() : List.of(setting);
+    }
+
+    private void admitRemoteRows() {
+        if (remoteVariables == null || setting == null) return;
+        if (jarFileInput == null && remoteVariables.containsKey("SERVER_JARFILE")) {
+            jarFileInput = new TextInputWidget.Builder()
+                    .text(remoteVariables.get("SERVER_JARFILE"))
+                    .onChange(t -> remoteVariables.put("SERVER_JARFILE", t))
+                    .size(500, 20)
+                    .build();
+            setting.addRow(new PopupWidget.PopupRow.Builder("Server Jar File", jarFileInput).build());
+        }
+        if (maxRamInput == null && remoteVariables.containsKey("MAXIMUM_RAM")) {
+            maxRamInput = new TextInputWidget.Builder()
+                    .text(remoteVariables.get("MAXIMUM_RAM"))
+                    .onChange(t -> remoteVariables.put("MAXIMUM_RAM", t))
+                    .size(60, 20)
+                    .build();
+            setting.addRow(new PopupWidget.PopupRow.Builder("Max RAM (%)", maxRamInput).build());
+        }
+    }
+
+    private void refreshRemoteRuntimes() {
+        if (runtimeLoading) return;
+        runtimeLoading = true;
+        provider().refreshRemoteRuntimes().thenRun(() -> ScreenManager.getInstance().execute(() -> {
+            runtimeLoading = false;
+            if (runtimeDropdown == null) return;
+            List<RuntimeOption> runtimes = new ArrayList<>();
+            RuntimeOption fallback = new RuntimeOption("Auto-install compatible Java", null, 0);
+            runtimes.add(fallback);
+            runtimes.addAll(provider().remoteRuntimes());
+            String path = parseRemoteJavaPath(getJvmArgs());
+            RuntimeOption selected = runtimes.stream().filter(runtime -> Objects.equals(runtime.path(), path)).findFirst().orElse(null);
+            if (selected == null && path != null) {
+                selected = new RuntimeOption(path, path, 0);
+                runtimes.add(selected);
+            }
+            runtimeDropdown.setItems(runtimes, selected == null ? fallback : selected);
+        })).exceptionally(error -> {
+            ScreenManager.getInstance().execute(() -> runtimeLoading = false);
+            return null;
+        });
     }
 
     private String getJvmArgs() {
@@ -267,13 +309,6 @@ public class ServerJvmSettingsController {
             new Notification("Compatibility Warning",
                     String.format("Version %s %s. Selected Java %d.", mcVersionStr, warning, javaVersion),
                     Notification.Type.WARN);
-        }
-    }
-
-    private void refreshSettings() {
-        Screen currentScreen = ScreenManager.getInstance().getCurrentScreen();
-        if (currentScreen instanceof SettingsScreen) {
-            ((SettingsScreen) currentScreen).refreshTab("Java");
         }
     }
 

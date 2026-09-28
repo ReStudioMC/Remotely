@@ -61,6 +61,7 @@ class ServerSettingsCatalogServiceTest {
 
         ServerSettingsCatalogService.View first = service.open("server-one", 4L, "26.3");
         ServerSettingsCatalogService.View second = service.open("server-one", 4L, "26.3");
+        assertEquals(0, resolutions[0]);
         ResolvedCatalogRepository.Snapshot snapshot = first.catalog("server:minecraft:entity_type", "current:none", List.of());
 
         assertEquals(1, resolutions[0]);
@@ -74,7 +75,7 @@ class ServerSettingsCatalogServiceTest {
     }
 
     @Test
-    void revalidatesResidentMetadataAfterTheAdmissionWindow() {
+    void revalidatesResidentMetadataAfterTheFirstCatalogUse() {
         MinecraftRegistryBundle registry = new MinecraftRegistryBundle("26.3", "created", List.of(
             new MinecraftRegistryBundle.Catalog(CatalogId.of("minecraft", "entity_type"), "Entities", "Entity Types",
                 List.of(new MinecraftRegistryBundle.Entry("minecraft:pig", "Pig", "Passive Animal", null,
@@ -108,11 +109,16 @@ class ServerSettingsCatalogServiceTest {
             new HostedServerSettingsProvider(ServerSettingsRegistry.getInstance()), clock);
 
         ServerSettingsCatalogService.View first = service.open("server-one", 4L, "26.3");
+        assertEquals(0, resolutions[0]);
+        first.catalog("server:minecraft:entity_type", "current:none", List.of());
         now[0] += 59_999L;
         ServerSettingsCatalogService.View second = service.open("server-one", 4L, "26.3");
+        second.catalog("server:minecraft:entity_type", "current:none", List.of());
         assertEquals(1, resolutions[0]);
         now[0]++;
         ServerSettingsCatalogService.View third = service.open("server-one", 4L, "26.3");
+        assertEquals(1, resolutions[0]);
+        third.catalog("server:minecraft:entity_type", "current:none", List.of());
         assertEquals(2, resolutions[0]);
 
         first.close();

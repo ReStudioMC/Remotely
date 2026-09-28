@@ -128,15 +128,18 @@ public final class ServerSettingsRegistry implements AutoCloseable {
         if (registrations.isEmpty()) {
             throw new IllegalArgumentException("Hosted settings need at least one source");
         }
+        boolean changed;
         synchronized (this) {
             claimHostedOwner(owner);
+            ServerSettingsSnapshot previous = currentSnapshot;
             providers.entrySet().removeIf(entry -> entry.getValue().source() == ProviderSource.HOSTED);
             for (ProviderRegistration registration : registrations) {
                 providers.put(registration.sourceKey(), registration);
             }
             rebuildLocked();
+            changed = !previous.packs().equals(currentSnapshot.packs());
         }
-        notifyListeners();
+        if (changed) notifyListeners();
     }
 
     void clearHosted(Object owner) {

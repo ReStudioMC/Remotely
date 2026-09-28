@@ -21,7 +21,14 @@ public final class CollaborationSettingsController {
         this.provider = provider;
     }
 
+    private List<Setting> residentSettings;
+
     public List<Setting> getSettings() {
+        if (residentSettings == null) residentSettings = List.copyOf(createSettings());
+        return residentSettings;
+    }
+
+    private List<Setting> createSettings() {
         Setting.Builder builder = new Setting.Builder("Collaboration");
         builder.addOption(ConfigOption.<Boolean>builder("Custom Color")
             .description("Use your chosen color for cursors, activity, and messages. Turn this off to use your avatar color.")

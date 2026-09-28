@@ -13,6 +13,7 @@ import restudio.rescreen.ui.settings.Setting;
 import restudio.rescreen.ui.settings.SettingsScreen;
 import restudio.rescreen.ui.widgets.AnimatedButton;
 import restudio.rescreen.ui.widgets.MountableButtonWidget;
+import restudio.rescreen.ui.widgets.PopupWidget.PopupRow;
 import restudio.rescreen.ui.widgets.PopupWidget;
 import restudio.rescreen.ui.widgets.ScreenWindowWidget;
 import restudio.rescreen.ui.widgets.SquareButtonWidget;
@@ -25,6 +26,8 @@ import java.util.Comparator;
 import java.util.List;
 import java.time.Duration;
 import java.util.Locale;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 
 import static restudio.rescreen.util.SoundUtils.playSound;
@@ -42,57 +45,107 @@ public class ServerNetworkSettingsController {
     private volatile String loadError;
     private volatile long loadStartedAt;
     private volatile long loadRequestId;
+    private volatile boolean closed;
+    private Setting setting;
+    private AnimatedButton createPortButton;
+    private PopupRow createRow;
+    private PopupRow stateRow;
+    private PopupRow retryRow;
+    private PopupRow unavailableRow;
+    private final Map<Integer, PopupRow> allocationRows = new LinkedHashMap<>();
 
     public ServerNetworkSettingsController(ReScreen parentScreen, PortManagementSettingsProvider portFeature) {
         this.parentScreen = parentScreen;
         this.portFeature = portFeature == null ? PortManagementSettingsProvider.unavailable("Network Feature Is Unavailable") : portFeature;
     }
 
-    public List<Setting> getSettings() {
-        if (!portFeature.available()) {
-            Setting.Builder unavailable = new Setting.Builder("Server Network");
-            unavailable.addRow("", new AnimatedButton.Builder().label("Network feature unavailable").active(false).hint(portFeature.unavailableReason()).build());
-            return List.of(unavailable.build());
-        }
+    public void cleanup() {
+        closed = true;
+        loadRequestId++;
+        loadingAllocations = false;
+        loadingAction = false;
+    }
 
-        ensureAllocationsLoaded();
+    public List<Setting> getSettings() {
+        if (closed) return setting == null ? List.of() : List.of(setting);
+        if (setting != null) {
+            if (portFeature.available()) ensureAllocationsLoaded();
+            refreshRows();
+            return List.of(setting);
+        }
+        if (portFeature.available()) ensureAllocationsLoaded();
 
         Setting.Builder builder = new Setting.Builder("Server Network");
-        AnimatedButton createPortButton = new AnimatedButton.Builder()
+        createPortButton = new AnimatedButton.Builder()
                 .label("Add Port")
                 .accentType(ThemeManager.getAccent("nice"))
                 .onClick(this::createAllocation)
                 .active(allocationsLoaded && !loadingAction)
                 .build();
         builder.addRow("", createPortButton);
+        setting = builder.build();
+        createRow = setting.getRows().getFirst();
+        stateRow = new PopupRow.Builder("", new AnimatedButton.Builder().label("Loading Ports").active(false).build()).build();
+        retryRow = new PopupRow.Builder("", new AnimatedButton.Builder().label("Retry Load")
+                .accentType(ThemeManager.getDefaultAccent()).onClick(this::loadAllocations).build()).build();
+        unavailableRow = new PopupRow.Builder("", new AnimatedButton.Builder().label("Network Feature Unavailable")
+                .active(false).hint(portFeature.unavailableReason()).build()).build();
+        refreshRows();
+        return List.of(setting);
+    }
 
-        if (!allocationsLoaded) {
-            if (loadingAllocations) {
-                builder.addRow("", new AnimatedButton.Builder().label("Loading Ports").active(false).build());
-            } else if (!safe(loadError).isBlank()) {
-                builder.addRow("", new AnimatedButton.Builder().label("Load Failed").active(false).build());
-                builder.addRow("", new AnimatedButton.Builder()
-                        .label("Retry Load")
-                        .accentType(ThemeManager.getDefaultAccent())
-                        .onClick(this::loadAllocations)
-                        .build());
-            } else {
-                builder.addRow("", new AnimatedButton.Builder().label("Ports Unavailable").active(false).build());
-            }
-            return List.of(builder.build());
+    private void refreshRows() {
+        if (setting == null) return;
+        if (!portFeature.available()) {
+            ((AnimatedButton) unavailableRow.getWidgets().getFirst()).setHint(portFeature.unavailableReason());
+            if (!setting.getRows().equals(List.of(unavailableRow))) setting.setRows(List.of(unavailableRow));
+            return;
         }
-
-        renderAllocations(builder, new ArrayList<>(allocationCache));
-        return List.of(builder.build());
+        createPortButton.setActive(allocationsLoaded && !loadingAction);
+        List<PopupRow> rows = new ArrayList<>();
+        rows.add(createRow);
+        if (!allocationsLoaded) {
+            ((AnimatedButton) stateRow.getWidgets().getFirst()).setMessage(loadingAllocations ? "Loading Ports" : safe(loadError).isBlank() ? "Ports Unavailable" : "Load Failed");
+            rows.add(stateRow);
+            if (!safe(loadError).isBlank()) rows.add(retryRow);
+        } else if (allocationCache.isEmpty()) {
+            allocationRows.clear();
+            ((AnimatedButton) stateRow.getWidgets().getFirst()).setMessage("No Ports Found");
+            rows.add(stateRow);
+        } else {
+            List<ServerModels.Allocation> allocations = new ArrayList<>(allocationCache);
+            allocations.sort(Comparator.comparing((ServerModels.Allocation item) -> !item.isDefault)
+                    .thenComparing(item -> item.port == null ? Integer.MAX_VALUE : item.port));
+            Map<Integer, PopupRow> next = new LinkedHashMap<>();
+            for (ServerModels.Allocation allocation : allocations) {
+                if (allocation.id == null) continue;
+                PopupRow row = allocationRows.get(allocation.id);
+                if (row == null) {
+                    row = new PopupRow.Builder("", createAllocationWidget(allocation)).build();
+                } else {
+                    MountableButtonWidget widget = (MountableButtonWidget) row.getWidgets().getFirst();
+                    widget.setName(formatAllocation(allocation));
+                    widget.setDescription(allocation.isDefault ? "Primary Port" : "Additional Port");
+                    widget.setHiddenText(safe(allocation.notes).isBlank() ? "No Notes" : allocation.notes);
+                }
+                ((SquareButtonWidget) ((MountableButtonWidget) row.getWidgets().getFirst()).mountedWidgets.get(1)).setVisible(!allocation.isDefault);
+                next.put(allocation.id, row);
+                rows.add(row);
+            }
+            allocationRows.clear();
+            allocationRows.putAll(next);
+        }
+        if (!setting.getRows().equals(rows)) setting.setRows(rows);
     }
 
     private void ensureAllocationsLoaded() {
         if (loadingAllocations && hasLoadTimedOut()) {
             loadingAllocations = false;
-            allocationsLoaded = false;
             loadError = "Load timed out";
             updateLoadingState();
-            ScreenManager.getInstance().execute(() -> new Notification("Load Failed", loadError, Notification.Type.ERROR));
+            ScreenManager.getInstance().execute(() -> {
+                if (!closed) new Notification("Load Failed", loadError, Notification.Type.ERROR);
+            });
             refreshNetwork();
         }
         if (!allocationsLoaded && !loadingAllocations && safe(loadError).isBlank()) {
@@ -101,7 +154,7 @@ public class ServerNetworkSettingsController {
     }
 
     private void loadAllocations() {
-        if (loadingAllocations) {
+        if (closed || loadingAllocations) {
             return;
         }
         long requestId = ++loadRequestId;
@@ -111,6 +164,7 @@ public class ServerNetworkSettingsController {
         updateLoadingState();
         AsyncTools.withTimeout(portFeature.getAllocations(), TaskSchedulers.current(), Duration.ofSeconds(20))
                 .whenComplete((allocations, error) -> ScreenManager.getInstance().execute(() -> {
+                    if (closed) return;
                     if (requestId != loadRequestId) {
                         return;
                     }
@@ -122,7 +176,6 @@ public class ServerNetworkSettingsController {
                         allocationsLoaded = true;
                         loadError = null;
                     } else {
-                        allocationsLoaded = false;
                         loadError = sanitizeError(error);
                         new Notification("Load Failed", loadError, Notification.Type.ERROR);
                     }
@@ -133,32 +186,17 @@ public class ServerNetworkSettingsController {
                 }));
     }
 
-    private void renderAllocations(Setting.Builder builder, List<ServerModels.Allocation> allocations) {
-        if (allocations.isEmpty()) {
-            builder.addRow("", new AnimatedButton.Builder().label("No ports found").active(false).build());
-            return;
-        }
-
-        allocations.sort(Comparator
-                .comparing((ServerModels.Allocation allocation) -> !allocation.isDefault)
-                .thenComparing(allocation -> allocation.port == null ? Integer.MAX_VALUE : allocation.port));
-
-        for (ServerModels.Allocation allocation : allocations) {
-            builder.addRow("", createAllocationWidget(allocation));
-        }
-    }
-
     private MountableButtonWidget createAllocationWidget(ServerModels.Allocation allocation) {
         SquareButtonWidget editButton = new SquareButtonWidget.Builder()
                 .imagePath("edit.png")
-                .onClick(() -> showEditPopup(allocation))
+                .onClick(() -> showEditPopup(currentAllocation(allocation.id)))
                 .hint("Edit Notes")
                 .size(18, 18)
                 .build();
 
         SquareButtonWidget deleteButton = new SquareButtonWidget.Builder()
                 .imagePath("delete.png")
-                .onClick(() -> deleteAllocation(allocation))
+                .onClick(() -> deleteAllocation(currentAllocation(allocation.id)))
                 .hint("Delete Port")
                 .accentType(ThemeManager.getAccent("danger"))
                 .size(18, 18)
@@ -175,11 +213,17 @@ public class ServerNetworkSettingsController {
                 .hiddenText(hiddenText)
                 .addButton(editButton);
 
-        if (!allocation.isDefault) {
-            builder.addButton(deleteButton);
-        }
+        builder.addButton(deleteButton);
+        MountableButtonWidget widget = builder.build();
+        deleteButton.setVisible(!allocation.isDefault);
+        return widget;
+    }
 
-        return builder.build();
+    private ServerModels.Allocation currentAllocation(Integer id) {
+        for (ServerModels.Allocation allocation : allocationCache) {
+            if (id != null && id.equals(allocation.id)) return allocation;
+        }
+        return new ServerModels.Allocation();
     }
 
     private void showEditPopup(ServerModels.Allocation allocation) {
@@ -212,7 +256,7 @@ public class ServerNetworkSettingsController {
     }
 
     private void createAllocation() {
-        if (loadingAction) {
+        if (closed || loadingAction) {
             return;
         }
         loadingAction = true;
@@ -220,6 +264,7 @@ public class ServerNetworkSettingsController {
         new Notification("Adding Port", "Requesting New Port", Notification.Type.INFO);
         portFeature.createAllocation()
                 .thenAccept(allocation -> ScreenManager.getInstance().execute(() -> {
+                    if (closed) return;
                     if (allocation != null) {
                         upsertAllocation(allocation);
                         new Notification("Port Added", formatAllocation(allocation), Notification.Type.SUCCESS);
@@ -233,6 +278,7 @@ public class ServerNetworkSettingsController {
                 }))
                 .exceptionally(e -> {
                     ScreenManager.getInstance().execute(() -> {
+                    if (closed) return;
                         new Notification("Add Failed", sanitizeAllocationError(e), Notification.Type.ERROR);
                         loadingAction = false;
                         updateLoadingState();
@@ -243,13 +289,14 @@ public class ServerNetworkSettingsController {
     }
 
     private void updateAllocation(ServerModels.Allocation allocation, String notes, boolean primary) {
-        if (allocation.id == null || loadingAction) {
+        if (closed || allocation.id == null || loadingAction) {
             return;
         }
         loadingAction = true;
         updateLoadingState();
         portFeature.updateAllocation(allocation.id, notes, primary)
                 .thenAccept(updated -> ScreenManager.getInstance().execute(() -> {
+                    if (closed) return;
                     if (updated != null) {
                         if (primary) {
                             allocationCache.forEach(item -> item.isDefault = false);
@@ -266,6 +313,7 @@ public class ServerNetworkSettingsController {
                 }))
                 .exceptionally(e -> {
                     ScreenManager.getInstance().execute(() -> {
+                    if (closed) return;
                         new Notification("Update Failed", sanitizeError(e), Notification.Type.ERROR);
                         loadingAction = false;
                         updateLoadingState();
@@ -276,7 +324,7 @@ public class ServerNetworkSettingsController {
     }
 
     private void deleteAllocation(ServerModels.Allocation allocation) {
-        if (allocation.id == null || allocation.isDefault || loadingAction) {
+        if (closed || allocation.id == null || allocation.isDefault || loadingAction) {
             return;
         }
         playSound(Sound.DELETE);
@@ -284,6 +332,7 @@ public class ServerNetworkSettingsController {
         updateLoadingState();
         portFeature.deleteAllocation(allocation.id)
                 .thenRun(() -> ScreenManager.getInstance().execute(() -> {
+                    if (closed) return;
                     allocationCache.removeIf(item -> allocation.id.equals(item.id));
                     new Notification("Port Deleted", formatAllocation(allocation), Notification.Type.SUCCESS);
                     loadingAction = false;
@@ -293,6 +342,7 @@ public class ServerNetworkSettingsController {
                 }))
                 .exceptionally(e -> {
                     ScreenManager.getInstance().execute(() -> {
+                    if (closed) return;
                         new Notification("Delete Failed", sanitizeError(e), Notification.Type.ERROR);
                         loadingAction = false;
                         updateLoadingState();
@@ -311,6 +361,8 @@ public class ServerNetworkSettingsController {
     }
 
     private void refreshNetwork() {
+        if (closed) return;
+        refreshRows();
         ScreenManager screenManager = ScreenManager.getInstance();
         Screen current = screenManager.getCurrentScreen();
         List<SettingsScreen> targets = new ArrayList<>();

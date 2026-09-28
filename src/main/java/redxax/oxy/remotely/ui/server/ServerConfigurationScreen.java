@@ -324,17 +324,21 @@ public class ServerConfigurationScreen extends ReScreen {
         }
         if (poolCreation != null) return;
 
+        Set<String> propertyCategories = new LinkedHashSet<>(fixedSettingsSuppliers.keySet());
+        if (!host.refreshGeneralAfterProperties()) propertyCategories.remove("General");
         observeConfigurationLoad(revision, "Server Properties",
                 host.configurationLoad("Server Properties", host.loadInstanceProperties(tempInstance.raw(), isEditMode && remote), () -> null),
-                fixedSettingsSuppliers.keySet());
+                propertyCategories);
         if (!isEditMode) return;
 
-        observeConfigurationLoad(revision, "Server Settings",
-                host.configurationLoad("Server Settings", host.reloadInstanceSettings(tempInstance.raw(), remote), () -> null),
-                fixedSettingsSuppliers.keySet());
-        observeConfigurationLoad(revision, "Modpack Settings",
-                host.configurationLoad("Modpack Settings", host.loadInstanceModpack(tempInstance.raw()), () -> null),
-                Set.of("General"));
+        if (host.usesInstanceMetadataReloads()) {
+            observeConfigurationLoad(revision, "Server Settings",
+                    host.configurationLoad("Server Settings", host.reloadInstanceSettings(tempInstance.raw(), remote), () -> null),
+                    fixedSettingsSuppliers.keySet());
+            observeConfigurationLoad(revision, "Modpack Settings",
+                    host.configurationLoad("Modpack Settings", host.loadInstanceModpack(tempInstance.raw()), () -> null),
+                    Set.of("General"));
+        }
         host.configurationLoad("Server Files", host.listInstanceFiles(tempInstance.raw()), List::of)
                 .whenComplete((files, failure) -> ScreenManager.getInstance().execute(() -> {
                     if (!acceptConfigurationLoad(revision, "Server Files", failure)) return;
@@ -351,9 +355,12 @@ public class ServerConfigurationScreen extends ReScreen {
                 originalRemoteVariables.putAll(data.values());
                 data.values().forEach(remoteVariables::putIfAbsent);
             });
-            observeConfigurationLoad(revision, "Startup Configuration",
-                    host.configurationLoad("Startup Configuration", startup, () -> null),
-                    Set.of("General", "Software Settings", "Java"));
+            host.configurationLoad("Startup Configuration", startup, () -> null)
+                    .whenComplete((ignored, failure) -> ScreenManager.getInstance().execute(() -> {
+                        if (!acceptConfigurationLoad(revision, "Startup Configuration", failure)) return;
+                        configurationUi.startupLoaded().run();
+                        refreshConfigurationCategories(Set.of("Software Settings", "Java"));
+                    }));
         }
 
         settingsController.load().whenComplete((ignored, failure) -> ScreenManager.getInstance().execute(() -> {
@@ -384,15 +391,12 @@ public class ServerConfigurationScreen extends ReScreen {
         if (settingsScreen == null) return;
         for (String category : categories) {
             if (category == null) continue;
-            if (settingsScreen.hasPendingChanges(category)) {
-                pendingPublishedTabs.add(category);
-                continue;
-            }
             Supplier<List<Setting>> fixed = fixedSettingsSuppliers.get(category);
             boolean dataDriven = settingsController != null && settingsController.tabNames().contains(category);
             if (fixed != null || dataDriven) {
-                settingsScreen.registerCategory(category, dataDriven
+                boolean accepted = settingsScreen.registerCategory(category, dataDriven
                         ? combinedSupplier(fixed, () -> settingsController.settings(category)) : fixed);
+                if (!accepted) pendingPublishedTabs.add(category);
             }
         }
     }
@@ -536,7 +540,7 @@ public class ServerConfigurationScreen extends ReScreen {
                                 parts.stream().map(part -> new ResourceAllocationBarWidget.StoragePart(part.name(), part.bytes())).toList(), size);
                         bar.entranceAnimationEnabled = false;
                         return bar;
-                    });
+                    }, files.indexed(), remotelyClient.getComposition().scheduler());
         }
         return storageBreakdownController.settings();
     }

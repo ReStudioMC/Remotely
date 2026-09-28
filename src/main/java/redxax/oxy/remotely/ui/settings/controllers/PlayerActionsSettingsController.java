@@ -15,6 +15,8 @@ import restudio.rescreen.util.Notification;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.UUID;
 import restudio.rescreen.platform.Async;
 
@@ -27,7 +29,13 @@ public class PlayerActionsSettingsController {
     private List<PlayerAction> loadedActions = new ArrayList<>();
     private boolean actionsLoaded;
     private boolean actionsLoading;
+    private volatile boolean closed;
     private Async<Void> saveChain = Async.completed(null);
+    private Setting setting;
+    private IconButton createButton;
+    private PopupWidget.PopupRow createRow;
+    private PopupWidget.PopupRow loadingRow;
+    private final Map<String, PopupWidget.PopupRow> actionRows = new LinkedHashMap<>();
 
     public PlayerActionsSettingsController(Object target) {
         this(target instanceof PlayerActionsFileProvider provider
@@ -39,8 +47,13 @@ public class PlayerActionsSettingsController {
         this.files = files;
     }
 
+    public void cleanup() {
+        closed = true;
+        actionsLoading = false;
+    }
+
     private void loadActions() {
-        if (actionsLoaded || actionsLoading) {
+        if (closed || actionsLoaded || actionsLoading) {
             return;
         }
         if (!files.available()) return;
@@ -67,6 +80,7 @@ public class PlayerActionsSettingsController {
 
     private void completeLoad(List<PlayerAction> actions, boolean refresh) {
         ScreenManager.getInstance().execute(() -> {
+            if (closed) return;
             loadedActions = sanitizeActions(actions);
             actionsLoaded = true;
             actionsLoading = false;
@@ -97,6 +111,7 @@ public class PlayerActionsSettingsController {
     }
 
     private void saveActions(List<PlayerAction> actions, String successMessage) {
+        if (closed) return;
         List<PlayerAction> snapshot = sanitizeActions(actions);
         String json = PlayerActionJson.write(snapshot);
         loadedActions = new ArrayList<>(snapshot);
@@ -108,39 +123,69 @@ public class PlayerActionsSettingsController {
                     .thenCompose(ignored -> files.write(json));
             saveChain.thenRun(() -> {
                 files.refresh();
-                ScreenManager.getInstance().execute(() -> new Notification("Success", successMessage, Notification.Type.SUCCESS));
+                ScreenManager.getInstance().execute(() -> {
+                    if (!closed) new Notification("Success", successMessage, Notification.Type.SUCCESS);
+                });
             }).exceptionally(e -> {
-                ScreenManager.getInstance().execute(() -> new Notification("Error", "Failed To Save Actions: " + e.getMessage(), Notification.Type.ERROR));
+                ScreenManager.getInstance().execute(() -> {
+                    if (!closed) new Notification("Error", "Failed To Save Actions: " + e.getMessage(), Notification.Type.ERROR);
+                });
                 return null;
             });
         }
     }
 
     public List<Setting> getSettings() {
+        if (closed) return setting == null ? List.of() : List.of(setting);
         loadActions();
+        if (setting != null) {
+            refreshRows();
+            return List.of(setting);
+        }
         Setting.Builder builder = new Setting.Builder(PLAYER_ACTIONS_TAB);
 
-        IconButton createButton = new IconButton.Builder()
+        createButton = new IconButton.Builder()
                 .label("Create New")
                 .imagePath("create.png")
                 .onClick(() -> showPlayerActionPopup(null))
                 .accentType(ThemeManager.getAccent("nice")).build();
         createButton.setActive(actionsLoaded && files.available());
         builder.addRow("", createButton);
-
-        if (!actionsLoaded) {
-            MountableButtonWidget loading = new MountableButtonWidget.Builder("Loading Actions")
+        setting = builder.build();
+        createRow = setting.getRows().getFirst();
+        MountableButtonWidget loading = new MountableButtonWidget.Builder("Loading Actions")
                     .description(files.available() ? "Reading Player Actions" : files.reason())
                     .iconPath("reload.png")
                     .build();
-            loading.setActive(false);
-            builder.addRow("", loading);
-            return List.of(builder.build());
-        }
+        loading.setActive(false);
+        loadingRow = new PopupWidget.PopupRow.Builder("", loading).build();
+        refreshRows();
+        return List.of(setting);
+    }
 
-        for (int i = 0; i < loadedActions.size(); i++) {
-            PlayerAction action = loadedActions.get(i);
+    private void refreshRows() {
+        if (setting == null) return;
+        createButton.setActive(actionsLoaded && files.available());
+        List<PopupWidget.PopupRow> rows = new ArrayList<>();
+        rows.add(createRow);
+        if (!actionsLoaded) {
+            rows.add(loadingRow);
+            if (!setting.getRows().equals(rows)) setting.setRows(rows);
+            return;
+        }
+        Map<String, PopupWidget.PopupRow> next = new LinkedHashMap<>();
+        for (PlayerAction action : loadedActions) {
             String actionUuid = action.uuid;
+            PopupWidget.PopupRow existing = actionRows.get(actionUuid);
+            if (existing != null) {
+                MountableButtonWidget widget = (MountableButtonWidget) existing.getWidgets().getFirst();
+                widget.setName(action.name);
+                widget.setDescription(action.command);
+                widget.setHiddenText(action.icon);
+                next.put(actionUuid, existing);
+                rows.add(existing);
+                continue;
+            }
 
             SquareButtonWidget editButton = new SquareButtonWidget.Builder()
                     .imagePath("edit.png")
@@ -150,9 +195,11 @@ public class PlayerActionsSettingsController {
             SquareButtonWidget deleteButton = new SquareButtonWidget.Builder()
                     .imagePath("delete.png")
                     .onClick(() -> {
+                        PlayerAction currentAction = findAction(actionUuid);
+                        if (currentAction == null) return;
                         List<PlayerAction> currentActions = new ArrayList<>(loadedActions);
                         currentActions.removeIf(current -> actionUuid.equals(current.uuid));
-                        saveActions(currentActions, "Action '" + action.name + "' Deleted.");
+                        saveActions(currentActions, "Action '" + currentAction.name + "' Deleted.");
                     })
                     .accentType(ThemeManager.getAccent("danger"))
                     .build();
@@ -163,13 +210,17 @@ public class PlayerActionsSettingsController {
                     .addButton(editButton)
                     .addButton(deleteButton)
                     .build();
-            builder.addRow("", widget);
+            PopupWidget.PopupRow row = new PopupWidget.PopupRow.Builder("", widget).build();
+            next.put(actionUuid, row);
+            rows.add(row);
         }
-
-        return List.of(builder.build());
+        if (!setting.getRows().equals(rows)) setting.setRows(rows);
+        actionRows.clear();
+        actionRows.putAll(next);
     }
 
     private void refreshActions() {
+        if (closed) return;
         ScreenManager screenManager = ScreenManager.getInstance();
         Screen current = screenManager.getCurrentScreen();
         List<SettingsScreen> targets = new ArrayList<>();

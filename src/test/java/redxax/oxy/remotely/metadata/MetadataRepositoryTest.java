@@ -16,11 +16,15 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class MetadataRepositoryTest {
     private static final MetadataArtifactFamily FAMILY = MetadataArtifactFamily.of("test_catalog");
@@ -99,6 +103,32 @@ class MetadataRepositoryTest {
 
         assertEquals(2, second.generation());
         assertEquals("revision-2|test_catalog:" + descriptor(secondBytes).bundleId(), second.stamp());
+    }
+
+    @Test
+    void completionDoesNotHoldTheRepositoryMonitor() {
+        byte[] bytes = bytes("one");
+        FakeTransport transport = new FakeTransport(manifest("revision-1", descriptor(bytes)), bytes);
+        Async<MetadataTransport.ManifestResponse> pending = Async.pending();
+        transport.pendingManifest = pending;
+        MetadataRepository repository = repository(transport, MetadataStorage.none());
+        AtomicBoolean unlocked = new AtomicBoolean();
+
+        repository.refresh(REQUEST).whenComplete((snapshot, failure) -> {
+            CountDownLatch observed = new CountDownLatch(1);
+            Thread.ofVirtual().start(() -> {
+                repository.snapshot(REQUEST);
+                observed.countDown();
+            });
+            try {
+                unlocked.set(observed.await(1, TimeUnit.SECONDS));
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        pending.complete(new MetadataTransport.ManifestResponse(MetadataTransport.Status.RESOLVED, "etag-1", transport.manifest));
+
+        assertTrue(unlocked.get());
     }
 
     private static MetadataRepository repository(FakeTransport transport, MetadataStorage storage) {

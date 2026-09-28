@@ -48,7 +48,14 @@ public class DiscordRpcSettingsController {
         this.capability = capability == null ? SettingsActionCapability.unavailable("settings.discord-rpc", "Discord Activity Is Unavailable") : capability;
     }
 
+    private List<Setting> residentSettings;
+
     public List<Setting> getSettings() {
+        if (residentSettings == null) residentSettings = List.copyOf(createSettings());
+        return residentSettings;
+    }
+
+    private List<Setting> createSettings() {
         Setting.Builder builder = new Setting.Builder("Discord Rpc");
 
         if (global) {

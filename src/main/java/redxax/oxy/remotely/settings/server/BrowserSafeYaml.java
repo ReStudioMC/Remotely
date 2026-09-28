@@ -8,8 +8,12 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 public final class BrowserSafeYaml {
+    private static final Pattern INTEGER = Pattern.compile("[-+]?\\d+");
+    private static final Pattern DECIMAL = Pattern.compile("[-+]?(?:\\d+\\.\\d*|\\d*\\.\\d+)(?:[eE][-+]?\\d+)?");
+    private static final Pattern EXPONENT = Pattern.compile("[-+]?\\d+[eE][-+]?\\d+");
     private BrowserSafeYaml() {
     }
 
@@ -102,10 +106,12 @@ public final class BrowserSafeYaml {
         if (value.equals("~") || value.equalsIgnoreCase("null")) return null;
         if (value.equalsIgnoreCase("true")) return true;
         if (value.equalsIgnoreCase("false")) return false;
+        char first = value.charAt(0);
+        if (first != '+' && first != '-' && first != '.' && (first < '0' || first > '9')) return value;
         String number = value.replace("_", "");
         try {
-            if (number.matches("[-+]?\\d+")) return integer(number);
-            if (number.matches("[-+]?(?:\\d+\\.\\d*|\\d*\\.\\d+)(?:[eE][-+]?\\d+)?") || number.matches("[-+]?\\d+[eE][-+]?\\d+")) return new BigDecimal(number);
+            if (INTEGER.matcher(number).matches()) return integer(number);
+            if (DECIMAL.matcher(number).matches() || EXPONENT.matcher(number).matches()) return new BigDecimal(number);
         } catch (NumberFormatException ignored) {
         }
         return value;

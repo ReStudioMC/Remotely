@@ -47,6 +47,7 @@ public class ServerPlanSettingsController {
     }
 
     public List<Setting> getSettings() {
+        if (setting != null) return List.of(setting);
         Setting.Builder builder = new Setting.Builder("Server Plan");
 
         planDropdown = new DropDownWidget.Builder<ServerModels.Plan>(new ArrayList<>())
@@ -94,9 +95,8 @@ public class ServerPlanSettingsController {
 
         builder.addRow("", subdomainWidget);
 
-        loadPlans();
-
         setting = builder.build();
+        loadPlans();
         updateCustomRamVisibility();
         return List.of(setting);
     }

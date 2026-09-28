@@ -59,14 +59,16 @@ public final class ServerSettingsCatalogService {
         this.clock = clock == null ? Clock.system() : clock;
     }
 
-    public synchronized View open(String serverId, long connectionGeneration, String minecraftVersion) {
-        if (closed) throw new IllegalStateException("Server settings catalogs are closed");
+    public View open(String serverId, long connectionGeneration, String minecraftVersion) {
         Context context = new Context(text(serverId, "server:none"), Math.max(0L, connectionGeneration),
             minecraftVersion == null ? "" : minecraftVersion.trim());
-        references.merge(context, 1, Integer::sum);
-        View view = new View(this, context);
+        View view;
+        synchronized (this) {
+            if (closed) throw new IllegalStateException("Server settings catalogs are closed");
+            references.merge(context, 1, Integer::sum);
+            view = new View(this, context);
+        }
         admitSettings();
-        admit(context.minecraftVersion());
         return view;
     }
 
@@ -222,6 +224,7 @@ public final class ServerSettingsCatalogService {
         private final ServerSettingsCatalogService owner;
         private final Context context;
         private boolean closed;
+        private boolean metadataRequested;
 
         private View(ServerSettingsCatalogService owner, Context context) {
             this.owner = owner;
@@ -230,14 +233,22 @@ public final class ServerSettingsCatalogService {
 
         public ResolvedCatalogRepository.Snapshot catalog(String sourceId, String currentIdentity,
                                                            Collection<String> currentValues) {
-            if (closed) return null;
+            boolean requestMetadata;
+            synchronized (this) {
+                if (closed) return null;
+                requestMetadata = !metadataRequested && catalogId(sourceId) != null;
+                if (requestMetadata) metadataRequested = true;
+            }
+            if (requestMetadata) owner.admit(context.minecraftVersion());
             return owner.resolve(context, sourceId, currentIdentity, currentValues);
         }
 
         @Override
         public void close() {
-            if (closed) return;
-            closed = true;
+            synchronized (this) {
+                if (closed) return;
+                closed = true;
+            }
             owner.release(context);
         }
     }

@@ -92,6 +92,7 @@ public final class SettingsScreenFactory {
             if (active[0]) {
                 active[0] = false;
                 backups.cleanup();
+                reProxy.cleanup();
                 runtime.cleanup();
             }
         };
@@ -111,6 +112,7 @@ public final class SettingsScreenFactory {
                 super.onDisplayed();
                 if (!active[0]) {
                     active[0] = true;
+                    reProxy.activate();
                     runtime.opened();
                     runtime.displayed(this);
                 }

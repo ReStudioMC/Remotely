@@ -19,9 +19,11 @@ import restudio.rebase.minecraft.MinecraftBiomeCatalog;
 import restudio.rescreen.platform.Async;
 import restudio.rescreen.ui.core.ScreenManager;
 import restudio.rescreen.ui.settings.Setting;
+import restudio.rescreen.ui.settings.SettingEntryWidget;
 import restudio.rescreen.ui.settings.SettingWidgetFactory;
 import restudio.rescreen.ui.settings.options.ConfigOption;
 import restudio.rescreen.ui.settings.options.OptionEditor;
+import restudio.rescreen.ui.widgets.DropDownWidget;
 import restudio.rescreen.util.UiTasks;
 
 import java.io.IOException;
@@ -54,6 +56,7 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
     private final NetworkConfigurationAdapters adapters;
     private final StructuredDocumentParser structuredParser;
     private final ServerSettingsCatalogService.View hostedCatalogs;
+    private final Consumer<Runnable> loadScheduler;
     private final Object stateLock = new Object();
     private final Async<Void> loadFuture;
     private final LinkedHashMap<String, DocumentState> documents = new LinkedHashMap<>();
@@ -61,6 +64,7 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
     private final LinkedHashMap<String, List<Setting>> settingsByTab = new LinkedHashMap<>();
     private final LinkedHashMap<FieldBinding, ConfigOption<?>> collectionOptions = new LinkedHashMap<>();
     private final LinkedHashMap<FieldBinding, ConfigOption<?>> fieldOptions = new LinkedHashMap<>();
+    private final Map<FieldBinding, DropDownWidget<String>> worldSelectors = new LinkedHashMap<>();
     private final LinkedHashSet<String> documentPaths = new LinkedHashSet<>();
     private final LinkedHashSet<String> availableDocumentPaths = new LinkedHashSet<>();
     private final LinkedHashSet<String> unavailableDocumentPaths = new LinkedHashSet<>();
@@ -76,7 +80,7 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
     private Async<List<String>> worldDiscovery;
     private long loadGeneration = 1;
     private boolean closed;
-    private boolean settingsExposed;
+    private boolean worldDiscoveryStarted;
 
     public ServerSettingsDocumentDataController(ServerSettingsDocumentTarget source, ServerSettingsSnapshot snapshot,
                                                  ServerSettingsDocumentStore store) {
@@ -104,12 +108,27 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
                                                     ServerSettingsDocumentStore store, boolean writeServerProperties,
                                                     StructuredDocumentParser structuredParser,
                                                     ServerSettingsCatalogService.View hostedCatalogs) {
+        this(source, snapshot, store, writeServerProperties, structuredParser, hostedCatalogs, null);
+    }
+
+    public ServerSettingsDocumentDataController(ServerSettingsDocumentTarget source, ServerSettingsSnapshot snapshot,
+                                                ServerSettingsDocumentStore store, StructuredDocumentParser structuredParser,
+                                                ServerSettingsCatalogService.View hostedCatalogs, Consumer<Runnable> loadScheduler) {
+        this(source, snapshot, store, true, structuredParser, hostedCatalogs, loadScheduler);
+    }
+
+    private ServerSettingsDocumentDataController(ServerSettingsDocumentTarget source, ServerSettingsSnapshot snapshot,
+                                                 ServerSettingsDocumentStore store, boolean writeServerProperties,
+                                                 StructuredDocumentParser structuredParser,
+                                                 ServerSettingsCatalogService.View hostedCatalogs,
+                                                 Consumer<Runnable> loadScheduler) {
         this.source = Objects.requireNonNull(source, "source");
         this.snapshot = snapshot == null ? new ServerSettingsSnapshot(List.of()) : snapshot;
         this.store = Objects.requireNonNull(store, "store");
         this.writeServerProperties = writeServerProperties;
         this.structuredParser = Objects.requireNonNull(structuredParser, "structuredParser");
         this.hostedCatalogs = hostedCatalogs;
+        this.loadScheduler = loadScheduler;
         adapters = new NetworkConfigurationAdapters(structuredParser);
         loadFuture = loadDocuments();
     }
@@ -162,9 +181,18 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
     }
 
     public List<Setting> settings(String tab) {
+        boolean discover;
+        long generation;
         synchronized (stateLock) {
-            settingsExposed = true;
-            return settingsByTab.getOrDefault(tab, List.of());
+            List<FieldBinding> fields = fieldsByTab.get(tab);
+            discover = !worldDiscoveryStarted && fields != null && fields.stream().anyMatch(binding -> isWorldField(binding.field));
+            if (discover) worldDiscoveryStarted = true;
+            generation = loadGeneration;
+        }
+        if (discover) discoverWorlds(generation);
+        synchronized (stateLock) {
+            List<FieldBinding> fields = fieldsByTab.get(tab);
+            return closed || fields == null ? List.of() : settingsByTab.computeIfAbsent(tab, ignored -> buildSettings(fields));
         }
     }
 
@@ -178,7 +206,7 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
 
     public Map<String, List<Setting>> settingsByTab() {
         synchronized (stateLock) {
-            settingsExposed = true;
+            fieldsByTab.forEach((tab, fields) -> settingsByTab.computeIfAbsent(tab, ignored -> buildSettings(fields)));
             return Collections.unmodifiableMap(new LinkedHashMap<>(settingsByTab));
         }
     }
@@ -244,6 +272,9 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
             documents.clear();
             fieldsByTab.clear();
             settingsByTab.clear();
+            worldSelectors.clear();
+            fieldOptions.clear();
+            collectionOptions.clear();
             declaredTabs.clear();
             publishedTabs.clear();
             completedDocuments.clear();
@@ -272,7 +303,7 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
             definitions.stream().flatMap(definition -> definition.fields().stream()).map(ServerSettingsField::tab).forEach(declaredTabs::add);
         }
         List<Async<Void>> loads = definitions.stream()
-                .map(definition -> loadDocument(definition).thenCompose(loaded -> onUi(() -> acceptLoadedDocument(generation, loaded))))
+                .map(definition -> loadDocument(definition).thenCompose(loaded -> prepareLoadedDocument(generation, loaded)))
                 .toList();
         synchronized (stateLock) {
             if (closed || generation != loadGeneration) {
@@ -282,10 +313,9 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
             documentLoads = loads;
         }
         if (loads.isEmpty()) {
-            discoverWorlds(generation);
             return Async.completed(null);
         }
-        return Async.allOf(loads.toArray(Async[]::new)).thenRun(() -> discoverWorlds(generation));
+        return Async.allOf(loads.toArray(Async[]::new));
     }
 
     private Async<Void> onUi(Runnable action) {
@@ -307,15 +337,59 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
         return result;
     }
 
-    private void acceptLoadedDocument(long generation, LoadedDocument loaded) {
+    private Async<Void> prepareLoadedDocument(long generation, LoadedDocument loaded) {
+        if (loadScheduler == null) return onUi(() -> acceptLoadedDocument(generation, loaded, null));
+        Async<Void> result = Async.pending();
+        scheduleDocumentStep(generation, loaded, null, 0, result);
+        return result;
+    }
+
+    private void scheduleDocumentStep(long generation, LoadedDocument loaded, DocumentState document, int start, Async<Void> result) {
+        try {
+            loadScheduler.accept(() -> {
+                if (result.isDone()) return;
+                synchronized (stateLock) {
+                    if (closed || generation != loadGeneration) {
+                        result.cancel();
+                        return;
+                    }
+                }
+                try {
+                    DocumentState prepared = document;
+                    if (loaded.available()) {
+                        if (prepared == null) prepared = new DocumentState(loaded.definition(), loaded.content(), loaded.exists(),
+                                adapters.get(adapterFormat(loaded.definition().format())));
+                        List<ServerSettingsField> fields = prepared.definition.fields();
+                        int end = Math.min(start + 4, fields.size());
+                        for (int index = start; index < end; index++) initializeField(prepared, fields.get(index));
+                        if (end < fields.size()) {
+                            scheduleDocumentStep(generation, loaded, prepared, end, result);
+                            return;
+                        }
+                    }
+                    acceptLoadedDocument(generation, loaded, prepared);
+                    result.complete(null);
+                } catch (Throwable error) {
+                    result.fail(error);
+                }
+            });
+        } catch (Throwable error) {
+            result.fail(error);
+        }
+    }
+
+    private void acceptLoadedDocument(long generation, LoadedDocument loaded, DocumentState prepared) {
         List<String> published;
         List<Consumer<List<String>>> listeners;
         synchronized (stateLock) {
             if (closed || generation != loadGeneration) return;
             DocumentDefinition definition = loaded.definition();
             if (loaded.available()) {
-                DocumentState state = new DocumentState(definition, loaded.content(), loaded.exists(), adapters.get(adapterFormat(definition.format())));
-                initializeDocument(state);
+                DocumentState state = prepared == null
+                        ? new DocumentState(definition, loaded.content(), loaded.exists(), adapters.get(adapterFormat(definition.format())))
+                        : prepared;
+                if (prepared == null) initializeDocument(state);
+                else if (isServerProperties(definition.relativePath())) updateServerProperties(state.baselineContent);
                 documents.put(definition.relativePath(), state);
                 availableDocumentPaths.add(definition.relativePath());
             } else if (definition.required() && !definition.createIfMissing()) {
@@ -345,9 +419,7 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
                 if (document == null) continue;
                 document.bindings.stream().filter(binding -> binding.field.tab().equals(tab)).forEach(fields::add);
             }
-            fieldsByTab.put(tab, fields);
-            preloadCollectionCatalogs();
-            settingsByTab.put(tab, buildSettings(fields));
+            fieldsByTab.put(tab, List.copyOf(fields));
             publishedTabs.add(tab);
             ready.add(tab);
         }
@@ -388,12 +460,13 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
         }
     }
 
-    private void publishSettings(long generation, List<String> worlds, boolean discovered) {
+    private void publishWorlds(long generation, List<String> worlds) {
         synchronized (stateLock) {
             if (closed || generation != loadGeneration) return;
-            worldCatalog = worlds == null ? List.of() : List.copyOf(worlds);
-            if (discovered && settingsExposed) return;
-            rebuildPublishedSettings();
+            List<String> updated = worlds == null ? List.of() : List.copyOf(worlds);
+            if (worldCatalog.equals(updated)) return;
+            worldCatalog = updated;
+            refreshWorldSettings();
         }
     }
 
@@ -411,7 +484,7 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
             }
             worldDiscovery = discovery;
         }
-        discovery.thenCompose(worlds -> onUi(() -> publishSettings(generation, worlds, true))).exceptionally(error -> null);
+        discovery.thenCompose(worlds -> onUi(() -> publishWorlds(generation, worlds))).exceptionally(error -> null);
         discovery.whenComplete((worlds, error) -> {
             synchronized (stateLock) {
                 if (worldDiscovery == discovery) worldDiscovery = null;
@@ -531,38 +604,67 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
         if (isServerProperties(document.definition.relativePath())) {
             updateServerProperties(document.baselineContent);
         }
-        for (ServerSettingsField field : document.definition.fields()) {
-            boolean present = document.adapter.contains(document.baselineContent, field.key());
-            String rawValue = document.adapter.read(document.baselineContent, field.key());
-            Object initial = parseValue(document, field, present ? rawValue : null);
-            FieldBinding binding = new FieldBinding(document, field, initial, defaultValue(field), present, rawValue);
-            document.bindings.add(binding);
-            document.baselines.putIfAbsent(field.key(), new BaselineValue(present, rawValue));
-        }
+        for (ServerSettingsField field : document.definition.fields()) initializeField(document, field);
     }
 
-    private void rebuildPublishedSettings() {
-        settingsByTab.clear();
-        collectionOptions.clear();
-        fieldOptions.clear();
-        preloadCollectionCatalogs();
-        fieldsByTab.forEach((tab, fields) -> settingsByTab.put(tab, buildSettings(fields)));
+    private void initializeField(DocumentState document, ServerSettingsField field) {
+        boolean present = document.baselineReader.contains(field.key());
+        String rawValue = document.baselineReader.read(field.key());
+        Object initial = parseValue(document, field, present ? rawValue : null);
+        FieldBinding binding = new FieldBinding(document, field, initial, defaultValue(field), present, rawValue);
+        document.bindings.add(binding);
+        document.baselines.putIfAbsent(field.key(), new BaselineValue(present, rawValue));
+    }
+
+    private void refreshWorldSettings() {
+        worldSelectors.forEach((binding, selector) -> {
+            ConfigOption<?> option = fieldOptions.get(binding);
+            String value = String.valueOf(option.get());
+            List<String> choices = new ArrayList<>(worldCatalog);
+            if (!choices.contains(value)) choices.addFirst(value);
+            selector.setItems(choices, value);
+        });
     }
 
     private List<Setting> buildSettings(List<FieldBinding> bindings) {
         LinkedHashMap<String, Setting.Builder> grouped = new LinkedHashMap<>();
-        for (FieldBinding binding : bindings) {
-            Setting.Builder builder = grouped.computeIfAbsent(binding.field.group(), Setting.Builder::new);
-            if (isGeneratorSettingsField(binding.field)) {
-                builder.addOption(singleBiomeGeneratorOption(binding));
-                builder.addOption(rawGeneratorOption(binding));
+        for (FieldBinding binding : bindings) addSetting(grouped, binding);
+        return grouped.values().stream().map(Setting.Builder::build).toList();
+    }
+
+    private void addSetting(Map<String, Setting.Builder> grouped, FieldBinding binding) {
+        Setting.Builder builder = grouped.computeIfAbsent(binding.field.group(), Setting.Builder::new);
+        if (isGeneratorSettingsField(binding.field)) {
+            builder.addOption(singleBiomeGeneratorOption(binding));
+            builder.addOption(rawGeneratorOption(binding));
+        } else {
+            ConfigOption<?> option = option(binding);
+            fieldOptions.put(binding, option);
+            if (isWorldField(binding.field)) {
+                addWorldSetting(builder, binding, option);
             } else {
-                ConfigOption<?> option = option(binding);
-                fieldOptions.put(binding, option);
                 builder.addOption(option);
             }
         }
-        return grouped.values().stream().map(Setting.Builder::build).toList();
+    }
+
+    @SuppressWarnings("unchecked")
+    private void addWorldSetting(Setting.Builder builder, FieldBinding binding, ConfigOption<?> option) {
+        ConfigOption<String> world = (ConfigOption<String>) option;
+        SettingEntryWidget entry = SettingWidgetFactory.createWidget(world);
+        List<String> choices = new ArrayList<>(worldCatalog);
+        if (!choices.contains(world.get())) choices.addFirst(world.get());
+        DropDownWidget<String> selector = new DropDownWidget.Builder<>(choices)
+                .selectedItem(world.get()).onSelectionChanged(world::set).size(140, 20).build();
+        world.addChangeListener(value -> {
+            List<String> available = new ArrayList<>(worldCatalog);
+            if (!available.contains(value)) available.addFirst(value);
+            selector.setItems(available, value);
+        });
+        worldSelectors.put(binding, selector);
+        entry.addMountedWidget(selector);
+        entry.setHeight(30);
+        builder.addRow("", entry);
     }
 
     private boolean isGeneratorSettingsField(ServerSettingsField field) {
@@ -655,25 +757,11 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
 
     private ConfigOption<String> worldOption(FieldBinding binding) {
         ServerSettingsField field = binding.field;
-        List<String> worlds = new ArrayList<>(worldCatalog);
-        String current = binding.value == null ? null : binding.value.toString();
-        if (current != null && !current.isBlank() && !worlds.contains(current)) {
-            worlds.add(0, current);
-        }
-        if (worlds.isEmpty()) {
-            worlds.add("world");
-        }
-        ConfigOption.Builder<String> builder = ConfigOption.<String>builder(field.name())
+        return ConfigOption.<String>builder(field.name())
                 .description(field.description())
                 .bind(() -> (String) readValue(binding), value -> writeValue(binding, value))
-                .defaultValue((String) binding.defaultValue);
-        if (worlds.size() > 1) {
-            builder.options(worlds);
-        }
-        if (worlds.size() > 10) {
-            builder.itemSelector(true);
-        }
-        return builder.build();
+                .defaultValue((String) binding.defaultValue)
+                .build();
     }
 
     private boolean isBiomeField(ServerSettingsField field) {
@@ -1206,30 +1294,6 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
                 false, List.of(), List.of(), null, null);
     }
 
-    private void preloadCollectionCatalogs() {
-        String serverId = source.catalogServerId();
-        if (serverId == null || serverId.isBlank()) return;
-        LinkedHashSet<String> sources = new LinkedHashSet<>();
-        for (DocumentState document : documents.values()) {
-            for (FieldBinding binding : document.bindings) collectCatalogs(binding.field.collection(), sources);
-        }
-        if (!sources.isEmpty()) {
-            OptionCatalogLoader.preload(serverId, sources.stream().map(OptionCatalogLoader::request).toList());
-        }
-    }
-
-    private void collectCatalogs(ServerSettingsField.CollectionSchema schema, LinkedHashSet<String> sources) {
-        if (schema == null) return;
-        collectCatalogs(schema.key(), sources);
-        collectCatalogs(schema.value(), sources);
-    }
-
-    private void collectCatalogs(ServerSettingsField.ValueSpec spec, LinkedHashSet<String> sources) {
-        if (spec == null) return;
-        if (spec.catalog() != null && spec.catalog().source() != null) sources.add(spec.catalog().source());
-        for (ServerSettingsField.ObjectField field : spec.fields()) collectCatalogs(field.value(), sources);
-        collectCatalogs(spec.collection(), sources);
-    }
 
     private ConfigOption<String> numberOption(FieldBinding binding, ConfigOption.Editor editor) {
         ServerSettingsField field = binding.field;
@@ -1411,7 +1475,7 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
     private void markSaved(SavePlan plan) {
         synchronized (stateLock) {
             DocumentState document = plan.document();
-            document.baselineContent = plan.updatedContent();
+            document.setBaseline(plan.updatedContent());
             document.exists = true;
             plan.mutations().forEach((key, value) -> document.changedValues.remove(key, value));
             Map<String, String> remaining = new LinkedHashMap<>(document.changedValues);
@@ -1561,8 +1625,8 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
     private void refreshBaselines(DocumentState document) {
         document.baselines.clear();
         for (FieldBinding binding : document.bindings) {
-            boolean present = document.adapter.contains(document.baselineContent, binding.field.key());
-            String raw = document.adapter.read(document.baselineContent, binding.field.key());
+            boolean present = document.baselineReader.contains(binding.field.key());
+            String raw = document.baselineReader.read(binding.field.key());
             document.baselines.putIfAbsent(binding.field.key(), new BaselineValue(present, raw));
             binding.presentAtLoad = present;
             binding.rawAtLoad = raw;
@@ -1900,13 +1964,19 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
         private final LinkedHashMap<String, BaselineValue> baselines = new LinkedHashMap<>();
         private final LinkedHashMap<String, String> changedValues = new LinkedHashMap<>();
         private String baselineContent;
+        private NetworkConfigurationAdapter.Reader baselineReader;
         private boolean exists;
 
         private DocumentState(DocumentDefinition definition, String baselineContent, boolean exists, NetworkConfigurationAdapter adapter) {
             this.definition = definition;
-            this.baselineContent = baselineContent == null ? "" : baselineContent;
             this.exists = exists;
             this.adapter = adapter;
+            setBaseline(baselineContent);
+        }
+
+        private void setBaseline(String content) {
+            baselineContent = content == null ? "" : content;
+            baselineReader = adapter.prepare(baselineContent);
         }
     }
 

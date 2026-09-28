@@ -13,6 +13,7 @@ import restudio.rescreen.ui.settings.SettingsScreen;
 import restudio.rescreen.ui.widgets.ScreenWindowWidget;
 import restudio.rescreen.ui.widgets.AnimatedButton;
 import restudio.rescreen.ui.widgets.MountableButtonWidget;
+import restudio.rescreen.ui.widgets.PopupWidget.PopupRow;
 import restudio.rescreen.ui.widgets.PopupWidget;
 import restudio.rescreen.ui.widgets.ScrollSelectorWidget;
 import restudio.rescreen.ui.widgets.SquareButtonWidget;
@@ -52,58 +53,106 @@ public class ServerSubuserSettingsController {
     private volatile String loadError;
     private volatile long loadStartedAt;
     private volatile long loadRequestId;
+    private volatile boolean closed;
+    private Setting setting;
+    private AnimatedButton addSubuserButton;
+    private PopupRow addRow;
+    private PopupRow stateRow;
+    private PopupRow retryRow;
+    private PopupRow unavailableRow;
+    private final Map<String, PopupRow> subuserRows = new LinkedHashMap<>();
 
     public ServerSubuserSettingsController(ReScreen parentScreen, SubuserSettingsProvider subuserFeature) {
         this.parentScreen = parentScreen;
         this.subuserFeature = subuserFeature == null ? SubuserSettingsProvider.unavailable("Subuser Feature Is Unavailable") : subuserFeature;
     }
 
-    public List<Setting> getSettings() {
-        if (!subuserFeature.available()) {
-            Setting.Builder unavailable = new Setting.Builder("Server Subusers");
-            unavailable.addRow("", new AnimatedButton.Builder().label("Subuser feature unavailable").active(false).hint(subuserFeature.unavailableReason()).build());
-            return List.of(unavailable.build());
-        }
+    public void cleanup() {
+        closed = true;
+        loadRequestId++;
+        loadingData = false;
+        loadingAction = false;
+    }
 
-        ensureDataLoaded();
+    public List<Setting> getSettings() {
+        if (closed) return setting == null ? List.of() : List.of(setting);
+        if (setting != null) {
+            if (subuserFeature.available()) ensureDataLoaded();
+            refreshRows();
+            return List.of(setting);
+        }
+        if (subuserFeature.available()) ensureDataLoaded();
 
         Setting.Builder builder = new Setting.Builder("Server Subusers");
-        AnimatedButton addSubuserButton = new AnimatedButton.Builder()
+        addSubuserButton = new AnimatedButton.Builder()
                 .label("Add Subuser")
                 .accentType(ThemeManager.getAccent("nice"))
                 .onClick(() -> showCreatePopup(permissionCategoryCache))
                 .active(dataLoaded)
                 .build();
         builder.addRow("", addSubuserButton);
+        setting = builder.build();
+        addRow = setting.getRows().getFirst();
+        stateRow = new PopupRow.Builder("", new AnimatedButton.Builder().label("Loading Subusers").active(false).build()).build();
+        retryRow = new PopupRow.Builder("", new AnimatedButton.Builder().label("Retry Load")
+                .accentType(ThemeManager.getDefaultAccent()).onClick(this::loadData).build()).build();
+        unavailableRow = new PopupRow.Builder("", new AnimatedButton.Builder().label("Subuser Feature Unavailable")
+                .active(false).hint(subuserFeature.unavailableReason()).build()).build();
+        refreshRows();
+        return List.of(setting);
+    }
 
-        if (!dataLoaded) {
-            if (loadingData) {
-                builder.addRow("", new AnimatedButton.Builder().label("Loading Subusers").active(false).build());
-            } else if (!safe(loadError).isBlank()) {
-                builder.addRow("", new AnimatedButton.Builder().label("Load Failed").active(false).build());
-                AnimatedButton retryButton = new AnimatedButton.Builder()
-                        .label("Retry Load")
-                        .accentType(ThemeManager.getDefaultAccent())
-                        .onClick(this::loadData)
-                        .build();
-                builder.addRow("", retryButton);
-            } else {
-                builder.addRow("", new AnimatedButton.Builder().label("Subusers Unavailable").active(false).build());
-            }
-            return List.of(builder.build());
+    private void refreshRows() {
+        if (setting == null) return;
+        if (!subuserFeature.available()) {
+            ((AnimatedButton) unavailableRow.getWidgets().getFirst()).setHint(subuserFeature.unavailableReason());
+            if (!setting.getRows().equals(List.of(unavailableRow))) setting.setRows(List.of(unavailableRow));
+            return;
         }
-
-        renderSubusers(builder, new ArrayList<>(subuserCache), permissionCategoryCache);
-        return List.of(builder.build());
+        addSubuserButton.setActive(dataLoaded && !loadingAction);
+        List<PopupRow> rows = new ArrayList<>();
+        rows.add(addRow);
+        if (!dataLoaded) {
+            ((AnimatedButton) stateRow.getWidgets().getFirst()).setMessage(loadingData ? "Loading Subusers" : safe(loadError).isBlank() ? "Subusers Unavailable" : "Load Failed");
+            rows.add(stateRow);
+            if (!safe(loadError).isBlank()) rows.add(retryRow);
+        } else if (subuserCache.isEmpty()) {
+            subuserRows.clear();
+            ((AnimatedButton) stateRow.getWidgets().getFirst()).setMessage("No Subusers Found");
+            rows.add(stateRow);
+        } else {
+            List<ServerModels.Subuser> subusers = new ArrayList<>(subuserCache);
+            subusers.sort(Comparator.comparing(this::resolveSubuserSortKey));
+            Map<String, PopupRow> next = new LinkedHashMap<>();
+            for (ServerModels.Subuser subuser : subusers) {
+                if (safe(subuser.uuid).isBlank()) continue;
+                PopupRow row = subuserRows.get(subuser.uuid);
+                if (row == null) row = new PopupRow.Builder("", createSubuserWidget(subuser)).build();
+                MountableButtonWidget widget = (MountableButtonWidget) row.getWidgets().getFirst();
+                widget.setName(resolveSubuserDisplayName(subuser));
+                int permissionCount = subuser.permissions == null ? 0 : subuser.permissions.size();
+                List<String> descriptionParts = new ArrayList<>();
+                if (subuser.restudioUser != null && !safe(subuser.restudioUser.username).isBlank()) descriptionParts.add("@" + subuser.restudioUser.username);
+                descriptionParts.add(permissionCount + " Permissions");
+                widget.setDescription(String.join(" \u00b7 ", descriptionParts));
+                widget.setHiddenText("Created " + (safe(subuser.createdAt).isBlank() ? "Unknown" : formatDateTime(subuser.createdAt)));
+                next.put(subuser.uuid, row);
+                rows.add(row);
+            }
+            subuserRows.clear();
+            subuserRows.putAll(next);
+        }
+        if (!setting.getRows().equals(rows)) setting.setRows(rows);
     }
 
     private void ensureDataLoaded() {
         if (loadingData && hasLoadTimedOut()) {
             loadingData = false;
-            dataLoaded = false;
             loadError = "Load timed out";
             updateLoadingState();
-            ScreenManager.getInstance().execute(() -> new Notification("Load Failed", loadError, Notification.Type.ERROR));
+            ScreenManager.getInstance().execute(() -> {
+                if (!closed) new Notification("Load Failed", loadError, Notification.Type.ERROR);
+            });
         }
         if (!dataLoaded && !loadingData && safe(loadError).isBlank()) {
             loadData();
@@ -111,7 +160,7 @@ public class ServerSubuserSettingsController {
     }
 
     private void loadData() {
-        if (loadingData) {
+        if (closed || loadingData) {
             return;
         }
         long requestId = ++loadRequestId;
@@ -121,11 +170,11 @@ public class ServerSubuserSettingsController {
         updateLoadingState();
         AsyncTools.schedule(TaskSchedulers.current(), Duration.ofMillis(LOAD_TIMEOUT_MS), () ->
                 ScreenManager.getInstance().execute(() -> {
+                    if (closed) return;
                     if (!loadingData || requestId != loadRequestId) {
                         return;
                     }
                     loadingData = false;
-                    dataLoaded = false;
                     loadError = "Load timed out";
                     loadStartedAt = 0L;
                     updateLoadingState();
@@ -138,6 +187,7 @@ public class ServerSubuserSettingsController {
             return new LoadedData(safeSubusers, safeCategories);
         }), TaskSchedulers.current(), Duration.ofSeconds(20)).whenComplete((loadedData, error) ->
                 ScreenManager.getInstance().execute(() -> {
+                    if (closed) return;
                     if (requestId != loadRequestId) {
                         return;
                     }
@@ -149,7 +199,6 @@ public class ServerSubuserSettingsController {
                         dataLoaded = true;
                         loadError = null;
                     } else {
-                        dataLoaded = false;
                         loadError = sanitizeError(error);
                         new Notification("Load Failed", loadError, Notification.Type.ERROR);
                     }
@@ -180,14 +229,7 @@ public class ServerSubuserSettingsController {
         return safe(subuser.uuid).toLowerCase(Locale.ROOT);
     }
 
-    private void renderSubusers(Setting.Builder builder, List<ServerModels.Subuser> subusers, Map<String, ServerModels.PermissionCategory> permissionCategories) {
-        if (subusers.isEmpty()) {
-            builder.addRow("", new AnimatedButton.Builder().label("No subusers found").active(false).build());
-            return;
-        }
-
-        subusers.sort(Comparator.comparing(this::resolveSubuserSortKey));
-        for (ServerModels.Subuser subuser : subusers) {
+    private MountableButtonWidget createSubuserWidget(ServerModels.Subuser subuser) {
             String name = resolveSubuserDisplayName(subuser);
 
             int permissionCount = subuser.permissions == null ? 0 : subuser.permissions.size();
@@ -202,7 +244,7 @@ public class ServerSubuserSettingsController {
             SquareButtonWidget editButton = new SquareButtonWidget.Builder()
                     .imagePath("edit.png")
                     .hint("Edit Permissions")
-                    .onClick(() -> showEditPopup(subuser, permissionCategories))
+                    .onClick(() -> showEditPopup(currentSubuser(subuser.uuid), permissionCategoryCache))
                     .accentType(ThemeManager.getAccent("nice"))
                     .size(18, 18)
                     .build();
@@ -210,7 +252,7 @@ public class ServerSubuserSettingsController {
             SquareButtonWidget deleteButton = new SquareButtonWidget.Builder()
                     .imagePath("delete.png")
                     .hint("Delete Subuser")
-                    .onClick(() -> showDeletePopup(subuser))
+                    .onClick(() -> showDeletePopup(currentSubuser(subuser.uuid)))
                     .accentType(ThemeManager.getAccent("danger"))
                     .size(18, 18)
                     .build();
@@ -221,8 +263,14 @@ public class ServerSubuserSettingsController {
                     .addButton(editButton)
                     .addButton(deleteButton)
                     .build();
-            builder.addRow("", row);
+            return row;
+    }
+
+    private ServerModels.Subuser currentSubuser(String uuid) {
+        for (ServerModels.Subuser subuser : subuserCache) {
+            if (uuid != null && uuid.equals(subuser.uuid)) return subuser;
         }
+        return new ServerModels.Subuser();
     }
 
     private void showCreatePopup(Map<String, ServerModels.PermissionCategory> categories) {
@@ -277,6 +325,7 @@ public class ServerSubuserSettingsController {
     }
 
     private void performUserSearch(TextInputWidget emailInput) {
+        if (closed) return;
         String query = safe(emailInput.getText()).trim();
         if (query.length() < 2) {
             new Notification("Search", "Enter at least 2 characters", Notification.Type.WARN);
@@ -287,12 +336,14 @@ public class ServerSubuserSettingsController {
         updateLoadingState();
         subuserFeature.searchUsers(query)
                 .thenAccept(results -> ScreenManager.getInstance().execute(() -> {
+                    if (closed) return;
                     loadingAction = false;
                     updateLoadingState();
                     showSearchResults(results, emailInput);
                 }))
                 .exceptionally(error -> {
                     ScreenManager.getInstance().execute(() -> {
+                    if (closed) return;
                         loadingAction = false;
                         updateLoadingState();
                         new Notification("Search Failed", sanitizeError(error), Notification.Type.ERROR);
@@ -501,10 +552,12 @@ public class ServerSubuserSettingsController {
     }
 
     private void createSubuser(String userIdentifier, List<String> permissions) {
+        if (closed) return;
         loadingAction = true;
         updateLoadingState();
         subuserFeature.createSubuser(userIdentifier, permissions)
                 .thenAccept(subuser -> ScreenManager.getInstance().execute(() -> {
+                    if (closed) return;
                     if (subuser == null) {
                         new Notification("Add Failed", "Server returned an error", Notification.Type.ERROR);
                         loadingAction = false;
@@ -522,6 +575,7 @@ public class ServerSubuserSettingsController {
                 }))
                 .exceptionally(error -> {
                     ScreenManager.getInstance().execute(() -> {
+                    if (closed) return;
                         new Notification("Add Failed", sanitizeError(error), Notification.Type.ERROR);
                         loadingAction = false;
                         updateLoadingState();
@@ -531,10 +585,12 @@ public class ServerSubuserSettingsController {
     }
 
     private void updateSubuser(ServerModels.Subuser subuser, List<String> permissions) {
+        if (closed) return;
         loadingAction = true;
         updateLoadingState();
         subuserFeature.updateSubuser(subuser.uuid, permissions)
                 .thenAccept(updated -> ScreenManager.getInstance().execute(() -> {
+                    if (closed) return;
                     if (updated == null) {
                         new Notification("Update Failed", "Server returned an error", Notification.Type.ERROR);
                         loadingAction = false;
@@ -552,6 +608,7 @@ public class ServerSubuserSettingsController {
                 }))
                 .exceptionally(error -> {
                     ScreenManager.getInstance().execute(() -> {
+                    if (closed) return;
                         new Notification("Update Failed", sanitizeError(error), Notification.Type.ERROR);
                         loadingAction = false;
                         updateLoadingState();
@@ -561,10 +618,12 @@ public class ServerSubuserSettingsController {
     }
 
     private void deleteSubuser(ServerModels.Subuser subuser) {
+        if (closed) return;
         loadingAction = true;
         updateLoadingState();
         subuserFeature.deleteSubuser(subuser.uuid)
                 .thenRun(() -> ScreenManager.getInstance().execute(() -> {
+                    if (closed) return;
                     playSound(Sound.SUCCESS);
                     String name = resolveSubuserDisplayName(subuser);
                     new Notification("Subuser Deleted", name, Notification.Type.INFO);
@@ -576,6 +635,7 @@ public class ServerSubuserSettingsController {
                 }))
                 .exceptionally(error -> {
                     ScreenManager.getInstance().execute(() -> {
+                    if (closed) return;
                         new Notification("Delete Failed", sanitizeError(error), Notification.Type.ERROR);
                         loadingAction = false;
                         updateLoadingState();
@@ -585,6 +645,8 @@ public class ServerSubuserSettingsController {
     }
 
     private void refreshSubusers() {
+        if (closed) return;
+        refreshRows();
         ScreenManager screenManager = ScreenManager.getInstance();
         Screen current = screenManager.getCurrentScreen();
         List<SettingsScreen> targets = new ArrayList<>();
