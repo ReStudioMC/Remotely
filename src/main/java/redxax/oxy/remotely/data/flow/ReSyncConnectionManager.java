@@ -63,7 +63,7 @@ public class ReSyncConnectionManager {
     private final Map<String, CachedProfileResolution> profileResolutionCache = BrowserSafeState.map();
     private final Map<String, ProfileFlight> profileFlights = BrowserSafeState.map();
     private final Map<String, Long> profileResolutionGenerations = BrowserSafeState.map();
-    private final Map<String, Async<ProfileResolution>> pendingProfileEnsures = BrowserSafeState.map();
+    private final Map<String, PendingProfileEnsure> pendingProfileEnsures = BrowserSafeState.map();
     private final Map<String, Async<ReSyncFlowClient>> pendingFlowClientAdmissions = BrowserSafeState.map();
     private final BrowserSafeState.LongValue nextProfileResolutionGeneration = new BrowserSafeState.LongValue();
     private final BrowserWork.Executor profileResolutionExecutor;
@@ -221,6 +221,16 @@ public class ReSyncConnectionManager {
             this.expectedOwnerKey = expectedOwnerKey;
             this.expectedOwner = expectedOwner;
             this.generation = generation;
+        }
+    }
+
+    private static final class PendingProfileEnsure {
+        private final Async<ProfileResolution> future;
+        private volatile boolean showNotifications;
+
+        private PendingProfileEnsure(Async<ProfileResolution> future, boolean showNotifications) {
+            this.future = future;
+            this.showNotifications = showNotifications;
         }
     }
 
@@ -480,6 +490,9 @@ public class ReSyncConnectionManager {
         OwnedFlowClient owner = flowClients.get(ownerKey);
         if (!staleProfile && owner != null
             && owner.client.connectionState() != ReSyncFlowClient.ConnectionState.DISCONNECTED) {
+            if (showNotifications) {
+                promoteNotifications(ownerKey, owner);
+            }
             return owner.client;
         }
         if (!staleProfile && owner != null && !owner.client.usesDirectWebSocketTransport()) {
@@ -493,18 +506,19 @@ public class ReSyncConnectionManager {
         ProfileResolution resolution = resolutionFuture.getNow(null);
         if (resolution == null) {
             BrowserSafeState.BooleanValue attachEnsure = new BrowserSafeState.BooleanValue();
-            pendingProfileEnsures.compute(serverId, (ignored, current) -> {
-                if (current == resolutionFuture) {
+            PendingProfileEnsure pending = pendingProfileEnsures.compute(serverId, (ignored, current) -> {
+                if (current != null && current.future == resolutionFuture) {
+                    current.showNotifications |= showNotifications;
                     return current;
                 }
                 attachEnsure.set(true);
-                return resolutionFuture;
+                return new PendingProfileEnsure(resolutionFuture, showNotifications);
             });
             if (attachEnsure.get()) {
                 resolutionFuture.thenAccept(resolved -> {
-                    pendingProfileEnsures.remove(serverId, resolutionFuture);
-                    if (resolved.available() && !connectionLifecycleClosed) {
-                        ensureFlowClient(resolved.serverId(), resolved.profile(), showNotifications, true);
+                    if (pendingProfileEnsures.remove(serverId, pending) && resolved.available()
+                        && !connectionLifecycleClosed) {
+                        ensureFlowClient(resolved.serverId(), resolved.profile(), pending.showNotifications, true);
                     }
                 });
             }
@@ -526,6 +540,18 @@ public class ReSyncConnectionManager {
 
     public ReSyncFlowClient ensureFlowClient(String serverId) {
         return ensureFlowClient(serverId, true);
+    }
+
+    private void promoteNotifications(String serverId, OwnedFlowClient expected) {
+        OwnershipLock ownership = acquireOwnership(serverId);
+        try {
+            if (!ownership.retiring && !connectionLifecycleClosed && isOwner(serverId, expected)
+                && expected.errorMode == ErrorMode.SILENT) {
+                expected.errorMode = ErrorMode.NOTIFY;
+            }
+        } finally {
+            releaseOwnership(serverId, ownership);
+        }
     }
 
     public Async<ReSyncFlowClient> ensureFlowClientAsync(String serverId, boolean showNotifications) {
@@ -759,7 +785,8 @@ public class ReSyncConnectionManager {
                 return null;
             }
             owner = flowClients.get(serverId);
-            ErrorMode errorMode = showNotifications ? ErrorMode.NOTIFY : ErrorMode.SILENT;
+            ErrorMode errorMode = showNotifications || owner != null && owner.errorMode == ErrorMode.NOTIFY
+                ? ErrorMode.NOTIFY : ErrorMode.SILENT;
             if (profile != null) {
                 flowProfiles.put(serverId, profile);
             }
@@ -780,7 +807,9 @@ public class ReSyncConnectionManager {
                     connectClaim = connectIfNeeded ? claimConnect(owner) : null;
                 }
             } else {
-                owner.errorMode = errorMode;
+                if (owner.errorMode == ErrorMode.SILENT || owner.errorMode == ErrorMode.NOTIFY) {
+                    owner.errorMode = errorMode;
+                }
                 connectClaim = connectIfNeeded ? claimConnect(owner) : null;
             }
         } finally {

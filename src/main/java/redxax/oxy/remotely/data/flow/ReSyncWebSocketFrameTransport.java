@@ -135,33 +135,39 @@ public final class ReSyncWebSocketFrameTransport implements ReSyncFrameTransport
 
             @Override
             public void onBinary(byte[] bytes) {
+                Consumer<byte[]> handler = frameHandler;
                 if (connectionGeneration.get() == generation && state.get() == State.OPEN) {
-                    frameHandler.accept(bytes);
+                    handler.accept(bytes);
                 }
             }
 
             @Override
             public void onClose(int statusCode, String reason) {
+                Consumer<String> reasonHandler;
+                Runnable handler;
                 synchronized (lifecycleLock) {
-                    if (connectionGeneration.get() != generation) {
+                    if (connectionGeneration.get() != generation || state.get() == State.CLOSED) {
                         return;
                     }
                     socket = null;
                     state.set(State.CLOSED);
+                    reasonHandler = closeReasonHandler;
+                    handler = closeHandler;
                 }
-                closeReasonHandler.accept(reason);
-                closeHandler.run();
+                reasonHandler.accept(reason);
+                handler.run();
             }
 
             @Override
             public void onError(Throwable error) {
+                Consumer<Throwable> handler = errorHandler;
                 synchronized (lifecycleLock) {
                     if (connectionGeneration.get() != generation || state.get() == State.CLOSING || state.get() == State.CLOSED) {
                         return;
                     }
                     state.set(State.FAILED);
                 }
-                errorHandler.accept(error);
+                handler.accept(error);
             }
         };
         Async<BinaryWebSocket> connection;
@@ -231,7 +237,8 @@ public final class ReSyncWebSocketFrameTransport implements ReSyncFrameTransport
         });
         boolean cancel;
         synchronized (lifecycleLock) {
-            cancel = connectionGeneration.get() != generation || pendingAttempt != connectionAttempt || state.get() != State.CONNECTING;
+            cancel = connectionGeneration.get() != generation || state.get() == State.CLOSING
+                || state.get() == State.CLOSED || state.get() == State.FAILED;
         }
         if (cancel) {
             connectionAttempt.cancel();
@@ -240,18 +247,23 @@ public final class ReSyncWebSocketFrameTransport implements ReSyncFrameTransport
 
     @Override
     public void send(byte[] frame) {
+        Consumer<Throwable> handler = errorHandler;
         BinaryWebSocket current = socket;
-        if (current == null || !current.isOpen()) {
+        int generation = connectionGeneration.get();
+        if (state.get() != State.OPEN || current == null || !current.isOpen()) {
             throw new IllegalStateException("ReSync WebSocket is not open");
         }
         current.sendBinary(frame).exceptionally(error -> {
-            errorHandler.accept(error);
+            if (connectionGeneration.get() == generation && socket == current && state.get() == State.OPEN) {
+                handler.accept(error);
+            }
             return null;
         });
     }
 
     @Override
     public void close() {
+        Consumer<Throwable> handler = errorHandler;
         BinaryWebSocket current;
         ConnectionAttempt attempt;
         synchronized (lifecycleLock) {
@@ -274,7 +286,9 @@ public final class ReSyncWebSocketFrameTransport implements ReSyncFrameTransport
             return;
         }
         current.close(1000, "Client Closed").exceptionally(error -> {
-            errorHandler.accept(error);
+            if (socket == current && state.get() == State.CLOSING) {
+                handler.accept(error);
+            }
             return null;
         });
     }

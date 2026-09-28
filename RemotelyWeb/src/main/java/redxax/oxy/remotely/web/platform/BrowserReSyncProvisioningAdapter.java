@@ -161,7 +161,7 @@ public final class BrowserReSyncProvisioningAdapter implements ReSyncProvisionin
                         if (!isCurrent(fence)) {
                             return staleResult();
                         }
-                        manager.ensureFlowClientForStartup(serverId, startupServer, true);
+                        manager.ensureFlowClientForStartup(serverId, startupServer, false);
                         if (!isCurrent(fence)) {
                             return staleResult();
                         }

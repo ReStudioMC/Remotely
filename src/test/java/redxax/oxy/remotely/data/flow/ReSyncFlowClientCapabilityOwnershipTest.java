@@ -3,8 +3,17 @@ package redxax.oxy.remotely.data.flow;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterEach;
+import restudio.rebase.platform.jvm.JvmTaskScheduler;
+import restudio.rescreen.platform.TaskScheduler;
+import redxax.oxy.remotely.util.TaskSchedulers;
 import org.junit.jupiter.api.io.TempDir;
 import redxax.oxy.remotely.RemotelyClient;
+import redxax.oxy.remotely.RemotelyComposition;
+import redxax.oxy.remotely.host.ApplicationHost;
+import restudio.rescreen.game.MinecraftGameAssets;
+import restudio.rescreen.ui.core.Screen;
 import restudio.resync.protocol.ReSyncProtocolContract;
 
 import java.nio.ByteBuffer;
@@ -17,6 +26,7 @@ import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ReSyncFlowClientCapabilityOwnershipTest {
@@ -24,6 +34,21 @@ class ReSyncFlowClientCapabilityOwnershipTest {
 
     @TempDir
     Path stateRoot;
+    private TaskScheduler previousScheduler;
+    private JvmTaskScheduler scheduler;
+
+    @BeforeEach
+    void setUp() {
+        previousScheduler = TaskSchedulers.current();
+        scheduler = new JvmTaskScheduler();
+        TaskSchedulers.configure(scheduler);
+    }
+
+    @AfterEach
+    void tearDown() {
+        TaskSchedulers.configure(previousScheduler);
+        scheduler.close();
+    }
 
     @Test
     void handshakeReconnectAndCapabilityReadsStayWithTheClientOwner() throws Exception {
@@ -40,7 +65,6 @@ class ReSyncFlowClientCapabilityOwnershipTest {
         FlowManager finalDecoyManager = null;
         CountDownLatch firstConnected = new CountDownLatch(1);
         CountDownLatch secondConnected = new CountDownLatch(1);
-        CountDownLatch disconnected = new CountDownLatch(1);
         AtomicInteger connections = new AtomicInteger();
 
         try {
@@ -52,25 +76,30 @@ class ReSyncFlowClientCapabilityOwnershipTest {
                     secondConnected.countDown();
                 }
             });
-            flowClient.setDisconnectListener(disconnected::countDown);
 
             flowClient.connect().join();
             transport.receiveHandshake(capabilities("first"));
             assertTrue(firstConnected.await(2L, TimeUnit.SECONDS));
             assertEquals("first", ownerManager.getServerCapabilities(SERVER_ID).get("ownerMarker").getAsString());
             assertNull(firstDecoyManager.getServerCapabilities(SERVER_ID));
+            ownerManager.getServerCapabilities(SERVER_ID).remove("protocolEnvelope");
+            assertTrue(flowClient.supportsGenericResourceActivation(ReSyncResourceType.GUI));
+            ownerManager.cacheServerCapabilities(SERVER_ID, new JsonObject());
+            assertTrue(flowClient.supportsFlowCapability("resource_revisions"));
+            assertTrue(flowClient.supportsGenericResourceActivation(ReSyncResourceType.GUI));
 
             OwnedClient secondDecoy = new OwnedClient();
             secondDecoyManager = manager(secondDecoy, "second-decoy");
             secondDecoy.bind(secondDecoyManager);
             transport.disconnect();
-            assertTrue(disconnected.await(2L, TimeUnit.SECONDS));
+            ReSyncFlowClientTestHarness.drain(flowClient);
             flowClient.connect().join();
             transport.receiveHandshake(capabilities("reconnected"));
             assertTrue(secondConnected.await(2L, TimeUnit.SECONDS));
             assertEquals("reconnected",
                 ownerManager.getServerCapabilities(SERVER_ID).get("ownerMarker").getAsString());
             assertNull(secondDecoyManager.getServerCapabilities(SERVER_ID));
+            assertFalse(flowClient.supportsGenericResourceActivation(ReSyncResourceType.GUI));
 
             OwnedClient finalDecoy = new OwnedClient();
             finalDecoyManager = manager(finalDecoy, "final-decoy");
@@ -91,7 +120,7 @@ class ReSyncFlowClientCapabilityOwnershipTest {
     }
 
     private FlowManager manager(OwnedClient owner, String directory) {
-        return new FlowManager(owner, null, null, redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(stateRoot.resolve(directory)));
+        return new FlowManager(owner, null, null, DesktopReSyncStorage.fromKey(stateRoot.resolve(directory)));
     }
 
     private static String capabilities(String marker) {
@@ -99,6 +128,24 @@ class ReSyncFlowClientCapabilityOwnershipTest {
         root.addProperty("serverId", SERVER_ID);
         root.addProperty("authorityEpoch", 1L);
         root.addProperty("ownerMarker", marker);
+        JsonObject protocol = new JsonObject();
+        protocol.addProperty("supported", true);
+        protocol.addProperty("resourceContractVersion", "1.3");
+        JsonObject authority = new JsonObject();
+        authority.addProperty("supported", true);
+        authority.addProperty("durable", true);
+        protocol.add("mutationAuthority", authority);
+        JsonObject operations = new JsonObject();
+        JsonArray mutations = new JsonArray();
+        mutations.add("activate");
+        operations.add("mutate", mutations);
+        protocol.add("resourceOperations", operations);
+        JsonArray resourceCapabilities = new JsonArray();
+        if ("first".equals(marker)) {
+            resourceCapabilities.add("resource_activation");
+        }
+        protocol.add("resourceCapabilities", resourceCapabilities);
+        root.add("protocolEnvelope", protocol);
         JsonObject contract = new JsonObject();
         contract.addProperty("version", ReSyncProtocolContract.FLOW_CONTRACT.version());
         contract.addProperty("minimumClientVersion", 0);
@@ -117,7 +164,7 @@ class ReSyncFlowClientCapabilityOwnershipTest {
         private FlowManager manager;
 
         private OwnedClient() {
-            super(null);
+            super(RemotelyComposition.browser(new TestHost()).scheduler(TaskSchedulers.current()).build());
         }
 
         private void bind(FlowManager manager) {
@@ -128,6 +175,20 @@ class ReSyncFlowClientCapabilityOwnershipTest {
         public FlowManager getFlowManager() {
             return manager;
         }
+    }
+
+    private static final class TestHost implements ApplicationHost {
+        @Override public void setScreen(Screen screen) { }
+        @Override public Screen getCurrentScreen() { return null; }
+        @Override public void ensureTextRenderer() { }
+        @Override public MinecraftGameAssets getGameAssets() { return null; }
+        @Override public Object getFontIdentifier(String namespace, String path) { return null; }
+        @Override public void openParentScreen(Screen currentScreen, Object parent) { }
+        @Override public void setClipboard(String text) { }
+        @Override public boolean shouldCloseRootScreen() { return false; }
+        @Override public String getGameVersion() { return ""; }
+        @Override public String getGameUserName() { return ""; }
+        @Override public String getGameUUID() { return ""; }
     }
 
     private static final class TestTransport implements ReSyncFrameTransport {

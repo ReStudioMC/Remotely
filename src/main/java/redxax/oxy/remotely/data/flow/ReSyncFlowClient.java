@@ -662,6 +662,10 @@ public class ReSyncFlowClient {
     private volatile boolean catalogAuthoringAdvertised;
     private volatile boolean optionQueriesAdvertised;
     private volatile CatalogVersion genericResourceContractVersion;
+    private volatile SessionCapabilities sessionCapabilities;
+
+    private record SessionCapabilities(int generation, JsonObject value) {
+    }
     private volatile boolean legacyCompatibilityProven;
     private volatile boolean catalogPublicationConfirmed;
     private volatile boolean authorityEpochAdvertised;
@@ -671,7 +675,6 @@ public class ReSyncFlowClient {
     private volatile long triggerBindingEpoch;
     private volatile String triggerBindingHash;
     private final Object worldGenAuthorityTransitionLock = new Object();
-    private final BrowserWork.Executor nodeRegistryScheduler = BrowserWork.executor();
     private TaskScheduler.ScheduledTask nodeRegistryTimeout;
     private TaskScheduler.ScheduledTask nodeRegistryRetry;
     private volatile boolean nodeRegistrySynced = false;
@@ -689,7 +692,7 @@ public class ReSyncFlowClient {
     private volatile String lastRetirementDiagnostic = "none";
     private volatile String lastTransportFailureDiagnostic = "none";
     private volatile int activeTransportGeneration = -1;
-    private final BrowserWork.Executor heartbeatScheduler = BrowserWork.executor();
+    private final ReSyncTimers heartbeatScheduler;
     private final BoundedTransportExecutor connectionEvents = new BoundedTransportExecutor("ReSyncFlow-Events",
         MAX_CONNECTION_EVENT_COUNT, MAX_CONNECTION_EVENT_BYTES, this::currentConnectionGeneration);
     private final BoundedTransportExecutor connectionCallbacks = new BoundedTransportExecutor("ReSyncFlow-Callbacks",
@@ -829,6 +832,17 @@ public class ReSyncFlowClient {
                              ReSyncCatalogPublicationCache catalogPublicationCache, ReSyncIdentityProvider identityProvider,
                              ReSyncLuckPermsProvider luckPermsProvider,
                              ReSyncCatalogPublicationDecoder catalogPublicationDecoder) {
+        this(serverId, apiClient, directWsUrl, directApiKey, client, frameTransport, catalogPublicationCache,
+            identityProvider, luckPermsProvider, catalogPublicationDecoder, TaskSchedulers.current(), false);
+    }
+
+    private ReSyncFlowClient(String serverId, RemotelyServerApi apiClient, String directWsUrl, String directApiKey,
+                             RemotelyClient client, ReSyncFrameTransport frameTransport,
+                             ReSyncCatalogPublicationCache catalogPublicationCache, ReSyncIdentityProvider identityProvider,
+                             ReSyncLuckPermsProvider luckPermsProvider,
+                             ReSyncCatalogPublicationDecoder catalogPublicationDecoder,
+                             TaskScheduler scheduler, boolean ownsScheduler) {
+        this.heartbeatScheduler = new ReSyncTimers(scheduler, ownsScheduler);
         this.serverId = serverId;
         this.catalogPublicationDecoder = catalogPublicationDecoder;
         this.catalogPublicationCache = Objects.requireNonNull(catalogPublicationCache, "Catalog publication cache is required");
@@ -865,7 +879,6 @@ public class ReSyncFlowClient {
         for (ReSyncResourceType type : ReSyncResourceType.values()) {
             pendingOpenResources.put(type, BrowserSafeState.set());
         }
-        configureHeartbeatScheduler();
         scheduleCatalogCacheHydration(0);
         refreshCatalogAuthority();
     }
@@ -890,7 +903,7 @@ public class ReSyncFlowClient {
                             boolean ownsScheduler, ReSyncCatalogPublicationDecoder catalogPublicationDecoder) {
         this(serverId, null, null, handshakeCredential(credentialProvider, serverId, null, apiKey), hostClient(),
             Objects.requireNonNull(frameTransport, "Frame transport is required"),
-            catalogCache(context), identityProvider, luckPermsProvider(context), catalogPublicationDecoder);
+            catalogCache(context), identityProvider, luckPermsProvider(context), catalogPublicationDecoder, scheduler, ownsScheduler);
     }
 
     public ReSyncFlowClient(String serverId, RemotelyServerApi apiClient, String directWsUrl, String directApiKey,
@@ -907,7 +920,7 @@ public class ReSyncFlowClient {
                             ReSyncCredentialProvider credentialProvider, boolean ownsScheduler) {
         this(serverId, apiClient, directWsUrl, handshakeCredential(credentialProvider, serverId, directWsUrl, directApiKey),
             hostClient(), createTransport(transportFactory, directWsUrl),
-            catalogCache(context), identityProvider, luckPermsProvider(context));
+            catalogCache(context), identityProvider, luckPermsProvider(context), null, scheduler, ownsScheduler);
     }
 
     private static String handshakeCredential(ReSyncCredentialProvider provider, String serverId, String endpoint,
@@ -937,11 +950,6 @@ public class ReSyncFlowClient {
         return context == null ? ReSyncLuckPermsProvider.unavailable() : context.luckPermsProvider();
     }
 
-    private void configureHeartbeatScheduler() {
-        heartbeatScheduler.setRemoveOnCancelPolicy(true);
-        heartbeatScheduler.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
-        heartbeatScheduler.setContinueExistingPeriodicTasksAfterShutdownPolicy(false);
-    }
 
     private void scheduleCatalogCacheHydration(int expectedGeneration) {
         long request = catalogCacheHydrationRequest.incrementAndGet();
@@ -6396,7 +6404,7 @@ public class ReSyncFlowClient {
 
     private boolean scheduleCoreGraphSaveSettlementRetry(CoreSaveSessionSettlementRecovery recovery) {
         try {
-            heartbeatScheduler.schedule(() -> retryCoreGraphSaveSettlement(recovery), java.time.Duration.ofSeconds(CORE_SAVE_SESSION_SETTLEMENT_RETRY_SECONDS));
+            heartbeatScheduler.schedule(() -> retryCoreGraphSaveSettlement(recovery), Duration.ofSeconds(CORE_SAVE_SESSION_SETTLEMENT_RETRY_SECONDS));
             return true;
         } catch (RuntimeException exception) {
             return false;
@@ -7078,6 +7086,7 @@ public class ReSyncFlowClient {
         triggerBindingHash = null;
         optionQueriesAdvertised = false;
         genericResourceContractVersion = null;
+        sessionCapabilities = null;
     }
 
     private void hydrateTriggerBindingState(JsonObject capabilities) {
@@ -7511,6 +7520,13 @@ public class ReSyncFlowClient {
         cancelConnectTimeout(generation);
         notifiedConnectionError.set(null);
 
+        JsonObject negotiatedCapabilities = capabilities == null ? new JsonObject() : capabilities.deepCopy();
+        synchronized (outboundLock) {
+            if (!isConnectionReadyGeneration(generation)) {
+                return;
+            }
+            sessionCapabilities = new SessionCapabilities(generation, negotiatedCapabilities);
+        }
         if (receivedServerCapabilities) {
             setCatalogAuthoringAdvertised(catalogAuthoringAdvertisedByServer);
             genericResourceContractVersion = genericResourceContractVersionByServer;
@@ -9206,7 +9222,7 @@ public class ReSyncFlowClient {
                 } catch (IllegalStateException exception) {
                     expireCatalogChunkTransfer(transfer);
                 }
-            }, java.time.Duration.ofSeconds(CATALOG_CHUNK_IDLE_SECONDS));
+            }, Duration.ofSeconds(CATALOG_CHUNK_IDLE_SECONDS));
             return true;
         } catch (IllegalStateException exception) {
             return false;
@@ -13836,7 +13852,7 @@ public class ReSyncFlowClient {
                     if (catalogAcquisition != acquisition) return;
                 }
                 checkCatalogAcquisitionDeadline();
-            }, Math.max(((1L) * 1_000_000L), remaining), 1L);
+            }, Duration.ofNanos(Math.max(1_000_000L, remaining)));
         } catch (IllegalStateException exception) {
             failCatalogAcquisitionLocked(acquisition, "CATALOG_PUBLICATION.DEADLINE_UNAVAILABLE");
         }
@@ -14376,11 +14392,11 @@ public class ReSyncFlowClient {
         if (!usingCachedRegistry) {
             return;
         }
-        nodeRegistryTimeout = nodeRegistryScheduler.schedule(() -> {
+        nodeRegistryTimeout = heartbeatScheduler.schedule(() -> {
             if (!nodeRegistrySynced && usingCachedRegistry) {
                 showCachedRegistryNotice();
             }
-        }, java.time.Duration.ofSeconds(NODE_REGISTRY_TIMEOUT_SECONDS));
+        }, Duration.ofSeconds(NODE_REGISTRY_TIMEOUT_SECONDS));
     }
 
     private void cancelNodeRegistryTimeout() {
@@ -14396,14 +14412,14 @@ public class ReSyncFlowClient {
             return;
         }
         try {
-            nodeRegistryRetry = nodeRegistryScheduler.schedule(() -> {
+            nodeRegistryRetry = heartbeatScheduler.schedule(() -> {
                 synchronized (ReSyncFlowClient.this) {
                     nodeRegistryRetry = null;
                 }
                 if (!shutdownRequested) {
                     requestNodeRegistry(true);
                 }
-            }, java.time.Duration.ofSeconds(NODE_REGISTRY_RETRY_SECONDS));
+            }, Duration.ofSeconds(NODE_REGISTRY_RETRY_SECONDS));
         } catch (RuntimeException ignored) {
             nodeRegistryRetry = null;
         }
@@ -17480,6 +17496,10 @@ public class ReSyncFlowClient {
     }
 
     private JsonObject resourceCapabilities() {
+        SessionCapabilities current = sessionCapabilities;
+        if (current != null) {
+            return current.generation() == connectionGeneration.get() ? current.value() : null;
+        }
         FlowManager manager = client != null ? client.getFlowManager() : null;
         return manager != null ? manager.getServerCapabilities(serverId) : null;
     }
@@ -18338,8 +18358,7 @@ public class ReSyncFlowClient {
     public void sendTabDelete(String tabId) { sendResourceDelete(ReSyncResourceType.TAB, tabId); }
 
     public boolean supportsFlowCapability(String capability) {
-        FlowManager manager = owningFlowManager();
-        JsonObject capabilities = manager != null ? manager.getServerCapabilities(serverId) : null;
+        JsonObject capabilities = resourceCapabilities();
         if (capabilities == null || !capabilities.has("flowContract") || !capabilities.get("flowContract").isJsonObject()) {
             return false;
         }
@@ -19772,7 +19791,6 @@ public class ReSyncFlowClient {
         failure = runShutdownStep(failure, collaboration::clear);
         failure = runShutdownStep(failure, workspaces::clear);
         failure = runShutdownStep(failure, this::shutdownCatalogPublicationWorker);
-        failure = runShutdownStep(failure, nodeRegistryScheduler::shutdownNow);
         failure = runShutdownStep(failure, heartbeatScheduler::shutdownNow);
         failure = runShutdownStep(failure, triggerUpdatePreparations::shutdownNow);
         failure = runShutdownStep(failure, resourcePreparations::shutdownNow);
@@ -19877,7 +19895,7 @@ public class ReSyncFlowClient {
     }
 
     public TaskScheduler scheduler() {
-        return TaskSchedulers.current();
+        return heartbeatScheduler.scheduler();
     }
 
     public HandshakeObservation handshakeObservation() {
@@ -19946,7 +19964,7 @@ public class ReSyncFlowClient {
     }
 
     boolean usesDirectWebSocketTransport() {
-        return frameTransport == null;
+        return frameTransport == null || directWsUrl != null && !directWsUrl.isBlank();
     }
 
     boolean isFrameTransportRetired() {

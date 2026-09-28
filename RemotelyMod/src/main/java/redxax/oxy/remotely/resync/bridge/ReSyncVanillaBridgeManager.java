@@ -280,9 +280,9 @@ public class ReSyncVanillaBridgeManager {
 
     private Object currentMinecraftScreen() {
         //#if MC >= 26.2
-        //$$ return Minecraft.getInstance().gui.screen();
+        return Minecraft.getInstance().gui.screen();
         //#else
-        return Minecraft.getInstance().screen;
+        //$$ return Minecraft.getInstance().screen;
         //#endif
     }
 

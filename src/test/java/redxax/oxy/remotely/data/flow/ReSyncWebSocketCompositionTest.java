@@ -1,8 +1,10 @@
 package redxax.oxy.remotely.data.flow;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterEach;
+import restudio.rebase.platform.jvm.JvmTaskScheduler;
 import restudio.rescreen.platform.Clock;
-import restudio.rescreen.platform.TaskScheduler;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -18,6 +20,18 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 class ReSyncWebSocketCompositionTest {
+    private JvmTaskScheduler scheduler;
+
+    @BeforeEach
+    void setUp() {
+        scheduler = new JvmTaskScheduler();
+    }
+
+    @AfterEach
+    void tearDown() {
+        scheduler.close();
+    }
+
 
     @Test
     void providerProfileCreatesTheConfiguredTransportAndTicketRotationReplacesIt() throws Exception {
@@ -33,7 +47,7 @@ class ReSyncWebSocketCompositionTest {
     void suppliedBrowserTransportUsesAnEmptyHandshakeCredential() {
         OpeningTransport transport = new OpeningTransport();
         ReSyncFlowClient client = new ReSyncFlowClient("123e4567-e89b-42d3-a456-426614174000", transport,
-            "browser-ticket", ReSyncFlowClientContext.defaults(), TaskScheduler.unavailable(), Clock.system(),
+            "browser-ticket", ReSyncFlowClientContext.defaults(), scheduler, Clock.system(),
             null, ReSyncCredentialProvider.browserTicket());
         try {
             client.connect().join();
@@ -58,9 +72,9 @@ class ReSyncWebSocketCompositionTest {
         };
         ReSyncFlowClientFactory clients = (id, api, url, credential, supplied, state) ->
             supplied != null ? new ReSyncFlowClient(id, supplied, credential, ReSyncFlowClientContext.defaults(),
-                TaskScheduler.unavailable(), Clock.system(), null, credentials)
+                scheduler, Clock.system(), null, credentials)
                 : new ReSyncFlowClient(id, api, url, credential, ReSyncFlowClientContext.defaults(),
-                    TaskScheduler.unavailable(), Clock.system(), transports, null, credentials);
+                    scheduler, Clock.system(), transports, null, credentials);
         ReSyncConnectionProfileProvider profiles = identity ->
             new ReSyncConnectionManager.ReSyncConnectionProfile(endpoint, ticket.get());
         ReSyncConnectionManager manager = new ReSyncConnectionManager(null, null,

@@ -305,7 +305,7 @@ public final class OptionCatalogLoader {
             if (client == null) {
                 FlowManager manager = FlowManager.getInstance();
                 client = manager != null && serverId != null && !serverId.isBlank()
-                    ? manager.ensureFlowClient(serverId) : null;
+                    ? manager.ensureFlowClient(serverId, false) : null;
             }
             return client != null ? client.optionCatalogContextKey(context) : null;
         }
@@ -316,7 +316,7 @@ public final class OptionCatalogLoader {
             if (client == null) {
                 FlowManager manager = FlowManager.getInstance();
                 client = manager != null && serverId != null && !serverId.isBlank()
-                    ? manager.ensureFlowClient(serverId) : null;
+                    ? manager.ensureFlowClient(serverId, false) : null;
             }
             if (client == null) {
                 return false;

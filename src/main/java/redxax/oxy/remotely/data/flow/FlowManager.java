@@ -2117,6 +2117,10 @@ public class FlowManager {
         return ensureSubscribedFlowClient(serverId);
     }
 
+    public ReSyncFlowClient ensureFlowClient(String serverId, boolean showNotifications) {
+        return ensureSubscribedFlowClient(serverId, showNotifications);
+    }
+
     public Async<ReSyncFlowClient> ensureFlowClientAsync(String serverId) {
         return connectionManager.ensureFlowClientAsync(serverId, true).thenApply(flowClient -> {
             if (attachCoreGraphListener(flowClient)) {

@@ -7,6 +7,7 @@ import redxax.oxy.remotely.util.TaskSchedulers;
 import restudio.rescreen.platform.Async;
 import restudio.rescreen.platform.TaskScheduler;
 import restudio.resync.flow.identity.ServerId;
+import restudio.resync.protocol.ReSyncProtocolContract;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -15,6 +16,9 @@ import java.util.ArrayDeque;
 import java.util.List;
 import java.util.Optional;
 import java.util.Queue;
+import java.util.ArrayList;
+import java.util.UUID;
+import restudio.rescreen.platform.Clock;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -26,7 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ReSyncFlowClientWebSocketRecoveryTest {
-    private static final ServerId TEST_SERVER = new ServerId(java.util.UUID.fromString("123e4567-e89b-42d3-a456-426614174000"));
+    private static final ServerId TEST_SERVER = new ServerId(UUID.fromString("123e4567-e89b-42d3-a456-426614174000"));
 
     private Async.Snapshot asyncSnapshot;
     private ExecutorService asyncPool;
@@ -48,6 +52,31 @@ class ReSyncFlowClientWebSocketRecoveryTest {
         TaskSchedulers.configure(previousScheduler);
         Async.restore(asyncSnapshot);
         asyncPool.shutdownNow();
+    }
+
+    @Test
+    void suppliedSchedulerKeepsHeartbeatsAliveAfterGlobalSchedulerChanges() throws Exception {
+        RecoveringTransport transport = new RecoveringTransport();
+        ReSyncFlowClient client = new ReSyncFlowClient(TEST_SERVER.canonicalText(), transport, "bridge",
+            ReSyncFlowClientContext.defaults(), scheduler, Clock.system(), null, ReSyncCredentialProvider.apiKey());
+        TaskSchedulers.configure(TaskScheduler.unavailable());
+        AtomicInteger connections = new AtomicInteger();
+        client.setConnectionListener(connections::incrementAndGet);
+        try {
+            client.connect().join();
+            transport.receive(handshakeFrame());
+            await(() -> connections.get() == 1);
+            for (int tick = 1; tick <= 4; tick++) {
+                scheduler.tick();
+                int expected = tick;
+                await(() -> transport.heartbeats.get() == expected);
+            }
+            client.shutdown();
+            scheduler.tick();
+            assertEquals(4, transport.heartbeats.get());
+        } finally {
+            client.shutdown();
+        }
     }
 
     @Test
@@ -173,6 +202,7 @@ class ReSyncFlowClientWebSocketRecoveryTest {
 
     private static final class ManualScheduler implements TaskScheduler {
         private final Queue<ManualTask> tasks = new ArrayDeque<>();
+        private final List<ManualTask> periodic = new ArrayList<>();
 
         @Override
         public void execute(Runnable task) {
@@ -187,8 +217,18 @@ class ReSyncFlowClientWebSocketRecoveryTest {
         }
 
         @Override
-        public ScheduledTask scheduleAtFixedRate(Runnable task, Duration initialDelay, Duration period) {
-            return new ManualTask(task, initialDelay);
+        public synchronized ScheduledTask scheduleAtFixedRate(Runnable task, Duration initialDelay, Duration period) {
+            ManualTask scheduled = new ManualTask(task, initialDelay);
+            periodic.add(scheduled);
+            return scheduled;
+        }
+
+        private void tick() {
+            List<ManualTask> scheduled;
+            synchronized (this) {
+                scheduled = List.copyOf(periodic);
+            }
+            scheduled.forEach(ManualTask::run);
         }
 
         private synchronized boolean has(Duration delay) {
@@ -241,6 +281,7 @@ class ReSyncFlowClientWebSocketRecoveryTest {
     private static final class RecoveringTransport implements ReSyncFrameTransport {
         private final ReSyncFrameCodec codec = new ReSyncFrameCodec();
         private final AtomicInteger handshakeRequests = new AtomicInteger();
+        private final AtomicInteger heartbeats = new AtomicInteger();
         private volatile Consumer<byte[]> frameHandler = ignored -> {};
         private volatile Runnable openHandler = () -> {};
         private volatile Runnable closeHandler = () -> {};
@@ -274,6 +315,9 @@ class ReSyncFlowClientWebSocketRecoveryTest {
 
         @Override
         public void send(byte[] frame) {
+            if (codec.decode(frame, null).messageType() == ReSyncProtocolContract.MESSAGE_HEARTBEAT) {
+                heartbeats.incrementAndGet();
+            }
             if (codec.decode(frame, null).messageType() == ReSyncProtocolContract.MESSAGE_HANDSHAKE_REQUEST) {
                 handshakeRequests.incrementAndGet();
             }
