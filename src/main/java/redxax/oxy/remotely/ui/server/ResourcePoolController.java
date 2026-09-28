@@ -1,6 +1,8 @@
 package redxax.oxy.remotely.ui.server;
 
 import redxax.oxy.remotely.RemotelyServerApi;
+import redxax.oxy.remotely.RemotelyCapabilityException;
+import restudio.rebase.restudio.api.ReStudioApiException;
 import restudio.rebase.resource.ResourcePoolClient;
 import restudio.rebase.resource.ResourcePoolModels;
 import restudio.rescreen.platform.Async;
@@ -175,6 +177,8 @@ public final class ResourcePoolController {
         private final String cpuPercent;
         private final String diskMiB;
         private ResourcePoolModels.Allocation authority;
+        private Async<ResourcePoolModels.Progress> active;
+        private int submissions;
 
         private PendingMutation(MutationKind kind, ResourcePoolModels.Allocation allocation, String accountId,
                                 String ramMiB, String cpuPercent, String diskMiB) {
@@ -300,7 +304,7 @@ public final class ResourcePoolController {
         boolean sameAccount = accountId.equals(snapshot.accountId());
         boolean resetPages = visibleLoading || !sameAccount;
         if (!sameAccount) {
-            mutations.clear();
+            mutations.values().removeIf(request -> !request.accountId.equals(accountId));
             activationIds.clear();
             purchaseOffers.clear();
             purchaseRequests.values().forEach(ResourcePoolController::cancelPurchase);
@@ -1207,18 +1211,24 @@ public final class ResourcePoolController {
 
     public Async<ResourcePoolModels.Progress> assign(ResourcePoolModels.Allocation allocation,
                                                       String ramMiB, String cpuPercent, String diskMiB) {
+        return assign(allocation, ramMiB, cpuPercent, diskMiB, ignored -> {});
+    }
+
+    Async<ResourcePoolModels.Progress> assign(ResourcePoolModels.Allocation allocation, String ramMiB,
+                                               String cpuPercent, String diskMiB, Consumer<UUID> requestIdentity) {
         positive(ramMiB, "RAM");
         positive(cpuPercent, "CPU");
         positive(diskMiB, "Disk");
-        return mutate(allocation, MutationKind.ASSIGN, ramMiB, cpuPercent, diskMiB);
+        return mutate(allocation, MutationKind.ASSIGN, ramMiB, cpuPercent, diskMiB, requestIdentity);
     }
 
     public Async<ResourcePoolModels.Progress> disable(ResourcePoolModels.Allocation allocation) {
-        return mutate(allocation, MutationKind.DISABLE, "0", "0", "0");
+        return mutate(allocation, MutationKind.DISABLE, "0", "0", "0", ignored -> {});
     }
 
     private Async<ResourcePoolModels.Progress> mutate(ResourcePoolModels.Allocation allocation, MutationKind kind,
-                                                       String ramMiB, String cpuPercent, String diskMiB) {
+                                                       String ramMiB, String cpuPercent, String diskMiB,
+                                                       Consumer<UUID> requestIdentity) {
         Objects.requireNonNull(allocation, "allocation");
         String key = allocation.poolId() + ":" + allocation.serverId();
         PendingMutation pending = mutations.get(key);
@@ -1232,7 +1242,12 @@ public final class ResourcePoolController {
             return Async.failed(new IllegalStateException("Refresh Before Changing This Resource Request"));
         }
         PendingMutation request = pending;
+        requestIdentity.accept(request.requestId);
+        if (request.active != null && !request.active.isDone()) {
+            return request.active;
+        }
         Async<ResourcePoolModels.Progress> result = Async.pending();
+        request.active = result;
         if (request.authority != null) {
             dispatchMutation(request, result);
             return result;
@@ -1261,6 +1276,7 @@ public final class ResourcePoolController {
         }
         ResourcePoolModels.Allocation allocation = request.authority;
         Async<ResourcePoolModels.Mutation> mutation;
+        request.submissions++;
         try {
             mutation = request.kind == MutationKind.ASSIGN
                     ? api.assign(allocation.poolId(), allocation.serverId(), new ResourcePoolModels.AssignRequest(
@@ -1279,6 +1295,12 @@ public final class ResourcePoolController {
             }
             if (failure == null) {
                 result.complete(new ResourcePoolModels.Progress(accepted.operation(), accepted.hosting()));
+                refresh(false);
+                return;
+            }
+            if (request.submissions == 1 && rejectedBeforeAdmission(failure)) {
+                mutations.remove(allocation.poolId() + ":" + allocation.serverId(), request);
+                result.fail(failure);
                 refresh(false);
                 return;
             }
@@ -1355,7 +1377,7 @@ public final class ResourcePoolController {
             PoolView b = right.get(i);
             if (!a.pool().equals(b.pool()) || !a.drafts().equals(b.drafts())
                     || !a.allocations().equals(b.allocations()) || !a.draftPages().equals(b.draftPages())
-                    || !a.allocationPages().equals(b.allocationPages())) return false;
+                    || !a.allocationPages().equals(b.allocationPages()) || !a.progress().equals(b.progress())) return false;
         }
         return true;
     }
@@ -1395,6 +1417,16 @@ public final class ResourcePoolController {
 
     private static IllegalStateException unknown(String action, Throwable failure) {
         return new IllegalStateException(action + " Outcome Is Unknown. Retry Uses The Same Request Identity: " + message(failure));
+    }
+
+    private static boolean rejectedBeforeAdmission(Throwable failure) {
+        for (Throwable current = failure; current != null; current = current.getCause()) {
+            if (current instanceof RemotelyCapabilityException capability && capability.status() == 409
+                    && "hosting_precondition".equals(capability.code())) return true;
+            if (current instanceof ReStudioApiException api && api.getStatus() == 409
+                    && "hosting_precondition".equals(api.getCode())) return true;
+        }
+        return false;
     }
 
     private static IllegalStateException purchaseUnknown(Throwable failure) {

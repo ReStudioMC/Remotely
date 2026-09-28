@@ -10,6 +10,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 
 final class PoolAllocationEditor {
     enum Resource {
@@ -304,6 +305,42 @@ final class PoolAllocationEditor {
         Proposal proposal = proposals.get(change.serverId());
         return proposal != null && proposal.allocation.revision().equals(change.revision())
                 && proposal.ram.equals(change.ram()) && proposal.cpu.equals(change.cpu()) && proposal.disk.equals(change.disk());
+    }
+
+    boolean pending(Change change, UUID requestId) {
+        ResourcePoolModels.Operation operation = ownedOperation(change, requestId);
+        if (operation == null || operation.state() != ResourcePoolModels.OperationState.PENDING
+                && operation.state() != ResourcePoolModels.OperationState.SETTLED) return false;
+        ResourcePoolModels.Allocation allocation = proposals.get(change.serverId()).allocation;
+        return allocation.state() == ResourcePoolModels.AllocationState.PENDING
+                && requestId.equals(allocation.currentRequestId()) && allocation.reserved().equals(operation.reserved());
+    }
+
+    boolean unknown(Change change, UUID requestId) {
+        ResourcePoolModels.Operation operation = ownedOperation(change, requestId);
+        return operation != null && operation.state() == ResourcePoolModels.OperationState.UNKNOWN;
+    }
+
+    private ResourcePoolModels.Operation ownedOperation(Change change, UUID requestId) {
+        Proposal proposal = proposals.get(change.serverId());
+        if (proposal == null || requestId == null) return null;
+        ResourcePoolModels.Allocation allocation = proposal.allocation;
+        ResourcePoolModels.Progress progress = view.progress().get(requestId);
+        if (progress == null || allocation.currentRequestId() != null
+                && !requestId.equals(allocation.currentRequestId())) return null;
+        ResourcePoolModels.Operation operation = progress.operation();
+        boolean owned = operation.requestId().equals(requestId) && operation.serverId().equals(change.serverId())
+                && operation.action() == ResourcePoolModels.Action.ASSIGN
+                && allocation.nodeId().equals(operation.nodeId())
+                && allocation.revision().equals(operation.allocationRevision())
+                && !allocation.revision().equals(change.revision())
+                && allocation.desired().equals(operation.desired())
+                && number(operation.desired().ramMiB()).equals(change.ram())
+                && number(operation.desired().cpuQuotaPercent()).equals(change.cpu())
+                && number(operation.retained().diskMiB()).equals(change.disk())
+                && allocation.retained().backupMiB().equals(operation.retained().backupMiB())
+                && number(allocation.retained().diskMiB()).compareTo(change.disk()) >= 0;
+        return owned ? operation : null;
     }
 
     boolean applied(Change change) {

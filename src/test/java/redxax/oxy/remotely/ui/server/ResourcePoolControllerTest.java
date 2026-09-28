@@ -1,6 +1,8 @@
 package redxax.oxy.remotely.ui.server;
 
 import org.junit.jupiter.api.Test;
+import redxax.oxy.remotely.RemotelyCapabilityException;
+import restudio.rebase.restudio.api.ReStudioApiException;
 import restudio.rebase.resource.ResourcePoolClient;
 import restudio.rebase.resource.ResourcePoolModels;
 import restudio.rescreen.platform.Async;
@@ -20,6 +22,102 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ResourcePoolControllerTest {
+    @Test
+    void assignmentIdentityIsAvailableBeforeAdmissionOrAnySnapshotCanComplete() {
+        UUID poolId = UUID.randomUUID();
+        List<String> events = new ArrayList<>();
+        AtomicReference<UUID> identity = new AtomicReference<>();
+        ResourcePoolClient client = new ResourcePoolClient((method, path, body) -> {
+            if (path.endsWith("/refresh")) {
+                events.add("refresh");
+                assertTrue(identity.get() != null);
+                return Async.completed(allocationJson(poolId));
+            }
+            if (path.endsWith("/assign")) {
+                events.add("assign");
+                assertEquals(identity.get(), UUID.fromString(field(body, "requestId")));
+                return Async.pending();
+            }
+            return Async.failed(new AssertionError("Unexpected Request"));
+        });
+        ResourcePoolController controller = controller(client, new AtomicReference<>("account"));
+        ResourcePoolModels.Allocation server = allocation(poolId, ResourcePoolModels.AllocationState.DISABLED, null);
+        Async<ResourcePoolModels.Progress> first = controller.assign(server, "2048", "200", "10240", requestId -> {
+            events.add("identity");
+            identity.set(requestId);
+        });
+        assertEquals(List.of("identity", "refresh", "assign"), events);
+        AtomicReference<UUID> joined = new AtomicReference<>();
+        assertSame(first, controller.assign(server, "2048", "200", "10240", joined::set));
+        assertEquals(identity.get(), joined.get());
+        assertEquals(List.of("identity", "refresh", "assign"), events);
+    }
+
+    @Test
+    void rejectedAssignmentReleasesItsIdentityAndRefreshesAuthorityForBothClients() {
+        for (Throwable rejection : List.of(
+                new RemotelyCapabilityException(409, "hosting_precondition", "Stop The Server"),
+                new ReStudioApiException(409, "hosting_precondition", "Stop The Server", null, null))) {
+            UUID poolId = UUID.randomUUID();
+            List<UUID> requests = new ArrayList<>();
+            int[] refreshes = {0};
+            int[] discoveries = {0};
+            ResourcePoolClient client = new ResourcePoolClient((method, path, body) -> {
+                if (path.endsWith("/refresh")) {
+                    refreshes[0]++;
+                    return Async.completed(allocationJson(poolId));
+                }
+                if (path.endsWith("/assign")) {
+                    requests.add(UUID.fromString(field(body, "requestId")));
+                    return Async.failed(rejection);
+                }
+                if (path.contains("/operations/")) discoveries[0]++;
+                return Async.failed(new IllegalStateException("Unavailable"));
+            });
+            ResourcePoolController controller = controller(client, new AtomicReference<>("account"));
+            ResourcePoolModels.Allocation server = allocation(poolId, ResourcePoolModels.AllocationState.DISABLED, null);
+
+            assertSame(rejection, controller.assign(server, "2048", "200", "10240").failure());
+            assertSame(rejection, controller.assign(server, "3072", "300", "20480").failure());
+            assertEquals(2, requests.size());
+            assertFalse(requests.getFirst().equals(requests.getLast()));
+            assertEquals(2, refreshes[0]);
+            assertEquals(0, discoveries[0]);
+        }
+    }
+
+    @Test
+    void uncertainAssignmentKeepsItsIdentityAndCoalescesConcurrentSubmissions() {
+        UUID poolId = UUID.randomUUID();
+        List<UUID> requests = new ArrayList<>();
+        List<Async<String>> responses = new ArrayList<>();
+        ResourcePoolClient client = new ResourcePoolClient((method, path, body) -> {
+            if (path.endsWith("/refresh")) return Async.completed(allocationJson(poolId));
+            if (path.endsWith("/assign")) {
+                requests.add(UUID.fromString(field(body, "requestId")));
+                Async<String> response = Async.pending();
+                responses.add(response);
+                return response;
+            }
+            return Async.failed(new IllegalStateException("Connection Lost"));
+        });
+        ResourcePoolController controller = controller(client, new AtomicReference<>("account"));
+        ResourcePoolModels.Allocation server = allocation(poolId, ResourcePoolModels.AllocationState.DISABLED, null);
+        Async<ResourcePoolModels.Progress> first = controller.assign(server, "2048", "200", "10240");
+        assertSame(first, controller.assign(server, "2048", "200", "10240"));
+        assertEquals(1, requests.size());
+        responses.getFirst().fail(new IllegalStateException("Connection Lost"));
+        assertTrue(first.failure().getMessage().contains("Outcome Is Unknown"));
+        Async<ResourcePoolModels.Progress> retried = controller.assign(server, "2048", "200", "10240");
+        assertEquals(2, requests.size());
+        assertEquals(requests.getFirst(), requests.getLast());
+        responses.getLast().fail(new RemotelyCapabilityException(409, "hosting_precondition", "Stop The Server"));
+        assertTrue(retried.failure().getMessage().contains("Outcome Is Unknown"));
+        controller.assign(server, "2048", "200", "10240");
+        assertEquals(3, requests.size());
+        assertEquals(requests.getFirst(), requests.getLast());
+    }
+
     @Test
     void invalidActivationResourcesCannotCreateAnOrphanDraft() {
         int[] requests = {0};
@@ -498,6 +596,41 @@ class ResourcePoolControllerTest {
         assertEquals(121, purchaseReads[0]);
         assertTrue(controller.snapshot().message().contains("Automatic Refresh Paused"));
         assertFalse(scheduler.runPoll());
+    }
+
+    @Test
+    void backgroundUnknownProgressNotifiesTheScreenWithoutAnAllocationChange() {
+        UUID poolId = UUID.randomUUID();
+        UUID requestId = UUID.randomUUID();
+        AtomicReference<ResourcePoolModels.OperationState> state = new AtomicReference<>(ResourcePoolModels.OperationState.PENDING);
+        PollScheduler scheduler = new PollScheduler();
+        String allocation = allocationJson(poolId).replace("\"state\":\"DISABLED\"", "\"state\":\"PENDING\"")
+                .replace("\"currentRequestId\":null", "\"currentRequestId\":\"" + requestId + "\"");
+        ResourcePoolClient client = new ResourcePoolClient((method, path, body) -> {
+            if (path.equals("/resource-pools?page=0&size=25")) return Async.completed(page(poolJson(poolId)));
+            if (path.contains("/drafts?")) return Async.completed(emptyPage());
+            if (path.contains("/allocations?")) return Async.completed(page(allocation));
+            if (path.contains("/operations/")) return Async.completed("{\"operation\":"
+                    + operationJson(requestId, "0", "0", "0", state.get()) + ",\"hosting\":null}");
+            if (path.equals("/billing/resource-pools/offers")) return Async.completed("[]");
+            if (path.startsWith("/billing/resource-pools/purchases?")) return Async.completed(emptyPage());
+            return Async.failed(new AssertionError("Unexpected Request " + method + " " + path));
+        });
+        ResourcePoolController controller = new ResourcePoolController(client, scheduler, () -> "account");
+        List<ResourcePoolController.Snapshot> notifications = new ArrayList<>();
+        controller.listen(notifications::add);
+        controller.refresh();
+        int beforePoll = notifications.size();
+        List<ResourcePoolModels.Allocation> before = controller.snapshot().pools().getFirst().allocations();
+        state.set(ResourcePoolModels.OperationState.UNKNOWN);
+
+        assertTrue(scheduler.runPoll());
+        assertEquals(beforePoll + 1, notifications.size());
+        assertEquals(before, notifications.getLast().pools().getFirst().allocations());
+        assertEquals(ResourcePoolModels.OperationState.UNKNOWN,
+                notifications.getLast().pools().getFirst().progress().get(requestId).operation().state());
+        assertTrue(scheduler.runPoll());
+        assertEquals(beforePoll + 1, notifications.size());
     }
 
     @Test

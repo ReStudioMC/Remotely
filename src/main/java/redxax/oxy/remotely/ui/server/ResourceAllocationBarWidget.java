@@ -1,6 +1,7 @@
 package redxax.oxy.remotely.ui.server;
 
 import restudio.rebase.resource.ResourcePoolModels;
+import restudio.rebase.storage.StorageBreakdownController;
 import restudio.rescreen.platform.IDrawContext;
 import restudio.rescreen.platform.input.ReMouseButton;
 import restudio.rescreen.platform.input.ReMouseEvent;
@@ -29,7 +30,7 @@ import static restudio.rescreen.config.Config.animationsEnabled;
 import static restudio.rescreen.config.Config.deltaTime;
 import static restudio.rescreen.config.Config.globalExpandSpeed;
 
-final class ResourceAllocationBarWidget extends MountableButtonWidget {
+final class ResourceAllocationBarWidget extends MountableButtonWidget implements StorageBreakdownController.StorageBar {
     private static final int LABEL_SIZE = 18;
     private static final int ICON_SIZE = 16;
     private static final Identifier RAM_ICON = Identifier.image("textures/icons/ram.png");
@@ -49,8 +50,8 @@ final class ResourceAllocationBarWidget extends MountableButtonWidget {
     private final PoolAllocationEditor editor;
     private final PoolCreationPreview creation;
     private final PoolAllocationEditor.Resource resource;
-    private final List<StoragePart> storageParts;
-    private final BigInteger storageCapacity;
+    private List<StoragePart> storageParts;
+    private BigInteger storageCapacity;
     private List<ResourcePoolModels.Allocation> allocations;
     private Set<String> editableServers = Set.of();
     private ResourcePoolController.PoolView accentView;
@@ -129,6 +130,16 @@ final class ResourceAllocationBarWidget extends MountableButtonWidget {
         icon = DISK_ICON;
         unit = " bytes";
         setHint(title + " Storage");
+        refresh();
+    }
+
+    @Override
+    public void updateStorage(List<StorageBreakdownController.StoragePart> values, BigInteger capacityBytes) {
+        List<StoragePart> next = values.stream().map(value -> new StoragePart(value.name(), value.bytes())).toList();
+        BigInteger capacity = capacityBytes.max(BigInteger.ZERO);
+        if (next.equals(storageParts) && capacity.equals(storageCapacity)) return;
+        storageParts = next;
+        storageCapacity = capacity;
         refresh();
     }
 

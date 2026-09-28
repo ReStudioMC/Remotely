@@ -15,6 +15,116 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PoolAllocationEditorTest {
     @Test
+    void admittedDiskReductionWaitsForItsOwnStorageReservationToSettle() {
+        UUID poolId = UUID.randomUUID();
+        UUID requestId = UUID.randomUUID();
+        ResourcePoolModels.Allocation initial = allocation(poolId, "first", "1", "1024", "100", "1024", "100");
+        PoolAllocationEditor editor = new PoolAllocationEditor();
+        editor.accept(view(poolId, List.of(initial), "4096", "400", "1024", "100", "3072", "300"));
+        assertTrue(editor.propose(PoolAllocationEditor.Resource.DISK, BigInteger.valueOf(512)));
+        PoolAllocationEditor.Change change = editor.changes().getFirst();
+        assertTrue(editor.beginReduction("first"));
+        editor.lock(true);
+        ResourcePoolModels.Allocation admitted = new ResourcePoolModels.Allocation("first", poolId, "node", "2",
+                initial.desired(), initial.reserved(), initial.effective(), initial.retained(),
+                ResourcePoolModels.AllocationState.PENDING, requestId, "2");
+        ResourcePoolModels.Operation operation = operation(admitted, requestId, "512", ResourcePoolModels.OperationState.PENDING);
+        editor.accept(progressView(poolId, admitted, operation));
+        editor.finish("first", true);
+
+        assertFalse(editor.matches(change));
+        assertFalse(editor.applied(change));
+        assertTrue(editor.pending(change, requestId));
+        assertFalse(editor.reductionSettled(change));
+        assertFalse(editor.beginReduction("first"));
+
+        ResourcePoolModels.Allocation settled = new ResourcePoolModels.Allocation("first", poolId, "node", "2",
+                initial.desired(), initial.desired(), initial.desired(), operation.retained(),
+                ResourcePoolModels.AllocationState.ACTIVE, null, "2");
+        editor.accept(progressView(poolId, settled,
+                operation(settled, requestId, "512", ResourcePoolModels.OperationState.SETTLED)));
+        assertFalse(editor.pending(change, requestId));
+        assertTrue(editor.applied(change));
+        assertTrue(editor.reductionSettled(change));
+    }
+
+    @Test
+    void ownedUnknownMustBeReviewedEvenWhenTheRequestedIncreaseLooksApplied() {
+        UUID poolId = UUID.randomUUID();
+        UUID requestId = UUID.randomUUID();
+        ResourcePoolModels.Allocation initial = allocation(poolId, "first", "1", "1024", "100", "1024", "100");
+        PoolAllocationEditor editor = new PoolAllocationEditor();
+        editor.accept(view(poolId, List.of(initial), "4096", "400", "1024", "100", "3072", "300"));
+        assertTrue(editor.propose(PoolAllocationEditor.Resource.RAM, BigInteger.valueOf(1536)));
+        PoolAllocationEditor.Change change = editor.changes().getFirst();
+        ResourcePoolModels.Compute requested = new ResourcePoolModels.Compute("1536", "100");
+        ResourcePoolModels.Allocation admitted = new ResourcePoolModels.Allocation("first", poolId, "node", "2",
+                requested, requested, initial.effective(), initial.retained(),
+                ResourcePoolModels.AllocationState.PENDING, requestId, "2");
+        editor.accept(progressView(poolId, admitted, operation(admitted, requestId, "1000", ResourcePoolModels.OperationState.UNKNOWN)));
+
+        assertTrue(editor.applied(change));
+        assertTrue(editor.unknown(change, requestId));
+        assertFalse(editor.pending(change, requestId));
+        assertFalse(editor.unknown(change, UUID.randomUUID()));
+        editor.accept(progressView(poolId, admitted, operation(admitted, requestId, "1000", ResourcePoolModels.OperationState.SETTLED)));
+        assertFalse(editor.unknown(change, requestId));
+        assertTrue(editor.pending(change, requestId));
+    }
+
+    @Test
+    void mixedIncreaseAndDiskReductionRecognizesOnlyTheSubmittedOperation() {
+        UUID poolId = UUID.randomUUID();
+        UUID requestId = UUID.randomUUID();
+        ResourcePoolModels.Allocation initial = allocation(poolId, "first", "1", "1024", "100", "1024", "100");
+        PoolAllocationEditor editor = new PoolAllocationEditor();
+        editor.accept(view(poolId, List.of(initial), "4096", "400", "1024", "100", "3072", "300"));
+        assertTrue(editor.propose(PoolAllocationEditor.Resource.RAM, BigInteger.valueOf(1536)));
+        assertTrue(editor.propose(PoolAllocationEditor.Resource.DISK, BigInteger.valueOf(512)));
+        PoolAllocationEditor.Change change = editor.changes().getFirst();
+        assertFalse(change.reduction());
+        ResourcePoolModels.Compute requested = new ResourcePoolModels.Compute("1536", "100");
+        ResourcePoolModels.Allocation admitted = new ResourcePoolModels.Allocation("first", poolId, "node", "2",
+                requested, requested, initial.effective(), initial.retained(),
+                ResourcePoolModels.AllocationState.PENDING, requestId, "2");
+        editor.accept(progressView(poolId, admitted, operation(admitted, requestId, "512", ResourcePoolModels.OperationState.PENDING)));
+        assertFalse(editor.matches(change));
+        assertFalse(editor.applied(change));
+        assertTrue(editor.pending(change, requestId));
+        assertFalse(editor.pending(change, UUID.randomUUID()));
+        assertFalse(editor.pending(change, null));
+
+        editor.accept(progressView(poolId, admitted, operation(admitted, requestId, "512", ResourcePoolModels.OperationState.UNKNOWN)));
+        assertTrue(editor.unknown(change, requestId));
+        assertFalse(editor.pending(change, requestId));
+        editor.accept(progressView(poolId, admitted, operation(admitted, requestId, "768", ResourcePoolModels.OperationState.PENDING)));
+        assertFalse(editor.pending(change, requestId));
+        editor.accept(progressView(poolId, admitted, operation(admitted, requestId, "512", ResourcePoolModels.OperationState.SUPERSEDED)));
+        assertFalse(editor.pending(change, requestId));
+        ResourcePoolModels.Operation unrelated = new ResourcePoolModels.Operation(requestId, "other", "2",
+                ResourcePoolModels.Action.ASSIGN, requested, requested, new ResourcePoolModels.Storage("512", "500"),
+                ResourcePoolModels.OperationState.PENDING, null, null, "node");
+        editor.accept(progressView(poolId, admitted, unrelated));
+        assertFalse(editor.pending(change, requestId));
+        editor.accept(view(poolId, List.of(admitted), "4096", "400", "1536", "100", "2560", "300"));
+        assertFalse(editor.pending(change, requestId));
+    }
+
+    private static ResourcePoolModels.Operation operation(ResourcePoolModels.Allocation allocation, UUID requestId,
+                                                           String disk, ResourcePoolModels.OperationState state) {
+        return new ResourcePoolModels.Operation(requestId, allocation.serverId(), allocation.revision(),
+                ResourcePoolModels.Action.ASSIGN, allocation.desired(), allocation.reserved(),
+                new ResourcePoolModels.Storage(disk, allocation.retained().backupMiB()), state, null, null, allocation.nodeId());
+    }
+
+    private static ResourcePoolController.PoolView progressView(UUID poolId, ResourcePoolModels.Allocation allocation,
+                                                                ResourcePoolModels.Operation operation) {
+        ResourcePoolController.PoolView base = view(poolId, List.of(allocation), "4096", "400", "1536", "100", "2560", "300");
+        return new ResourcePoolController.PoolView(base.pool(), base.drafts(), base.allocations(),
+                Map.of(operation.requestId(), new ResourcePoolModels.Progress(operation, null)));
+    }
+
+    @Test
     void manyServerTransferWaitsForSettlementAndPreservesCreationCapacity() {
         UUID poolId = UUID.randomUUID();
         List<ResourcePoolModels.Allocation> initial = new ArrayList<>();

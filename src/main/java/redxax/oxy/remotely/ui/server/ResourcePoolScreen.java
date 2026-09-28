@@ -84,7 +84,24 @@ public final class ResourcePoolScreen extends ReScreen {
     private ResourcePoolController.Snapshot displayed;
     private String layoutStamp;
 
-    private record PendingChange(UUID poolId, PoolAllocationEditor.Change change) {}
+    private static final class PendingChange {
+        private final UUID poolId;
+        private final PoolAllocationEditor.Change change;
+        private UUID requestId;
+
+        private PendingChange(UUID poolId, PoolAllocationEditor.Change change) {
+            this.poolId = poolId;
+            this.change = change;
+        }
+
+        private UUID poolId() {
+            return poolId;
+        }
+
+        private PoolAllocationEditor.Change change() {
+            return change;
+        }
+    }
 
     public ResourcePoolScreen(Screen parent, RemotelyClient remotelyClient) {
         this(parent, remotelyClient, null);
@@ -1117,6 +1134,13 @@ public final class ResourcePoolScreen extends ReScreen {
             stopChanges("Account Changed", Notification.Type.ERROR);
             return;
         }
+        for (PendingChange pending : pendingChanges) {
+            PoolAllocationEditor editor = editors.get(pending.poolId());
+            if (editor != null && editor.unknown(pending.change(), pending.requestId)) {
+                stopChanges("Resource Change Could Not Be Confirmed. Refresh To Review Its Status", Notification.Type.WARN);
+                return;
+            }
+        }
         pendingChanges.removeIf(pending -> {
             PoolAllocationEditor editor = editors.get(pending.poolId());
             return editor != null && (pending.change().reduction()
@@ -1130,6 +1154,7 @@ public final class ResourcePoolScreen extends ReScreen {
         for (PendingChange pending : pendingChanges) {
             PoolAllocationEditor editor = editors.get(pending.poolId());
             if (editor == null || !editor.matches(pending.change())
+                    && !editor.pending(pending.change(), pending.requestId)
                     && !(pending.change().reduction() && editor.applied(pending.change()))) {
                 stopChanges("A Server Changed While Applying Resources", Notification.Type.WARN);
                 return;
@@ -1144,6 +1169,7 @@ public final class ResourcePoolScreen extends ReScreen {
         for (PendingChange pending : List.copyOf(pendingChanges)) {
             if (changesInFlight >= MAX_PARALLEL_CHANGES) return;
             PoolAllocationEditor editor = editors.get(pending.poolId());
+            if (editor.pending(pending.change(), pending.requestId)) continue;
             if (pending.change().reduction()) {
                 if (editor.applied(pending.change())) continue;
                 if (editor.busy(pending.change().serverId()) || editor.submitted(pending.change().serverId())) continue;
@@ -1180,7 +1206,8 @@ public final class ResourcePoolScreen extends ReScreen {
             }
             return;
         }
-        if (pendingChanges.stream().anyMatch(pending -> editors.get(pending.poolId()).hasPending())) return;
+        if (pendingChanges.stream().anyMatch(pending -> editors.get(pending.poolId()).hasPending()
+                || editors.get(pending.poolId()).pending(pending.change(), pending.requestId))) return;
         if (pendingChanges.stream().noneMatch(pending -> editors.get(pending.poolId())
                 .waitingForCapacity(pending.change().serverId()))) {
             stopChanges("Refresh The Pool And Review Remaining Changes", Notification.Type.WARN);
@@ -1212,7 +1239,8 @@ public final class ResourcePoolScreen extends ReScreen {
         updateAllocationRows(editor);
         long run = changeRun;
         try {
-            controller.assign(allocation, change.ram().toString(), change.cpu().toString(), change.disk().toString())
+            controller.assign(allocation, change.ram().toString(), change.cpu().toString(), change.disk().toString(),
+                            requestId -> pending.requestId = requestId)
                     .whenComplete((progress, failure) -> host().application().execute(() -> {
                         boolean accepted = failure == null && progress != null
                                 && progress.operation().state() != ResourcePoolModels.OperationState.UNKNOWN;

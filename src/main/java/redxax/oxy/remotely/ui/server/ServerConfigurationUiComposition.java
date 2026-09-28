@@ -91,31 +91,35 @@ public final class ServerConfigurationUiComposition {
         if (plan != null) plan.selectPlanByName(state.preselectedPlanName());
         Supplier<List<Setting>> poolSettings = state.resourcePoolCreation()
                 ? poolSettings(screen, preview, cleanup) : () -> List.of();
+        List<Setting> storageSettings = new ArrayList<>();
+        if (locationField != null) {
+            Setting.Builder storage = new Setting.Builder("Storage");
+            storage.addRow("Location", locationField);
+            storageSettings.add(storage.build());
+        }
+        List<Setting> poolVersions = new ArrayList<>();
         settings.put("General", () -> {
             List<Setting> result = new ArrayList<>();
             if (plan != null) result.addAll(plan.getSettings());
             result.addAll(general.getSettings());
             if (state.resourcePoolCreation()) {
                 if (!linkedModpack) version.bindToRemoteVariables(remoteVariables);
-                List<Setting> gameVersion = linkedModpack
-                        ? List.of(new Setting.Builder("Game Version").build()) : version.getSettings();
-                Setting versionSetting = gameVersion.getFirst();
-                if (linkedModpack) versionSetting.addRow("", new MountableButtonWidget.Builder("Minecraft Version")
-                        .description("Set By The Linked Modpack").build());
-                versionSetting.addRow("", new MountableButtonWidget.Builder("Server Image")
-                        .description("Choose The Java Runtime For This Server")
-                        .addWidget(profile).build());
-                result.addAll(gameVersion);
+                if (poolVersions.isEmpty()) {
+                    poolVersions.addAll(linkedModpack ? List.of(new Setting.Builder("Game Version").build()) : version.getSettings());
+                    Setting versionSetting = poolVersions.getFirst();
+                    if (linkedModpack) versionSetting.addRow("", new MountableButtonWidget.Builder("Minecraft Version")
+                            .description("Set By The Linked Modpack").build());
+                    versionSetting.addRow("", new MountableButtonWidget.Builder("Server Image")
+                            .description("Choose The Java Runtime For This Server")
+                            .addWidget(profile).build());
+                }
+                result.addAll(poolVersions);
                 result.addAll(poolSettings.get());
             } else if (!linkedModpack) {
                 if (state.restudioBackend() || state.restudioCreation()) version.bindToRemoteVariables(remoteVariables);
                 result.addAll(version.getSettings());
             }
-            if (locationField != null) {
-                Setting.Builder storage = new Setting.Builder("Storage");
-                storage.addRow("Location", locationField);
-                result.add(storage.build());
-            }
+            result.addAll(storageSettings);
             if (state.editMode() && state.restudioBackend()) {
                 result.addAll(modpack.getSettings());
             }
@@ -142,14 +146,20 @@ public final class ServerConfigurationUiComposition {
             cleanup.add(schedules::cleanup);
         }
         if (state.editMode() && state.restudioBackend()) {
-            settings.put("Network", new ServerNetworkSettingsController(screen, platform.portProvider())::getSettings);
-            settings.put("Subusers", new ServerSubuserSettingsController(screen, platform.subuserProvider())::getSettings);
+            ServerNetworkSettingsController network = new ServerNetworkSettingsController(screen, platform.portProvider());
+            ServerSubuserSettingsController subusers = new ServerSubuserSettingsController(screen, platform.subuserProvider());
+            settings.put("Network", network::getSettings);
+            settings.put("Subusers", subusers::getSettings);
+            cleanup.add(network::cleanup);
+            cleanup.add(subusers::cleanup);
         }
         boolean compatible = platform.managementCompatible();
         if (compatible) settings.put("Management", new ServerManagementSettingsController(platform.managementSettings())::getSettings);
         boolean enabled = platform.managementEnabled();
         if (state.editMode()) {
-            settings.put("Player Actions", new PlayerActionsSettingsController(platform.playerActionsFileProvider())::getSettings);
+            PlayerActionsSettingsController actions = new PlayerActionsSettingsController(platform.playerActionsFileProvider());
+            settings.put("Player Actions", actions::getSettings);
+            cleanup.add(actions::cleanup);
             if (compatible && enabled) {
                 var liveProvider = platform.liveSettingsProvider();
                 ServerGameRulesSettingsController rules = new ServerGameRulesSettingsController(liveProvider);
@@ -164,10 +174,12 @@ public final class ServerConfigurationUiComposition {
             }
         }
         if (state.editMode() && !state.restudioCreation()) {
+            ServerExtraSettingsController extra = new ServerExtraSettingsController(extraFiles, data.documentPaths(), platform.documentAccess());
             settings.put("Extra Files", () -> {
                 List<String> availableFiles = new ArrayList<>(extraFiles == null ? List.of() : extraFiles);
                 availableFiles.addAll(data.availableDocumentPaths());
-                return new ServerExtraSettingsController(availableFiles, data.documentPaths(), platform.documentAccess()).getSettings();
+                extra.updateFiles(availableFiles, data.documentPaths());
+                return extra.getSettings();
             });
         }
         String title = state.editMode() ? "Edit " + platform.name()
@@ -189,7 +201,7 @@ public final class ServerConfigurationUiComposition {
                             preview.value(PoolAllocationEditor.Resource.CPU).toString(),
                             preview.value(PoolAllocationEditor.Resource.DISK).toString(),
                             preview.value(PoolAllocationEditor.Resource.BACKUP).toString());
-                });
+                }, () -> version.refreshRemoteVariables(remoteVariables));
     }
 
     private static Supplier<List<Setting>> poolSettings(ReScreen screen, PoolCreationPreview preview,
@@ -273,7 +285,9 @@ public final class ServerConfigurationUiComposition {
             cleanup.add(() -> editor.hold(BigInteger.ZERO, BigInteger.ZERO, BigInteger.ZERO));
         }
         MountableButtonWidget existingEditor = editRow;
+        List<Setting> poolSettings = new ArrayList<>();
         return () -> {
+            if (!poolSettings.isEmpty()) return List.copyOf(poolSettings);
             Setting capacity = new Setting.Builder("Pool Capacity").build();
             for (ResourceAllocationBarWidget bar : List.of(ramBar, cpuBar, diskBar)) {
                 bar.setHeight(18);
@@ -285,7 +299,9 @@ public final class ServerConfigurationUiComposition {
             allocation.addRow("", ram.row());
             allocation.addRow("", cpu.row());
             allocation.addRow("", disk.row());
-            return List.of(capacity, allocation.build());
+            poolSettings.add(capacity);
+            poolSettings.add(allocation.build());
+            return List.copyOf(poolSettings);
         };
     }
 
