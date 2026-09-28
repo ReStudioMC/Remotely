@@ -91,9 +91,9 @@ public class LootTableDesignerScreen extends FocusedJsonResourceDesignerScreen i
     @Override
     protected List<ResourcePanelSection> editorSections(List<String> fields) {
         return appendRemainingSections(List.of(
-            new ResourcePanelSection("Trigger", fields.stream().filter(field -> field.startsWith("trigger.")).toList()),
-            new ResourcePanelSection("Pool", fields.stream().filter(field -> field.startsWith("pools.")).toList()),
-            new ResourcePanelSection("Hooks", fields.stream().filter(field -> field.startsWith("hooks.")).toList())
+            new ResourcePanelSection("", fields.stream().filter(field -> field.startsWith("trigger.")).toList()),
+            new ResourcePanelSection("", fields.stream().filter(field -> field.startsWith("pools.")).toList()),
+            new ResourcePanelSection("", fields.stream().filter(field -> field.startsWith("hooks.")).toList())
         ), fields);
     }
 
@@ -269,28 +269,67 @@ public class LootTableDesignerScreen extends FocusedJsonResourceDesignerScreen i
         if (field == null) {
             return super.jsonResourceDescription(null, label);
         }
+        if (field.matches("pools\\.\\d+\\.entries\\.\\d+\\.item")) {
+            return "Item produced when this entry is selected.\nSupports Minecraft items, ReSync items, and provider items.";
+        }
+        if (field.matches("pools\\.\\d+\\.entries\\.\\d+\\.minAmount")) {
+            return "Minimum stack size produced by this entry.\nMust be at least 1.";
+        }
+        if (field.matches("pools\\.\\d+\\.entries\\.\\d+\\.maxAmount")) {
+            return "Maximum stack size produced by this entry.\nMust be at least the minimum amount.";
+        }
+        if (field.matches("pools\\.\\d+\\.entries\\.\\d+\\.weight")) {
+            return "Relative selection chance within this pool.\nHigher values make this entry more likely when entries are selected by weight.\n0 excludes it from weighted selection.";
+        }
+        if (field.matches("pools\\.\\d+\\.entries\\.\\d+\\.chance")) {
+            return "Chance this entry is eligible on each roll.\nChecked before weighted selection.";
+        }
+        if (field.matches("pools\\.\\d+\\.entries\\.\\d+\\.conditions")) {
+            return "Conditions that must pass for this entry to be considered.\nSupports permission, world, player, entity type, chance, and nested all, any, or not checks.";
+        }
+        if (field.matches("pools\\.\\d+\\.entries\\.\\d+\\.components")) {
+            return "Item metadata applied to the generated stack.\nSupports display name, lore, custom model data, and enchantments.";
+        }
         return switch (field) {
-            case "trigger.event" -> "Event That Starts This Loot Table.\nChoose Vault Open To Roll It When A Matching Vault Begins Opening.\nChoose None To Disable Event-Based Rolls.";
+            case "displayName" -> "Loot table name shown in project views and previews.";
+            case "enabled" -> "Export state.\nOn: synchronized and active.\nOff: saved but not used live.";
+            case "trigger.event" -> "Event that starts this loot table.\nChoose Vault Open to roll it when a matching vault begins opening.\nChoose None to disable event-based rolls.";
             case "trigger.target" -> {
                 if (VAULT_OPEN_EVENT.equalsIgnoreCase(triggerEvent())) {
-                    yield "Vault Category To Match.\nNormal Matches Standard Vaults.\nOminous Matches Ominous Vaults.\nAny Matches Either Category.";
+                    yield "Vault category to match.\nNormal matches standard vaults.\nOminous matches ominous vaults.\nAny matches either category.";
                 }
                 if ("entity_death".equalsIgnoreCase(triggerEvent())) {
-                    yield "Entity Type That Must Die For This Loot Table To Run.\nChoose None To Match Every Entity Type.";
+                    yield "Entity type that must die for this loot table to run.\nChoose None to match every entity type.";
                 }
-                yield "Block Or Item That Starts This Loot Table.\nChoose None To Match Every Target.";
+                if ("block_break".equalsIgnoreCase(triggerEvent())) {
+                    yield "Block that must be broken to start this loot table.\nChoose None to match every block.";
+                }
+                if ("block_place".equalsIgnoreCase(triggerEvent())) {
+                    yield "Block or item that must be placed to start this loot table.\nChoose None to match every placement.";
+                }
+                if ("item_use".equalsIgnoreCase(triggerEvent())) {
+                    yield "Item that must be used to start this loot table.\nChoose None to accept any item.";
+                }
+                if ("item_hit_entity".equalsIgnoreCase(triggerEvent())) {
+                    yield "Item that must hit the target entity.\nChoose None to accept any item.";
+                }
+                yield "Block or item that starts this loot table.\nChoose None to match every target.";
             }
             case "trigger.tool" -> {
                 if (VAULT_OPEN_EVENT.equalsIgnoreCase(triggerEvent())) {
-                    yield "Key Item Required By This Vault Trigger.\nChoose A Minecraft Key, ReSync Item, Or Provider Item.\nLeave Empty To Use Each Vault Category's Standard Key.";
+                    yield "Key item required by this vault trigger.\nChoose a Minecraft key, ReSync item, or provider item.\nLeave empty to use each vault category's standard key.";
                 }
                 if (entityTriggerEvent()) {
-                    yield "Item Or Damage Type Required For This Entity Event.\nLeave Empty To Accept Any Item Or Damage Type.";
+                    yield "Item or damage type required for this entity event.\nLeave empty to accept any item or damage type.";
                 }
-                yield "Item Required For This Loot Event.\nLeave Empty To Accept Any Item.";
+                yield "Item required for this loot event.\nLeave empty to accept any item.";
             }
-            case "trigger.entity" -> "Entity Type That Must Be Hit For This Loot Table To Run.\nChoose None To Match Every Entity Type.";
-            case "trigger.overrideDrops" -> "Whether The Original Event Drops Are Removed Before This Table's Drops Are Applied.";
+            case "trigger.entity" -> "Entity type that must be hit for this loot table to run.\nChoose None to match every entity type.";
+            case "trigger.overrideDrops" -> "Remove the event's original drops before applying this table's drops.\nApplies to block breaks and entity deaths.";
+            case "pools.0.rolls" -> "Number of times this pool selects an entry.\nEach roll returns at most one entry.\nSet to 0 to disable the pool.";
+            case "hooks.beforeRollFlow" -> "Flow run before this loot table is rolled.\nReceives the loot table id and available roll context.";
+            case "hooks.afterRollFlow" -> "Flow run after this loot table is rolled.\nReceives the generated items and available roll context.";
+            case "hooks.deniedRollFlow" -> "Flow run when a roll is requested for this disabled table.\nReceives the request context and no generated items.";
             default -> super.jsonResourceDescription(field, label);
         };
     }

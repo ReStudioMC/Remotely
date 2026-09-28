@@ -148,7 +148,6 @@ public abstract class FocusedJsonResourceDesignerScreen extends StudioScreen imp
             () -> type + ":" + serverId + ":" + id, this::resourceLifecycle,
             () -> new Notification("Editor Busy", "Try Again", Notification.Type.WARN));
         OPEN_SCREENS.add(this);
-        resourceHeaderActions.add(headerButton("save.png", "Save", this::save));
     }
 
     protected boolean hasResourceHistory() {

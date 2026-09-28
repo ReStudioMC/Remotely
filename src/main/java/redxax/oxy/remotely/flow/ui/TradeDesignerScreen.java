@@ -46,9 +46,9 @@ public class TradeDesignerScreen extends FocusedJsonResourceDesignerScreen imple
     @Override
     protected List<ResourcePanelSection> editorSections(List<String> fields) {
         return appendRemainingSections(List.of(
-            new ResourcePanelSection("Profile", fields.stream().filter(field -> List.of("displayName", "profession", "villagerType", "level").contains(field)).toList()),
-            new ResourcePanelSection("Trade", fields.stream().filter(field -> field.startsWith("offers.") || List.of("maxUses", "restockTicks", "lootTable").contains(field)).toList()),
-            new ResourcePanelSection("Hooks", fields.stream().filter(field -> field.startsWith("hooks.")).toList())
+            new ResourcePanelSection("", fields.stream().filter(field -> List.of("displayName", "profession", "villagerType", "level").contains(field)).toList()),
+            new ResourcePanelSection("", fields.stream().filter(field -> field.startsWith("offers.") || List.of("maxUses", "restockTicks", "lootTable").contains(field)).toList()),
+            new ResourcePanelSection("", fields.stream().filter(field -> field.startsWith("hooks.")).toList())
         ), fields);
     }
 
