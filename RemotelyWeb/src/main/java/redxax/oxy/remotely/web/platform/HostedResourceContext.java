@@ -19,6 +19,7 @@ import restudio.rebase.resource.provider.AsyncResourceProvider;
 import restudio.rebase.resource.provider.OnlineResourceVersion;
 import restudio.rebase.resource.provider.ResourceCompatibilityTokens;
 import restudio.rebase.resource.provider.ResourceProviderException;
+import restudio.rebase.restudio.api.ReStudioApiException;
 import restudio.rebase.restudio.api.models.ServerModels;
 import restudio.rebase.ui.screens.resources.ResourceOverviewScreen;
 import restudio.rebase.ui.screens.resources.ResourceContainerCapabilities;
@@ -1511,13 +1512,37 @@ final class HostedResourceContext implements ResourceBrowserContext {
         String key = directory == null || directory.isBlank() ? "/" : directory;
         Async<List<ServerModels.PteroFileObjectAttributes>> cached = dataCache.resourceDirectoryRequests.get(key);
         if (cached != null) return view(cached);
-        Async<List<ServerModels.PteroFileObjectAttributes>> request = api.listResourceFiles(serverId, key);
+        Async<List<ServerModels.PteroFileObjectAttributes>> request = api.listResourceFiles(serverId, key)
+                .handle((files, failure) -> new OperationResult<>(files, failure))
+                .thenCompose(result -> result.failure() == null ? Async.completed(result.value())
+                        : absentResourceDirectory(key, result.failure()));
         dataCache.resourceDirectoryRequests.put(key, request);
         request.whenComplete((ignored, failure) -> {
             if (failure == null) return;
             if (dataCache.resourceDirectoryRequests.get(key) == request) dataCache.resourceDirectoryRequests.remove(key);
         });
         return view(request);
+    }
+
+    private Async<List<ServerModels.PteroFileObjectAttributes>> absentResourceDirectory(String path, Throwable failure) {
+        if (!(failure instanceof ReStudioApiException response && response.getStatus() == 404) || "/".equals(path)) {
+            return Async.failed(failure);
+        }
+        int separator = path.lastIndexOf('/');
+        String parent = separator <= 0 ? "/" : path.substring(0, separator);
+        String name = path.substring(separator + 1);
+        return api.listResourceFiles(serverId, parent)
+                .handle((files, parentFailure) -> new OperationResult<>(files, parentFailure))
+                .thenCompose(result -> {
+                    if (result.failure() == null) {
+                        if (result.value() == null) return Async.failed(new IllegalStateException("Resource Parent Directory Response Is Missing"));
+                        boolean present = result.value().stream()
+                                .anyMatch(file -> file != null && name.equals(file.name));
+                        return present ? Async.failed(failure) : Async.completed(List.<ServerModels.PteroFileObjectAttributes>of());
+                    }
+                    return "/".equals(parent) ? Async.failed(result.failure())
+                            : absentResourceDirectory(parent, result.failure());
+                });
     }
 
     private void recordResourceFailure(String path, Throwable failure) {

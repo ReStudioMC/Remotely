@@ -19,6 +19,7 @@ import restudio.rescreen.util.Notification;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.BiConsumer;
@@ -174,8 +175,46 @@ final class HostedResourceContainerProvider implements ResourceContainerProvider
     @Override
     public Async<Void> toggle(ResourceContainerItem resource, boolean enabled) {
         if (resource == null || !fileCapability("resources.toggle").available()) return failed("Resource Toggle Is Unavailable");
-        return screenHost.serverApi().toggleResource(server.identifier, key(resource), enabled)
-                .thenRun(resourceContext::invalidateFileCache);
+        String source = key(resource);
+        boolean disabled = source.toLowerCase(Locale.ROOT).endsWith(".disabled");
+        String target = enabled && disabled ? source.substring(0, source.length() - ".disabled".length())
+                : !enabled && !disabled ? source + ".disabled" : source;
+        if (source.equals(target)) {
+            resource.setEnabled(enabled);
+            return Async.completed(null);
+        }
+        return screenHost.serverApi().toggleResource(server.identifier, source, enabled)
+                .handle((ignored, failure) -> failure)
+                .thenCompose(failure -> {
+                    if (failure == null) {
+                        applyToggle(resource, source, target, enabled);
+                        return Async.completed(null);
+                    }
+                    String directory = directory(resource);
+                    String sourceName = source.substring(source.lastIndexOf('/') + 1);
+                    String targetName = target.substring(target.lastIndexOf('/') + 1);
+                    return screenHost.serverApi().listResourceFiles(server.identifier, directory)
+                            .handle((files, readFailure) -> readFailure == null && files != null
+                                    && files.stream().anyMatch(file -> file != null && targetName.equals(file.name))
+                                    && files.stream().noneMatch(file -> file != null && sourceName.equals(file.name)))
+                            .thenCompose(confirmed -> {
+                                if (!confirmed) return Async.failed(failure);
+                                applyToggle(resource, source, target, enabled);
+                                return Async.completed(null);
+                            });
+                });
+    }
+
+    private void applyToggle(ResourceContainerItem resource, String source, String target, boolean enabled) {
+        resource.path(target);
+        resource.setEnabled(enabled);
+        ResourceMarketplaceProvider.Card card = cards.remove(source);
+        if (card != null) cards.put(target, card);
+        String icon = icons.remove(source);
+        if (icon != null) icons.put(target, icon);
+        Identifier iconId = iconIds.remove(source);
+        if (iconId != null) iconIds.put(target, iconId);
+        resourceContext.invalidateFileCache();
     }
 
     @Override

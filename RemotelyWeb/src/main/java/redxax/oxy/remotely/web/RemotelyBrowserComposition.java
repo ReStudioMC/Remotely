@@ -112,6 +112,8 @@ public final class RemotelyBrowserComposition {
         ServerSettingsRegistry.StorageSnapshot serverSettingsStorage = null;
         OptionCatalogCache previousOptionCatalogCache = null;
         try {
+            boolean desktopMode = !BrowserReScreenClient.compactTouchDevice();
+            Config.setDesktopModeOverride(desktopMode);
             boolean demo = metadata.demo();
             TaskIdentities.install(TaskIdentities.Access.BROWSER);
             previousOptionCatalogCache = OptionCatalogCache.install(BrowserReSyncStorage.fromKey("remotely.option-catalogs"),
@@ -185,7 +187,7 @@ public final class RemotelyBrowserComposition {
             client.initialize();
             if (demo) host.notify("Reactor Demo", "Changes Reset Automatically", ReSyncNotificationLevel.INFO);
             browserRoot = host.getCurrentScreen();
-            screenClient = new BrowserReScreenClient(canvasId, host::getCurrentScreen, true).diagnostics(diagnostics);
+            screenClient = new BrowserReScreenClient(canvasId, host::getCurrentScreen, desktopMode).diagnostics(diagnostics);
             config.applyBrowserAppearance();
             if (!(browserRoot instanceof ServerManagerScreen root)) {
                 throw new IllegalStateException("Remotely Server Manager Did Not Start");

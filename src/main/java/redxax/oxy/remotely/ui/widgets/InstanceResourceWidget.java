@@ -10,6 +10,9 @@ import restudio.rescreen.ui.widgets.ToggleWidget;
 import restudio.rescreen.util.Notification;
 import restudio.rescreen.util.Sound;
 import restudio.rescreen.util.Identifier;
+import redxax.oxy.remotely.ResourceTogglePendingException;
+
+import java.util.Locale;
 
 import static restudio.rescreen.util.SoundUtils.playSound;
 
@@ -140,9 +143,23 @@ public class InstanceResourceWidget extends ResourceWidget<ResourceContainerItem
                 toggle.setValue(originalState);
                 return;
             }
-            provider.toggle(resource, !originalState).exceptionally(e -> {
+            String originalPath = resource.path();
+            boolean enabled = !originalState;
+            provider.toggle(resource, enabled).thenRun(() -> ScreenManager.getInstance().execute(() -> {
+                if (resource.isEnabled() == enabled) return;
+                boolean disabled = originalPath.toLowerCase(Locale.ROOT).endsWith(".disabled");
+                String path = enabled && disabled ? originalPath.substring(0, originalPath.length() - ".disabled".length())
+                        : !enabled && !disabled ? originalPath + ".disabled" : originalPath;
+                resource.path(path);
+                resource.setEnabled(enabled);
+            })).exceptionally(e -> {
                 ScreenManager.getInstance().execute(() -> {
-                    new Notification("Failed to toggle resource", e.getCause() != null ? e.getCause().getMessage() : e.getMessage(), Notification.Type.ERROR);
+                    Throwable failure = e.getCause() != null ? e.getCause() : e;
+                    if (failure instanceof ResourceTogglePendingException) {
+                        new Notification("Resource Toggle Still Running", "Refresh To Check Its State", Notification.Type.INFO);
+                    } else {
+                        new Notification("Failed To Toggle Resource", failure.getMessage(), Notification.Type.ERROR);
+                    }
                     toggle.setValue(originalState);
                 });
                 return null;

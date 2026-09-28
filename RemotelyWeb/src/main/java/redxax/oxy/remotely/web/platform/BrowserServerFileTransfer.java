@@ -18,6 +18,7 @@ import java.util.UUID;
 final class BrowserServerFileTransfer {
     static final long MAX_UPLOAD_BYTES = 4L * 1024 * 1024 * 1024;
     private static final long PROGRESS_UPDATE_INTERVAL_MILLIS = 150L;
+    private static final long DELIVERY_WAIT_MILLIS = Duration.ofMinutes(65).toMillis();
     private final BrowserRemotelyServerApi api;
     private final UploadApi uploadApi;
     private final String serverId;
@@ -196,7 +197,7 @@ final class BrowserServerFileTransfer {
     private void completeFile(List<TransferSource> sources, int index, TransferSource source,
                               BrowserRemotelyServerApi.HostedUploadView upload, String directory, long sent, long total,
                               BiConsumer<Long, Long> progress, Async<?>[] active, UUID[] activeUpload, Async<Void> result) {
-        Async<Void> complete = complete(upload.uploadId, 0);
+        Async<Void> complete = complete(upload.uploadId);
         active[0] = complete;
         complete.whenComplete((ignored, failure) -> {
             BrowserTransferBridge.release(source);
@@ -211,22 +212,33 @@ final class BrowserServerFileTransfer {
         });
     }
 
-    private Async<Void> complete(UUID uploadId, int attempt) {
-        return uploadApi.completeHostedUpload(serverId, uploadId).thenCompose(status -> awaitDelivery(uploadId, status, attempt))
-                .exceptionallyCompose(failure -> attempt >= 2 ? Async.failed(failure)
-                        : uploadApi.hostedUploadStatus(serverId, uploadId).thenCompose(status -> awaitDelivery(uploadId, status, attempt + 1)));
+    private Async<Void> complete(UUID uploadId) {
+        long deadline = System.currentTimeMillis() + DELIVERY_WAIT_MILLIS;
+        return completeRequest(uploadId, 0).thenCompose(status -> awaitDelivery(uploadId, status, deadline));
     }
 
-    private Async<Void> awaitDelivery(UUID uploadId, BrowserRemotelyServerApi.HostedUploadView status, int attempt) {
+    private Async<BrowserRemotelyServerApi.HostedUploadView> completeRequest(UUID uploadId, int attempt) {
+        return uploadApi.completeHostedUpload(serverId, uploadId).exceptionallyCompose(failure -> {
+            if (attempt >= 2) return Async.failed(failure);
+            return uploadApi.hostedUploadStatus(serverId, uploadId).thenCompose(status -> {
+                if (status == null || status.delivering || status.delivered || status.failed) return Async.completed(status);
+                return completeRequest(uploadId, attempt + 1);
+            });
+        });
+    }
+
+    private Async<Void> awaitDelivery(UUID uploadId, BrowserRemotelyServerApi.HostedUploadView status, long deadline) {
         if (status == null || status.offset != status.size) return Async.failed(new IllegalStateException("Upload Is Incomplete"));
         if (status.delivered) return Async.completed(null);
-        if (status.failed) return attempt >= 2 ? Async.failed(new IllegalStateException("Hosted Upload Delivery Failed")) : complete(uploadId, attempt + 1);
-        if (!status.delivering) return attempt >= 2 ? Async.failed(new IllegalStateException("Hosted Upload Could Not Be Finalized")) : complete(uploadId, attempt + 1);
+        if (status.failed) return Async.failed(new IllegalStateException(
+                status.failure == null || status.failure.isBlank() ? "Remote File Transfer Failed. Retry Upload" : status.failure));
+        if (!status.delivering) return Async.failed(new IllegalStateException("Hosted Upload Could Not Be Finalized"));
+        if (System.currentTimeMillis() >= deadline) return Async.failed(new IllegalStateException("Remote File Transfer Timed Out. Retry Upload"));
         Async<Void> result = Async.pending();
         TaskScheduler.ScheduledTask task = scheduler.schedule(() -> uploadApi.hostedUploadStatus(serverId, uploadId)
                 .whenComplete((next, failure) -> {
                     if (failure != null) result.fail(failure);
-                    else awaitDelivery(uploadId, next, attempt).whenComplete((ignored, deliveryFailure) -> {
+                    else awaitDelivery(uploadId, next, deadline).whenComplete((ignored, deliveryFailure) -> {
                         if (deliveryFailure == null) result.complete(null);
                         else result.fail(deliveryFailure);
                     });

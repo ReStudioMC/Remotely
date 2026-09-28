@@ -80,6 +80,33 @@ class BrowserServerFileTransferTest {
     }
 
     @Test
+    void reportsTheSafeDeliveryFailureFromTheHostedSession() {
+        FakeUploadApi api = new FakeUploadApi(TransferSource.MAX_CHUNK_BYTES);
+        api.failure = "Server Restarted During Upload. Retry Upload";
+        api.failOnPoll = true;
+        BrowserServerFileTransfer transfer = new BrowserServerFileTransfer(api, "server", TaskScheduler.direct());
+
+        Async<Void> result = transfer.upload(List.of(TransferSource.fromBytes("plugin.jar", new byte[1])), RemotePath.root(), null);
+
+        assertTrue(result.isDone());
+        assertEquals(api.failure, result.failure().getMessage());
+        assertEquals(1, api.completions);
+    }
+
+    @Test
+    void ambiguousCompletionUsesAcceptedStatusWithoutRepeatingTheRequest() {
+        FakeUploadApi api = new FakeUploadApi(TransferSource.MAX_CHUNK_BYTES);
+        api.ambiguousCompletion = true;
+        BrowserServerFileTransfer transfer = new BrowserServerFileTransfer(api, "server", TaskScheduler.direct());
+
+        Async<Void> result = transfer.upload(List.of(TransferSource.fromBytes("plugin.jar", new byte[1])), RemotePath.root(), null);
+
+        assertTrue(result.isDone());
+        assertNull(result.failure());
+        assertEquals(1, api.completions);
+    }
+
+    @Test
     void oversizedUploadFailsBeforeTransport() {
         BrowserServerFileTransfer transfer = new BrowserServerFileTransfer(null, "server");
         TransferSource source = new TransferSource() {
@@ -154,6 +181,10 @@ class BrowserServerFileTransferTest {
         private long size;
         private long offset;
         private int completions;
+        private String failure;
+        private boolean failOnPoll;
+        private boolean ambiguousCompletion;
+        private boolean completedAfterAmbiguous;
 
         private FakeUploadApi(int chunkSize) {
             this.chunkSize = chunkSize;
@@ -168,7 +199,13 @@ class BrowserServerFileTransferTest {
 
         @Override
         public Async<BrowserRemotelyServerApi.HostedUploadView> hostedUploadStatus(String serverId, UUID uploadId) {
-            return Async.completed(view());
+            BrowserRemotelyServerApi.HostedUploadView view = view();
+            view.delivered = completedAfterAmbiguous;
+            if (failOnPoll) {
+                view.failed = true;
+                view.failure = failure;
+            }
+            return Async.completed(view);
         }
 
         @Override
@@ -183,8 +220,15 @@ class BrowserServerFileTransferTest {
         @Override
         public Async<BrowserRemotelyServerApi.HostedUploadView> completeHostedUpload(String serverId, UUID uploadId) {
             completions++;
+            if (ambiguousCompletion && completions == 1) {
+                completedAfterAmbiguous = true;
+                return Async.failed(new IllegalStateException("Completion Response Was Lost"));
+            }
             BrowserRemotelyServerApi.HostedUploadView view = view();
-            view.delivered = true;
+            view.delivered = failure == null;
+            view.delivering = failOnPoll;
+            view.failed = failure != null && !failOnPoll;
+            view.failure = view.failed ? failure : null;
             return Async.completed(view);
         }
 

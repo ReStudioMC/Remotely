@@ -74,6 +74,7 @@ import restudio.rebase.resource.provider.AsyncReStudioMarketplaceProvider;
 import restudio.rebase.resource.provider.ResourceProviderCatalog;
 import restudio.rebase.resource.provider.ResourceProviderTransport;
 import restudio.rebase.restudio.api.models.ServerModels;
+import restudio.rebase.storage.StorageBreakdownIndex;
 import restudio.rebase.health.ServerHealth;
 import restudio.rebase.instance.loaders.ModLoader;
 import restudio.rebase.restudio.community.ReStudioCommunityProvider;
@@ -157,7 +158,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     private final Map<String, ServerState> serverStates = new LinkedHashMap<>();
     private final Map<String, Long> powerTransitions = new LinkedHashMap<>();
     private final Map<String, List<Consumer<ServerState>>> stateListeners = new LinkedHashMap<>();
-    private final Set<String> stateRequests = new HashSet<>();
+    private final Map<String, InitialStateRequest> stateRequests = new LinkedHashMap<>();
     private final Map<String, ServerModels.ReProxySummary> reProxyStates = new LinkedHashMap<>();
     private final Map<String, List<Runnable>> reProxyRefreshListeners = new LinkedHashMap<>();
     private final Set<String> reProxyStateRequests = new HashSet<>();
@@ -1279,7 +1280,9 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         ServerModels.ClientServerView server = serverView(target);
         BrowserRemotelyServerApi api = browserApi();
         if (server == null || api == null) return ServerScreenHost.super.storageFiles(target);
-        return new StorageFiles(new BrowserServerFileSystemProvider(this, api, capabilities(server), server), RemotePath.root());
+        return new StorageFiles(new BrowserServerFileSystemProvider(this, api, capabilities(server), server), RemotePath.root(),
+                directory -> api.storageDirectory(serverId(server), directory)
+                        .thenApply(StorageBreakdownIndex::fromStorageDirectory));
     }
 
     @Override
@@ -1499,6 +1502,16 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     }
 
     @Override
+    public boolean usesInstanceMetadataReloads() {
+        return false;
+    }
+
+    @Override
+    public boolean refreshGeneralAfterProperties() {
+        return false;
+    }
+
+    @Override
     public ServerSettingsDataController createServerSettingsController(Object value, ServerSettingsSnapshot snapshot) {
         if (!(value instanceof BrowserServerConfigurationTarget target) || browserApi() == null || target.id().isBlank()) {
             return ServerSettingsDataController.unavailable();
@@ -1536,7 +1549,8 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         var catalogs = remotelyClient == null ? null : remotelyClient.getComposition().serverSettingsCatalogService();
         var token = flowManager == null ? null : flowManager.currentServerConnectionToken(target.id());
         var view = catalogs == null ? null : catalogs.open(target.id(), token == null ? 0L : token.generation(), target.minecraftVersion());
-        return new ServerSettingsDocumentDataController(target, registry.snapshot(target), store, BrowserSafeYaml::parse, view);
+        return new ServerSettingsDocumentDataController(target, registry.snapshot(target), store, BrowserSafeYaml::parse, view,
+                ScreenManager.getInstance()::execute);
     }
 
     @Override
@@ -1553,14 +1567,28 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         BrowserServerConfigurationTarget original = state.original() instanceof BrowserServerConfigurationTarget value ? value : null;
         BrowserServerConfigurationTarget managed = original == null ? target : original;
         BrowserRemotelyServerApi api = browserApi();
+        Map<String, Async<?>> catalogRequests = new LinkedHashMap<>();
         VersionSettingsCatalog catalog = new VersionSettingsCatalog() {
-            @Override public Async<List<GameVersion>> gameVersions() { return api.getCatalogGameVersions(); }
-            @Override public Async<List<ModLoaderVersion>> modLoaderVersions(ModLoader loader, String gameVersion) {
-                return api.getCatalogModLoaderVersions(loader, gameVersion);
+            @SuppressWarnings("unchecked")
+            private <T> Async<T> resident(String key, Supplier<Async<T>> fetch) {
+                Async<?> existing = catalogRequests.get(key);
+                if (existing != null) return (Async<T>) existing;
+                Async<T> result = fetch.get();
+                catalogRequests.put(key, result);
+                return result;
             }
-            @Override public Async<Map<String, Software>> software() { return api.getCatalogSoftware(); }
-            @Override public Async<Map<String, Version>> versions(String software) { return api.getCatalogVersions(software); }
-            @Override public Async<List<Build>> builds(String software, String version) { return api.getCatalogBuilds(software, version); }
+
+            @Override public Async<List<GameVersion>> gameVersions() { return resident("game", api::getCatalogGameVersions); }
+            @Override public Async<List<ModLoaderVersion>> modLoaderVersions(ModLoader loader, String gameVersion) {
+                return resident("loader:" + loader + ':' + gameVersion, () -> api.getCatalogModLoaderVersions(loader, gameVersion));
+            }
+            @Override public Async<Map<String, Software>> software() { return resident("software", api::getCatalogSoftware); }
+            @Override public Async<Map<String, Version>> versions(String software) {
+                return resident("versions:" + software, () -> api.getCatalogVersions(software));
+            }
+            @Override public Async<List<Build>> builds(String software, String version) {
+                return resident("builds:" + software + ':' + version, () -> api.getCatalogBuilds(software, version));
+            }
         };
         DiscordRpcSettingsController.InstanceSettings discord = new DiscordRpcSettingsController.InstanceSettings() {
             @Override public String get(String key, String fallback) { return target.property(key) == null ? fallback : target.property(key); }
@@ -1770,7 +1798,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         BrowserRemotelyServerApi api = browserApi();
         String id = serverId(server);
         HostContext context = captureContext();
-        if (api == null || id.isBlank() || !isCurrent(context)) {
+        if (api == null || id.isBlank() || !isCurrent(context) || !api.developerAvailable()) {
             if (completion != null) completion.accept(null);
             return;
         }
@@ -1786,6 +1814,13 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         provider.workspace().current().whenComplete((binding, failure) -> application.execute(() -> {
             if (!sameHostContext(context, developerBindingRequests.get(key)) || !isCurrent(context)) return;
             developerBindingRequests.remove(key);
+            if (!Objects.equals(key, developmentKey(id)) || !api.developerAvailable()) {
+                developerBindings.remove(key);
+                resolvedDeveloperBindings.remove(key);
+                List<Consumer<DeveloperCapabilityProvider.Workspace.Binding>> waiters = developerBindingWaiters.remove(key);
+                if (waiters != null) waiters.forEach(waiter -> waiter.accept(null));
+                return;
+            }
             if (failure == null) resolvedDeveloperBindings.add(key);
             if (failure == null && binding != null) developerBindings.put(key, binding);
             else developerBindings.remove(key);
@@ -1799,7 +1834,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
 
     private String developmentKey(String serverId) {
         BrowserLaunchSession.Metadata session = BrowserLaunchSession.metadata();
-        return firstNonBlank(session.subjectId(), session.grantId()) + ":" + serverId;
+        return BrowserLaunchSession.authorityKey() + ":" + firstNonBlank(session.subjectId(), session.grantId()) + ":" + serverId;
     }
 
     @Override
@@ -2667,17 +2702,34 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     private void requestInitialState(ServerModels.ClientServerView server) {
         String id = serverId(server);
         HostContext context = captureContext();
-        if (!isCurrent(context) || id.isBlank() || !stateRequests.add(id)) return;
-        try {
-            serverStatus(null, server).whenComplete((ignored, failure) -> execute(() -> {
-                if (failure != null) stateRequests.remove(id);
-                if (!isCurrent(context)) return;
-                if (failure != null && isSessionExpired(failure)) notifySessionExpired();
-            }));
-        } catch (Throwable failure) {
-            stateRequests.remove(id);
-            if (isCurrent(context) && isSessionExpired(failure)) notifySessionExpired();
+        if (!isCurrent(context) || id.isBlank()) return;
+        String ticket = BrowserLaunchSession.ticket();
+        InitialStateRequest previous = stateRequests.get(id);
+        if (previous != null && Objects.equals(previous.ticket(), ticket)
+                && previous.retryAt() > System.currentTimeMillis()) return;
+        if (stateRequests.size() >= MAX_CACHED_SERVER_STATES && previous == null) {
+            stateRequests.remove(stateRequests.keySet().iterator().next());
         }
+        InitialStateRequest request = new InitialStateRequest(ticket, Long.MAX_VALUE);
+        stateRequests.put(id, request);
+        try {
+            serverStatus(null, server).whenComplete((ignored, failure) -> execute(() ->
+                    completeInitialState(id, context, request, failure)));
+        } catch (Throwable failure) {
+            completeInitialState(id, context, request, failure);
+        }
+    }
+
+    private void completeInitialState(String id, HostContext context, InitialStateRequest request, Throwable failure) {
+        if (!isCurrent(context) || stateRequests.get(id) != request) return;
+        if (failure != null) {
+            stateRequests.put(id, new InitialStateRequest(request.ticket(),
+                    System.currentTimeMillis() + BrowserRemotelyServerApi.readFailureDelay(failure)));
+            if (isSessionExpired(failure)) notifySessionExpired();
+        }
+    }
+
+    private record InitialStateRequest(String ticket, long retryAt) {
     }
 
     private void refreshPlayerMetrics(ServerModels.ClientServerView server, BrowserRemotelyServerApi browserApi, HostContext context) {
