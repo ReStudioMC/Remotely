@@ -1,8 +1,11 @@
 package redxax.oxy.remotely.web.platform;
 
+import com.google.gson.JsonObject;
 import org.teavm.jso.JSBody;
 import restudio.rescreen.platform.Async;
+import restudio.rescreen.util.Notification;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -22,13 +25,19 @@ public final class BrowserLaunchSession {
     private static Metadata activeSession;
     private static long authorityGeneration;
     private static String authorityKey = "";
-    private static String demoLeaseExpiresAt = "";
-    private static Set<String> demoEditablePaths = Set.of();
+    private static DemoLease demoLease;
+    private static int demoOperationId;
+    private static boolean demoEndPending;
+    private static boolean demoOperationPending;
+    private static boolean demoStatusPending;
     private static boolean renewalInFlight;
     private static final List<Async<Metadata>> RENEWAL_WAITERS = new ArrayList<>();
     private static Callback interactiveLoginCallback;
     private static int interactiveLoginAttempts;
     private static int interactiveLoginRequestId;
+    private static int logoutRequestId;
+    private static String pendingLogoutUrl = "";
+    private static String pendingLogoutNonce = "";
 
     private static final int MAX_INTERACTIVE_LOGIN_ATTEMPTS = 240;
 
@@ -43,13 +52,21 @@ public final class BrowserLaunchSession {
         if (callback == null) {
             return;
         }
+        if (logoutRequestId != 0 || !pendingLogoutNonce.isBlank()) {
+            callback.failed("Finish Signing Out Before Signing In");
+            return;
+        }
         failPendingOperations(new IllegalStateException("Browser Session Superseded"));
         advanceRequestGeneration();
         clearCallbacks();
         boolean wasAuthenticated = authenticated();
         installSession(null);
-        demoLeaseExpiresAt = "";
-        demoEditablePaths = Set.of();
+        demoLease = null;
+        demoOperationId++;
+        demoEndPending = false;
+        demoOperationPending = false;
+        demoStatusPending = false;
+        stopDemoActivity();
         renewalInFlight = false;
         finishRenewalWaiters(null, new IllegalStateException("Browser Session Superseded"));
         cancelRenewal();
@@ -162,8 +179,13 @@ public final class BrowserLaunchSession {
     }
 
     public static boolean beginInteractiveLogin(boolean forceLogin, Callback callback) {
-        if (callback == null) {
+        if (callback == null || logoutRequestId != 0) {
             return false;
+        }
+        if (!pendingLogoutNonce.isBlank()) {
+            forceLogin = true;
+            pendingLogoutUrl = "";
+            pendingLogoutNonce = "";
         }
         failPendingOperations(new IllegalStateException("Browser Session Superseded"));
         advanceRequestGeneration();
@@ -183,11 +205,45 @@ public final class BrowserLaunchSession {
     }
 
     public static void signOut() {
-        boolean demo = metadata().demo();
+        if (logoutRequestId != 0 || demoEndPending) return;
+        if (metadata().demo()) {
+            if (demoLease == null) return;
+            demoEndPending = true;
+            failPendingOperations(new IllegalStateException("Reactor Demo Is Ending"));
+            advanceRequestGeneration();
+            clearCallbacks();
+            renewalInFlight = false;
+            finishRenewalWaiters(null, new IllegalStateException("Reactor Demo Is Ending"));
+            cancelRenewal();
+            stopDemoActivity();
+            cancelDemoLeaseExpiry();
+            requestDemoOperation(++demoOperationId, "DELETE", demoIdentityBody());
+            return;
+        }
+        logoutRequestId = nextId();
         clearLocalSession();
         clearAccountMetadata();
-        if (demo) requestDemoEnd();
-        else requestLogout();
+        if (pendingLogoutNonce.isBlank()) pendingLogoutNonce = logoutNonce();
+        requestLogout(logoutRequestId, pendingLogoutUrl, pendingLogoutNonce);
+    }
+
+    public static void logoutUrlReady(int requestId, String url) {
+        if (requestId == logoutRequestId && url != null && !url.isBlank()) pendingLogoutUrl = url;
+    }
+
+    public static void logoutFinished(int requestId, String message) {
+        if (requestId != logoutRequestId) return;
+        logoutRequestId = 0;
+        if (message == null || message.isBlank()) {
+            pendingLogoutUrl = "";
+            pendingLogoutNonce = "";
+        }
+        if (message != null && !message.isBlank()) {
+            String nonce = pendingLogoutNonce;
+            new Notification("Sign Out Failed", message + ". Click To Retry", Notification.Type.ERROR, () -> {
+                if (!nonce.isBlank() && nonce.equals(pendingLogoutNonce)) signOut();
+            });
+        }
     }
 
     public static boolean authenticated() {
@@ -218,30 +274,60 @@ public final class BrowserLaunchSession {
         return session == null || session.ticket() == null ? "" : session.ticket();
     }
 
-    public static void demoLeaseExpires(String value) {
-        demoLeaseExpiresAt = value == null ? "" : value.strip();
+    public static void completeDemo(int requestId, String body) {
+        if (!isCurrentRequest(requestId)) return;
+        try {
+            JsonObject response = BrowserJson.object(body);
+            DemoLease lease = DemoLease.from(response);
+            if (!"ACTIVE".equals(lease.status())) throw new IllegalStateException("Reactor Demo Is Not Ready");
+            String ticket = BrowserJson.string(response, "ticket");
+            if (ticket.isBlank()) throw new IllegalStateException("Browser ReSync Ticket Was Not Issued");
+            if (demoLease != null && !demoLease.sameIdentity(lease)) throw new IllegalStateException("Reactor Demo Session Changed");
+            JsonObject profile = response.has("account") && response.get("account").isJsonObject()
+                    ? response.getAsJsonObject("account") : new JsonObject();
+            Set<String> scopes = new HashSet<>();
+            if (response.has("scopes") && response.get("scopes").isJsonArray()) {
+                response.getAsJsonArray("scopes").forEach(value -> scopes.add(value.getAsString()));
+            }
+            if (!scopes.contains("remotely.demo")) throw new IllegalStateException("Reactor Demo Session Is Invalid");
+            lease = demoLease == null ? lease : demoLease.updated(lease, true);
+            demoLease = lease;
+            complete(requestId, firstNonBlank(BrowserJson.string(response, "grantId"), lease.leaseId()), ticket,
+                    BrowserJson.string(response, "audience"), String.join(",", scopes), BrowserJson.string(response, "nodeId"),
+                    BrowserJson.string(response, "expiresAt"), firstNonBlank(BrowserJson.string(profile, "id"), lease.leaseId()),
+                    firstNonBlank(BrowserJson.string(profile, "username"), "reactor-demo"),
+                    firstNonBlank(BrowserJson.string(profile, "displayName"), "Reactor Demo"), "", "",
+                    firstNonBlank(BrowserJson.string(response, "sessionLabel"), "Reactor Demo"));
+            if (demoLease == lease && authenticated() && !demoEndPending) {
+                scheduleDemoLeaseExpiry(lease.deadline());
+                startDemoActivity();
+            }
+        } catch (RuntimeException failure) {
+            fail(requestId, failure.getMessage());
+        }
     }
 
-    public static void startDemoLeaseExpiry(String value) {
-        demoLeaseExpires(value);
-        scheduleDemoLeaseExpiry(demoLeaseExpiresAt);
+    public static void demoLeaseExpires(String value) {
+        DemoLease previous = demoLease;
+        demoLease = new DemoLease(previous == null ? "" : previous.leaseId(), previous == null ? "" : previous.generation(), previous == null ? "0" : previous.configurationRevision(),
+                value == null ? "" : value.strip(), previous == null ? "" : previous.idleExpiresAt(),
+                previous == null ? "" : previous.status(), previous == null ? Set.of() : previous.editablePaths());
     }
 
     public static String demoLeaseExpiresAt() {
-        return demoLeaseExpiresAt;
+        return demoLease == null ? "" : demoLease.deadline();
     }
 
     public static void demoEditablePaths(String value) {
-        if (value == null || value.isBlank()) {
-            demoEditablePaths = Set.of();
-            return;
-        }
         Set<String> paths = new HashSet<>();
-        for (String candidate : value.split("\\n")) {
+        if (value != null) for (String candidate : value.split("\\n")) {
             String path = normalizedDemoPath(candidate);
             if (!path.isBlank()) paths.add(path);
         }
-        demoEditablePaths = Set.copyOf(paths);
+        DemoLease previous = demoLease;
+        demoLease = new DemoLease(previous == null ? "" : previous.leaseId(), previous == null ? "" : previous.generation(), previous == null ? "0" : previous.configurationRevision(),
+                previous == null ? "" : previous.leaseExpiresAt(), previous == null ? "" : previous.idleExpiresAt(),
+                previous == null ? "" : previous.status(), paths);
     }
 
     public static boolean demoPathEditable(String value) {
@@ -249,11 +335,139 @@ public final class BrowserLaunchSession {
     }
 
     static boolean demoPathEditable(String value, boolean demo) {
-        return demo && demoEditablePaths.contains(normalizedDemoPath(value));
+        return demo && demoLease != null && demoLease.editablePaths().contains(normalizedDemoPath(value));
     }
 
     public static void demoLeaseExpired() {
-        if (metadata().demo()) expireSession();
+        if (metadata().demo() && demoLease != null && !demoEndPending) {
+            if (demoOperationPending) {
+                demoStatusPending = true;
+                return;
+            }
+            demoStatusPending = false;
+            demoOperationPending = true;
+            requestDemoOperation(++demoOperationId, "GET", "");
+        }
+    }
+
+    public static void demoActivity() {
+        if (metadata().demo() && demoLease != null && !demoEndPending && !demoOperationPending) {
+            demoOperationPending = true;
+            requestDemoOperation(++demoOperationId, "POST", demoIdentityBody());
+        }
+    }
+
+    private static String demoIdentityBody() {
+        JsonObject body = new JsonObject();
+        body.addProperty("leaseId", demoLease.leaseId());
+        body.addProperty("generation", demoLease.generation());
+        return body.toString();
+    }
+
+    public static void demoOperationComplete(int operationId, String method, int status, String body) {
+        if (operationId != demoOperationId || demoLease == null) return;
+        demoOperationPending = false;
+        try {
+            if (status < 200 || status >= 300) throw BrowserRemotelyServerApi.capabilityFailure(status, body);
+            JsonObject response = BrowserJson.object(body);
+            String state = BrowserJson.string(response, "status");
+            if ("DELETE".equals(method)) {
+                if (!demoLease.matches(response)) throw new IllegalStateException("Demo End Identity Was Not Confirmed");
+                if (!demoTerminalStatus(state)) throw new IllegalStateException("Demo End Was Not Confirmed");
+                clearLocalSession();
+                clearAccountMetadata();
+                new Notification("Reactor Demo Ended", "Your Demo Session Has Ended", Notification.Type.INFO);
+                return;
+            }
+            if (!demoLease.matches(response)) throw new IllegalStateException("Reactor Demo Session Changed");
+            if (demoTerminalStatus(state)) {
+                expireSession();
+                return;
+            }
+            DemoLease updated = DemoLease.from(response);
+            if (!demoLease.sameIdentity(updated)) throw new IllegalStateException("Reactor Demo Session Changed");
+            if (!"ACTIVE".equals(updated.status())) throw new IllegalStateException("Reactor Demo Is Unavailable");
+            demoLease = demoLease.updated(updated, false);
+            demoStatusPending = false;
+            scheduleDemoLeaseExpiry(demoLease.deadline());
+        } catch (RuntimeException failure) {
+            if ("DELETE".equals(method)) {
+                demoEndPending = false;
+                demoOperationPending = false;
+                DemoLease failedLease = demoLease;
+                new Notification("End Demo Failed", "Your Demo End Was Not Confirmed. Click To Retry", Notification.Type.ERROR,
+                        () -> {
+                            if (demoLease != null && failedLease.sameIdentity(demoLease)) signOut();
+                        });
+            } else if (BrowserServerScreenHost.isSessionExpired(failure)) {
+                expireSession();
+            } else if ("GET".equals(method) || demoStatusPending) {
+                demoStatusPending = false;
+                scheduleDemoStatusRetry();
+            }
+        }
+    }
+
+    static boolean demoTerminalStatus(String status) {
+        return "ENDED".equals(status) || "EXPIRING".equals(status) || "RESETTING".equals(status);
+    }
+
+    record DemoLease(String leaseId, String generation, String configurationRevision, String leaseExpiresAt, String idleExpiresAt, String status,
+                     Set<String> editablePaths) {
+        DemoLease {
+            editablePaths = Set.copyOf(editablePaths);
+        }
+
+        static DemoLease from(JsonObject value) {
+            String leaseId = BrowserJson.string(value, "leaseId");
+            String generation = BrowserJson.string(value, "generation");
+            String configurationRevision = BrowserJson.string(value, "configurationRevision");
+            requireCounter(generation, 1);
+            requireCounter(configurationRevision, 0);
+            String deadline = BrowserJson.string(value, "leaseExpiresAt");
+            String idle = BrowserJson.string(value, "idleExpiresAt");
+            if (leaseId.isBlank() || deadline.isBlank() || idle.isBlank()) {
+                throw new IllegalArgumentException("Reactor Demo Session Is Invalid");
+            }
+            Instant.parse(deadline);
+            Instant.parse(idle);
+            Set<String> paths = new HashSet<>();
+            if (value.has("editablePaths") && value.get("editablePaths").isJsonArray()) {
+                value.getAsJsonArray("editablePaths").forEach(path -> paths.add(normalizedDemoPath(path.getAsString())));
+            }
+            return new DemoLease(leaseId, generation, configurationRevision, deadline, idle, BrowserJson.string(value, "status"), paths);
+        }
+
+        private static void requireCounter(String value, long minimum) {
+            long number = Long.parseLong(value);
+            if (number < minimum || !Long.toString(number).equals(value)) {
+                throw new IllegalArgumentException("Reactor Demo Session Revision Is Invalid");
+            }
+        }
+
+        boolean sameIdentity(DemoLease other) {
+            return other != null && leaseId.equals(other.leaseId) && generation.equals(other.generation);
+        }
+
+        boolean matches(JsonObject value) {
+            return leaseId.equals(BrowserJson.string(value, "leaseId")) && generation.equals(BrowserJson.string(value, "generation"));
+        }
+
+        DemoLease updated(DemoLease value, boolean replacePaths) {
+            if (!sameIdentity(value)) throw new IllegalArgumentException("Reactor Demo Session Changed");
+            long currentRevision = Long.parseLong(configurationRevision);
+            long incomingRevision = Long.parseLong(value.configurationRevision);
+            if (incomingRevision < currentRevision) return this;
+            String idle = incomingRevision == currentRevision && Instant.parse(idleExpiresAt).isAfter(Instant.parse(value.idleExpiresAt))
+                    ? idleExpiresAt : value.idleExpiresAt;
+            return new DemoLease(leaseId, generation, value.configurationRevision, value.leaseExpiresAt, idle, value.status,
+                    replacePaths ? value.editablePaths : editablePaths);
+        }
+
+        String deadline() {
+            if (idleExpiresAt.isBlank()) return leaseExpiresAt;
+            return Instant.parse(leaseExpiresAt).isBefore(Instant.parse(idleExpiresAt)) ? leaseExpiresAt : idleExpiresAt;
+        }
     }
 
     public static void renew() {
@@ -266,6 +480,7 @@ public final class BrowserLaunchSession {
 
     public static Async<Metadata> renewAsync() {
         if (!authenticated()) return Async.failed(new IllegalStateException("Browser Session Expired"));
+        if (demoEndPending) return Async.failed(new IllegalStateException("Reactor Demo Is Ending"));
         if (renewalInFlight) {
             Async<Metadata> waiting = Async.pending();
             RENEWAL_WAITERS.add(waiting);
@@ -410,8 +625,12 @@ public final class BrowserLaunchSession {
         clearCallbacks();
         boolean authenticated = authenticated();
         installSession(null);
-        demoLeaseExpiresAt = "";
-        demoEditablePaths = Set.of();
+        demoLease = null;
+        demoOperationId++;
+        demoEndPending = false;
+        demoOperationPending = false;
+        demoStatusPending = false;
+        stopDemoActivity();
         renewalInFlight = false;
         finishRenewalWaiters(null, new IllegalStateException("Browser Session Expired"));
         cancelRenewal();
@@ -559,7 +778,26 @@ public final class BrowserLaunchSession {
     @JSBody(params = {"serverId"}, script = "var backend = window.__remotelyBackendOrigin || 'https://restudiomc.net'; var url = new URL('/ws/remotely-web/servers/' + encodeURIComponent(serverId || '') + '/terminal', backend); url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'; return url.toString();")
     public static native String terminalUrl(String serverId);
 
-    @JSBody(params = {"forceLogin"}, script = "try { const backend = window.__remotelyBackendOrigin || 'https://restudiomc.net'; const backendUrl = new URL(backend); const currentUrl = new URL(window.location.href); const localPage = currentUrl.protocol === 'file:' || ['localhost', '127.0.0.1', '[::1]', '::1'].includes(currentUrl.hostname); const authBackend = localPage || ['localhost', '127.0.0.1', '[::1]', '::1'].includes(backendUrl.hostname) ? 'https://restudiomc.net' : backendUrl.origin; const returnUrl = currentUrl.origin === backendUrl.origin || localPage ? new URL('/remotely-web/', authBackend) : currentUrl; const loginUrl = new URL('/api/auth/login', authBackend); loginUrl.searchParams.set('redirect_uri', returnUrl.toString()); if (forceLogin) loginUrl.searchParams.set('force_login', 'true'); return loginUrl.toString(); } catch (error) { return ''; }")
+    @JSBody(params = {"forceLogin"}, script = """
+            try {
+                const backend = window.__remotelyBackendOrigin || 'https://restudiomc.net';
+                const backendUrl = new URL(backend);
+                const currentUrl = new URL(window.location.href);
+                const localPage = currentUrl.protocol === 'file:' || ['localhost', '127.0.0.1', '[::1]', '::1'].includes(currentUrl.hostname);
+                const authBackend = localPage || ['localhost', '127.0.0.1', '[::1]', '::1'].includes(backendUrl.hostname)
+                    ? 'https://restudiomc.net' : backendUrl.origin;
+                const returnUrl = currentUrl.origin === backendUrl.origin || localPage ? new URL('/remotely-web/', authBackend) : currentUrl;
+                if (currentUrl.searchParams.get('view') === 'resources') returnUrl.searchParams.set('view', 'resources');
+                const invitation = new URLSearchParams(currentUrl.hash.slice(1)).get('invite');
+                if (invitation && /^[A-Za-z0-9_-]{43}$/.test(invitation)) returnUrl.hash = 'invite=' + invitation;
+                const loginUrl = new URL('/api/auth/login', authBackend);
+                loginUrl.searchParams.set('redirect_uri', returnUrl.toString());
+                if (forceLogin) loginUrl.searchParams.set('force_login', 'true');
+                return loginUrl.toString();
+            } catch (error) {
+                return '';
+            }
+            """)
     private static native String loginUrl(boolean forceLogin);
 
     @JSBody(params = {"url"}, script = "const existing = window.__remotelyLoginWindow; if (existing && !existing.closed) { try { existing.focus(); } catch (error) {} return true; } const opened = window.open(url, 'remotely-login', 'popup,width=520,height=720,resizable=yes,scrollbars=yes'); if (!opened) return false; window.__remotelyLoginWindow = opened; try { opened.focus(); } catch (error) {} return true;")
@@ -571,8 +809,102 @@ public final class BrowserLaunchSession {
     @JSBody(script = "const popup = window.__remotelyLoginWindow; window.__remotelyLoginWindow = null; if (popup && !popup.closed) { try { popup.close(); } catch (error) {} }")
     private static native void closeLoginWindow();
 
-    @JSBody(script = "const backend = window.__remotelyBackendOrigin || 'https://restudiomc.net'; const backendUrl = new URL(backend); const localPage = window.location.protocol === 'file:' || ['localhost', '127.0.0.1', '[::1]', '::1'].includes(window.location.hostname); const authBackend = localPage || ['localhost', '127.0.0.1', '[::1]', '::1'].includes(backendUrl.hostname) ? 'https://restudiomc.net' : backendUrl.origin; fetch(new URL('/api/auth/logout', authBackend).toString(), {method: 'POST', credentials: 'include', cache: 'no-store', headers: {'Accept': 'application/json'}}).catch(function() {});")
-    private static native void requestLogout();
+    @JSBody(script = "return window.crypto.randomUUID();")
+    private static native String logoutNonce();
+
+    @JSBody(params = {"requestId", "pendingUrl", "nonce"}, script = """
+            const backend = window.__remotelyBackendOrigin || 'https://restudiomc.net';
+            const backendUrl = new URL(backend);
+            const loopback = ['localhost', '127.0.0.1', '[::1]', '::1'];
+            const localPage = window.location.protocol === 'file:' || loopback.includes(window.location.hostname);
+            const authBackend = localPage || loopback.includes(backendUrl.hostname) ? 'https://restudiomc.net' : backendUrl.origin;
+            let popup = null;
+            try {
+                popup = window.open('about:blank', 'remotely-logout-' + requestId, 'popup,width=520,height=720,resizable=yes,scrollbars=yes');
+            } catch (error) {}
+            if (popup) {
+                try {
+                    popup.document.title = 'Signing Out';
+                    popup.document.body.textContent = 'Signing Out';
+                } catch (error) {}
+            }
+            function request(path, method) {
+                const controller = new AbortController();
+                const timeout = window.setTimeout(function() { controller.abort(); }, 20000);
+                return fetch(new URL(path, authBackend).toString(), {
+                    method: method, credentials: 'include', cache: 'no-store', signal: controller.signal,
+                    headers: {'Accept': 'application/json'}
+                }).finally(function() { window.clearTimeout(timeout); });
+            }
+            function readLogoutUrl(retried) {
+                return request('/api/auth/logout-url?request=' + encodeURIComponent(nonce) + '&origin=' + encodeURIComponent(window.location.origin), 'GET').then(function(response) {
+                    if (response.status === 401 && !retried) {
+                        return request('/api/auth/refresh', 'POST').then(function(refresh) {
+                            if (!refresh.ok) throw new Error('Sign In Again To Finish Signing Out');
+                            return readLogoutUrl(true);
+                        });
+                    }
+                    if (!response.ok) throw new Error('Account Sign Out Unavailable');
+                    return response.json().then(function(body) {
+                        const url = new URL(body.url);
+                        if (url.protocol !== 'https:' || url.username || url.password) throw new Error('Account Sign Out Unavailable');
+                        return url.toString();
+                    });
+                });
+            }
+            let logoutUrl = pendingUrl || '';
+            let failure = '';
+            const ready = logoutUrl ? Promise.resolve(logoutUrl) : readLogoutUrl(false);
+            ready.then(function(url) {
+                    logoutUrl = url;
+                    javaMethods.get('redxax.oxy.remotely.web.platform.BrowserLaunchSession.logoutUrlReady(ILjava/lang/String;)V').invoke(requestId, url);
+                })
+                .catch(function(error) { failure = error.message || 'Account Sign Out Unavailable'; })
+                .then(function() {
+                    if (!logoutUrl) return;
+                    return request('/api/auth/logout', 'POST').then(function(response) {
+                        if (!response.ok) throw new Error('Server Sign Out Failed');
+                    }).catch(function(error) { failure = error.message || 'Server Sign Out Failed'; });
+                }).then(function() {
+                    function finish(message) {
+                        javaMethods.get('redxax.oxy.remotely.web.platform.BrowserLaunchSession.logoutFinished(ILjava/lang/String;)V').invoke(requestId, message);
+                    }
+                    if (logoutUrl) {
+                        if (popup && !popup.closed) {
+                            const deadline = Date.now() + 120000;
+                            let settled = false;
+                            let closeTask = 0;
+                            function settle(message) {
+                                if (settled) return;
+                                settled = true;
+                                window.removeEventListener('message', acknowledged);
+                                if (closeTask) window.clearTimeout(closeTask);
+                                finish(message);
+                            }
+                            function acknowledged(event) {
+                                if (event.origin === authBackend && event.source === popup && event.data
+                                    && event.data.type === 'restudio:logout-complete' && event.data.request === nonce) settle(failure);
+                            }
+                            window.addEventListener('message', acknowledged);
+                            popup.location.replace(logoutUrl);
+                            function awaitClose() {
+                                if (settled) return;
+                                if (popup.closed) closeTask = window.setTimeout(function() { settle(failure || 'Sign Out Window Closed Before Completion'); }, 250);
+                                else if (Date.now() >= deadline) settle(failure || 'Finish Signing Out In The Browser Window');
+                                else closeTask = window.setTimeout(awaitClose, 250);
+                            }
+                            awaitClose();
+                        } else {
+                            finish(failure || 'Sign Out Window Could Not Be Opened');
+                            window.location.assign(logoutUrl);
+                        }
+                    } else {
+                        if (popup && !popup.closed) popup.close();
+                        finish(failure);
+                    }
+                });
+            """)
+    private static native void requestLogout(int requestId, String pendingUrl, String nonce);
 
     @JSBody(script = "if (window.__remotelyFetchControllers) { Object.keys(window.__remotelyFetchControllers).forEach(function(key) { const controller = window.__remotelyFetchControllers[key]; if (controller && typeof controller.abort === 'function') controller.abort(); delete window.__remotelyFetchControllers[key]; }); } if (window.__remotelyWebSockets) { Object.keys(window.__remotelyWebSockets).forEach(function(key) { const socket = window.__remotelyWebSockets[key]; if (socket && typeof socket.close === 'function') socket.close(1000, 'Signed Out'); delete window.__remotelyWebSockets[key]; }); } const refreshController = window.__remotelyApplicationSessionRefreshController; if (refreshController && typeof refreshController.abort === 'function') refreshController.abort(); window.__remotelyApplicationSessionRefreshController = null; window.__remotelyApplicationSessionRefresh = null; window.__remotelyBrowserSession = null;")
     private static native void clearBrowserSession();
@@ -586,8 +918,11 @@ public final class BrowserLaunchSession {
     @JSBody(script = "if (window.__remotelySessionRenewal) window.clearTimeout(window.__remotelySessionRenewal); window.__remotelySessionRenewal = 0;")
     private static native void cancelRenewal();
 
-    @JSBody(params = {"expiresAt"}, script = "if (window.__remotelyDemoLeaseExpiry) window.clearTimeout(window.__remotelyDemoLeaseExpiry); const expiry = Date.parse(expiresAt || ''); if (!Number.isFinite(expiry)) return; window.__remotelyDemoLeaseExpiry = window.setTimeout(function() { javaMethods.get('redxax.oxy.remotely.web.platform.BrowserLaunchSession.demoLeaseExpired()V').invoke(); }, Math.max(0, expiry - Date.now()));")
+    @JSBody(params = {"expiresAt"}, script = "if (window.__remotelyDemoLeaseExpiry) window.clearTimeout(window.__remotelyDemoLeaseExpiry); const expiry = Date.parse(expiresAt || ''); if (!Number.isFinite(expiry)) return; window.__remotelyDemoLeaseExpiry = window.setTimeout(function() { javaMethods.get('redxax.oxy.remotely.web.platform.BrowserLaunchSession.demoLeaseExpired()V').invoke(); }, Math.max(1000, expiry - Date.now()));")
     private static native void scheduleDemoLeaseExpiry(String expiresAt);
+
+    @JSBody(script = "if (window.__remotelyDemoLeaseExpiry) window.clearTimeout(window.__remotelyDemoLeaseExpiry); window.__remotelyDemoLeaseExpiry = window.setTimeout(function() { javaMethods.get('redxax.oxy.remotely.web.platform.BrowserLaunchSession.demoLeaseExpired()V').invoke(); }, 15000);")
+    private static native void scheduleDemoStatusRetry();
 
     @JSBody(script = "if (window.__remotelyDemoLeaseExpiry) window.clearTimeout(window.__remotelyDemoLeaseExpiry); window.__remotelyDemoLeaseExpiry = 0;")
     private static native void cancelDemoLeaseExpiry();
@@ -677,9 +1012,6 @@ public final class BrowserLaunchSession {
 
     @JSBody(params = {"requestId", "forceLogin"}, script = """
             function responseMessage(body, response, operation) {
-                if (response.status === 429 && String(operation || '').toLowerCase().startsWith('reactor demo')) {
-                    return 'The Reactor Demo Needs A Moment. Please Try Again Soon';
-                }
                 const text = String(body || '').trim();
                 const contentType = String(response.headers.get('content-type') || '').toLowerCase();
                 const fallback = operation + ' failed with status ' + response.status;
@@ -691,6 +1023,13 @@ public final class BrowserLaunchSession {
                     if (payload && typeof payload.message === 'string' && payload.message.trim()) {
                         return payload.message.trim();
                     }
+                    const demoMessages = {
+                        reactor_demo_busy: 'The Shared Demo Is Busy. Please Try Again Soon',
+                        reactor_demo_resetting: 'The Shared Demo Is Resetting. Please Try Again Soon',
+                        reactor_demo_unavailable: 'The Reactor Demo Is Unavailable. Please Try Again Later',
+                        reactor_demo_session_expired: 'Your Demo Session Has Ended'
+                    };
+                    if (payload && demoMessages[payload.code]) return demoMessages[payload.code];
                     if (payload && typeof payload.error === 'string' && payload.error.trim()) {
                         return payload.error.trim();
                     }
@@ -765,11 +1104,8 @@ public final class BrowserLaunchSession {
                                     failDemo('Reactor demo response was not valid JSON');
                                     return null;
                                 }
-                                const profile = session.account || {};
                                 try {
-                                    javaMethods.get('redxax.oxy.remotely.web.platform.BrowserLaunchSession.startDemoLeaseExpiry(Ljava/lang/String;)V').invoke(String(session.leaseExpiresAt || ''));
-                                    javaMethods.get('redxax.oxy.remotely.web.platform.BrowserLaunchSession.demoEditablePaths(Ljava/lang/String;)V').invoke(Array.isArray(session.editablePaths) ? session.editablePaths.join('\\n') : '');
-                                    javaMethods.get('redxax.oxy.remotely.web.platform.BrowserLaunchSession.complete(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V').invoke(requestId, String(session.grantId || session.leaseId || ''), String(session.ticket || ''), String(session.audience || ''), Array.isArray(session.scopes) ? session.scopes.join(',') : '', String(session.nodeId || ''), String(session.expiresAt || ''), String(profile.id || session.leaseId || ''), String(profile.username || 'reactor-demo'), String(profile.displayName || 'Reactor Demo'), '', '', String(session.sessionLabel || 'Reactor Demo'));
+                                    javaMethods.get('redxax.oxy.remotely.web.platform.BrowserLaunchSession.completeDemo(ILjava/lang/String;)V').invoke(requestId, body);
                                 } finally {
                                     clearDemoRequest();
                                 }
@@ -877,12 +1213,70 @@ public final class BrowserLaunchSession {
                     fail(String(error && (error.message || error) || 'Browser launch failed'));
                 });
             }
-            fetch(new URL('/api/remotely-web/demo/session', backend).toString(), {method: 'DELETE', credentials: 'include', cache: 'no-store', headers: {'Accept': 'application/json'}}).catch(function() { return null; }).then(function() { requestLaunch(false); });
+            requestLaunch(false);
             """)
     private static native void requestLaunch(int requestId, boolean forceLogin);
 
-    @JSBody(script = "try { const backend = window.__remotelyBackendOrigin || 'https://restudiomc.net'; fetch(new URL('/api/remotely-web/demo/session', backend).toString(), {method: 'DELETE', credentials: 'include', cache: 'no-store', headers: {'Accept': 'application/json'}}); } catch (e) {}")
-    private static native void requestDemoEnd();
+    @JSBody(script = """
+            if (window.__remotelyDemoActivity) return;
+            const state = {lastSent: 0, timer: 0};
+            state.input = function(event) {
+                if (!event.isTrusted || document.visibilityState !== 'visible') return;
+                const send = function() {
+                    state.timer = 0;
+                    if (window.__remotelyDemoActivity !== state || document.visibilityState !== 'visible') return;
+                    state.lastSent = Date.now();
+                    javaMethods.get('redxax.oxy.remotely.web.platform.BrowserLaunchSession.demoActivity()V').invoke();
+                };
+                if (state.timer) return;
+                const delay = Math.max(0, 15000 - (Date.now() - state.lastSent));
+                if (delay === 0) send();
+                else state.timer = window.setTimeout(send, delay);
+            };
+            window.__remotelyDemoActivity = state;
+            ['pointerdown', 'keydown', 'wheel', 'touchstart'].forEach(function(type) {
+                document.addEventListener(type, state.input, {capture: true, passive: true});
+            });
+            """)
+    private static native void startDemoActivity();
+
+    @JSBody(script = """
+            const state = window.__remotelyDemoActivity;
+            if (!state) return;
+            window.__remotelyDemoActivity = null;
+            if (state.timer) window.clearTimeout(state.timer);
+            ['pointerdown', 'keydown', 'wheel', 'touchstart'].forEach(function(type) {
+                document.removeEventListener(type, state.input, true);
+            });
+            """)
+    private static native void stopDemoActivity();
+
+    @JSBody(params = {"operationId", "method", "body"}, script = """
+            const backend = window.__remotelyBackendOrigin || 'https://restudiomc.net';
+            const controller = typeof AbortController === 'function' ? new AbortController() : null;
+            let finished = false;
+            const complete = function(status, response) {
+                if (finished) return;
+                finished = true;
+                window.clearTimeout(timeout);
+                javaMethods.get('redxax.oxy.remotely.web.platform.BrowserLaunchSession.demoOperationComplete(ILjava/lang/String;ILjava/lang/String;)V').invoke(operationId, method, status, response);
+            };
+            const timeout = window.setTimeout(function() {
+                if (controller) controller.abort();
+                complete(0, '');
+            }, 15000);
+            const options = {method: method, credentials: 'include', cache: 'no-store', headers: {'Accept': 'application/json'}};
+            if (body) {
+                options.body = body;
+                options.headers['Content-Type'] = 'application/json';
+            }
+            if (controller) options.signal = controller.signal;
+            const endpoint = method === 'POST' ? '/api/remotely-web/demo/activity' : '/api/remotely-web/demo/session';
+            fetch(new URL(endpoint, backend).toString(), options).then(function(response) {
+                return response.text().then(function(text) { complete(response.status, text); });
+            }).catch(function() { complete(0, ''); });
+            """)
+    private static native void requestDemoOperation(int operationId, String method, String body);
 
     @JSBody(script = "if (typeof window.__remotelyBackendOrigin === 'string' && window.__remotelyBackendOrigin) return window.__remotelyBackendOrigin; const current = new URL(window.location.href); const isLocal = function(host) { return host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1'; }; const config = window.__REMOTELY_WEB_CONFIG__ && typeof window.__REMOTELY_WEB_CONFIG__.backendOrigin === 'string' ? window.__REMOTELY_WEB_CONFIG__.backendOrigin.trim() : ''; const meta = document.querySelector('meta[name=\"remotely-backend-origin\"]'); const configured = config || (meta && typeof meta.content === 'string' ? meta.content.trim() : '') || current.searchParams.get('backendOrigin') || ''; const explicit = configured.length > 0; let target; try { target = new URL(explicit ? configured : 'https://restudiomc.net', current.href); } catch (error) { return ''; } if (target.username || target.password || target.search || target.hash || target.pathname !== '/') return ''; if (target.protocol !== 'https:' && !(target.protocol === 'http:' && isLocal(target.hostname))) return ''; window.__remotelyBackendOrigin = target.origin; return target.origin;")
     public static native String backendOrigin();
@@ -922,7 +1316,8 @@ public final class BrowserLaunchSession {
 
         public boolean sameAuthority(Metadata other) {
             return other != null && subjectId.equals(other.subjectId()) && audience.equals(other.audience())
-                && assignedNode.equals(other.assignedNode()) && scopes.equals(other.scopes());
+                && assignedNode.equals(other.assignedNode()) && scopes.equals(other.scopes())
+                && (!demo() || grantId.equals(other.grantId()));
         }
 
         public boolean demo() {

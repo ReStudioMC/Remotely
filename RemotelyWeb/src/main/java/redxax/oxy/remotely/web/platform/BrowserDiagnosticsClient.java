@@ -64,7 +64,7 @@ public final class BrowserDiagnosticsClient implements BrowserRuntimeDiagnostics
 
     @Override
     public synchronized void report(Event event) {
-        if (event == null || transport == null || !BrowserLaunchSession.authenticated()) {
+        if (event == null || transport == null || !BrowserLaunchSession.authenticated() || BrowserLaunchSession.metadata().demo()) {
             return;
         }
         String source = source(event.source());

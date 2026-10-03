@@ -2,6 +2,7 @@ package redxax.oxy.remotely.web.platform;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import redxax.oxy.remotely.demo.ReactorDemoPreview;
 import redxax.oxy.remotely.RemotelyCapabilityException;
 import restudio.rebase.backend.CapabilityIds;
 import restudio.rebase.backend.DeveloperCapabilityProvider;
@@ -16,12 +17,14 @@ import restudio.rescreen.platform.http.HttpTransport;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class BrowserReadRecoveryTest {
@@ -35,6 +38,36 @@ class BrowserReadRecoveryTest {
     @AfterEach
     void close() {
         api.close();
+    }
+
+    @Test
+    void demoConfigurationSavesStayLocalAcrossRenewalAndDisappearForTheNextVisitor() {
+        session = new BrowserLaunchSession.Metadata("grant", "demo-ticket", "audience", Set.of("remotely.demo"),
+                "node", "expiry", "visitor-a", "", "", "", "", "");
+        Async<String> first = api.readConfiguration("one", "server.properties");
+        transport.reply(0, 200, "{\"players\":[],\"resources\":[]}");
+        transport.reply(1, 200, "motd=Original");
+        assertEquals("motd=Original", first.getNow(null));
+        assertEquals(null, api.writeConfiguration("one", "server.properties", "motd=Preview").failure());
+        assertEquals("motd=Preview", api.readConfiguration("one", "server.properties").getNow(null));
+        Async<?> startup = api.getServerStartupConfig("one");
+        transport.reply(2, 200, "{\"identifier\":\"one\",\"software\":\"PAPER\",\"version\":\"1.21.1\"}");
+        assertEquals(null, startup.failure());
+        assertEquals(null, api.updateServerStartupVariables("one", "preview-0", Map.of("VERSION", "1.21.2")).failure());
+        session = new BrowserLaunchSession.Metadata("renewed", "renewed-ticket", "audience", Set.of("remotely.demo"),
+                "node", "expiry", "visitor-a", "", "", "", "", "");
+        assertEquals("motd=Preview", api.readConfiguration("one", "server.properties").getNow(null));
+        assertEquals("1.21.2", api.getServerStartupConfig("one").getNow(null).values().get("VERSION"));
+        assertTrue(transport.sent.stream().allMatch(request -> "GET".equals(request.method())));
+        assertEquals("demo-ticket", transport.sent.getFirst().headers().firstValue("X-Remotely-Web-Ticket").orElse(""));
+        ReactorDemoPreview old = api.demoPreview("one").getNow(null);
+        session = new BrowserLaunchSession.Metadata("next", "next-ticket", "audience", Set.of("remotely.demo"),
+                "node", "expiry", "visitor-b", "", "", "", "", "");
+        Async<String> next = api.readConfiguration("one", "server.properties");
+        transport.reply(3, 200, "{\"players\":[],\"resources\":[]}");
+        transport.reply(4, 200, "motd=Original");
+        assertEquals("motd=Original", next.getNow(null));
+        assertThrows(IllegalStateException.class, () -> old.write("server.properties", "stale"));
     }
 
     @Test
@@ -208,11 +241,13 @@ class BrowserReadRecoveryTest {
     }
 
     private static final class RecordingTransport implements HttpTransport {
+        private final List<HttpRequest> sent = new ArrayList<>();
         private final List<Async<HttpResponse<byte[]>>> requests = new ArrayList<>();
         private Throwable immediateFailure;
 
         @Override
         public <T> Async<HttpResponse<T>> sendAsync(HttpRequest request, HttpResponse.BodyHandler<T> handler) {
+            sent.add(request);
             Async<HttpResponse<byte[]>> response = immediateFailure == null ? Async.pending() : Async.failed(immediateFailure);
             requests.add(response);
             return response.thenApply(value -> {

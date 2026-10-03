@@ -1,5 +1,7 @@
 package redxax.oxy.remotely.web.platform;
 
+import redxax.oxy.remotely.ui.server.NetworkCreationPlan;
+import restudio.rebase.resource.ResourcePoolClient;
 import redxax.oxy.remotely.RemotelyServerApi;
 import redxax.oxy.remotely.RemotelyCapabilityException;
 import redxax.oxy.remotely.RemotelyClient;
@@ -20,6 +22,9 @@ import redxax.oxy.remotely.ui.server.ServerDetailsScreen;
 import redxax.oxy.remotely.ui.server.ResourcePoolScreen;
 import restudio.rebase.resource.marketplace.HostedModpackSelection;
 import redxax.oxy.remotely.network.NetworkLifecycleOperation;
+import redxax.oxy.remotely.network.HostedNetworkClient;
+import redxax.oxy.remotely.network.HostedNetworkPendingStore;
+import redxax.oxy.remotely.network.protocol.NetworkOperationStatus;
 import redxax.oxy.remotely.ui.server.ServerIconManager;
 import redxax.oxy.remotely.ui.server.ServerIconProvider;
 import redxax.oxy.remotely.ui.server.ResourceContainerAdapter;
@@ -43,6 +48,7 @@ import redxax.oxy.remotely.ui.settings.controllers.ServerJvmSettingsProvider;
 import redxax.oxy.remotely.ui.settings.controllers.ServerLiveSettingsProvider;
 import redxax.oxy.remotely.ui.settings.controllers.SubuserSettingsProvider;
 import redxax.oxy.remotely.ui.settings.controllers.UnavailableServerLiveSettingsProvider;
+import redxax.oxy.remotely.ui.settings.controllers.UnavailablePlayerActionsFileProvider;
 import redxax.oxy.remotely.discord.DiscordRpcSettingsController;
 import redxax.oxy.remotely.ui.widgets.InstanceResourceWidget;
 import redxax.oxy.remotely.settings.server.BundledServerSettingsRegistry;
@@ -52,6 +58,7 @@ import redxax.oxy.remotely.settings.server.ServerSettingsRegistry;
 import redxax.oxy.remotely.settings.server.ServerSettingsSnapshot;
 import restudio.rebase.backend.FileExplorerProviders;
 import restudio.rebase.backend.FileExplorerRuntime;
+import restudio.rebase.backend.FileTags;
 import restudio.rebase.backend.CapabilityDescriptor;
 import restudio.rebase.backend.CapabilityIds;
 import restudio.rebase.backend.DeveloperCapabilityProvider;
@@ -111,7 +118,6 @@ import redxax.oxy.remotely.config.RemotelyRecentItem;
 import redxax.oxy.remotely.config.RemotelyViewStateStore;
 import redxax.oxy.remotely.config.SettingsScreenFactory;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -142,9 +148,11 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     private final TaskScheduler scheduler;
     private final FlowManager flowManager;
     private final RemotelyClient remotelyClient;
+    private HostedNetworkPendingStore pendingHostedNetworks;
     private final ResourceMarketplaceProviderAdapter resourceMarketplace;
     private BrowserResourceProviderGateway resourceGateway;
     private final BrowserFileExplorerPersistence fileExplorerPersistence;
+    private FileTags fileTags;
     private final ServerIconProvider iconProvider;
     private final FileExplorerProviders.Snapshot previousFileExplorerProviders;
     private final FileExplorerRuntime.Snapshot previousFileExplorerRuntime;
@@ -649,7 +657,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     @Override
     public ServerScreenHost.EnvironmentNotice environmentNotice() {
         if (!BrowserLaunchSession.metadata().demo()) return ServerScreenHost.super.environmentNotice();
-        String description = demoExpiryDescription(BrowserLaunchSession.demoLeaseExpiresAt());
+        String description = "Shared Server. Sample Players And Plugins. Configuration Saves Stay In Your Preview";
         return new ServerScreenHost.EnvironmentNotice("Reactor Demo", description, "Reactor.png");
     }
 
@@ -851,6 +859,76 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
             default -> normalized.startsWith("rename:") ? renameNetwork(provider, network.id(), action.substring(action.indexOf(':') + 1))
                     : Async.failed(new UnsupportedOperationException("Network Action Is Unavailable"));
         };
+    }
+
+    @Override
+    public ResourcePoolClient resourcePools() {
+        return serverApi.resourcePools();
+    }
+
+    @Override
+    public Async<String> createHostedNetwork(NetworkCreationPlan plan) {
+        if (!authenticated() || serverApi == null || scheduler == null) {
+            return Async.failed(new IllegalStateException("Sign In To Create A Reactor Network"));
+        }
+        try {
+            String account = hostedAccount();
+            return runHostedNetwork(pendingHostedNetworks().admit(account, plan.hostedCommand()), account);
+        } catch (RuntimeException error) {
+            return Async.failed(error);
+        }
+    }
+
+    @Override
+    public HostedNetworkPendingStore.Pending pendingHostedNetwork() {
+        ServerScreenHost.AccountIdentity identity = accountIdentity();
+        return identity.authenticated() && !identity.subjectId().isBlank()
+                ? pendingHostedNetworks().current(hostedAccount()) : null;
+    }
+
+    @Override
+    public Async<String> resumeHostedNetwork() {
+        try {
+            String account = hostedAccount();
+            HostedNetworkPendingStore.Pending pending = pendingHostedNetwork();
+            return pending == null ? Async.failed(new IllegalStateException("No Pending Network Request")) : runHostedNetwork(pending, account);
+        } catch (RuntimeException error) {
+            return Async.failed(error);
+        }
+    }
+
+    @Override
+    public void acknowledgeHostedNetwork(String requestId, String networkId) {
+        pendingHostedNetworks().acknowledgeTerminal(hostedAccount(), requestId, networkId);
+    }
+
+    private HostedNetworkPendingStore pendingHostedNetworks() {
+        if (pendingHostedNetworks == null) pendingHostedNetworks = new HostedNetworkPendingStore(
+                Objects.requireNonNull(configStore(), "Network Configuration Is Unavailable"));
+        return pendingHostedNetworks;
+    }
+
+    private String hostedAccount() {
+        ServerScreenHost.AccountIdentity identity = accountIdentity();
+        return identity.authenticated() ? "true:" + BrowserLaunchSession.apiBaseUrl() + ":" + identity.subjectId() : "";
+    }
+
+    private Async<String> runHostedNetwork(HostedNetworkPendingStore.Pending pending, String account) {
+        HostContext context = captureContext();
+        if (!isCurrent(context) || !account.equals(hostedAccount())) {
+            return Async.failed(new IllegalStateException("Sign In To Create A Reactor Network"));
+        }
+        Async<NetworkOperationStatus> request = serverApi.hostedNetworks().execute(pending.command(), pending.body(), scheduler,
+                () -> isCurrent(context));
+        request.whenComplete((status, error) -> {
+            if (status != null) {
+                pendingHostedNetworks().clearTerminal(account, pending.command().requestId(), pending.command().networkId());
+            } else if (error instanceof HostedNetworkClient.OperationFailure terminal) {
+                pendingHostedNetworks().markTerminal(account, pending.command().requestId(), pending.command().networkId(),
+                        terminal.status().state());
+            }
+        });
+        return request.thenApply(status -> hostedNetworkViewId(status.networkId()));
     }
 
     @Override
@@ -1336,7 +1414,12 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     @Override
     public void openServerConfiguration(Screen current, ServerModels.ClientServerView server) {
         if (demo()) {
-            unavailable(Action.SERVER_CONFIGURATION);
+            HostContext context = captureContext();
+            browserApi().demoPreview(serverId(server)).whenComplete((preview, failure) -> execute(() -> {
+                if (!isCurrent(context)) return;
+                if (failure != null) application.notify("Configuration Preview Unavailable", failureMessage(failure), ReSyncNotificationLevel.WARN);
+                else openServerConfiguration(current, (Object) server);
+            }));
             return;
         }
         withCapability(server, "settings.read", () -> {
@@ -1348,7 +1431,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     public void openServerConfiguration(Screen current, ServerModels.ClientServerView server, String initialTab,
                                         String diskMiB) {
         if (demo()) {
-            unavailable(Action.SERVER_CONFIGURATION);
+            openServerConfiguration(current, server);
             return;
         }
         withCapability(server, "settings.read", () -> ScreenManager.getInstance().navigate(current,
@@ -1368,7 +1451,13 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     @Override
     public ServerConfigurationTarget configurationTarget(Object value) {
         if (value instanceof BrowserServerConfigurationTarget target) return target;
-        if (value instanceof ServerModels.ClientServerView server) return new BrowserServerConfigurationTarget(server);
+        if (value instanceof ServerModels.ClientServerView server) {
+            if (demo() && browserApi() != null) {
+                var preview = browserApi().demoPreview(serverId(server)).getNow(null);
+                if (preview != null) return preview.configuration(() -> new BrowserServerConfigurationTarget(server).copy(server.name));
+            }
+            return new BrowserServerConfigurationTarget(server);
+        }
         return ServerConfigurationTarget.unavailable(value);
     }
 
@@ -1460,7 +1549,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         BrowserRemotelyServerApi browserApi = browserApi();
         String id = target.id();
         if (browserApi == null || id.isBlank()) return Async.completed(null);
-        return capabilityOperation(target.view(), "files.read", () -> browserApi.getFileContentAllowMissing(id, "server.properties")
+        return capabilityOperation(target.view(), "files.read", () -> browserApi.readConfiguration(id, "server.properties")
                 .thenAccept(content -> {
                     if (isCurrent(context)) target.replaceProperties(parseProperties(content));
                 })).handle((ignored, failure) -> {
@@ -1524,7 +1613,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
             public Async<Document> read(String relativePath) {
                 HostContext context = captureContext();
                 if (!isCurrent(context)) return Async.failed(new IllegalStateException("Browser Session Expired"));
-                return observeSessionFailure(api.getFileContentAllowMissing(target.id(), relativePath)
+                return observeSessionFailure(api.readConfiguration(target.id(), relativePath)
                         .thenApply(content -> content == null ? Document.missing() : new Document(true, content)), context);
             }
 
@@ -1532,7 +1621,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
             public Async<Void> write(String relativePath, String content) {
                 HostContext context = captureContext();
                 if (!isCurrent(context)) return Async.failed(new IllegalStateException("Browser Session Expired"));
-                return observeSessionFailure(api.writeFile(target.id(), relativePath, content), context);
+                return observeSessionFailure(api.writeConfiguration(target.id(), relativePath, content), context);
             }
 
             @Override
@@ -1553,6 +1642,27 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
                 ScreenManager.getInstance()::execute);
     }
 
+    @SuppressWarnings("unchecked")
+    static <T> Async<T> residentCatalog(Map<String, Async<?>> requests, String key, Supplier<Async<T>> fetch) {
+        Async<?> existing = requests.get(key);
+        Async<T> result;
+        if (existing != null) result = (Async<T>) existing;
+        else {
+            result = fetch.get();
+            requests.put(key, result);
+            Async<T> admitted = result;
+            result.whenComplete((value, failure) -> {
+                if (failure != null) requests.remove(key, admitted);
+            });
+        }
+        Async<T> consumer = Async.pending();
+        result.whenComplete((value, failure) -> {
+            if (failure == null) consumer.complete(value);
+            else consumer.fail(failure);
+        });
+        return consumer;
+    }
+
     @Override
     public ServerScreenHost.ConfigurationUi createConfigurationUi(Screen owner, ConfigurationState state,
                                                                   ServerSettingsDataController settingsController,
@@ -1569,13 +1679,8 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         BrowserRemotelyServerApi api = browserApi();
         Map<String, Async<?>> catalogRequests = new LinkedHashMap<>();
         VersionSettingsCatalog catalog = new VersionSettingsCatalog() {
-            @SuppressWarnings("unchecked")
             private <T> Async<T> resident(String key, Supplier<Async<T>> fetch) {
-                Async<?> existing = catalogRequests.get(key);
-                if (existing != null) return (Async<T>) existing;
-                Async<T> result = fetch.get();
-                catalogRequests.put(key, result);
-                return result;
+                return residentCatalog(catalogRequests, key, fetch);
             }
 
             @Override public Async<List<GameVersion>> gameVersions() { return resident("game", api::getCatalogGameVersions); }
@@ -1587,7 +1692,10 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
                 return resident("versions:" + software, () -> api.getCatalogVersions(software));
             }
             @Override public Async<List<Build>> builds(String software, String version) {
-                return resident("builds:" + software + ':' + version, () -> api.getCatalogBuilds(software, version));
+                return resident("builds:" + software + ':' + version, () -> demo()
+                        ? versions(software).thenCompose(values -> values.containsKey(version) ? api.getCatalogBuilds(software, version)
+                                : Async.completed(List.of(new Build("latest", "Latest"))))
+                        : api.getCatalogBuilds(software, version));
             }
         };
         DiscordRpcSettingsController.InstanceSettings discord = new DiscordRpcSettingsController.InstanceSettings() {
@@ -1597,17 +1705,17 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         };
         ServerExtraSettingsController.DocumentAccess documents = new ServerExtraSettingsController.DocumentAccess() {
             @Override public Async<String> read(String relativePath) {
-                return capabilityOperation(target.view(), "files.read", () -> api.getFileContent(target.id(), relativePath));
+                return capabilityOperation(target.view(), "files.read", () -> api.readConfiguration(target.id(), relativePath));
             }
             @Override public Async<Void> write(String relativePath, String content) {
-                return capabilityOperation(target.view(), "files.write", () -> api.writeFile(target.id(), relativePath, content));
+                return capabilityOperation(target.view(), "files.write", () -> api.writeConfiguration(target.id(), relativePath, content));
             }
             @Override public Async<Void> write(String relativePath, String expectedContent, String content) {
-                return capabilityOperation(target.view(), "files.read", () -> api.getFileContent(target.id(), relativePath)).thenCompose(current -> {
+                return capabilityOperation(target.view(), "files.read", () -> api.readConfiguration(target.id(), relativePath)).thenCompose(current -> {
                     if (!Objects.equals(current, expectedContent)) {
                         return Async.failed(new IllegalStateException("Configuration File Changed. Reopen It And Try Again"));
                     }
-                    return capabilityOperation(target.view(), "files.write", () -> api.writeFile(target.id(), relativePath, content));
+                    return capabilityOperation(target.view(), "files.write", () -> api.writeConfiguration(target.id(), relativePath, content));
                 });
             }
         };
@@ -1632,14 +1740,24 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
             @Override public ServerPlanSettingsProvider planSettingsProvider() { return api::getPlans; }
             @Override public ServerJvmSettingsProvider jvmSettingsProvider() { return null; }
             @Override public BackupSettingsProvider backupProvider() {
-                return BackupSettingsProvider.managed(owner, BrowserHostedSettingsProviders.backups(api, target.id(), configStore()));
+                return demo() ? BackupSettingsProvider.unavailable(false, true, "Backups Are Not Available In Reactor Demo")
+                        : BackupSettingsProvider.managed(owner, BrowserHostedSettingsProviders.backups(api, target.id(), configStore()));
             }
             @Override public AsyncServerScheduleFeature scheduleProvider() {
                 return BrowserHostedSettingsProviders.schedules(api, target.id());
             }
-            @Override public PortManagementSettingsProvider portProvider() { return BrowserHostedSettingsProviders.ports(api, target.id()); }
-            @Override public SubuserSettingsProvider subuserProvider() { return BrowserHostedSettingsProviders.subusers(api, target.id()); }
-            @Override public PlayerActionsFileProvider playerActionsFileProvider() { return new BrowserPlayerActionsFileProvider(api, target.id()); }
+            @Override public PortManagementSettingsProvider portProvider() {
+                return demo() ? PortManagementSettingsProvider.unavailable("Network Changes Are Not Available In Reactor Demo")
+                        : BrowserHostedSettingsProviders.ports(api, target.id());
+            }
+            @Override public SubuserSettingsProvider subuserProvider() {
+                return demo() ? SubuserSettingsProvider.unavailable("Sharing Is Not Available In Reactor Demo")
+                        : BrowserHostedSettingsProviders.subusers(api, target.id());
+            }
+            @Override public PlayerActionsFileProvider playerActionsFileProvider() {
+                return demo() ? new UnavailablePlayerActionsFileProvider("Unavailable In Reactor Demo")
+                        : new BrowserPlayerActionsFileProvider(api, target.id());
+            }
             @Override public ServerLiveSettingsProvider liveSettingsProvider() { return liveSettings; }
             @Override public ServerExtraSettingsController.DocumentAccess documentAccess() { return documents; }
         };
@@ -1731,6 +1849,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
             return Async.failed(new UnsupportedOperationException("Hosted Server Configuration Is Unavailable"));
         }
         BrowserRemotelyServerApi api = browserApi();
+        if (demo()) return api.demoPreview(target.id()).thenAccept(preview -> preview.configuration(target.copy(target.name())));
         return capabilityOperation(target.view(), "settings.write", () -> api.renameServer(target.id(), target.name()).thenApply(ignored -> null));
     }
 
@@ -1743,6 +1862,18 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
             return Async.failed(new UnsupportedOperationException("Hosted Server Configuration Is Unavailable"));
         }
         BrowserRemotelyServerApi api = browserApi();
+        if (demo()) {
+            HostContext context = captureContext();
+            return api.demoPreview(target.id()).thenCompose(preview -> {
+                if (!isCurrent(context)) return Async.failed(new IllegalStateException("Demo Session Ended"));
+                Async<Void> save = settingsController == null ? Async.completed(null) : settingsController.save(target);
+                return save.thenRun(() -> {
+                    if (!isCurrent(context)) throw new IllegalStateException("Demo Session Ended");
+                    preview.configuration(target.copy(newName == null ? target.name() : newName));
+                    application.notify("Configuration Preview Saved", "These Changes Stay In Your Demo Session", ReSyncNotificationLevel.INFO);
+                });
+            });
+        }
         Async<Void> result = capabilityOperation(target.view(), "settings.write",
                 () -> api.renameServer(target.id(), newName == null ? target.name() : newName));
         if (reinstallSoftware) {
@@ -1757,7 +1888,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         if (!(value instanceof BrowserServerConfigurationTarget target) || browserApi() == null || target.id().isBlank()) {
             return Async.failed(new UnsupportedOperationException("Hosted Server Files Are Unavailable"));
         }
-        return capabilityOperation(target.view(), "files.write", () -> browserApi().writeFile(target.id(), path, content));
+        return capabilityOperation(target.view(), "files.write", () -> browserApi().writeConfiguration(target.id(), path, content));
     }
 
     @Override
@@ -2086,6 +2217,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     }
 
     private NexoGlyphPreviewAccess glyphPreview(ServerModels.ClientServerView server) {
+        if (demo()) return null;
         String id = serverId(server);
         BrowserRemotelyServerApi api = browserApi();
         if (id.isBlank() || api == null) return null;
@@ -2122,6 +2254,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     }
 
     private void installFileExplorerRuntime() {
+        installFileTags();
         FileExplorerRuntime.installSettingsResolver(this, fileExplorerPersistence::settings);
         FileExplorerRuntime.installSortSaver(this, fileExplorerPersistence::saveSort);
         FileExplorerRuntime.installServerNameResolver(this, serverId -> {
@@ -2148,6 +2281,13 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         });
     }
 
+    private void installFileTags() {
+        if (fileTags != null) fileTags.close();
+        HostContext context = captureContext();
+        fileTags = new FileTags(fileExplorerPersistence.fileTagStore(() -> isCurrent(context)));
+        FileExplorerRuntime.installFileTags(this, fileTags);
+    }
+
     private ResourceMarketplaceProviderAdapter createResourceMarketplace() {
         Clock clock = remotelyClient == null ? null : remotelyClient.getComposition().clock();
         if (clock == null) clock = new BrowserClock();
@@ -2167,13 +2307,11 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
 
     @Override
     public void signOut(Screen current) {
-        onAuthenticationInvalidated();
         BrowserLaunchSession.signOut();
     }
 
     void onAuthenticationInvalidated() {
         if (closed) return;
-        remotelyClient.storageBreakdownIndex().clear();
         authenticationCleanupInProgress = true;
         authenticationObserved = false;
         observedAuthenticated = false;
@@ -2197,7 +2335,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     public boolean supports(Action action) {
         if (action == null) return true;
         if (demo()) return switch (action) {
-            case FILE_EXPLORER, GLOBAL_TERMINAL, SIGN_OUT -> true;
+            case FILE_EXPLORER, GLOBAL_TERMINAL, SIGN_OUT, SERVER_CONFIGURATION -> true;
             default -> false;
         };
         return switch (action) {
@@ -2232,7 +2370,8 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
             case CREATE_SERVER -> authenticated && restudioTarget
                     ? ActionAvailability.enabled()
                     : ActionAvailability.disabled(authenticated ? "Choose ReStudio To Create A Server" : "Sign In To Create A Server");
-            case NETWORK_CREATE -> ActionAvailability.disabled("Network Creation Requires A Connected Desktop Host");
+            case NETWORK_CREATE -> authenticated ? ActionAvailability.enabled()
+                    : ActionAvailability.disabled("Sign In To Create A Reactor Network");
             case NETWORK_IMPORT -> ActionAvailability.disabled("Network Import Requires A Connected Desktop Host");
             case MODPACK_SERVER -> authenticated && restudioTarget
                     ? ActionAvailability.enabled()
@@ -2246,7 +2385,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     static ActionAvailability demoManagerAction(Action action) {
         if (action == null) return ActionAvailability.enabled();
         return switch (action) {
-            case FILE_EXPLORER, GLOBAL_TERMINAL, SIGN_OUT -> ActionAvailability.enabled();
+            case FILE_EXPLORER, GLOBAL_TERMINAL, SIGN_OUT, SERVER_CONFIGURATION -> ActionAvailability.enabled();
             default -> ActionAvailability.disabled("Unavailable In Reactor Demo");
         };
     }
@@ -2427,7 +2566,10 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     }
 
     private void clearBrowserSessionState() {
+        if (remotelyClient != null) remotelyClient.storageBreakdownIndex().clear();
         advanceHostGeneration();
+        if (fileTags != null) fileTags.close();
+        if (!closed) installFileTags();
         retireResourceContexts();
         FileExplorerProviders.clearServerRoots(this);
         BrowserRemotelyServerApi browserApi = browserApi();
@@ -2571,6 +2713,12 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         } catch (Throwable failure) {
             return Async.failed(failure);
         }
+    }
+
+    @Override
+    public String collaborationResourceId(Object target) {
+        ServerModels.ClientServerView server = asServerView(target);
+        return server != null && "RESTUDIO".equalsIgnoreCase(browserBackendType(server)) ? server.identifier : "";
     }
 
     @Override
@@ -2741,7 +2889,9 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
             playerMetricRequests.remove(id);
             return;
         }
-        Async<List<RemotelyServerApi.Player>> players = capabilities(server).players(server).exceptionally(failure -> {
+        ServerUiCapabilityProvider provider = capabilities(server);
+        Async<List<RemotelyServerApi.Player>> players = (provider.availability(server, "players.list").available()
+                ? provider.players(server) : Async.<List<RemotelyServerApi.Player>>completed(List.of())).exceptionally(failure -> {
             if (isCurrent(context) && isSessionExpired(failure)) notifySessionExpired();
             return List.of();
         });
@@ -2831,7 +2981,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         onAuthenticationInvalidated();
         sessionExpiryNotified = true;
         application.notify(demo ? "Reactor Demo Ended" : "Sign In Required",
-                demo ? "Your Demo Server Is Resetting" : "Your Browser Session Expired", demo ? ReSyncNotificationLevel.INFO : ReSyncNotificationLevel.ERROR);
+                demo ? "Your Demo Session Has Ended" : "Your Browser Session Expired", demo ? ReSyncNotificationLevel.INFO : ReSyncNotificationLevel.ERROR);
         if (!demo) signIn(application.getCurrentScreen());
     }
 
@@ -2905,18 +3055,6 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         Throwable current = failure;
         while (current.getCause() != null && current.getCause() != current) current = current.getCause();
         return current.getMessage() == null || current.getMessage().isBlank() ? "Operation Failed" : current.getMessage();
-    }
-
-    private static String demoExpiryDescription(String value) {
-        if (value == null || value.isBlank()) return "Changes Reset Automatically";
-        try {
-            long seconds = Duration.between(Instant.now(), Instant.parse(value)).getSeconds();
-            if (seconds <= 0) return "Session Is Resetting";
-            long minutes = Math.max(1L, (seconds + 59L) / 60L);
-            return "Changes Reset Automatically. Session Ends In " + minutes + (minutes == 1 ? " Minute" : " Minutes");
-        } catch (RuntimeException ignored) {
-            return "Changes Reset Automatically";
-        }
     }
 
     private static final class BrowserServerFileSystemProvider implements RemoteFileSystemProvider,

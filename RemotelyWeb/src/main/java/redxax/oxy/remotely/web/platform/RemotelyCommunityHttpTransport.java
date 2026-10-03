@@ -7,6 +7,7 @@ import restudio.rebase.restudio.community.ReStudioCommunityHttpTransport.Respons
 import restudio.rescreen.platform.http.HttpTransport;
 import restudio.rebase.restudio.community.ReStudioCommunityHttpTransport;
 
+import java.io.ByteArrayOutputStream;
 import java.net.URI;
 import java.time.Duration;
 
@@ -26,6 +27,19 @@ final class RemotelyCommunityHttpTransport implements ReStudioCommunityHttpTrans
         builder.method(method, body == null ? HttpRequest.BodyPublishers.noBody() : HttpRequest.BodyPublishers.ofByteArray(body));
         return transport.sendAsync(builder.build(), HttpResponse.BodyHandlers.ofString())
                 .thenApply(response -> new Response(response.statusCode(), response.body()));
+    }
+
+    @Override
+    public Async<byte[]> download(String path) {
+        HttpRequest request = HttpRequest.newBuilder(URI.create(BrowserLaunchSession.apiBaseUrl() + path)).timeout(Duration.ofSeconds(30)).GET().build();
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        return transport.sendStreaming(request, bytes -> {
+            if (output.size() + bytes.length > 8 * 1024 * 1024) throw new IllegalStateException("File Exceeds 8 MiB");
+            output.write(bytes, 0, bytes.length);
+        }).thenApply(response -> {
+            if (response.statusCode() < 200 || response.statusCode() >= 300) throw new IllegalStateException("File Download Failed: " + response.statusCode());
+            return output.toByteArray();
+        });
     }
 
     @Override

@@ -30,4 +30,13 @@ class BrowserDemoSessionExpiryTest {
         assertEquals("Server Address Is Unavailable", failure.getMessage());
         assertEquals("resource_pool_conflict", failure.code());
     }
+    @Test
+    void resourceValidationShowsTheServerReasonWithoutLeakingUnstructuredResponses() {
+        IllegalStateException failure = BrowserRemotelyServerApi.resourcePoolFailure(400,
+                "{\"error\":\"Bad Request\",\"message\":\"Discount Code Is Unavailable\"}");
+        assertEquals("Discount Code Is Unavailable", failure.getMessage());
+        assertEquals("Browser Capability Failed With Status 400",
+                BrowserRemotelyServerApi.resourcePoolFailure(400, "<html>Upstream Failure</html>").getMessage());
+    }
+
 }

@@ -1,6 +1,8 @@
 package redxax.oxy.remotely.web;
 
 import org.teavm.jso.JSBody;
+import restudio.rebase.ui.screens.collaboration.CollaborationScreen;
+import redxax.oxy.remotely.ui.server.ResourcePoolScreen;
 import redxax.oxy.remotely.web.platform.BrowserLaunchSession;
 
 public final class RemotelyBrowserMain {
@@ -24,6 +26,11 @@ public final class RemotelyBrowserMain {
                 }
                 try {
                     runtime = RemotelyBrowserComposition.start("remotely-canvas", metadata);
+                    if (resourcesView() && !metadata.demo()) {
+                        runtime.host().setScreen(new ResourcePoolScreen(runtime.root(), runtime.client()));
+                    }
+                    String invitation = invitationCode();
+                    if (!metadata.demo() && !invitation.isBlank()) runtime.host().setScreen(new CollaborationScreen(runtime.root()).invitation(invitation));
                     startupInFlight = false;
                     if (!loopStarted) {
                         loopStarted = true;
@@ -52,6 +59,12 @@ public final class RemotelyBrowserMain {
     public static void fail(String message) {
         setStatus(message == null ? "Remotely web launch failed" : message);
     }
+
+    @JSBody(script = "const hash = new URLSearchParams(window.location.hash.slice(1)); return hash.get('invite') || '';")
+    private static native String invitationCode();
+
+    @JSBody(script = "return new URL(window.location.href).searchParams.get('view') === 'resources';")
+    private static native boolean resourcesView();
 
     @JSBody(params = {"message"}, script = "const value = String(message || 'Remotely Web Could Not Start').slice(0, 240); if (typeof window.__remotelySetStatus === 'function') { window.__remotelySetStatus(value); } else { document.title = 'Remotely'; }")
     private static native void setStatus(String message);

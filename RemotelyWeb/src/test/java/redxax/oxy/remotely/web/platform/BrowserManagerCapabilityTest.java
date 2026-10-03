@@ -27,7 +27,6 @@ class BrowserManagerCapabilityTest {
     @Test
     void keepsUnavailableManagerActionsVisibleWithSpecificReasons() {
         for (ServerScreenHost.Action action : new ServerScreenHost.Action[]{
-                ServerScreenHost.Action.NETWORK_CREATE,
                 ServerScreenHost.Action.NETWORK_IMPORT,
                 ServerScreenHost.Action.IMPORT_SERVER,
                 ServerScreenHost.Action.REMOTE_HOST}) {
@@ -35,6 +34,12 @@ class BrowserManagerCapabilityTest {
             assertFalse(availability.available());
             assertFalse(availability.reason().isBlank());
         }
+    }
+
+    @Test
+    void enablesHostedNetworksOnlyForAuthenticatedAccounts() {
+        assertTrue(BrowserServerScreenHost.browserManagerAction(ServerScreenHost.Action.NETWORK_CREATE, null, true).available());
+        assertFalse(BrowserServerScreenHost.browserManagerAction(ServerScreenHost.Action.NETWORK_CREATE, null, false).available());
     }
 
     @Test
@@ -52,10 +57,11 @@ class BrowserManagerCapabilityTest {
         assertTrue(BrowserServerScreenHost.demoManagerAction(ServerScreenHost.Action.FILE_EXPLORER).available());
         assertTrue(BrowserServerScreenHost.demoManagerAction(ServerScreenHost.Action.GLOBAL_TERMINAL).available());
         assertTrue(BrowserServerScreenHost.demoManagerAction(ServerScreenHost.Action.SIGN_OUT).available());
+        assertTrue(BrowserServerScreenHost.demoManagerAction(ServerScreenHost.Action.SERVER_CONFIGURATION).available());
         for (ServerScreenHost.Action action : new ServerScreenHost.Action[]{
                 ServerScreenHost.Action.CREATE_SERVER,
                 ServerScreenHost.Action.IMPORT_SERVER,
-                ServerScreenHost.Action.SERVER_CONFIGURATION,
+                ServerScreenHost.Action.RESOURCES,
                 ServerScreenHost.Action.WORLD,
                 ServerScreenHost.Action.NETWORK_SETTINGS,
                 ServerScreenHost.Action.DEVELOPMENT,

@@ -185,7 +185,7 @@ public final class RemotelyBrowserComposition {
             BundledServerSettingsRegistry.loadInto(settingsRegistry, new BrowserSafeYamlServerSettingsMetadataParser());
             client = new RemotelyClient(composition);
             client.initialize();
-            if (demo) host.notify("Reactor Demo", "Changes Reset Automatically", ReSyncNotificationLevel.INFO);
+            if (demo) host.notify("Reactor Demo", "Shared With Other Visitors. Resets When Everyone Is Idle", ReSyncNotificationLevel.INFO);
             browserRoot = host.getCurrentScreen();
             screenClient = new BrowserReScreenClient(canvasId, host::getCurrentScreen, desktopMode).diagnostics(diagnostics);
             config.applyBrowserAppearance();

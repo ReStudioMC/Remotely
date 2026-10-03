@@ -1,5 +1,7 @@
 package redxax.oxy.remotely.web.platform;
 
+import redxax.oxy.remotely.network.HostedNetworkClient;
+
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
@@ -10,6 +12,7 @@ import redxax.oxy.remotely.RemotelyServerApi;
 import redxax.oxy.remotely.ResourceTogglePendingException;
 import redxax.oxy.remotely.RemotelyClient;
 import redxax.oxy.remotely.flow.ui.marketplace.ReSyncMarketplaceApi;
+import redxax.oxy.remotely.ui.server.HostedNetworkOverviewProvider;
 import redxax.oxy.remotely.ui.server.NetworkOverviewProvider;
 import redxax.oxy.remotely.ui.server.ServerScreenHost;
 import restudio.rebase.backend.CapabilityDescriptor;
@@ -57,7 +60,8 @@ import restudio.rebase.health.ServerHealth;
 import restudio.rebase.health.ServerHealthJsonCodec;
 import restudio.rebase.schedule.ServerScheduleCapabilityClient;
 import restudio.rebase.schedule.ServerScheduleModels;
-import restudio.rebase.restudio.api.ReStudioResourceCapabilityClient;
+import redxax.oxy.remotely.demo.ReactorDemoPreview;
+import restudio.rebase.util.VersionOrder;
 import restudio.rescreen.util.IsoTimes;
 
 import java.net.URI;
@@ -114,11 +118,13 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
     private final WebSocketTransport webSocket;
     private final BrowserReSyncMarketplaceApi marketplace;
     private final BrowserApplicationHost host;
-    private final ReStudioResourceCapabilityClient resourceApi;
+    private final Map<String, Async<ReactorDemoPreview>> demoPreviews = new LinkedHashMap<>();
+    private String demoAuthority = "";
+    private final String apiBaseUrl;
     private final ServerScheduleCapabilityClient scheduleClient;
     private final ResourcePoolClient resourcePools;
     private final Map<String, Consumer<DeveloperCapabilityProvider.JobProgress>> developerProgress = new LinkedHashMap<>();
-    private final Set<BrowserSshTerminalTransport> activeTerminalTransports = new HashSet<>();
+    private final Set<TerminalTransport> activeTerminalTransports = new HashSet<>();
     private final Set<UUID> activeConsoleSessions = new HashSet<>();
     private final Map<String, Long> missingReSyncServers = new LinkedHashMap<>();
     private final Map<String, Long> missingReSyncApiKeys = new LinkedHashMap<>();
@@ -165,9 +171,8 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         baseUrl = Objects.requireNonNull(capabilityBaseUrl, "capabilityBaseUrl");
         scheduleClient = new ServerScheduleCapabilityClient(this::request);
         resourcePools = new ResourcePoolClient(this::resourcePoolRequest);
-        resourceApi = new ReStudioResourceCapabilityClient(transport);
-        resourceApi.setBaseUrl(Objects.requireNonNull(apiBaseUrl, "apiBaseUrl"));
-        resourceApi.useSessionCookies();
+        networks = new HostedNetworkClient(this::resourcePoolRequest);
+        this.apiBaseUrl = Objects.requireNonNull(apiBaseUrl, "apiBaseUrl");
         BrowserLaunchSession.addAuthStateListener(browserReadAuthListener);
         BrowserLaunchSession.addTicketListener(browserReadTicketListener);
         BrowserLaunchSession.addSessionExpiryListener(browserReadExpiryListener);
@@ -176,6 +181,13 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
     @Override
     public ResourcePoolClient resourcePools() {
         return resourcePools;
+    }
+
+    private final HostedNetworkClient networks;
+
+    @Override
+    public HostedNetworkClient hostedNetworks() {
+        return networks;
     }
 
     public void close() {
@@ -193,6 +205,7 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
             browserReadValues.clear();
         }
         requests.forEach(BrowserReadOwner::cancelOwner);
+        clearDemoPreviews();
     }
 
     void invalidateReadCache() {
@@ -200,6 +213,7 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
     }
 
     private void invalidateBrowserReadCache() {
+        if (!Objects.equals(demoAuthority, demoAuthority())) clearDemoPreviews();
         List<BrowserReadOwner> requests;
         synchronized (browserReadLock) {
             browserReadEpoch++;
@@ -304,7 +318,7 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
                 String version = BrowserJson.string(element.getAsJsonObject(), "version");
                 if (version != null && !version.isBlank()) result.add(new ModLoaderVersion(loader, version, version));
             });
-            return List.copyOf(result);
+            return VersionOrder.newestFirst(result, ModLoaderVersion::version);
         });
     }
 
@@ -345,20 +359,7 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
     }
 
     public Async<List<ServerScreenHost.NetworkView>> getNetworks() {
-        return networkValueRequest("GET", "/networks", null).thenApply(BrowserRemotelyServerApi::networkViews);
-    }
-
-    private static List<ServerScreenHost.NetworkView> networkViews(JsonElement response) {
-        List<ServerScreenHost.NetworkView> result = new ArrayList<>();
-        if (response == null || !response.isJsonArray()) return List.of();
-        response.getAsJsonArray().forEach(element -> {
-            if (element == null || !element.isJsonObject()) return;
-            JsonObject value = element.getAsJsonObject();
-            result.add(new ServerScreenHost.NetworkView(BrowserJson.string(value, "id"), BrowserJson.string(value, "name"),
-                    BrowserJson.string(value, "status"), BrowserJson.string(value, "description"), BrowserJson.strings(value, "members"),
-                    BrowserJson.bool(value, "managed", true), BrowserJson.string(value, "proxyId")));
-        });
-        return List.copyOf(result);
+        return networkValueRequest("GET", "/networks", null).thenApply(HostedNetworkOverviewProvider::views);
     }
 
     void addInstanceChangeListener(Object owner, Consumer<ManagerSnapshot> listener) {
@@ -526,7 +527,6 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
     }
 
     private Async<ManagerSnapshot> fetchManagerSnapshot(boolean includeStates) {
-        if (BrowserLaunchSession.metadata().demo()) return fetchLegacyManagerSnapshot(includeStates);
         String endpoint = includeStates ? "/manager-snapshot" : "/manager-snapshot?includeStatuses=false";
         return request("GET", endpoint, null).handle((body, failure) -> {
             if (failure == null) return Async.completed(managerSnapshot(BrowserJson.object(body)));
@@ -545,7 +545,7 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         }
         List<ServerModels.ClientServerView> servers = BrowserJson.objects(response, "servers").stream()
                 .map(BrowserRemotelyServerApi::serverView).map(ServerView::toModel).toList();
-        List<ServerScreenHost.NetworkView> networks = networkViews(networkValues);
+        List<ServerScreenHost.NetworkView> networks = HostedNetworkOverviewProvider.views(networkValues);
         Set<String> serverIds = new HashSet<>();
         servers.forEach(server -> serverIds.add(serverId(server)));
         Map<String, ServerModels.ServerStatus> statuses = new LinkedHashMap<>();
@@ -766,6 +766,7 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
 
     @Override
     public Async<PlayerList> getPlayers(String serverId) {
+        if (sessionSource.get().demo()) return demoPreview(serverId).thenApply(preview -> new PlayerList(true, preview.players()));
         return get("/servers/" + path(serverId) + "/players", BrowserRemotelyServerApi::playerList).thenApply(value -> {
             List<Player> players = value == null || value.players == null ? List.of() : value.players.stream().filter(Objects::nonNull)
                     .map(player -> new Player(player.uuid, player.name, player.online, player.operator, player.ping, player.address)).toList();
@@ -822,12 +823,131 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
 
     @Override
     public Async<List<ServerModels.PteroFileObjectAttributes>> listResourceFiles(String serverId, String directory) {
-        return resourceApi.listFiles(serverId, directory);
+        if (!sessionSource.get().demo()) return listFiles(serverId, directory);
+        return demoPreview(serverId).thenCompose(preview -> {
+            if (directory != null && directory.endsWith("/datapacks")) return Async.completed(List.of());
+            return listFiles(serverId, directory).thenApply(files -> {
+                if (!"/plugins".equals(directory)) return files;
+                List<ServerModels.PteroFileObjectAttributes> result = new ArrayList<>(files);
+                result.addAll(preview.files());
+                return List.copyOf(result);
+            });
+        });
     }
 
     @Override
     public Async<List<ServerModels.ResourceFileHash>> resolveResourceFileHashes(String serverId, List<String> paths) {
-        return resourceApi.resolveHashes(serverId, paths);
+        if (!sessionSource.get().demo()) return resourceHashes(serverId, paths);
+        return demoPreview(serverId).thenCompose(preview -> {
+            List<ServerModels.ResourceFileHash> samples = new ArrayList<>();
+            List<String> real = new ArrayList<>();
+            for (String requested : paths == null ? List.<String>of() : paths) {
+                ReactorDemoPreview.Resource resource = preview.resource(requested);
+                if (resource == null) real.add(requested);
+                else {
+                    ServerModels.ResourceFileHash hash = new ServerModels.ResourceFileHash();
+                    hash.path = requested;
+                    hash.sha1 = resource.sha1();
+                    hash.status = "sample";
+                    samples.add(hash);
+                }
+            }
+            return resourceHashes(serverId, real).thenApply(hashes -> {
+                samples.addAll(hashes);
+                return List.copyOf(samples);
+            });
+        });
+    }
+
+    private Async<List<ServerModels.ResourceFileHash>> resourceHashes(String serverId, List<String> paths) {
+        if (paths == null || paths.isEmpty()) return Async.completed(List.of());
+        return post("/servers/" + path(serverId) + "/files/hashes", Map.of("paths", paths), value -> {
+            List<ServerModels.ResourceFileHash> hashes = new ArrayList<>();
+            JsonElement files = value.get("files");
+            if (files != null && files.isJsonArray()) files.getAsJsonArray().forEach(element -> {
+                JsonObject file = element.getAsJsonObject();
+                ServerModels.ResourceFileHash hash = new ServerModels.ResourceFileHash();
+                hash.path = BrowserJson.string(file, "path");
+                hash.version = BrowserJson.string(file, "version");
+                hash.sha1 = BrowserJson.string(file, "sha1");
+                hash.murmur2 = BrowserJson.string(file, "murmur2");
+                hash.status = BrowserJson.string(file, "status");
+                hash.error = BrowserJson.string(file, "error");
+                hashes.add(hash);
+            });
+            return List.copyOf(hashes);
+        });
+    }
+
+    Async<ReactorDemoPreview> demoPreview(String serverId) {
+        String authority = demoAuthority();
+        if (closed || authority.isBlank() || serverId == null || serverId.isBlank()) {
+            return Async.failed(new IllegalStateException("Demo Session Ended"));
+        }
+        if (!Objects.equals(demoAuthority, authority)) clearDemoPreviews();
+        demoAuthority = authority;
+        Async<ReactorDemoPreview> resident = demoPreviews.get(serverId);
+        if (resident == null) {
+            resident = demoRequest("GET", "/remotely-web/demo/servers/" + path(serverId) + "/showcase", null).thenApply(body -> {
+                if (!Objects.equals(authority, demoAuthority()) || closed) throw new Async.Cancellation();
+                JsonObject data = BrowserJson.object(body);
+                List<Player> players = new ArrayList<>();
+                data.getAsJsonArray("players").forEach(element -> {
+                    JsonObject player = element.getAsJsonObject();
+                    players.add(new Player(UUID.fromString(BrowserJson.string(player, "uuid")), BrowserJson.string(player, "name"),
+                            BrowserJson.bool(player, "online", false), BrowserJson.bool(player, "operator", false),
+                            BrowserJson.integer(player, "ping", 0), BrowserJson.string(player, "address")));
+                });
+                List<ReactorDemoPreview.Resource> resources = new ArrayList<>();
+                data.getAsJsonArray("resources").forEach(element -> {
+                    JsonObject file = element.getAsJsonObject();
+                    resources.add(new ReactorDemoPreview.Resource(BrowserJson.string(file, "name"), BrowserJson.longValue(file, "size", 0),
+                            BrowserJson.string(file, "sha1"), BrowserJson.string(file, "projectId"), BrowserJson.string(file, "versionId"),
+                            BrowserJson.string(file, "version"), BrowserJson.string(file, "title"), BrowserJson.string(file, "iconUrl"),
+                            BrowserJson.string(file, "pageUrl")));
+                });
+                return new ReactorDemoPreview(players, resources);
+            });
+            demoPreviews.put(serverId, resident);
+            Async<ReactorDemoPreview> admitted = resident;
+            resident.whenComplete((value, failure) -> {
+                if (failure != null) demoPreviews.remove(serverId, admitted);
+            });
+        }
+        return resident.thenApply(value -> {
+            if (!Objects.equals(authority, demoAuthority()) || closed) throw new Async.Cancellation();
+            return value;
+        });
+    }
+
+    private String demoAuthority() {
+        BrowserLaunchSession.Metadata session = sessionSource.get();
+        return session.demo() && !session.ticket().isBlank() ? session.subjectId() : "";
+    }
+
+    private void clearDemoPreviews() {
+        demoPreviews.values().forEach(request -> {
+            ReactorDemoPreview preview = request.failure() == null && !request.isCancelled() ? request.getNow(null) : null;
+            if (preview != null) preview.close();
+        });
+        demoPreviews.clear();
+        demoAuthority = "";
+    }
+
+    Async<String> readConfiguration(String serverId, String relativePath) {
+        return sessionSource.get().demo() ? demoPreview(serverId).thenCompose(preview ->
+                preview.read(relativePath, () -> getFileContentAllowMissing(serverId, relativePath)))
+                : getFileContentAllowMissing(serverId, relativePath);
+    }
+
+    Async<String> resourceProfile(String serverId) {
+        return sessionSource.get().demo() ? demoPreview(serverId).thenApply(ignored -> null)
+                : getFileContentAllowMissing(serverId, ".meta/modpack-profile.json");
+    }
+
+    Async<Void> writeConfiguration(String serverId, String relativePath, String content) {
+        if (!sessionSource.get().demo()) return writeFile(serverId, relativePath, content);
+        return demoPreview(serverId).thenAccept(preview -> preview.write(relativePath, content));
     }
 
     @Override
@@ -883,8 +1003,14 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         String value = resourcePath == null ? "" : resourcePath.strip().replace('\\', '/');
         int separator = value.lastIndexOf('/');
         String resource = separator < 0 ? value : value.substring(separator + 1);
-        String body = json(Map.of("resource", resource, "enabled", enabled));
-        return demoRequest("POST", "/remotely-web/demo/servers/" + path(serverId) + "/resources/toggle", body).thenApply(ignored -> null);
+        return demoPreview(serverId).thenCompose(preview -> {
+            if (preview.resource(resourcePath) != null) {
+                preview.toggle(resourcePath, enabled);
+                return Async.completed(null);
+            }
+            String body = json(Map.of("resource", resource, "enabled", enabled));
+            return demoRequest("POST", "/remotely-web/demo/servers/" + path(serverId) + "/resources/toggle", body).thenApply(ignored -> null);
+        });
     }
 
     Async<Void> resumeResourceToggle(String jobId) {
@@ -996,7 +1122,7 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
             return ServerScheduleModels.Capabilities.unavailable("Scheduling Is Not Available In Reactor Demo");
         }
         return new ServerScheduleModels.Capabilities(true, "", ServerScheduleModels.Durability.BACKEND,
-                true, true, true, true, true);
+                true, true, true, true, true, true, true);
     }
 
     @Override
@@ -1141,11 +1267,13 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
 
     @Override
     public Async<ServerModels.StartupSettings> getServerStartupConfig(String serverId) {
+        if (sessionSource.get().demo()) return demoPreview(serverId).thenCompose(preview -> preview.startup(() -> getServer(serverId)));
         return get("/servers/" + path(serverId) + "/startup-settings", BrowserRemotelyServerApi::startupSettings);
     }
 
     @Override
     public Async<Void> updateServerStartupVariables(String serverId, String revision, Map<String, String> values) {
+        if (sessionSource.get().demo()) return demoPreview(serverId).thenAccept(preview -> preview.startup(revision, values));
         if (revision == null || revision.isBlank()) return Async.failed(new IllegalArgumentException("Startup Settings Revision Is Required"));
         Map<String, String> variables = values == null ? Map.of() : new LinkedHashMap<>(values);
         return put("/servers/" + path(serverId) + "/startup-settings", Map.of(
@@ -1698,10 +1826,11 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         String resolvedServerId = requireServerId(serverId);
         return size -> {
             TerminalSize resolvedSize = size == null ? new TerminalSize(120, 32) : size;
-            BrowserSshTerminalTransport[] holder = new BrowserSshTerminalTransport[1];
-            BrowserSshTerminalTransport terminal = new BrowserSshTerminalTransport(
-                    () -> browserSshSession(resolvedServerId), resolvedSize,
-                    () -> removeActiveTerminal(holder[0]));
+            TerminalTransport[] holder = new TerminalTransport[1];
+            TerminalTransport terminal = BrowserLaunchSession.metadata().demo()
+                    ? new BrowserConsoleTransport(listener -> openTerminal(resolvedServerId, listener), () -> removeActiveTerminal(holder[0]))
+                    : new BrowserSshTerminalTransport(() -> browserSshSession(resolvedServerId), resolvedSize,
+                            () -> removeActiveTerminal(holder[0]));
             holder[0] = terminal;
             synchronized (activeTerminalTransports) {
                 activeTerminalTransports.add(terminal);
@@ -1710,7 +1839,7 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         };
     }
 
-    private void removeActiveTerminal(BrowserSshTerminalTransport terminal) {
+    private void removeActiveTerminal(TerminalTransport terminal) {
         if (terminal == null) return;
         synchronized (activeTerminalTransports) {
             activeTerminalTransports.remove(terminal);
@@ -1718,12 +1847,12 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
     }
 
     public void closeAllTerminals() {
-        List<BrowserSshTerminalTransport> terminals;
+        List<TerminalTransport> terminals;
         synchronized (activeTerminalTransports) {
             terminals = new ArrayList<>(activeTerminalTransports);
             activeTerminalTransports.clear();
         }
-        terminals.forEach(BrowserSshTerminalTransport::close);
+        terminals.forEach(TerminalTransport::close);
         Set<UUID> consoleSessions;
         synchronized (activeConsoleSessions) {
             consoleSessions = Set.copyOf(activeConsoleSessions);
@@ -3732,6 +3861,15 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         return new RemotelyCapabilityException(status, code, message);
     }
 
+    static IllegalStateException resourcePoolFailure(int status, String body) {
+        JsonObject root = parseCapabilityBody(body);
+        String message = BrowserJson.string(root, "message", "").strip();
+        if (status == 400 && "Bad Request".equals(BrowserJson.string(root, "error", "")) && !message.isBlank()) {
+            return new RemotelyCapabilityException(status, "resource_pool_invalid", message.substring(0, Math.min(160, message.length())));
+        }
+        return capabilityFailure(status, body);
+    }
+
     private static JsonObject parseCapabilityBody(String body) {
         if (body == null || body.isBlank()) return new JsonObject();
         try {
@@ -4064,9 +4202,9 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
     }
 
     private Async<String> demoRequestOnce(String method, String endpoint, String body, boolean retry) {
-        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(BrowserLaunchSession.apiBaseUrl() + endpoint))
+        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(apiBaseUrl + endpoint))
                 .header("Accept", "application/json")
-                .header("X-Remotely-Web-Ticket", BrowserLaunchSession.ticket())
+                .header("X-Remotely-Web-Ticket", sessionSource.get().ticket())
                 .timeout(Duration.ofSeconds(20));
         if (body != null) builder.header("Content-Type", "application/json");
         builder.method(method, body == null ? HttpRequest.BodyPublishers.noBody() : HttpRequest.BodyPublishers.ofString(body));
@@ -4099,7 +4237,8 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
                 if (response.statusCode() == 401) {
                     return sessionExpired(new IllegalStateException("Browser Session Expired"));
                 }
-                return Async.failed(capabilityFailure(response.statusCode(), response.body()));
+                return Async.failed(endpoint.startsWith("/billing/resource-pools/") || endpoint.startsWith("/resource-pools/")
+                        ? resourcePoolFailure(response.statusCode(), response.body()) : capabilityFailure(response.statusCode(), response.body()));
             }
             return Async.completed(response.body() == null ? "" : response.body());
         });

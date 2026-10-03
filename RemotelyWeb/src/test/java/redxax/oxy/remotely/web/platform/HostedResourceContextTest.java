@@ -18,8 +18,51 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class HostedResourceContextTest {
+    @Test
+    void metadataSurvivesOnlyAnUnchangedPhysicalFileIdentity() {
+        ResourceIndexOrchestrator.ResolvedMetadata metadata = new ResourceIndexOrchestrator.ResolvedMetadata(
+                "Modrinth", "project", "version", "1", "Plugin", "", List.of(), "", "", null);
+        ResourceIndexOrchestrator.ResolvedEntry previous = new ResourceIndexOrchestrator.ResolvedEntry(
+                "/plugins", "plugin.jar", 42L, 100L, true, "abc", 123L, metadata);
+        ResourceIndexOrchestrator.ResolvedEntry unchanged = new ResourceIndexOrchestrator.ResolvedEntry(
+                "/plugins", "plugin.jar", 42L, 100L, false, null, null, null);
+        ResourceIndexOrchestrator.ResolvedEntry reused = HostedResourceContext.retainMetadata(previous, unchanged);
+        assertSame(metadata, reused.metadata());
+        assertEquals("abc", reused.hash());
+        assertFalse(reused.enabled());
+        for (ResourceIndexOrchestrator.ResolvedEntry changed : List.of(
+                new ResourceIndexOrchestrator.ResolvedEntry("/plugins", "plugin.jar", 43L, 100L, true, null, null, null),
+                new ResourceIndexOrchestrator.ResolvedEntry("/plugins", "plugin.jar", 42L, 101L, true, null, null, null),
+                new ResourceIndexOrchestrator.ResolvedEntry("/plugins", "plugin.jar", 42L, 100L, true, "changed", null, null),
+                new ResourceIndexOrchestrator.ResolvedEntry("/plugins", "plugin.jar", 42L, 100L, true, null, 456L, null))) {
+            assertSame(changed, HostedResourceContext.retainMetadata(previous, changed));
+        }
+        ResourceIndexOrchestrator.ResolvedEntry unknown = new ResourceIndexOrchestrator.ResolvedEntry(
+                "/plugins", "plugin.jar", 42L, 0L, true, null, null, null);
+        ResourceIndexOrchestrator.ResolvedEntry unstamped = new ResourceIndexOrchestrator.ResolvedEntry(
+                "/plugins", "plugin.jar", 42L, 0L, true, "abc", 123L, metadata);
+        assertSame(unknown, HostedResourceContext.retainMetadata(unstamped, unknown));
+        ResourceIndexOrchestrator.ResolvedEntry signed = new ResourceIndexOrchestrator.ResolvedEntry(
+                "/plugins", "plugin.jar", 42L, 0L, true, "sha1:ABC", null, null);
+        assertSame(metadata, HostedResourceContext.retainMetadata(unstamped, signed).metadata());
+    }
+
+    @Test
+    void aPartialPhysicalListingCannotBeAcceptedAsTheCompleteResourceInventory() {
+        ResourceIndexOrchestrator.Result partial = canonicalIndex(List.of("/mods", "/plugins"), Map.of(
+                "/mods", List.of(entry("/mods", "new.jar", null, null))), Map.of("/plugins", "plugins unavailable"));
+        ResourceIndexOrchestrator.Result unavailable = canonicalIndex(List.of("/plugins"), Map.of(),
+                Map.of("/plugins", "plugins unavailable"));
+
+        assertThrows(IllegalStateException.class, () -> HostedResourceContext.completePhysicalIndex(partial));
+        assertThrows(IllegalStateException.class, () -> HostedResourceContext.completePhysicalIndex(unavailable));
+        ResourceIndexOrchestrator.Result empty = canonicalIndex(List.of("/plugins"), Map.of(), Map.of());
+        assertSame(empty, HostedResourceContext.completePhysicalIndex(empty));
+    }
+
     @Test
     void directoryAggregationKeepsSuccessfulFoldersWithFailureMetadata() {
         ResourceIndexOrchestrator.Result result = canonicalIndex(List.of("/mods", "/plugins"), Map.of(

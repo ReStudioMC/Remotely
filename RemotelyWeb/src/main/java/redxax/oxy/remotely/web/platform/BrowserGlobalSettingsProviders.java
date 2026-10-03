@@ -106,8 +106,7 @@ final class BrowserGlobalSettingsProviders {
         if (!BrowserLaunchSession.authenticated()) {
             return "";
         }
-        BrowserLaunchSession.Metadata metadata = BrowserLaunchSession.metadata();
-        return firstNonBlank(metadata.grantId(), metadata.ticket());
+        return BrowserLaunchSession.authorityKey();
     }
 
     private static ServerClientSettingsProvider browserServerSettings(BrowserRemotelyConfigStore config, BrowserSettingsRuntime runtime) {
@@ -209,7 +208,7 @@ final class BrowserGlobalSettingsProviders {
             public void checkForUpdates() { }
             public boolean current(Screen screen) {
                 return runtime.active && runtime.screen == screen && runtime.lifecycleGeneration > 0
-                        && ScreenManager.getInstance().getCurrentScreen() == screen
+                        && ReStudioAccountSettingsProvider.super.current(screen)
                         && Objects.equals(runtime.initialSubjectScope, currentSubjectScope())
                         && Objects.equals(runtime.initialSessionScope, currentSessionScope());
             }

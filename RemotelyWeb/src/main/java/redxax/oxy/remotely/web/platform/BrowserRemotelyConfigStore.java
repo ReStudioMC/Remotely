@@ -181,6 +181,25 @@ public final class BrowserRemotelyConfigStore implements RemotelyConfigStore, Re
     public void save() {
     }
 
+    @Override
+    public String readPendingNetwork(String key) {
+        return storage.read(PREFIX + key);
+    }
+
+    @Override
+    public void writePendingNetwork(String key, String body) {
+        String storageKey = PREFIX + key;
+        write(storageKey, body);
+        if (!body.equals(storage.read(storageKey))) throw new IllegalStateException("Pending Network Request Was Not Saved");
+    }
+
+    @Override
+    public void removePendingNetwork(String key) {
+        String storageKey = PREFIX + key;
+        erase(storageKey);
+        if (storage.read(storageKey) != null) throw new IllegalStateException("Pending Network Request Was Not Cleared");
+    }
+
     public void apply() {
         Config.isDev = getIsDev();
         applyBrowserAppearance();

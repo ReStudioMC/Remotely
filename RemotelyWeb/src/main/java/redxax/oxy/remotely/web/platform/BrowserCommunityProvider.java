@@ -8,6 +8,7 @@ import restudio.rebase.restudio.api.models.FeedbackModels;
 import restudio.rebase.restudio.community.ReStudioAccountManagementProvider;
 import restudio.rebase.restudio.community.ReStudioCommunityProvider;
 import restudio.rebase.restudio.community.ReStudioCommunityClient;
+import restudio.rebase.restudio.community.FeedbackSync;
 import restudio.rescreen.platform.Async;
 import restudio.rescreen.platform.http.HttpTransport;
 import restudio.rescreen.util.Identifier;
@@ -46,9 +47,33 @@ public final class BrowserCommunityProvider implements ReStudioCommunityProvider
         }
     }
 
+    @Override
+    public Async<String> feedbackRequest(String method, String suffix, String body) { return client.feedbackRequest(method, suffix, body); }
+    @Override
+    public FeedbackSync feedbackSync() { return client.feedbackSync(); }
+    @Override
+    public Async<FeedbackModels.File> uploadThreadFile(String id, String commentId, String name, String contentType, byte[] bytes) {
+        return client.uploadThreadFile(id, commentId, name, contentType, bytes);
+    }
+
+    @Override
+    public Async<FeedbackModels.File> uploadThreadFile(String id, String commentId, String name, String contentType, byte[] bytes, String requestId) {
+        return client.uploadThreadFile(id, commentId, name, contentType, bytes, requestId);
+    }
+    @Override
+    public Async<byte[]> downloadThreadFile(String postId, String fileId) { return client.downloadThreadFile(postId, fileId); }
+
+    @Override
+    public Async<Void> markNotificationRead(FeedbackModels.Notification notification) { return client.markNotificationRead(notification); }
+
     public void close() {
         client.close();
         session.close();
+    }
+
+    @Override
+    public Async<String> collaborationRequest(String method, String path, String body) {
+        return client.collaborationRequest(method, path, body);
     }
 
     @Override

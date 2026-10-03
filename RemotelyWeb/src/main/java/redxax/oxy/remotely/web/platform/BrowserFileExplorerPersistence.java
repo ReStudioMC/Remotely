@@ -4,18 +4,69 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import restudio.rebase.backend.FileExplorerRuntime;
+import restudio.rebase.backend.FileTags;
+import restudio.rescreen.platform.Async;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+import java.util.Objects;
+import java.util.function.BooleanSupplier;
 
 final class BrowserFileExplorerPersistence {
     private static final String TABS_PREFIX = "ui.explorer.tabs.";
+    private static final String FILE_TAGS_KEY = "ui.explorer.colors.v1";
     private final BrowserRemotelyConfigStore config;
 
     BrowserFileExplorerPersistence(BrowserRemotelyConfigStore config) {
         this.config = config;
+    }
+
+    FileTags.Store fileTagStore(BooleanSupplier current) {
+        String subject = BrowserLaunchSession.authenticated() ? BrowserLaunchSession.metadata().subjectId() : "";
+        return new FileTags.Store() {
+            @Override
+            public Async<String> read() {
+                try {
+                    requireValid();
+                    String value = config.get(FILE_TAGS_KEY, "");
+                    requireValid();
+                    return Async.completed(value);
+                } catch (Throwable failure) {
+                    return Async.failed(failure);
+                }
+            }
+
+            @Override
+            public Async<Void> write(String value) {
+                try {
+                    requireValid();
+                    config.set(FILE_TAGS_KEY, value);
+                    config.save();
+                    requireValid();
+                    if (!Objects.equals(value, config.get(FILE_TAGS_KEY, null))) {
+                        throw new IllegalStateException("Tags Were Not Saved");
+                    }
+                    requireValid();
+                    return Async.completed(null);
+                } catch (Throwable failure) {
+                    return Async.failed(failure);
+                }
+            }
+
+            @Override
+            public boolean valid() {
+                return available() && current != null && current.getAsBoolean()
+                        && Objects.equals(subject, BrowserLaunchSession.metadata().subjectId());
+            }
+
+            private void requireValid() {
+                if (!valid()) throw new IllegalStateException("Folder Tag Session Changed");
+            }
+        };
     }
 
     FileExplorerRuntime.ExplorerSettings settings() {
@@ -131,10 +182,11 @@ final class BrowserFileExplorerPersistence {
         if (source == null || source.path == null || source.path.isBlank()) return null;
         String serverId = source.extras.get("serverId");
         String type = source.apiType == null ? "" : source.apiType.trim();
-        if (serverId == null || serverId.isBlank() || (!type.isBlank() && !"restudio".equalsIgnoreCase(type))) return null;
+        if (type.isBlank()) type = "restudio";
+        if (serverId == null || serverId.isBlank() || !Set.of("restudio", "ptero", "pterodactyl", "calagopus").contains(type.toLowerCase(Locale.ROOT))) return null;
         FileExplorerRuntime.TabDescriptor descriptor = new FileExplorerRuntime.TabDescriptor();
         descriptor.path = source.path;
-        descriptor.apiType = "restudio";
+        descriptor.apiType = type.toLowerCase(Locale.ROOT);
         descriptor.apiHost = source.apiHost;
         descriptor.extras.putAll(source.extras);
         return descriptor;

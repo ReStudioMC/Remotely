@@ -138,6 +138,7 @@ public final class BrowserHostedSettingsProviders {
         Objects.requireNonNull(api, "api");
         String id = requireServerId(serverId);
         return new SubuserSettingsProvider() {
+            public String collaborationResourceId() { return id; }
             public Async<List<ServerModels.Subuser>> getSubusers() { return api.getSubusers(id); }
             public Async<ServerModels.SystemPermissions> getSystemPermissions() { return api.getSystemPermissions(); }
             public Async<ServerModels.Subuser> createSubuser(String email, List<String> permissions) { return api.createSubuser(id, email, permissions); }

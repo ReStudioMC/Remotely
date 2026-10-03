@@ -24,6 +24,11 @@ final class RemotelyCommunitySessionTransport implements ReStudioCommunitySessio
     }
 
     @Override
+    public String authorityKey() {
+        return BrowserLaunchSession.authorityKey();
+    }
+
+    @Override
     public ReStudioAccount account() {
         BrowserLaunchSession.Metadata metadata = BrowserLaunchSession.metadata();
         ReStudioAccount value = new ReStudioAccount();

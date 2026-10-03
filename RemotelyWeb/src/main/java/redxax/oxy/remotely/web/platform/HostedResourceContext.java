@@ -5,6 +5,8 @@ import com.google.gson.JsonObject;
 import org.teavm.jso.JSBody;
 import restudio.rebase.backend.CapabilityDescriptor;
 import restudio.rebase.backend.RemotePath;
+import restudio.rebase.backend.feature.BackupOperations;
+import redxax.oxy.remotely.RemotelyServerApi;
 import restudio.rescreen.platform.Async;
 import restudio.rescreen.platform.TaskScheduler;
 import restudio.rebase.resource.ResourceIndexOrchestrator;
@@ -45,6 +47,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -66,6 +69,7 @@ final class HostedResourceContext implements ResourceBrowserContext {
     private final List<Consumer<CanonicalResourceInventory>> canonicalInventoryListeners = new ArrayList<>();
     private final Map<String, BrowserRemotelyServerApi.HostedModpackCapabilities> modpackCapabilities = new LinkedHashMap<>();
     private final BrowserTaskScheduler scheduler = new BrowserTaskScheduler();
+    private final Set<Async<Void>> resourceBackups = new LinkedHashSet<>();
     private TaskScheduler.ScheduledTask pendingResourceNotification;
     private OperationFence pendingResourceNotificationFence;
     private ResourceCacheKey cacheKey;
@@ -279,7 +283,7 @@ final class HostedResourceContext implements ResourceBrowserContext {
                 ResourceContainerCapabilities.UPDATE_SELECTION, CapabilityDescriptor.supported(
                         ResourceContainerCapabilities.UPDATE_SELECTION),
                 ResourceContainerCapabilities.BACKUP, mutationCapability(ResourceContainerCapabilities.BACKUP,
-                        "Server Backups Are Unavailable", "backups.create"),
+                        "Server Backups Are Unavailable", "backups.create", "backups.list"),
                 ResourceContainerCapabilities.UPLOAD, CapabilityDescriptor.supported(
                         ResourceContainerCapabilities.UPLOAD));
     }
@@ -463,58 +467,97 @@ final class HostedResourceContext implements ResourceBrowserContext {
                         resource.metadata().availableUpdate() != null)).distinct().toList();
     }
 
+    private record ResourceIndexLoad(ResourceDataCache cache, long generation, Async<ResourceIndexOrchestrator.Result> request) {
+    }
+
     private Async<ResourceIndexOrchestrator.Result> canonicalResourceIndex(boolean force, OperationFence fence) {
-        if (!hasInstance()) return Async.completed(new ResourceIndexOrchestrator.Result(List.of(), Map.of()));
+        ResourceIndexLoad load = loadResourceIndex(force, fence);
+        return load.request().thenApply(result -> {
+            if (!isInventoryCurrent(fence, load.cache(), load.generation())) throw new Async.Cancellation();
+            return result;
+        });
+    }
+
+    private ResourceIndexLoad loadResourceIndex(boolean force, OperationFence fence) {
+        if (!hasInstance()) return new ResourceIndexLoad(dataCache, dataCache.resourceIndexGeneration,
+                Async.completed(new ResourceIndexOrchestrator.Result(List.of(), Map.of())));
         if (!force && dataCache.canonicalResourceRequest != null && isDataCurrent(fence)) {
             if (!dataCache.canonicalResourceRequest.isDone() || dataCache.canonicalResourceResult == null) {
-                return view(dataCache.canonicalResourceRequest);
+                return new ResourceIndexLoad(dataCache, dataCache.resourceIndexGeneration, view(dataCache.canonicalResourceRequest));
             }
-            return Async.completed(dataCache.canonicalResourceResult);
+            return new ResourceIndexLoad(dataCache, dataCache.resourceIndexGeneration, Async.completed(dataCache.canonicalResourceResult));
         }
-        if (force) {
-            dataCache.resourceDirectoryRequests.clear();
-            dataCache.canonicalResourceResult = null;
-        }
+        ResourceDataCache cache = dataCache;
+        long generation = ++cache.resourceIndexGeneration;
+        cancel(cache.canonicalResourceRequest);
+        cancel(cache.resourceDirectoriesRequest);
+        List.copyOf(cache.resourceDirectoryRequests.values()).forEach(HostedResourceContext::cancel);
+        cache.resourceDirectoryRequests.clear();
+        cache.resourceDirectoriesRequest = null;
+        cancel(cache.resourceHydrationRequest);
+        cache.resourceHydrationRequest = null;
+        cache.resourceHydrationGeneration++;
+        cancel(cache.modpackProfileRequest);
+        cache.modpackProfileRequest = null;
+        cache.modpackProfileScheduled = false;
+        cache.canonicalResourceResult = null;
         Async<ResourceIndexOrchestrator.Result> request = withCapabilities(() -> resourceDirectoriesAsync(fence)
                 .thenCompose(directories -> {
-                    dataCache.resourceDirectorySnapshots.keySet().removeIf(path -> !directories.contains(path));
-                    dataCache.resourceFailureMessages.keySet().removeIf(path -> !isDiscoveryFailure(path)
+                    if (!isInventoryCurrent(fence, cache, generation)) return staleOperation();
+                    cache.resourceDirectorySnapshots.keySet().removeIf(path -> !directories.contains(path));
+                    cache.resourceFailureMessages.keySet().removeIf(path -> !isDiscoveryFailure(path)
                             && !directories.contains(path));
-                    return resourceIndex.indexPhysical(directories, resourceSource(fence));
+                    return resourceIndex.indexPhysical(directories, resourceSource(fence, cache, generation)).thenApply(result -> {
+                        if (!isInventoryCurrent(fence, cache, generation)) throw new Async.Cancellation();
+                        return completePhysicalIndex(result);
+                    });
                 }), "files.read", "files.list");
-        dataCache.canonicalResourceRequest = request;
+        cache.canonicalResourceRequest = request;
         request.whenComplete((result, failure) -> {
+            if (!isInventoryCurrent(fence, cache, generation)) return;
             if (failure != null) {
-                if (dataCache.canonicalResourceRequest == request) {
-                    dataCache.canonicalResourceRequest = null;
-                    dataCache.canonicalResourceResult = null;
+                if (cache.canonicalResourceRequest == request) {
+                    cache.canonicalResourceRequest = null;
+                    cache.canonicalResourceResult = null;
                 }
                 return;
             }
-            if (dataCache.canonicalResourceRequest != request || !isCurrent(fence)) return;
+            if (cache.canonicalResourceRequest != request) return;
             List<ResourceIndexOrchestrator.ResolvedEntry> resources = result == null ? List.of()
                     : preserveLastGoodMetadata(result.resources());
-            dataCache.indexedResources = resources;
-            dataCache.canonicalResourceResult = new ResourceIndexOrchestrator.Result(resources,
+            cache.indexedResources = resources;
+            cache.canonicalResourceResult = new ResourceIndexOrchestrator.Result(resources,
                     result == null ? Map.of() : result.failures());
-            dataCache.resourceFailureMessages.keySet().removeIf(path -> !isDiscoveryFailure(path)
-                    && !dataCache.resourceDirectorySnapshots.containsKey(path));
+            cache.resourceFailureMessages.keySet().removeIf(path -> !isDiscoveryFailure(path)
+                    && !cache.resourceDirectorySnapshots.containsKey(path));
             if (result != null) mergeResourceFailures(result.failures());
-            dataCache.modpackProfile = null;
+            cache.modpackProfile = null;
             notifyResourceListeners(fence);
-            scheduleResourceHydration(result, fence);
+            if (isInventoryCurrent(fence, cache, generation)) scheduleResourceHydration(result, fence);
         });
-        return view(request);
+        return new ResourceIndexLoad(cache, generation, view(request));
     }
 
-    private ResourceIndexOrchestrator.Source resourceSource(OperationFence fence) {
+    private boolean isInventoryCurrent(OperationFence fence, ResourceDataCache cache, long generation) {
+        return cache == dataCache && cache.resourceIndexGeneration == generation && isCurrent(fence);
+    }
+
+    static ResourceIndexOrchestrator.Result completePhysicalIndex(ResourceIndexOrchestrator.Result result) {
+        if (!result.failures().isEmpty()) {
+            throw new IllegalStateException("Resource Directories Could Not Be Loaded: " + result.failures());
+        }
+        return result;
+    }
+
+    private ResourceIndexOrchestrator.Source resourceSource(OperationFence fence, ResourceDataCache cache, long generation) {
         return new ResourceIndexOrchestrator.Source() {
             @Override
             public Async<List<ResourceIndexOrchestrator.Entry>> list(String directory) {
-                return listResourceDirectory(directory).thenApply(entries -> {
-                    if (!isCurrent(fence)) throw new Async.Cancellation();
+                if (!isInventoryCurrent(fence, cache, generation)) return staleOperation();
+                return listResourceDirectory(directory, fence, cache, generation).thenApply(entries -> {
+                    if (!isInventoryCurrent(fence, cache, generation)) throw new Async.Cancellation();
                     List<ResourceIndexOrchestrator.Entry> mapped = ResourceIndexEntries.fromFiles(directory, entries);
-                    dataCache.resourceDirectorySnapshots.put(directory, mapped);
+                    cache.resourceDirectorySnapshots.put(directory, mapped);
                     recordResourceFailure(directory, null);
                     return mapped;
                 });
@@ -522,7 +565,7 @@ final class HostedResourceContext implements ResourceBrowserContext {
 
             @Override
             public List<ResourceIndexOrchestrator.Entry> snapshot(String directory) {
-                return dataCache.resourceDirectorySnapshots.getOrDefault(directory, List.of());
+                return cache.resourceDirectorySnapshots.getOrDefault(directory, List.of());
             }
 
             @Override
@@ -530,7 +573,7 @@ final class HostedResourceContext implements ResourceBrowserContext {
                     List<ResourceIndexOrchestrator.Entry> files) {
                 List<String> paths = ResourceIndexRequests.paths(files);
                 if (paths.isEmpty()) return Async.completed(Map.of());
-                if (!isCurrent(fence)) return staleOperation();
+                if (!isInventoryCurrent(fence, cache, generation)) return staleOperation();
                 Map<String, ResourceIndexOrchestrator.HashResolution> hashes = new LinkedHashMap<>();
                 paths.forEach(path -> hashes.put(path, null));
                 boolean[] batchFailed = {false};
@@ -541,7 +584,7 @@ final class HostedResourceContext implements ResourceBrowserContext {
                 for (List<String> batch : hashBatches) {
                     int currentBatch = ++batchNumber;
                     batches = batches.thenCompose(ignored -> {
-                        if (!isCurrent(fence)) return staleOperation();
+                        if (!isInventoryCurrent(fence, cache, generation)) return staleOperation();
                         Async<List<ServerModels.ResourceFileHash>> request;
                         try {
                             request = Objects.requireNonNull(api.resolveResourceFileHashes(serverId, batch), "Resource Hash Request");
@@ -549,16 +592,16 @@ final class HostedResourceContext implements ResourceBrowserContext {
                             request = Async.failed(failure);
                         }
                         return request.thenApply(values -> {
-                            if (!isCurrent(fence)) throw new Async.Cancellation();
+                            if (!isInventoryCurrent(fence, cache, generation)) throw new Async.Cancellation();
                             ResourceIndexRequests.merge(hashes, values.stream().map(value -> new ResourceIndexRequests.HashValue(
                                     value.path, value.sha1, fingerprintValue(normalizeFingerprint(value.murmur2)))).toList());
                             return null;
                         }).handle((ignoredValue, failure) -> {
                             if (failure == null) return null;
-                            if (!isCurrent(fence)) throw new Async.Cancellation();
+                            if (!isInventoryCurrent(fence, cache, generation)) throw new Async.Cancellation();
                             if (isCancellation(failure)) throw rethrow(failure);
                             batchFailed[0] = true;
-                            dataCache.resourceFailureMessages.put("files.hash",
+                            cache.resourceFailureMessages.put("files.hash",
                                     "Hash Batch " + currentBatch + "/" + batchCount + " Failed: "
                                             + failureMessage(failure, "Resource Hash Resolution Failed"));
                             return null;
@@ -566,9 +609,9 @@ final class HostedResourceContext implements ResourceBrowserContext {
                     });
                 }
                 return batches.thenApply(ignored -> {
-                    if (!isCurrent(fence)) throw new Async.Cancellation();
+                    if (!isInventoryCurrent(fence, cache, generation)) throw new Async.Cancellation();
                     hashes.values().removeIf(Objects::isNull);
-                    if (!batchFailed[0]) dataCache.resourceFailureMessages.remove("files.hash");
+                    if (!batchFailed[0]) cache.resourceFailureMessages.remove("files.hash");
                     return hashes;
                 });
             }
@@ -579,17 +622,18 @@ final class HostedResourceContext implements ResourceBrowserContext {
     private void scheduleResourceHydration(ResourceIndexOrchestrator.Result physical, OperationFence fence) {
         if (physical == null || !isCurrent(fence)) return;
         ResourceDataCache cache = dataCache;
+        long inventoryGeneration = cache.resourceIndexGeneration;
         cancel(cache.resourceHydrationRequest);
         cache.resourceHydrationRequest = null;
         long generation = ++cache.resourceHydrationGeneration;
         scheduler.execute(() -> {
-            if (!isCurrent(fence) || cache != dataCache || cache.resourceHydrationGeneration != generation) return;
-            Async<ResourceIndexOrchestrator.Result> hydration = resourceIndex.hydrate(physical, resourceSource(fence),
+            if (!isInventoryCurrent(fence, cache, inventoryGeneration) || cache.resourceHydrationGeneration != generation) return;
+            Async<ResourceIndexOrchestrator.Result> hydration = resourceIndex.hydrate(physical, resourceSource(fence, cache, inventoryGeneration),
                     this::resolveMetadata);
             cache.resourceHydrationRequest = hydration;
             hydration.whenComplete((result, failure) -> {
                 if (cache.resourceHydrationRequest != hydration || cache.resourceHydrationGeneration != generation
-                        || !isCurrent(fence) || cache != dataCache) return;
+                        || !isInventoryCurrent(fence, cache, inventoryGeneration)) return;
                 cache.resourceHydrationRequest = null;
                 if (failure != null) {
                     if (isCancellation(failure)) {
@@ -618,15 +662,23 @@ final class HostedResourceContext implements ResourceBrowserContext {
         dataCache.indexedResources.stream().filter(Objects::nonNull)
                 .forEach(entry -> previous.put(entry.path(), entry));
         if (previous.isEmpty() || physical == null || physical.isEmpty()) return physical == null ? List.of() : physical;
-        return physical.stream().filter(Objects::nonNull).map(entry -> {
-            ResourceIndexOrchestrator.ResolvedEntry old = previous.get(entry.path());
-            if (old == null) return entry;
-            String hash = entry.hash() == null || entry.hash().isBlank() ? old.hash() : entry.hash();
-            Long murmur2 = entry.murmur2() == null ? old.murmur2() : entry.murmur2();
-            ResourceIndexOrchestrator.ResolvedMetadata metadata = entry.metadata() == null ? old.metadata() : entry.metadata();
-            return new ResourceIndexOrchestrator.ResolvedEntry(entry.directoryPath(), entry.fileName(), entry.size(),
-                    entry.mtime(), entry.enabled(), hash, murmur2, metadata);
-        }).toList();
+        return physical.stream().filter(Objects::nonNull).map(entry -> retainMetadata(previous.get(entry.path()), entry)).toList();
+    }
+
+    static ResourceIndexOrchestrator.ResolvedEntry retainMetadata(ResourceIndexOrchestrator.ResolvedEntry previous,
+                                                                  ResourceIndexOrchestrator.ResolvedEntry current) {
+        if (previous == null || !previous.path().equals(current.path()) || previous.size() != current.size()
+                || previous.mtime() != current.mtime()) return current;
+        if (current.hash() != null && !current.hash().isBlank()
+                && !normalizeHash(current.hash()).equals(normalizeHash(previous.hash()))) return current;
+        if (current.murmur2() != null && !current.murmur2().equals(previous.murmur2())) return current;
+        if (current.mtime() <= 0 && (current.hash() == null || current.hash().isBlank()
+                || previous.hash() == null || previous.hash().isBlank())) return current;
+        String hash = current.hash() == null || current.hash().isBlank() ? previous.hash() : current.hash();
+        Long murmur2 = current.murmur2() == null ? previous.murmur2() : current.murmur2();
+        ResourceIndexOrchestrator.ResolvedMetadata metadata = current.metadata() == null ? previous.metadata() : current.metadata();
+        return new ResourceIndexOrchestrator.ResolvedEntry(current.directoryPath(), current.fileName(), current.size(),
+                current.mtime(), current.enabled(), hash, murmur2, metadata);
     }
 
     private Async<ResourceIndexOrchestrator.MetadataResolution> resolveMetadata(List<String> hashes,
@@ -840,7 +892,154 @@ final class HostedResourceContext implements ResourceBrowserContext {
     }
 
     Async<Void> createResourceBackup(String name) {
-        return withCapabilities(() -> api.createBackup(serverId, name, List.of(), false).thenApply(ignored -> null), "backups.create");
+        OperationFence fence = captureFence();
+        return withCapabilities(() -> {
+            if (!isCurrent(fence)) return Async.failed(new Async.Cancellation());
+            Async<Void> backup = awaitResourceBackup(api, serverId, name, scheduler, () -> isCurrent(fence));
+            resourceBackups.add(backup);
+            backup.whenComplete((ignored, failure) -> resourceBackups.remove(backup));
+            return backup;
+        }, "backups.create", "backups.list");
+    }
+
+    static Async<Void> awaitResourceBackup(RemotelyServerApi api, String serverId, String name,
+                                           TaskScheduler scheduler, BooleanSupplier current) {
+        return new ResourceBackup(api, new BackupOperations.CreateRequest(UUID.randomUUID().toString(), serverId, name,
+                List.of(), false), scheduler, current).start();
+    }
+
+    private static final class ResourceBackup {
+        private final RemotelyServerApi api;
+        private final BackupOperations.CreateRequest request;
+        private final TaskScheduler scheduler;
+        private final BooleanSupplier current;
+        private final Async<Void> result = Async.pending();
+        private TaskScheduler.ScheduledTask deadline;
+        private TaskScheduler.ScheduledTask retry;
+        private Async<?> active;
+        private String backupId;
+        private String waiting = "Backup Is Still Being Created";
+
+        private ResourceBackup(RemotelyServerApi api, BackupOperations.CreateRequest request,
+                               TaskScheduler scheduler, BooleanSupplier current) {
+            this.api = api;
+            this.request = request;
+            this.scheduler = scheduler;
+            this.current = current;
+        }
+
+        private Async<Void> start() {
+            result.whenComplete((ignored, failure) -> {
+                if (deadline != null) deadline.cancel();
+                if (retry != null) retry.cancel();
+                if (active != null && !active.isDone()) active.cancel();
+            });
+            try {
+                deadline = scheduler.schedule(() -> result.fail(new IllegalStateException(
+                        waiting + ". Updates Were Not Started. Check Backups Before Retrying")), Duration.ofMinutes(10));
+                create(false);
+            } catch (Throwable failure) {
+                result.fail(failure);
+            }
+            return result;
+        }
+
+        private boolean ready() {
+            if (result.isDone()) return false;
+            if (current.getAsBoolean()) return true;
+            result.cancel();
+            return false;
+        }
+
+        private void create(boolean observe) {
+            if (!ready()) return;
+            Async<BackupOperations.CreateResult> operation;
+            try {
+                operation = Objects.requireNonNull(observe ? api.observeCreate(request) : api.createBackup(request));
+            } catch (Throwable failure) {
+                recover(failure);
+                return;
+            }
+            active = operation;
+            operation.whenComplete((created, failure) -> {
+                if (!ready()) return;
+                if (failure != null) {
+                    recover(failure);
+                } else if (created == null || !request.requestId().equals(created.requestId())) {
+                    recover(new IllegalStateException("Backup Creation Response Could Not Be Verified"));
+                } else if (created.state() == BackupOperations.State.FAILED || created.state() == BackupOperations.State.UNRECORDED) {
+                    result.fail(new IllegalStateException(created.message().isBlank() ? "Backup Creation Failed" : created.message()));
+                } else if (created.backup() != null && created.backup().uuid != null && !created.backup().uuid.isBlank()) {
+                    backupId = created.backup().uuid;
+                    inspect(created.backup());
+                } else {
+                    waiting = created.message().isBlank() ? "Backup Creation Is Pending" : created.message();
+                    schedule();
+                }
+            });
+        }
+
+        private void observe() {
+            if (!ready()) return;
+            if (backupId == null) {
+                create(true);
+                return;
+            }
+            Async<List<ServerModels.Backup>> operation;
+            try {
+                operation = Objects.requireNonNull(api.getBackups(request.serverId()));
+            } catch (Throwable failure) {
+                recover(failure);
+                return;
+            }
+            active = operation;
+            operation.whenComplete((backups, failure) -> {
+                if (!ready()) return;
+                if (failure != null) {
+                    recover(failure);
+                    return;
+                }
+                ServerModels.Backup backup = backups == null ? null : backups.stream()
+                        .filter(value -> value != null && backupId.equals(value.uuid)).findFirst().orElse(null);
+                if (backup == null) {
+                    waiting = "Backup Completion Could Not Be Verified";
+                    schedule();
+                } else {
+                    inspect(backup);
+                }
+            });
+        }
+
+        private void inspect(ServerModels.Backup backup) {
+            if (!ready()) return;
+            if (backup.completedAt == null || backup.completedAt.isBlank()) {
+                waiting = "Backup Is Still Being Created";
+                schedule();
+            } else if (backup.isSuccessful) {
+                result.complete(null);
+            } else {
+                result.fail(new IllegalStateException("Backup Failed. Updates Were Not Started"));
+            }
+        }
+
+        private void recover(Throwable failure) {
+            if (!ready()) return;
+            if (failure instanceof Async.Cancellation) {
+                result.cancel();
+                return;
+            }
+            waiting = "Backup Status Is Unavailable: " + failureMessage(failure, "Observation Failed");
+            schedule();
+        }
+
+        private void schedule() {
+            if (!ready()) return;
+            try {
+                retry = scheduler.schedule(this::observe, Duration.ofSeconds(2));
+            } catch (Throwable failure) {
+                result.fail(failure);
+            }
+        }
     }
 
     Async<Boolean> detachResource(String path) {
@@ -876,12 +1075,16 @@ final class HostedResourceContext implements ResourceBrowserContext {
 
     Async<CanonicalResourceInventory> canonicalResourceInventory(boolean force) {
         OperationFence fence = captureFence();
-        Async<ResourceIndexOrchestrator.Result> index = canonicalResourceIndex(force, fence);
-        return index.thenApply(result -> {
+        ResourceIndexLoad load = loadResourceIndex(force, fence);
+        ResourceDataCache cache = load.cache();
+        long generation = load.generation();
+        return load.request().thenApply(result -> {
+            if (!isInventoryCurrent(fence, cache, generation)) throw new Async.Cancellation();
             List<ResourceIndexOrchestrator.ResolvedEntry> resources = dataCache.indexedResources;
             if (resources.isEmpty() && result != null && !result.resources().isEmpty()) resources = result.resources();
             if (!isCurrent(fence)) throw new Async.Cancellation();
             scheduleModpackProfile(resources, fence);
+            if (!isInventoryCurrent(fence, cache, generation)) throw new Async.Cancellation();
             return new CanonicalResourceInventory(resources, dataCache.modpackProfile, canonicalFailures(result));
         });
     }
@@ -890,9 +1093,10 @@ final class HostedResourceContext implements ResourceBrowserContext {
         if (!hasInstance() || !isCurrent(fence) || dataCache.modpackProfile != null
                 || dataCache.modpackProfileRequest != null || dataCache.modpackProfileScheduled) return;
         ResourceDataCache cache = dataCache;
+        long generation = cache.resourceIndexGeneration;
         cache.modpackProfileScheduled = true;
         scheduler.execute(() -> {
-            if (!isCurrent(fence) || cache != dataCache) return;
+            if (!isInventoryCurrent(fence, cache, generation)) return;
             Async<ModpackProfile> request;
             try {
                 request = canonicalModpackProfile(resources, fence);
@@ -902,7 +1106,7 @@ final class HostedResourceContext implements ResourceBrowserContext {
             }
             cache.modpackProfileRequest = request;
             request.whenComplete((profile, failure) -> {
-                if (!isCurrent(fence) || cache != dataCache) return;
+                if (!isInventoryCurrent(fence, cache, generation)) return;
                 if (failure != null) {
                     Throwable cause = ResourceProviderException.unwrap(failure);
                     if (!(cause instanceof Async.Cancellation)) {
@@ -925,8 +1129,10 @@ final class HostedResourceContext implements ResourceBrowserContext {
         if (!hasInstance()) return Async.completed(null);
         if (dataCache.modpackProfile != null) return Async.completed(dataCache.modpackProfile);
         if (dataCache.modpackProfileRequest != null) return dataCache.modpackProfileRequest;
-        return api.getFileContentAllowMissing(serverId, ".meta/modpack-profile.json").handle((content, failure) -> {
-            if (!isCurrent(fence)) throw new Async.Cancellation();
+        ResourceDataCache cache = dataCache;
+        long generation = cache.resourceIndexGeneration;
+        return api.resourceProfile(serverId).handle((content, failure) -> {
+            if (!isInventoryCurrent(fence, cache, generation)) throw new Async.Cancellation();
             if (failure != null) {
                 Throwable cause = ResourceProviderException.unwrap(failure);
                 if (cause instanceof Async.Cancellation cancellation) throw cancellation;
@@ -1455,29 +1661,32 @@ final class HostedResourceContext implements ResourceBrowserContext {
 
     private Async<List<String>> resourceDirectoriesAsync(OperationFence fence) {
         if (!hasInstance()) return Async.completed(List.of());
+        ResourceDataCache cache = dataCache;
+        long generation = cache.resourceIndexGeneration;
         if (dataCache.resourceDirectoriesRequest != null && isDataCurrent(fence)) return view(dataCache.resourceDirectoriesRequest);
         dataCache.resourceFailureMessages.remove("server.properties");
         dataCache.resourceFailureMessages.remove("/");
         Async<List<String>> request = api.getFileContentAllowMissing(serverId, "server.properties")
                 .handle((content, failure) -> new OperationResult<>(content, failure))
                 .thenCompose(result -> {
-                    if (!isDataCurrent(fence)) return staleOperation();
+                    if (!isInventoryCurrent(fence, cache, generation)) return staleOperation();
                     if (result.failure() != null) {
                         recordResourceFailure("server.properties", result.failure());
                         dataCache.worldName = "world";
-                        return Async.completed(resourceDirectories(loader, dataCache.worldName));
+                    } else {
+                        recordResourceFailure("server.properties", null);
+                        dataCache.worldName = resolveWorldName(result.value());
                     }
-                    recordResourceFailure("server.properties", null);
-                    dataCache.worldName = resolveWorldName(result.value());
                     List<String> directories = resourceDirectories(loader, dataCache.worldName);
                     return api.listResourceFiles(serverId, "/")
                             .handle((root, failure) -> new OperationResult<>(root, failure))
                             .thenCompose(rootResult -> {
-                                if (!isDataCurrent(fence)) return staleOperation();
+                                if (!isInventoryCurrent(fence, cache, generation)) return staleOperation();
                                 if (rootResult.failure() != null) {
                                     recordResourceFailure("/", rootResult.failure());
-                                    return Async.completed(directories);
+                                    return Async.failed(rootResult.failure());
                                 }
+                                if (rootResult.value() == null) return Async.failed(new IllegalStateException("Resource Root Response Is Missing"));
                                 recordResourceFailure("/", null);
                                 return Async.completed(mergeResourceDirectories(directories, rootResult.value()));
                             });
@@ -1492,30 +1701,25 @@ final class HostedResourceContext implements ResourceBrowserContext {
 
     List<String> mergeResourceDirectories(List<String> defaults,
                                           List<ServerModels.PteroFileObjectAttributes> rootEntries) {
-        LinkedHashSet<String> directories = new LinkedHashSet<>(defaults == null ? List.of() : defaults);
-        if (rootEntries == null) return List.copyOf(directories);
-        String normalizedWorld = normalizedWorldName(dataCache.worldName);
-        for (ServerModels.PteroFileObjectAttributes entry : rootEntries) {
-            if (entry == null || entry.isFile || entry.name == null || entry.name.isBlank()) continue;
-            String name = entry.name.strip();
-            switch (name.toLowerCase(Locale.ROOT)) {
-                case "mods", "plugins", "resourcepacks", "shaderpacks" -> directories.add("/" + name);
-                default -> {
-                    if (name.equals(normalizedWorld)) directories.add("/" + name + "/datapacks");
-                }
-            }
-        }
-        return List.copyOf(directories);
+        if (rootEntries == null) return defaults == null ? List.of() : List.copyOf(defaults);
+        return ResourceIndexOrchestrator.mergeDirectories(defaults, rootEntries.stream().filter(Objects::nonNull)
+                .filter(entry -> !entry.isFile).map(entry -> entry.name).toList());
     }
 
-    private Async<List<ServerModels.PteroFileObjectAttributes>> listResourceDirectory(String directory) {
+    private Async<List<ServerModels.PteroFileObjectAttributes>> listResourceDirectory(String directory, OperationFence fence,
+                                                                                     ResourceDataCache cache, long generation) {
+        if (!isInventoryCurrent(fence, cache, generation)) return staleOperation();
         String key = directory == null || directory.isBlank() ? "/" : directory;
         Async<List<ServerModels.PteroFileObjectAttributes>> cached = dataCache.resourceDirectoryRequests.get(key);
         if (cached != null) return view(cached);
         Async<List<ServerModels.PteroFileObjectAttributes>> request = api.listResourceFiles(serverId, key)
                 .handle((files, failure) -> new OperationResult<>(files, failure))
-                .thenCompose(result -> result.failure() == null ? Async.completed(result.value())
-                        : absentResourceDirectory(key, result.failure()));
+                .thenCompose(result -> {
+                    if (!isInventoryCurrent(fence, cache, generation)) return staleOperation();
+                    if (result.failure() != null) return absentResourceDirectory(key, result.failure());
+                    return result.value() == null ? Async.failed(new IllegalStateException("Resource Directory Response Is Missing"))
+                            : Async.completed(result.value());
+                });
         dataCache.resourceDirectoryRequests.put(key, request);
         request.whenComplete((ignored, failure) -> {
             if (failure == null) return;
@@ -1595,9 +1799,16 @@ final class HostedResourceContext implements ResourceBrowserContext {
         if (!isCurrent(fence)) return;
         CanonicalResourceInventory canonicalSnapshot = new CanonicalResourceInventory(dataCache.indexedResources,
                 dataCache.modpackProfile, resourceFailureSnapshot());
-        canonicalInventoryListeners.forEach(listener -> listener.accept(canonicalSnapshot));
-        listeners.forEach(listener -> listener.accept(new ResourceBrowserContext.ResourceChange(
-                ResourceBrowserContext.ResourceChange.EventType.REFRESHED, List.of())));
+        ResourceDataCache cache = dataCache;
+        long generation = cache.resourceIndexGeneration;
+        for (Consumer<CanonicalResourceInventory> listener : canonicalInventoryListeners) {
+            if (!isInventoryCurrent(fence, cache, generation)) return;
+            listener.accept(canonicalSnapshot);
+        }
+        for (Consumer<ResourceBrowserContext.ResourceChange> listener : listeners) {
+            if (!isInventoryCurrent(fence, cache, generation)) return;
+            listener.accept(new ResourceBrowserContext.ResourceChange(ResourceBrowserContext.ResourceChange.EventType.REFRESHED, List.of()));
+        }
     }
 
     private List<String> inventoryProviders() {
@@ -1717,6 +1928,7 @@ final class HostedResourceContext implements ResourceBrowserContext {
 
     private void clearInventoryCache() {
         advanceLifecycleGeneration();
+        dataCache.resourceIndexGeneration++;
         dataCache.resourceHydrationGeneration++;
         List<Async<List<ServerModels.PteroFileObjectAttributes>>> directoryRequests =
                 List.copyOf(dataCache.resourceDirectoryRequests.values());
@@ -1745,6 +1957,7 @@ final class HostedResourceContext implements ResourceBrowserContext {
     }
 
     private static void clearDataCache(ResourceDataCache cache) {
+        cache.resourceIndexGeneration++;
         cache.resourceHydrationGeneration++;
         List<Async<List<ServerModels.PteroFileObjectAttributes>>> directoryRequests =
                 List.copyOf(cache.resourceDirectoryRequests.values());
@@ -1916,6 +2129,7 @@ final class HostedResourceContext implements ResourceBrowserContext {
     }
 
     private void advanceLifecycleGeneration() {
+        for (Async<Void> backup : List.copyOf(resourceBackups)) backup.cancel();
         lifecycleGeneration++;
         if (lifecycleGeneration <= 0) lifecycleGeneration = 1L;
     }
@@ -1945,6 +2159,7 @@ final class HostedResourceContext implements ResourceBrowserContext {
         private final Map<String, String> resourceFailureMessages = new LinkedHashMap<>();
         private final Map<String, List<ResourceIndexOrchestrator.Entry>> resourceDirectorySnapshots = new LinkedHashMap<>();
         private final Map<String, Async<List<ServerModels.PteroFileObjectAttributes>>> resourceDirectoryRequests = new LinkedHashMap<>();
+        private long resourceIndexGeneration;
         private Async<ResourceIndexOrchestrator.Result> canonicalResourceRequest;
         private ResourceIndexOrchestrator.Result canonicalResourceResult;
         private Async<ResourceIndexOrchestrator.Result> resourceHydrationRequest;
