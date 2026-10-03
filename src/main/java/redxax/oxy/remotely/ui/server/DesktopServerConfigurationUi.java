@@ -74,8 +74,8 @@ public final class DesktopServerConfigurationUi {
             @Override public ServerManagementSettingsProvider managementSettings() { return new DesktopServerManagementSettingsProvider(instance); }
             @Override public ServerPlanSettingsProvider planSettingsProvider() { return new DesktopServerPlanSettingsProvider(); }
             @Override public ServerJvmSettingsProvider jvmSettingsProvider() { return new DesktopServerJvmSettingsProvider(instance); }
-            @Override public BackupSettingsProvider backupProvider() { return new JvmBackupSettingsProvider(owner, instance); }
-            @Override public AsyncServerScheduleFeature scheduleProvider() { return new DesktopServerScheduleFeatureAdapter(instance); }
+            @Override public BackupSettingsProvider backupProvider() { return new JvmBackupSettingsProvider(owner, instance, managed); }
+            @Override public AsyncServerScheduleFeature scheduleProvider() { return new DesktopServerScheduleFeatureAdapter(managed); }
             @Override public PortManagementSettingsProvider portProvider() { return DesktopHostedSettingsProviders.ports(instance); }
             @Override public SubuserSettingsProvider subuserProvider() { return DesktopHostedSettingsProviders.subusers(instance); }
             @Override public PlayerActionsFileProvider playerActionsFileProvider() { return new DesktopPlayerActionsFileProvider(managed); }

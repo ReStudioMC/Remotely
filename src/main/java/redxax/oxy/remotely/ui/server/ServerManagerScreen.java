@@ -32,6 +32,7 @@ import restudio.rescreen.ui.desktop.DesktopBounds;
 import restudio.rescreen.ui.desktop.DesktopGroup;
 import restudio.rescreen.ui.desktop.DesktopGroupWidget;
 import restudio.rebase.ui.widgets.account.ReStudioInboxButton;
+import restudio.rebase.ui.screens.collaboration.CollaborationScreen;
 import restudio.rescreen.ui.desktop.DesktopIconWidget;
 import restudio.rescreen.ui.desktop.DesktopMetrics;
 import restudio.rescreen.ui.desktop.DesktopShellScreen;
@@ -438,6 +439,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
 
     private void showUserMenu() {
         ContextMenuWidget.Builder builder = new ContextMenuWidget.Builder(this);
+        builder.addHeaderButton("person.png", () -> CollaborationScreen.open(this, "", ""), "Friends And Teams");
         if (serverHost().supports(ServerScreenHost.Action.INBOX)) {
             builder.addHeaderButton(new ReStudioInboxButton(() -> serverHost().openInbox(this)));
         }
@@ -1568,7 +1570,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
             return false;
         }
         ServerScreenHost.ServerIdentity identity = serverHost().identity(server);
-        return identity.local() && !identity.installing() && !serverHost().isPanel(server) && !isRestudioServer(server)
+        return !identity.installing() && serverHost().networkMemberAvailability(server).available()
                 && networkForServer(server) == null;
     }
 
@@ -1577,7 +1579,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
             return false;
         }
         ServerScreenHost.ServerIdentity identity = serverHost().identity(server);
-        return identity.local() && !identity.installing() && !serverHost().isPanel(server) && !isRestudioServer(server)
+        return !identity.installing() && serverHost().networkMemberAvailability(server).available()
                 && networkForServer(server) == null;
     }
 
@@ -1599,7 +1601,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
             return false;
         }
         ServerScreenHost.ServerIdentity proxyIdentity = serverHost().identity(proxy);
-        return proxyIdentity.local() && !proxyIdentity.installing() && !serverHost().isPanel(proxy) && !isRestudioServer(proxy)
+        return !proxyIdentity.installing() && !serverHost().isPanel(proxy) && !isRestudioServer(proxy)
                 && canUseAsNetworkBackend(server);
     }
 

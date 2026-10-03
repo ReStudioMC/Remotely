@@ -3,6 +3,7 @@ package redxax.oxy.remotely.ui.server;
 import redxax.oxy.remotely.RemotelyClient;
 import redxax.oxy.remotely.DesktopRemotelyPaths;
 import redxax.oxy.remotely.network.DesktopNetworkManager;
+import redxax.oxy.remotely.network.ForwardingMode;
 import redxax.oxy.remotely.network.NetworkDefinition;
 import redxax.oxy.remotely.network.NetworkDiscoveryResult;
 import redxax.oxy.remotely.network.NetworkJob;
@@ -17,6 +18,7 @@ import redxax.oxy.remotely.network.NetworkRuntimeNodeStatus;
 import redxax.oxy.remotely.network.NetworkRuntimeSnapshot;
 import redxax.oxy.remotely.network.NetworkHostScope;
 import restudio.rebase.Rebase;
+import restudio.rebase.backend.ServerBackend;
 import restudio.rebase.instance.Instance;
 import restudio.rebase.instance.InstanceManager;
 import restudio.rebase.instance.InstanceState;
@@ -59,6 +61,10 @@ public class DesktopNetworkOverviewProvider implements NetworkOverviewProvider {
     @Override
     public Async<NetworkDefinition> save(String networkId, SaveRequest request) {
         return Async.supplyAsync(() -> requireNetwork(networkId)).thenCompose(current -> {
+            if (!request.routingGroups().equals(current.routingGroups()) || !request.syncRealms().equals(current.syncRealms())
+                    || !request.features().equals(current.features()) || !request.sharedDataPolicy().equals(current.sharedDataPolicy())) {
+                requireConfiguration(current, instances());
+            }
             Async<NetworkDefinition> result = Async.completed(current);
             if (!request.name().equals(current.name())) {
                 result = result.thenApply(updated -> {
@@ -103,6 +109,7 @@ public class DesktopNetworkOverviewProvider implements NetworkOverviewProvider {
     @Override
     public Async<NetworkJob> attach(String networkId, AttachRequest request) {
         return Async.supplyAsync(() -> requireNetwork(networkId)).thenCompose(network -> {
+            requireConfiguration(network, instances());
             Instance instance = findInstance(request.serverId());
             if (instance == null) {
                 return NetworkOverviewProvider.unavailable("Server Is Unavailable");
@@ -126,14 +133,18 @@ public class DesktopNetworkOverviewProvider implements NetworkOverviewProvider {
 
     @Override
     public Async<NetworkJob> attachExternal(String networkId, ExternalAttachRequest request) {
-        return Async.supplyAsync(() -> requireNetwork(networkId)).thenCompose(network -> manager.prepareExternalAttach(network, request.name(), NetworkMemberRole.CUSTOM,
-                        request.joinRule(), request.address(), request.port(), request.capacity(), instances(), List.of()))
-                .thenCompose(prepared -> manager.runPreparedAttach(prepared, instances(), "Network Overview"));
+        return Async.supplyAsync(() -> requireNetwork(networkId)).thenCompose(network -> {
+            requireConfiguration(network, instances());
+            return manager.prepareExternalAttach(network, request.name(), NetworkMemberRole.CUSTOM,
+                    request.joinRule(), request.address(), request.port(), request.capacity(), instances(), List.of())
+                    .thenCompose(prepared -> manager.runPreparedAttach(prepared, instances(), "Network Overview"));
+        });
     }
 
     @Override
     public Async<NetworkJob> detach(String networkId, String memberId) {
         return Async.supplyAsync(() -> requireNetwork(networkId)).thenCompose(network -> {
+            requireConfiguration(network, instances());
             NetworkMember member = network.members().stream().filter(value -> value.nodeId().equals(memberId)).findFirst().orElse(null);
             if (member == null) {
                 return NetworkOverviewProvider.unavailable("Server Is Unavailable");
@@ -150,8 +161,10 @@ public class DesktopNetworkOverviewProvider implements NetworkOverviewProvider {
 
     @Override
     public Async<NetworkJob> dissolve(String networkId) {
-        return Async.supplyAsync(() -> requireNetwork(networkId))
-                .thenCompose(network -> manager.dissolveSafely(network, instances(), "Network Overview"));
+        return Async.supplyAsync(() -> requireNetwork(networkId)).thenCompose(network -> {
+            requireConfiguration(network, instances());
+            return manager.dissolveSafely(network, instances(), "Network Overview");
+        });
     }
 
     @Override
@@ -162,27 +175,45 @@ public class DesktopNetworkOverviewProvider implements NetworkOverviewProvider {
 
     @Override
     public Async<NetworkJob> rotateSecret(String networkId) {
-        return Async.supplyAsync(() -> requireNetwork(networkId))
-                .thenCompose(network -> manager.prepareSecretRotation(network, instances()))
-                .thenCompose(prepared -> manager.runPreparedSecretRotation(prepared, instances(), "Network Overview"));
+        return Async.supplyAsync(() -> requireNetwork(networkId)).thenCompose(network -> {
+            List<Instance> snapshot = instances();
+            requireConfiguration(network, snapshot);
+            return applyModernForwarding(network, snapshot);
+        });
     }
 
     @Override
     public Async<NetworkJob> reconcile(String networkId) {
         return Async.supplyAsync(() -> requireNetwork(networkId)).thenCompose(network -> {
-            manager.reconcileInstanceBindings(instances());
-            return manager.runJob(network, instances(), List.of(), NetworkJobType.RECONCILE, "Network Overview");
+            List<Instance> snapshot = instances();
+            requireConfiguration(network, snapshot);
+            manager.reconcileInstanceBindings(snapshot);
+            return manager.runJob(network, snapshot, List.of(), NetworkJobType.RECONCILE, "Network Overview");
         });
+    }
+
+    private Async<NetworkJob> applyModernForwarding(NetworkDefinition network, List<Instance> instances) {
+        return manager.prepareSecretRotation(network, instances)
+                .thenCompose(prepared -> manager.runPreparedSecretRotation(prepared, instances, "Network Overview")
+                        .whenComplete((job, failure) -> {
+                            if (failure != null) manager.discardPreparedSecretRotation(prepared);
+                        }));
     }
 
     @Override
     public Async<NetworkJob> resumeJob(String networkId, String jobId) {
-        return manager.resumeJob(jobId, instances(), List.of());
+        return Async.supplyAsync(() -> requireNetwork(networkId)).thenCompose(network -> {
+            requireConfiguration(network, instances());
+            return manager.resumeJob(jobId, instances(), List.of());
+        });
     }
 
     @Override
     public Async<NetworkJob> rollbackJob(String networkId, String jobId) {
-        return manager.rollbackJob(jobId, instances());
+        return Async.supplyAsync(() -> requireNetwork(networkId)).thenCompose(network -> {
+            requireConfiguration(network, instances());
+            return manager.rollbackJob(jobId, instances());
+        });
     }
 
     @Override
@@ -198,6 +229,7 @@ public class DesktopNetworkOverviewProvider implements NetworkOverviewProvider {
     @Override
     public Async<NetworkJob> installReSync(String networkId) {
         return Async.supplyAsync(() -> requireNetwork(networkId)).thenCompose(network -> {
+            requireConfiguration(network, instances());
             List<Instance> targets = network.members().stream().filter(NetworkMember::isManaged).map(NetworkMember::instanceId)
                     .map(this::findInstance).filter(Objects::nonNull).distinct().toList();
             List<String> backendIds = network.members().stream().filter(member -> member.isManaged() && !member.isProxy())
@@ -304,7 +336,42 @@ public class DesktopNetworkOverviewProvider implements NetworkOverviewProvider {
         });
         return new OverviewState(network, servers, manager.discover(network, instances, List.of()), manager.getRuntimeSnapshot(networkId),
                 manager.getIncidents(networkId), manager.getLifecycleJobManager().getJobs(networkId), manager.getJobManager().getJobs(networkId),
-                manager.getTransferFailureHeat(networkId), installed);
+                manager.getTransferFailureHeat(networkId), installed, capabilities(network, instances));
+    }
+
+    private Map<String, NetworkCapability> capabilities(NetworkDefinition network, Collection<Instance> instances) {
+        String issue = configurationIssue(network, instances);
+        Map<String, NetworkCapability> capabilities = new LinkedHashMap<>();
+        for (String operation : List.of("save", "membership", "externalMembership", "secretRotation", "reconcile", "jobRecovery", "resync", "dissolve")) {
+            capabilities.put(operation, issue.isBlank() ? NetworkCapability.supported(operation, "desktop")
+                    : NetworkCapability.unavailable(operation, issue, "desktop"));
+        }
+        for (String operation : List.of("preflight", "lifecycle", "memberLifecycle", "lifecycleRecovery", "runtimeControl", "command", "broadcast")) {
+            capabilities.put(operation, NetworkCapability.supported(operation, "desktop"));
+        }
+        return Map.copyOf(capabilities);
+    }
+
+    public static String configurationIssue(NetworkDefinition network, Collection<Instance> instances) {
+        for (NetworkMember member : network.members()) {
+            if (!member.isManaged()) continue;
+            Instance instance = instances == null ? null : instances.stream().filter(value -> value != null && member.instanceId().equals(value.getInstanceId())).findFirst().orElse(null);
+            if (instance == null) return "Managed Server " + member.routeName() + " Is Unavailable For Safe Configuration Changes";
+            try {
+                ServerBackend backend = instance.getBackend();
+                if (backend == null || backend.getFileSystem() == null || !backend.getFileSystem().supportsAtomicWrites()) {
+                    return "Safe Configuration Writes Are Unavailable For " + instance.getName();
+                }
+            } catch (RuntimeException exception) {
+                return "Safe Configuration Writes Are Unavailable For " + instance.getName();
+            }
+        }
+        return "";
+    }
+
+    private void requireConfiguration(NetworkDefinition network, Collection<Instance> instances) {
+        String issue = configurationIssue(network, instances);
+        if (!issue.isBlank()) throw new IllegalStateException(issue);
     }
 
     private NetworkDefinition requireNetwork(String networkId) {
@@ -335,7 +402,7 @@ public class DesktopNetworkOverviewProvider implements NetworkOverviewProvider {
         Identifier icon = iconManager.getIconId(instance);
         return new ServerView(instance.getInstanceId(), instance.getName(), member != null && member.isProxy(), member == null || member.isManaged(),
                 NetworkHostScope.resolve(instance), member == null ? defaultAddress(network, instance) : member.address(),
-                member == null ? observedPort(instance, 25566) : member.port(), state == null ? "" : state.name(), icon == null ? "" : icon.toString());
+                member == null ? observedPort(instance, 25566) : member.port(), state == null ? "" : state.name(), icon);
     }
 
     private String defaultAddress(NetworkDefinition network, Instance instance) {

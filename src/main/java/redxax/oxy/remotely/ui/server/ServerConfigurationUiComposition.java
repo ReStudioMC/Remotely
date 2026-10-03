@@ -147,7 +147,7 @@ public final class ServerConfigurationUiComposition {
         }
         if (state.editMode() && state.restudioBackend()) {
             ServerNetworkSettingsController network = new ServerNetworkSettingsController(screen, platform.portProvider());
-            ServerSubuserSettingsController subusers = new ServerSubuserSettingsController(screen, platform.subuserProvider());
+            ServerSubuserSettingsController subusers = new ServerSubuserSettingsController(screen, platform.subuserProvider(), screen instanceof ServerConfigurationScreen configuration ? configuration::settingsOwner : () -> screen);
             settings.put("Network", network::getSettings);
             settings.put("Subusers", subusers::getSettings);
             cleanup.add(network::cleanup);
@@ -251,7 +251,7 @@ public final class ServerConfigurationUiComposition {
                 boolean restart = selected != null && selected.state() == ResourcePoolModels.AllocationState.PENDING
                         && new BigInteger(selected.desired().ramMiB())
                         .compareTo(new BigInteger(selected.effective().ramMiB())) < 0;
-                String detail = resources.applyingChanges() ? "Applying Server Changes From The Header"
+                String detail = resources.applyingChanges() ? "Applying Server Changes"
                         : editor.busy() ? "Applying Resource Change"
                         : restart ? "RAM Becomes Free After A Stop Or Restart • Refresh To Check Capacity"
                         : editor.submitted() ? "Waiting For Updated Pool Capacity • Refresh To Check"
@@ -260,7 +260,7 @@ public final class ServerConfigurationUiComposition {
                         : editor.changed() ? "RAM " + editor.value(PoolAllocationEditor.Resource.RAM) + " MiB • CPU "
                         + editor.value(PoolAllocationEditor.Resource.CPU) + "% • Disk "
                         + editor.value(PoolAllocationEditor.Resource.DISK) + " MiB"
-                        : editor.hasChanges() ? "Use Apply All Or Discard In The Header"
+                        : editor.hasChanges() ? "Use Apply All Or Discard In Pool Capacity"
                         : "Drag An Existing Server Divider To Preview A Change";
                 row.setDescription(detail + (editor.changeCount() > 1 ? " • " + editor.changeCount() + " Server Previews" : ""));
             };
@@ -289,6 +289,15 @@ public final class ServerConfigurationUiComposition {
         return () -> {
             if (!poolSettings.isEmpty()) return List.copyOf(poolSettings);
             Setting capacity = new Setting.Builder("Pool Capacity").build();
+            if (resources != null && editor != null) {
+                capacity.addTitleAction("Refresh", resources::refreshPool, "Refresh Pool Capacity", PopupWidget.TitleActionRole.SECONDARY);
+                capacity.addTitleAction("Discard", () -> {
+                    if (resources.hasChanges(preview.view().pool().id())) resources.discardChanges(preview.view().pool().id());
+                }, "Discard All Resource Previews", PopupWidget.TitleActionRole.SECONDARY);
+                capacity.addTitleAction("Apply All", () -> {
+                    if (resources.canApplyChanges(preview.view().pool().id())) resources.applyChanges(preview.view().pool().id());
+                }, "Apply All Previewed Server Changes", PopupWidget.TitleActionRole.PRIMARY);
+            }
             for (ResourceAllocationBarWidget bar : List.of(ramBar, cpuBar, diskBar)) {
                 bar.setHeight(18);
                 capacity.addRow(new PopupWidget.PopupRow.Builder("", bar).minHeight(18).build());

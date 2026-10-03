@@ -6,6 +6,7 @@ import redxax.oxy.remotely.config.DesktopRemotelyConfigManager;
 import redxax.oxy.remotely.data.flow.ReSyncDesktopIdentityProvider;
 import redxax.oxy.remotely.packcontent.RemotelyPackContentIntegration;
 import redxax.oxy.remotely.servers.ReProxyAutoStartService;
+import redxax.oxy.remotely.servers.DesktopServerSchedules;
 import restudio.rebase.Rebase;
 import restudio.rebase.instance.InstanceManager;
 import restudio.rebase.platform.jvm.JvmRebasePlatform;
@@ -62,7 +63,11 @@ public class RemotelyInit {
         InstanceManager.getInstance().loadInstances();
 
         RemotelyManager remotelyManager = new RemotelyManager(remotelyDir, configManager);
-        Rebase.initialize(remotelyManager, JvmRebasePlatform.create());
+        Rebase.initialize(remotelyManager);
+        Rebase.installPlatform(JvmRebasePlatform.create());
+        DesktopServerSchedules schedules = new DesktopServerSchedules(InstanceManager.getInstance());
+        schedules.start();
+        Runtime.getRuntime().addShutdownHook(new Thread(schedules::close, "Remotely Schedule Shutdown"));
         ReStudio.getInstance().init(remotelyDir, application.reStudioClientId());
         ReSyncDesktopIdentityProvider.initialize(remotelyDir);
         new ReProxyAutoStartService(InstanceManager.getInstance()).start();

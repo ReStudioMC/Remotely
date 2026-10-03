@@ -12,6 +12,7 @@ public interface SubuserSettingsProvider {
     Async<ServerModels.Subuser> updateSubuser(String subuserUuid, List<String> permissions);
     Async<Void> deleteSubuser(String subuserUuid);
     Async<List<ServerModels.ReStudioUserInfo>> searchUsers(String query);
+    default String collaborationResourceId() { return ""; }
     default boolean available() { return true; }
     default String unavailableReason() { return "Subuser Feature Is Unavailable"; }
 

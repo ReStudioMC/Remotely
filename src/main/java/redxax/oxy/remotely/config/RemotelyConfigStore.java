@@ -14,6 +14,10 @@ import java.util.List;
 public interface RemotelyConfigStore extends RebaseConfigStore {
     String RECENT_RESTUDIO_ITEMS_KEY = "remotely.recent.restudioItems";
 
+    default String readPendingNetwork(String key) { throw new UnsupportedOperationException("Pending Network Storage Is Unavailable"); }
+    default void writePendingNetwork(String key, String body) { throw new UnsupportedOperationException("Pending Network Storage Is Unavailable"); }
+    default void removePendingNetwork(String key) { throw new UnsupportedOperationException("Pending Network Storage Is Unavailable"); }
+
     default boolean getWallpaper() { return bool("remotely.wallpaper", false); }
     default void setWallpaper(boolean value) { set("remotely.wallpaper", String.valueOf(value)); save(); apply(); }
     default boolean getCustomReverseProxy() { return bool("remotely.customReverseProxy", false); }

@@ -1,7 +1,14 @@
 package redxax.oxy.remotely.host;
 
+import restudio.rebase.backend.ServerBackend;
+import redxax.oxy.remotely.network.NetworkBootstrap;
+import redxax.oxy.remotely.network.HostedNetworkClient;
+import redxax.oxy.remotely.network.HostedNetworkPendingStore;
+import redxax.oxy.remotely.network.protocol.NetworkOperationStatus;
+
 import redxax.oxy.remotely.RemotelyClient;
 import redxax.oxy.remotely.RemotelyServerApi;
+import redxax.oxy.remotely.DesktopRemotelyServerApi;
 import redxax.oxy.remotely.DesktopRemotelyPaths;
 import redxax.oxy.remotely.config.RemotelyConfigManager;
 import redxax.oxy.remotely.config.RemotelyConfigStore;
@@ -34,6 +41,8 @@ import redxax.oxy.remotely.ui.server.NetworkMigrationScreen;
 import redxax.oxy.remotely.ui.server.NetworkOverviewScreen;
 import redxax.oxy.remotely.ui.server.NetworkCreationPlan;
 import redxax.oxy.remotely.ui.server.ServerDetailsScreen;
+import redxax.oxy.remotely.ui.server.NewTerminalTargetProvider;
+import restudio.rebase.backend.impl.SshTerminalFeature;
 import redxax.oxy.remotely.ui.server.ServerManagerScreen;
 import redxax.oxy.remotely.ui.server.ResourcePoolScreen;
 import redxax.oxy.remotely.ui.server.ServerScreenHost;
@@ -48,6 +57,7 @@ import redxax.oxy.remotely.ui.server.ServerDevelopmentProvider;
 import redxax.oxy.remotely.ui.server.ServerDetailsTarget;
 import redxax.oxy.remotely.ui.server.ClientServerDetailsTarget;
 import redxax.oxy.remotely.ui.settings.data.ServerSettingsDataController;
+import redxax.oxy.remotely.ui.settings.data.DesktopServerSettingsDataController;
 import redxax.oxy.remotely.ui.settings.data.ServerSettingsController;
 import redxax.oxy.remotely.settings.server.ServerSettingsSnapshot;
 import redxax.oxy.remotely.ui.widgets.management.PlayerManagerController;
@@ -110,6 +120,7 @@ import restudio.rebase.ui.screens.auth.ReStudioLoginScreen;
 import restudio.rebase.ui.screens.feedback.FeedbackBrowserScreen;
 import restudio.rebase.ui.screens.notification.InboxScreen;
 import restudio.rebase.resource.ResourceType;
+import restudio.rebase.resource.ResourcePoolClient;
 import restudio.rebase.resource.marketplace.JvmResourceMarketplaceAdapter;
 import restudio.rebase.ui.screens.resources.ResourceContainer;
 import restudio.rebase.ui.screens.resources.DesktopResourceContainerProvider;
@@ -157,6 +168,7 @@ public final class DesktopServerHost implements ServerScreenHost {
     @Override
     public HttpTransport weatherTransport() { return weatherTransport; }
     private static final String DESKTOP_HOST_ID = "remotely.desktopHostId";
+    private static final String HOSTED_NETWORK_PREFIX = "hosted:";
     private final RemotelyClient client;
     private final Map<Runnable, Consumer<List<NetworkDefinition>>> networkListeners = new IdentityHashMap<>();
     private final Map<Runnable, Consumer<NetworkRuntimeSnapshot>> runtimeListeners = new IdentityHashMap<>();
@@ -169,12 +181,20 @@ public final class DesktopServerHost implements ServerScreenHost {
     private final AtomicLong restudioRequestGeneration = new AtomicLong();
     private final ServerIconProvider iconProvider;
     private final ServerIconManager iconManager;
+    private final HostedNetworkPendingStore pendingHostedNetworks;
 
     public DesktopServerHost(RemotelyClient client) {
         this.client = Objects.requireNonNull(client, "client");
         this.iconProvider = client.getComposition().serverIconProvider();
         this.iconManager = new ServerIconManager(iconProvider);
+        this.pendingHostedNetworks = new HostedNetworkPendingStore(client.getComposition().configManager());
         FileExplorerProviders.installAdditionalRootGroups(this, this::reactorExplorerRootGroups);
+    }
+
+    @Override
+    public String collaborationResourceId(Object target) {
+        Instance instance = instance(target);
+        return instance != null && instance.getBackend() instanceof ReStudioBackend backend ? backend.getServerId() : "";
     }
 
     @Override
@@ -689,7 +709,7 @@ public final class DesktopServerHost implements ServerScreenHost {
 
     @Override
     public Object developmentSource(Object candidate) {
-        return developmentSource(instance(candidate));
+        return developmentSource(candidate instanceof ServerModels.ClientServerView server ? resolve(server) : instance(candidate));
     }
 
     @Override
@@ -1045,6 +1065,14 @@ public final class DesktopServerHost implements ServerScreenHost {
         return new ServerSettingsController(value, snapshot, RebaseApiFactory.get(value), view);
     }
 
+    @Override
+    public ServerSettingsDataController createNewServerSettingsController(Object instance, ServerSettingsSnapshot snapshot) {
+        if (!(instance instanceof Instance value)) return ServerSettingsDataController.unavailable();
+        var catalogs = client.getComposition().serverSettingsCatalogService();
+        var view = catalogs == null ? null : catalogs.open(value.getInstanceId(), 0L, value.getVersionId());
+        return DesktopServerSettingsDataController.forNewServer(value, snapshot, view);
+    }
+
     public Async<Void> saveInstanceConfiguration(Instance instance, ServerSettingsDataController settingsController) {
         if (instance == null || settingsController == null) {
             return Async.failed(new IllegalArgumentException("Server Configuration Is Unavailable"));
@@ -1249,16 +1277,6 @@ public final class DesktopServerHost implements ServerScreenHost {
                     String identifier = entry.getKey();
                     Instance instance = entry.getValue();
                     ServerModels.ClientServerView server = nextViews.get(identifier);
-                    try {
-                        studio.getApi().getSftpToken(identifier)
-                                .thenAccept(value -> {
-                                    if (requestGeneration == restudioRequestGeneration.get()) {
-                                        updateRestudioCredential(instance, "password", value == null ? "" : value);
-                                    }
-                                })
-                                .exceptionally(ignored -> null);
-                    } catch (RuntimeException ignored) {
-                    }
                     try {
                         studio.getApi().getServerResources(identifier)
                                 .thenAccept(stats -> {
@@ -1488,17 +1506,26 @@ public final class DesktopServerHost implements ServerScreenHost {
     @Override
     public Async<List<ServerScreenHost.NetworkView>> networks() {
         DesktopNetworkManager manager = DesktopNetworkAccess.manager(client);
-        if (manager == null) {
-            return Async.completed(List.of());
-        }
+        List<ServerScreenHost.NetworkView> local;
         try {
-            return Async.completed(manager.getNetworks().stream().filter(Objects::nonNull).map(network ->
+            local = manager == null ? List.of() : manager.getNetworks().stream().filter(Objects::nonNull).map(network ->
                     new ServerScreenHost.NetworkView(network.networkId(), network.name(), network.desiredState().name(),
                             "Managed Network", network.members().stream().map(member -> member.instanceId()).toList(), true,
-                            network.proxyInstanceId())).toList());
+                            network.proxyInstanceId())).toList();
         } catch (RuntimeException exception) {
-            return Async.completed(List.of());
+            local = List.of();
         }
+        if (!(client.getApiClient() instanceof DesktopRemotelyServerApi api) || !authenticated()) return Async.completed(local);
+        List<ServerScreenHost.NetworkView> localNetworks = local;
+        return api.hostedNetworkViews().thenApply(hosted -> {
+            List<ServerScreenHost.NetworkView> merged = new ArrayList<>(localNetworks);
+            for (ServerScreenHost.NetworkView network : hosted) {
+                if (network == null || network.id().isBlank()) continue;
+                merged.add(new ServerScreenHost.NetworkView(HOSTED_NETWORK_PREFIX + network.id(), network.name(), network.status(),
+                        network.description(), network.members(), network.managed(), network.proxyId()));
+            }
+            return List.copyOf(merged);
+        }).exceptionally(ignored -> localNetworks);
     }
 
     @Override
@@ -1525,6 +1552,25 @@ public final class DesktopServerHost implements ServerScreenHost {
         return manager == null ? NetworkOverviewProvider.unavailableProvider() : new DesktopNetworkOverviewProvider(this.client, manager);
     }
 
+    private NetworkOverviewProvider hostedNetworkOverviewProvider() {
+        if (!(client.getApiClient() instanceof DesktopRemotelyServerApi api)) return NetworkOverviewProvider.unavailableProvider();
+        return new DesktopHostedNetworkOverviewProvider(api, this::openHostedNetworkServer);
+    }
+
+    private void openHostedNetworkServer(Screen current, String serverId) {
+        ReStudio studio = ReStudio.getInstance();
+        UUID sessionId = studio == null ? null : studio.getSessionId();
+        String userId = studio == null ? "" : studio.getUserId();
+        restudioServers().whenComplete((servers, failure) -> application().execute(() -> {
+            if (studio == null || !studio.isAuthenticated() || ReStudio.getInstance() != studio
+                    || !Objects.equals(sessionId, studio.getSessionId()) || !Objects.equals(userId, studio.getUserId())) return;
+            ServerModels.ClientServerView server = failure == null ? restudioBridgeViews.get(serverId) : null;
+            if (server == null || !mergeServerScreen(current, server, false)) {
+                application().notify("Server Unavailable", "Hosted Server Details Could Not Be Opened", ReSyncNotificationLevel.ERROR);
+            }
+        }));
+    }
+
     @Override
     public Async<NetworkAdoptionReport> scanNetwork(ServerModels.ClientServerView server, boolean migrate) {
         Instance proxy = resolve(server);
@@ -1548,10 +1594,14 @@ public final class DesktopServerHost implements ServerScreenHost {
 
     @Override
     public Async<Void> networkAction(ServerScreenHost.NetworkView view, String action) {
+        DesktopNetworkManager manager = DesktopNetworkAccess.manager(client);
+        if (view != null && view.id().startsWith(HOSTED_NETWORK_PREFIX)
+                && (manager == null || manager.getNetwork(view.id()).isEmpty())) {
+            return hostedNetworkAction(view.id().substring(HOSTED_NETWORK_PREFIX.length()), action);
+        }
         if (view == null || view.id().isBlank() || client.getNetworkManager() == null) {
             return Async.failed(new IllegalArgumentException("Network Is Unavailable"));
         }
-        DesktopNetworkManager manager = DesktopNetworkAccess.manager(client);
         if (manager == null) {
             return Async.failed(new IllegalArgumentException("Network Is Unavailable"));
         }
@@ -1562,6 +1612,10 @@ public final class DesktopServerHost implements ServerScreenHost {
         List<Instance> instances = Rebase.get().getInstanceManager().getAllInstances();
         String rawAction = action == null ? "" : action.trim();
         String normalized = rawAction.toLowerCase(Locale.ROOT);
+        if (Set.of("sync", "reconcile", "resume", "recover", "rollback", "dissolve").contains(normalized)) {
+            String issue = DesktopNetworkOverviewProvider.configurationIssue(network, instances);
+            if (!issue.isBlank()) return Async.failed(new IllegalStateException(issue));
+        }
         return switch (normalized) {
             case "start" -> lifecycle(manager, network, instances, NetworkLifecycleOperation.START);
             case "stop" -> lifecycle(manager, network, instances, NetworkLifecycleOperation.STOP);
@@ -1574,6 +1628,34 @@ public final class DesktopServerHost implements ServerScreenHost {
             case "preflight" -> JvmAsyncBridge.fromFuture(manager.runPreflight(network, instances)).thenApply(ignored -> null);
             case "rename" -> Async.failed(new UnsupportedOperationException("Network Name Is Required"));
             default -> normalized.startsWith("rename:") ? renameNetwork(manager, network, rawAction.substring("rename:".length()), instances) : Async.failed(new UnsupportedOperationException("Network Action Is Unavailable"));
+        };
+    }
+
+    private Async<Void> hostedNetworkAction(String networkId, String action) {
+        if (networkId.isBlank()) return Async.failed(new IllegalArgumentException("Hosted Network Is Unavailable"));
+        NetworkOverviewProvider provider = hostedNetworkOverviewProvider();
+        String rawAction = action == null ? "" : action.trim();
+        String normalized = rawAction.toLowerCase(Locale.ROOT);
+        return switch (normalized) {
+            case "start" -> provider.lifecycle(networkId, NetworkLifecycleOperation.START).thenApply(ignored -> null);
+            case "stop" -> provider.lifecycle(networkId, NetworkLifecycleOperation.STOP).thenApply(ignored -> null);
+            case "restart" -> provider.lifecycle(networkId, NetworkLifecycleOperation.RESTART).thenApply(ignored -> null);
+            case "rolling-restart" -> provider.lifecycle(networkId, NetworkLifecycleOperation.ROLLING_RESTART).thenApply(ignored -> null);
+            case "sync", "reconcile" -> provider.reconcile(networkId).thenApply(ignored -> null);
+            case "dissolve" -> provider.dissolve(networkId).thenApply(ignored -> null);
+            case "preflight" -> provider.preflight(networkId).thenApply(ignored -> null);
+            case "resume", "recover", "rollback" -> provider.load(networkId).thenCompose(state -> {
+                NetworkJob job = state.jobs().stream().filter(candidate -> normalized.equals("rollback")
+                        ? candidate.canRollback() : candidate.canResume()).findFirst().orElse(null);
+                if (job == null) return Async.failed(new IllegalStateException("Hosted Network Has No Recoverable Job"));
+                return (normalized.equals("rollback") ? provider.rollbackJob(networkId, job.jobId())
+                        : provider.resumeJob(networkId, job.jobId())).thenApply(ignored -> null);
+            });
+            default -> normalized.startsWith("rename:")
+                    ? provider.load(networkId).thenCompose(state -> provider.save(networkId,
+                            new NetworkOverviewProvider.SaveRequest(rawAction.substring("rename:".length()), state.network().routingGroups(),
+                                    state.network().syncRealms(), state.network().features(), state.network().sharedDataPolicy()))).thenApply(ignored -> null)
+                    : Async.failed(new UnsupportedOperationException("Hosted Network Action Is Unavailable"));
         };
     }
 
@@ -1620,12 +1702,11 @@ public final class DesktopServerHost implements ServerScreenHost {
         if (studio == null || !studio.isAuthenticated() || instance == null) {
             return Async.failed(new IllegalStateException("Reactor Server Is Unavailable"));
         }
-        return JvmAsyncBridge.fromFuture(studio.getApi().getSftpToken(identifier)).thenApply(token -> {
+        return Async.supplyAsync(() -> {
             if (ReStudio.getInstance() != studio || !studio.isAuthenticated()
                     || restudioBridgeInstances.get(identifier) != instance) {
                 throw new IllegalStateException("Reactor Server Is Unavailable");
             }
-            updateRestudioCredential(instance, "password", token);
             RemoteFileSystemProvider provider = FileExplorerProviders.forInstance(instance);
             if (provider == null || !provider.operationCapability(CapabilityIds.FILES, List.of(), null).available()) {
                 throw new IllegalStateException("Reactor Server Files Are Unavailable");
@@ -1678,16 +1759,29 @@ public final class DesktopServerHost implements ServerScreenHost {
                 if (server.existing()) {
                     Instance existing = instancesById.get(server.existingId());
                     if (existing == null) return Async.failed(new IllegalArgumentException("Selected Server Is Unavailable"));
-                    if (server.proxy() && (!isVelocityProxy(existing) || !canMutateStandalone(existing))) {
-                        return Async.failed(new IllegalArgumentException("A Local Standalone Velocity Proxy Is Required"));
+                    if (server.proxy() && (!isVelocityProxy(existing) || !canManageNetworkMember(existing))) {
+                        return Async.failed(new IllegalArgumentException("A Standalone Velocity Proxy With Atomic Configuration Access Is Required"));
                     }
-                    if (!server.proxy() && (existing.isProxyServer() || !canMutateStandalone(existing))) {
-                        return Async.failed(new IllegalArgumentException("Only Local Standalone Backend Servers Can Join A Network"));
+                    if (server.management() == NetworkMemberManagement.EXTERNAL) {
+                        BackendConfig backend = existing.getBackendConfig();
+                        if (existing.isProxyServer() || backend == null || !PteroBackend.isPanelType(backend.type)) {
+                            return Async.failed(new IllegalArgumentException("Only An Existing Panel Backend Can Be Imported As External"));
+                        }
+                        if (!plan.firewallVerified()) {
+                            return Async.failed(new IllegalArgumentException("Verify The Panel Backend Is Reachable Only From The Proxy"));
+                        }
+                        continue;
+                    }
+                    if (!server.proxy() && (existing.isProxyServer() || !canManageNetworkMember(existing))) {
+                        return Async.failed(new IllegalArgumentException("Backend Requires Standalone Membership And Atomic Configuration Access"));
                     }
                     if (existing.getState() != InstanceState.STOPPED && existing.getState() != InstanceState.CRASHED) {
                         return Async.failed(new IllegalStateException("Stop Every Selected Server Before Creating The Network"));
                     }
                     continue;
+                }
+                if (server.management() == NetworkMemberManagement.EXTERNAL) {
+                    return Async.failed(new IllegalArgumentException("External Members Must Be Existing Panel Servers"));
                 }
                 Instance template = instance(server.template());
                 if (template == null) return Async.failed(new IllegalArgumentException("Server Configuration Is Unavailable"));
@@ -1697,7 +1791,12 @@ public final class DesktopServerHost implements ServerScreenHost {
                 if (name.isBlank()) return Async.failed(new IllegalArgumentException("Every New Server Needs A Name"));
                 if (!validServerName(name)) return Async.failed(new IllegalArgumentException("Server Names Cannot Contain File Path Characters"));
                 if (!names.add(name.toLowerCase(Locale.ROOT))) return Async.failed(new IllegalArgumentException("Server Names Must Be Unique"));
-                if (server.host() != null) continue;
+                if (server.host() != null) {
+                    if (server.host().panel() || !"SSH".equalsIgnoreCase(server.host().type()) || findHost(server.host()) == null) {
+                        return Async.failed(new IllegalArgumentException("Choose A Connected SSH Host Or Import An Existing Panel Server"));
+                    }
+                    continue;
+                }
                 Path root = networkCreationRoot(server);
                 if (!Files.isDirectory(root)) return Async.failed(new IllegalArgumentException("Server Location Is Unavailable: " + root));
                 Path target = root.resolve(name).normalize();
@@ -1738,7 +1837,96 @@ public final class DesktopServerHost implements ServerScreenHost {
     }
 
     @Override
+    public ResourcePoolClient resourcePools() {
+        return client.getApiClient().resourcePools();
+    }
+
+    @Override
+    public Async<String> createHostedNetwork(NetworkCreationPlan plan) {
+        ReStudio studio = ReStudio.getInstance();
+        if (studio == null || !studio.isAuthenticated() || studio.getUserId() == null || studio.getSessionId() == null) {
+            return Async.failed(new IllegalStateException("Sign In To Create A Reactor Network"));
+        }
+        try {
+            String account = hostedAccount();
+            return runHostedNetwork(pendingHostedNetworks.admit(account, plan.hostedCommand()), account);
+        } catch (RuntimeException error) {
+            return Async.failed(error);
+        }
+    }
+
+    @Override
+    public String hostedNetworkViewId(String networkId) {
+        return HOSTED_NETWORK_PREFIX + networkId;
+    }
+
+    @Override
+    public HostedNetworkPendingStore.Pending pendingHostedNetwork() {
+        ServerScreenHost.AccountIdentity identity = accountIdentity();
+        return identity.authenticated() && !identity.subjectId().isBlank()
+                ? pendingHostedNetworks.current(hostedAccount()) : null;
+    }
+
+    @Override
+    public Async<String> resumeHostedNetwork() {
+        try {
+            String account = hostedAccount();
+            HostedNetworkPendingStore.Pending pending = pendingHostedNetwork();
+            return pending == null ? Async.failed(new IllegalStateException("No Pending Network Request")) : runHostedNetwork(pending, account);
+        } catch (RuntimeException error) {
+            return Async.failed(error);
+        }
+    }
+
+    @Override
+    public void acknowledgeHostedNetwork(String requestId, String networkId) {
+        pendingHostedNetworks.acknowledgeTerminal(hostedAccount(), requestId, networkId);
+    }
+
+    private String hostedAccount() {
+        ServerScreenHost.AccountIdentity identity = accountIdentity();
+        return identity.authenticated() ? "true:" + ReStudio.getInstance().getEnvironment().name() + ":" + identity.subjectId() : "";
+    }
+
+    private Async<String> runHostedNetwork(HostedNetworkPendingStore.Pending pending, String account) {
+        ReStudio studio = ReStudio.getInstance();
+        if (studio == null || !studio.isAuthenticated() || studio.getUserId() == null || studio.getSessionId() == null
+                || !account.equals(hostedAccount())) {
+            return Async.failed(new IllegalStateException("Sign In To Create A Reactor Network"));
+        }
+        UUID session = studio.getSessionId();
+        String subject = studio.getUserId();
+        RemotelyServerApi api = client.getApiClient();
+        Async<NetworkOperationStatus> request = api.hostedNetworks().execute(
+                pending.command(), pending.body(), client.getComposition().scheduler(),
+                () -> ReStudio.getInstance() == studio && studio.isAuthenticated() && client.getApiClient() == api
+                        && session.equals(studio.getSessionId()) && subject.equals(studio.getUserId()));
+        request.whenComplete((status, error) -> {
+            if (status != null) {
+                pendingHostedNetworks.clearTerminal(account, pending.command().requestId(), pending.command().networkId());
+            } else if (error instanceof HostedNetworkClient.OperationFailure terminal) {
+                pendingHostedNetworks.markTerminal(account, pending.command().requestId(), pending.command().networkId(),
+                        terminal.status().state());
+            }
+        });
+        return request.thenApply(status -> hostedNetworkViewId(status.networkId()));
+    }
+
+    @Override
+    public Async<Void> prepareCreatedNetworkServer(Object server) {
+        Instance created = instance(server);
+        return created == null ? Async.failed(new IllegalArgumentException("Created Server Is Unavailable"))
+                : JvmAsyncBridge.fromFuture(NetworkBootstrap.initialize(created));
+    }
+
+    @Override
     public Async<Void> createNetwork(String name, String proxyId, int entryPort, List<NetworkCreationMember> members, boolean installReSync) {
+        return createNetwork(name, proxyId, entryPort, members, installReSync, false);
+    }
+
+    @Override
+    public Async<Void> createNetwork(String name, String proxyId, int entryPort, List<NetworkCreationMember> members,
+                                     boolean installReSync, boolean firewallVerified) {
         DesktopNetworkManager manager = DesktopNetworkAccess.manager(client);
         if (manager == null) return Async.failed(new IllegalStateException("Network Manager Is Unavailable"));
         List<Instance> instances = Rebase.get().getInstanceManager().getAllInstances();
@@ -1746,26 +1934,35 @@ public final class DesktopServerHost implements ServerScreenHost {
         if (proxy == null) return Async.failed(new IllegalArgumentException("Proxy Server Is Unavailable"));
         List<NetworkCreationMember> backends = members == null ? List.of() : List.copyOf(members);
         Map<String, Instance> instancesById = instances.stream().filter(Objects::nonNull).collect(Collectors.toMap(Instance::getInstanceId, instance -> instance, (first, ignored) -> first, LinkedHashMap::new));
-        if (!isVelocityProxy(proxy) || !canMutateStandalone(proxy)) {
-            return Async.failed(new IllegalArgumentException("A Local Standalone Velocity Proxy Is Required"));
+        if (!isVelocityProxy(proxy) || !canManageNetworkMember(proxy)) {
+            return Async.failed(new IllegalArgumentException("A Standalone Velocity Proxy With Atomic Configuration Access Is Required"));
         }
         if (backends.isEmpty()) {
             return Async.failed(new IllegalArgumentException("Backend Server Is Required"));
         }
         if (backends.stream().anyMatch(member -> {
             Instance backend = instancesById.get(member.instanceId());
-            return backend == null || backend.getInstanceId().equals(proxy.getInstanceId()) || backend.isProxyServer() || !canMutateStandalone(backend);
+            if (backend == null || backend.getInstanceId().equals(proxy.getInstanceId()) || backend.isProxyServer()) return true;
+            if (member.management() == NetworkMemberManagement.EXTERNAL) {
+                BackendConfig config = backend.getBackendConfig();
+                return config == null || !PteroBackend.isPanelType(config.type) || member.address().isBlank()
+                    || member.preferredPort() == 0 || !firewallVerified;
+            }
+            return !canManageNetworkMember(backend);
         })) {
-            return Async.failed(new IllegalArgumentException("Only Local Standalone Backend Servers Can Join A Network"));
+            return Async.failed(new IllegalArgumentException("Managed Backends Need Atomic Configuration Access. External Panel Backends Need An Address, Port, And Firewall Verification"));
         }
-        NetworkCreationRequest request = new NetworkCreationRequest(name, proxy.getInstanceId(), entryPort, backends, false);
+        NetworkCreationRequest request = new NetworkCreationRequest(name, proxy.getInstanceId(), entryPort, backends, firewallVerified);
         List<Instance> reSyncTargets = new ArrayList<>();
         if (installReSync) reSyncTargets.add(proxy);
         backends.stream().filter(NetworkCreationMember::resyncEnabled).map(member -> instancesById.get(member.instanceId())).filter(Objects::nonNull).forEach(reSyncTargets::add);
-        Async<Void> setup = reSyncTargets.isEmpty() ? Async.completed(null) : installReSync(reSyncTargets.stream().distinct().toList());
-        return setup.thenCompose(ignored -> manager.prepareCreation(request, instances, List.of()))
-                .thenCompose(prepared -> manager.runPreparedCreation(prepared, instances, "Server Manager"))
-                .thenCompose(job -> completeNetworkCreation(manager, instances, job));
+        return manager.prepareCreation(request, instances, List.of())
+                .thenCompose(prepared -> manager.runPreparedCreation(prepared, instances, "Server Manager")
+                        .whenComplete((job, failure) -> manager.discardPreparedCreation(prepared)))
+                .thenCompose(job -> completeNetworkCreation(manager, instances, job))
+                .thenCompose(ignored -> reSyncTargets.isEmpty() ? Async.completed(null)
+                        : installReSync(reSyncTargets.stream().distinct().toList()).exceptionallyCompose(failure ->
+                                Async.failed(new IllegalStateException("Network Created. ReSync Installation Needs Recovery", failure))));
     }
 
     @Override
@@ -1778,11 +1975,24 @@ public final class DesktopServerHost implements ServerScreenHost {
     @Override
     public Async<Void> discardCreatedServer(NetworkCreationPlan.Server plan, Object server) {
         if (plan == null || plan.existing()) return discardCreatedServer(server);
-        if (plan.host() != null) return Async.failed(new UnsupportedOperationException("Remote Server Rollback Is Unavailable"));
         Instance expected = instance(plan.template());
         Instance instance = instance(server);
         if (expected == null || instance == null || !expected.getInstanceId().equals(instance.getInstanceId())) {
             return Async.failed(new IllegalArgumentException("Created Server Identity Is Unavailable"));
+        }
+        DesktopNetworkManager manager = DesktopNetworkAccess.manager(client);
+        if (instance.getNetworkId() != null && !instance.getNetworkId().isBlank()
+                || manager != null && manager.getNetworkForInstance(instance.getInstanceId()).isPresent()) {
+            return Async.failed(new IllegalStateException("Created Server Still Belongs To A Network. Recover The Network Before Removing It"));
+        }
+        if (manager != null) manager.requireCreationRemovalSafe(instance.getInstanceId());
+        if (plan.host() != null) {
+            BackendConfig config = instance.getBackendConfig();
+            if (!"SSH".equalsIgnoreCase(plan.host().type()) || config == null || config.credentials == null
+                    || plan.host().id().isBlank() || !plan.host().id().equals(config.credentials.get("hostId"))) {
+                return Async.failed(new IllegalStateException("Created Remote Server Host Cannot Be Verified"));
+            }
+            return JvmAsyncBridge.fromFuture(Rebase.get().getInstanceManager().discardRemoteCreation(instance));
         }
         Path root;
         Path target;
@@ -1812,7 +2022,7 @@ public final class DesktopServerHost implements ServerScreenHost {
 
     @Override
     public Async<Void> discardPartialNetworkServer(NetworkCreationPlan.Server plan) {
-        if (plan == null || plan.host() != null) return Async.completed(null);
+        if (plan == null) return Async.completed(null);
         return discardCreatedServer(plan, plan.template());
     }
 
@@ -1845,11 +2055,13 @@ public final class DesktopServerHost implements ServerScreenHost {
         if (proxy == null) {
             return Async.failed(new IllegalStateException("Network Proxy Is Unavailable"));
         }
-        if (!isVelocityProxy(proxy) || !canMutateStandalone(proxy)) {
-            return Async.failed(new IllegalStateException("Network Proxy Is Not A Local Velocity Server"));
+        if (!isVelocityProxy(proxy) || !canConfigureNetworkMember(proxy)) {
+            return Async.failed(new IllegalStateException("Network Proxy Configuration Is Unavailable"));
         }
-        if (target.getInstanceId().equals(proxy.getInstanceId()) || target.isProxyServer() || !canMutateStandalone(target)) {
-            return Async.failed(new IllegalStateException("Only Local Standalone Backend Servers Can Join A Network"));
+        String configurationIssue = DesktopNetworkOverviewProvider.configurationIssue(network, instances);
+        if (!configurationIssue.isBlank()) return Async.failed(new IllegalStateException(configurationIssue));
+        if (target.getInstanceId().equals(proxy.getInstanceId()) || target.isProxyServer() || !canManageNetworkMember(target)) {
+            return Async.failed(new IllegalStateException("Backend Server Must Be Standalone And Allow Configuration Changes"));
         }
         boolean resync = installReSync || normalized.endsWith("-resync");
         String route = uniqueRoute(network, target.getName());
@@ -1878,10 +2090,17 @@ public final class DesktopServerHost implements ServerScreenHost {
             failure.addSuppressed(rollbackFailure);
             return Async.failed(failure);
         }
-        return rollback.handle((ignored, rollbackFailure) -> {
-            if (rollbackFailure != null) failure.addSuppressed(rollbackFailure);
-            return null;
-        }).thenCompose(ignored -> Async.failed(failure));
+        return rollback.thenCompose(restored -> {
+            if (restored == null || restored.status() != NetworkJobStatus.ROLLED_BACK) {
+                return Async.<Void>failed(new IllegalStateException("Network Recovery Is Required. Created Servers Were Kept", failure));
+            }
+            return Async.<Void>failed(failure);
+        }).exceptionallyCompose(rollbackFailure -> {
+            if (rollbackFailure == failure) return Async.failed(failure);
+            if (rollbackFailure.getCause() == failure) return Async.failed(rollbackFailure);
+            failure.addSuppressed(rollbackFailure);
+            return Async.failed(new IllegalStateException("Network Recovery Is Required. Created Servers Were Kept", failure));
+        });
     }
 
     private Async<Void> installReSync(List<Instance> targets) {
@@ -2344,6 +2563,35 @@ public final class DesktopServerHost implements ServerScreenHost {
     }
 
     @Override
+    public NewTerminalTargetProvider newTerminalTargetProvider() {
+        return new NewTerminalTargetProvider() {
+            @Override
+            public Async<Object> newTarget(List<Object> openTargets) {
+                return NewTerminalTargetProvider.local().newTarget(openTargets);
+            }
+
+            @Override
+            public boolean supports(Object target) {
+                if (!(target instanceof Shell shell)) return true;
+                RemoteHost host = findHostById(Rebase.get().getInstanceManager(), shell.hostId());
+                return host != null && "SSH".equalsIgnoreCase(host.getType());
+            }
+        };
+    }
+
+    @Override
+    public TerminalWidget createShellTerminal(NewTerminalTargetProvider.Shell shell, int x, int y, int width, int height) {
+        TerminalSessionProvider provider = size -> {
+            RemoteHost host = findHostById(Rebase.get().getInstanceManager(), shell.hostId());
+            if (host == null || !"SSH".equalsIgnoreCase(host.getType())) {
+                throw new IllegalStateException("SSH Host Is Unavailable");
+            }
+            return new SshTerminalFeature(host.getSshManager(), null).openSession(size.columns(), size.rows(), null);
+        };
+        return TerminalWidget.getOrCreate(shell.id(), x, y, width, height, provider);
+    }
+
+    @Override
     public void shutdownTerminal(String id) {
         ServerTerminal.shutdown(id);
         TerminalWidget.shutdownLocal(id);
@@ -2552,12 +2800,6 @@ public final class DesktopServerHost implements ServerScreenHost {
         });
     }
 
-    private static void updateRestudioCredential(Instance instance, String key, String value) {
-        BackendConfig config = instance == null ? null : instance.getBackendConfig();
-        if (config == null || config.credentials == null || key == null || key.isBlank()) return;
-        config.credentials.put(key, value == null ? "" : value);
-    }
-
     private static void applyRestudioObservedState(Instance instance, String value, boolean suspended, boolean installing) {
         if (instance == null) return;
         if (suspended) {
@@ -2716,7 +2958,13 @@ public final class DesktopServerHost implements ServerScreenHost {
 
     @Override
     public void openNetworkSettings(Screen current, String networkId) {
-        application().setScreen(new NetworkOverviewScreen(current, networkOverviewProvider(client), networkId));
+        if (networkId == null || networkId.isBlank()) throw new IllegalArgumentException("Network Is Unavailable");
+        DesktopNetworkManager manager = DesktopNetworkAccess.manager(client);
+        boolean local = manager != null && manager.getNetwork(networkId).isPresent();
+        boolean hosted = !local && networkId != null && networkId.startsWith(HOSTED_NETWORK_PREFIX);
+        String id = hosted ? networkId.substring(HOSTED_NETWORK_PREFIX.length()) : networkId;
+        NetworkOverviewProvider provider = hosted ? hostedNetworkOverviewProvider() : networkOverviewProvider(client);
+        application().setScreen(new NetworkOverviewScreen(current, provider, id));
     }
 
     @Override
@@ -2770,6 +3018,24 @@ public final class DesktopServerHost implements ServerScreenHost {
         }
         DesktopNetworkManager manager = DesktopNetworkAccess.manager(client);
         return manager == null ? client.getNetworkManager() == null : manager.getNetworkForInstance(instance.getInstanceId()).isEmpty();
+    }
+
+    private static boolean canConfigureNetworkMember(Instance instance) {
+        if (instance == null || instance.getState() == InstanceState.INSTALLING) return false;
+        ServerBackend backend = instance.getBackend();
+        return backend != null && backend.getFileSystem() != null && backend.getFileSystem().supportsAtomicWrites();
+    }
+
+    private boolean canManageNetworkMember(Instance instance) {
+        if (!canConfigureNetworkMember(instance)) return false;
+        DesktopNetworkManager manager = DesktopNetworkAccess.manager(client);
+        return manager != null && manager.getNetworkForInstance(instance.getInstanceId()).isEmpty();
+    }
+
+    @Override
+    public ActionAvailability networkMemberAvailability(ServerModels.ClientServerView server) {
+        return canManageNetworkMember(resolve(server)) ? ActionAvailability.enabled()
+                : ActionAvailability.disabled("Server Requires Standalone Membership And Atomic Configuration Access");
     }
 
     private boolean canDeleteStandalone(Instance instance) {

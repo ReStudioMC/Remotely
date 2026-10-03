@@ -3,6 +3,7 @@ package redxax.oxy.remotely.ui.settings.controllers;
 import redxax.oxy.remotely.util.DesktopAsyncTools;
 import restudio.rebase.backend.feature.PortManagementFeature;
 import restudio.rebase.backend.feature.SubuserFeature;
+import restudio.rebase.backend.impl.ReStudioBackend;
 import restudio.rebase.instance.Instance;
 import restudio.rescreen.platform.Async;
 import restudio.rebase.restudio.api.models.ServerModels;
@@ -29,6 +30,7 @@ public final class DesktopHostedSettingsProviders {
         SubuserFeature feature = instance.getBackend().getFeature(SubuserFeature.class).orElse(null);
         if (feature == null) return SubuserSettingsProvider.unavailable("Subuser Feature Is Unavailable");
         return new SubuserSettingsProvider() {
+            public String collaborationResourceId() { return instance.getBackend() instanceof ReStudioBackend backend ? backend.getServerId() : ""; }
             public Async<List<ServerModels.Subuser>> getSubusers() { return DesktopAsyncTools.adapt(feature.getSubusers()); }
             public Async<ServerModels.SystemPermissions> getSystemPermissions() { return DesktopAsyncTools.adapt(feature.getSystemPermissions()); }
             public Async<ServerModels.Subuser> createSubuser(String email, List<String> permissions) { return DesktopAsyncTools.adapt(feature.createSubuser(email, permissions)); }

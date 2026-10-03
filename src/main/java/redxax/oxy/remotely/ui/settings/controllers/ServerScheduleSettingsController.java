@@ -10,10 +10,11 @@ import restudio.rescreen.ui.rescreen.ReScreen;
 import restudio.rescreen.ui.settings.Setting;
 import restudio.rescreen.ui.settings.SettingsScreen;
 import restudio.rescreen.ui.widgets.AnimatedButton;
+import restudio.rescreen.ui.widgets.AnimatedWidget;
 import restudio.rescreen.ui.widgets.MountableButtonWidget;
 import restudio.rescreen.ui.widgets.PopupWidget;
 import restudio.rescreen.ui.widgets.ScreenWindowWidget;
-import restudio.rescreen.ui.widgets.ScrollSelectorWidget;
+import restudio.rescreen.ui.widgets.DropDownWidget;
 import restudio.rescreen.ui.widgets.SquareButtonWidget;
 import restudio.rescreen.ui.widgets.TextInputWidget;
 import restudio.rescreen.ui.widgets.ToggleWidget;
@@ -29,9 +30,14 @@ import java.util.Locale;
 import java.util.Map;
 import java.time.Instant;
 import java.time.ZoneId;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 
 public final class ServerScheduleSettingsController {
     private static final String TAB = "Schedules";
+    private static final List<String> ZONES = ZoneId.getAvailableZoneIds().stream().sorted().toList();
+    private static final int FIELD_WIDTH = 140;
 
     private final ReScreen owner;
     private final AsyncServerScheduleFeature feature;
@@ -127,6 +133,8 @@ public final class ServerScheduleSettingsController {
 
     private final class ScheduleRow {
         private ServerScheduleModels.Schedule schedule;
+        private ServerScheduleModels.Schedule rendered;
+        private String displayZone;
         private final SquareButtonWidget run;
         private final SquareButtonWidget edit;
         private final SquareButtonWidget delete;
@@ -145,12 +153,17 @@ public final class ServerScheduleSettingsController {
 
         private void update(ServerScheduleModels.Schedule current, boolean canRun) {
             schedule = current;
-            String state = current.enabled() ? "Enabled" : "Disabled";
-            String next = current.nextRunAt().isBlank() ? "No Next Run" : "Next " + displayTime(current.nextRunAt());
-            widget.setName(current.name());
-            widget.setMessage(current.name());
-            widget.setDescription(state + " · " + next);
-            widget.setHiddenText(current.lastResult().isBlank() ? "Never Run" : current.lastResult());
+            String zone = ZoneId.systemDefault().getId();
+            if (!current.equals(rendered) || !zone.equals(displayZone)) {
+                String state = current.enabled() ? "Enabled" : "Disabled";
+                String next = current.nextRunAt().isBlank() ? "No Next Run" : "Next " + displayTime(current.nextRunAt());
+                widget.setName(current.name());
+                widget.setMessage(current.name());
+                widget.setDescription(state + " · " + next);
+                widget.setHiddenText(current.lastResult().isBlank() ? "Never Run" : current.lastResult());
+                rendered = current;
+                displayZone = zone;
+            }
             run.active = !action && canRun;
             edit.active = !action;
             delete.active = !action;
@@ -186,58 +199,75 @@ public final class ServerScheduleSettingsController {
         if (screen == null || action) return;
         ServerScheduleModels.Capabilities capabilities = feature.scheduleCapabilities();
         PopupWidget.Builder popup = new PopupWidget.Builder(schedule == null ? "Add Schedule" : "Edit Schedule")
-                .pos(50, screen.height / 8).size(480, 430).setResizable(true).setMinSize(420, 330);
+                .size(500, 460).setResizable(true).setMinSize(440, 330)
+                .animateElevation(false).enableHoverColors(false).animateColor(false).entranceAnimation(false);
         TextInputWidget name = input(draft.name(), "Schedule Name", 260);
-        ToggleWidget enabled = new ToggleWidget.Builder().toggled(draft.enabled()).build();
-        ToggleWidget onlyOnline = new ToggleWidget.Builder().toggled(draft.onlyOnline()).build();
-        List<String> timingOptions = new ArrayList<>();
-        if (capabilities.oneTime()) timingOptions.add("One Time");
-        if (capabilities.cron()) timingOptions.add("Recurring");
-        int timingIndex = timingOptions.indexOf(draft.timing());
-        ScrollSelectorWidget timing = new ScrollSelectorWidget.Builder().options(timingOptions)
-                .selectedIndex(Math.max(0, timingIndex)).size(150, 20).build();
-        ScrollSelectorWidget preset = new ScrollSelectorWidget.Builder().options(ScheduleTimingGuide.PRESETS)
-                .selectedIndex(ScheduleTimingGuide.PRESETS.indexOf(draft.preset())).size(150, 20).build();
-        TextInputWidget recurringTime = input(draft.recurringTime(), "HH:MM", 90);
-        ScrollSelectorWidget weekDay = new ScrollSelectorWidget.Builder().options(ScheduleTimingGuide.WEEKDAYS_LIST)
-                .selectedIndex(draft.weekDay()).size(120, 20).build();
-        TextInputWidget monthDay = input(draft.monthDay(), "1 To 31", 70);
-        TextInputWidget advancedCron = input(draft.cron(), "Five Field Cron", 220);
-        TextInputWidget when = input(draft.oneTime(), "2026-08-27 18:00", 260);
-        TextInputWidget zone = input(draft.zone(), "Time Zone", 180);
-        popup.addRow("name", "Name", name);
-        popup.addRow("enabled", "Enabled", enabled);
-        popup.addRow("timing", "Timing", timing);
-        if (capabilities.oneTime()) popup.addRow("schedule-when", "Local Date And Time", when);
-        if (capabilities.cron()) {
-            popup.addRow("schedule-preset", "Recurring Pattern", preset);
-            popup.addRow("schedule-time", "Recurring Time", recurringTime);
-            popup.addRow("schedule-weekday", "Week Day", weekDay);
-            popup.addRow("schedule-month-day", "Month Day", monthDay);
-            popup.addRow("schedule-cron", "Advanced Cron", advancedCron);
-            Runnable updateTimingFields = () -> updateTimingRows(popup.getWidget(), capabilities.oneTime(), capabilities.timeZone(),
-                    "Recurring".equals(timing.getSelectedOption()), preset.getSelectedOption());
-            timing.setOnChange(updateTimingFields);
-            preset.setOnChange(updateTimingFields);
-            if (capabilities.timeZone()) popup.addRow("schedule-zone", "Recurring Time Zone", zone);
-            updateTimingFields.run();
-        }
-        popup.addRow("online", "Only While Running", onlyOnline);
+        ToggleWidget enabled = toggle(draft.enabled(), "Enable Schedule");
+        ToggleWidget onlyOnline = toggle(draft.onlyOnline(), "Run Tasks Only While The Server Is Running");
+        ToggleWidget timing = toggle(capabilities.cron() && (!capabilities.oneTime() || "Recurring".equals(draft.timing())), "Repeat This Schedule");
+        timing.setActive(capabilities.cron() && capabilities.oneTime());
+        List<String> presets = ScheduleTimingGuide.PRESETS.stream()
+                .filter(value -> capabilities.seconds() || !ScheduleTimingGuide.SECONDLY.equals(value)).toList();
+        DropDownWidget<String> preset = ScheduleDatePicker.quiet(new DropDownWidget.Builder<>(presets)
+                .selectedItem(draft.preset()).size(ScheduleDatePicker.SELECTOR_WIDTH, 20).build());
+        MountableButtonWidget timingRow = new MountableButtonWidget.Builder("Recurring")
+                .description("Off Runs Once. On Repeats At The Chosen Frequency").addWidget(timing).build();
+        TextInputWidget advancedCron = input(draft.cron(), capabilities.seconds() ? "Five Or Six Field Cron" : "Five Field Cron", 260);
+        String currentZone = draft.zone().isBlank() ? ZoneId.systemDefault().getId() : draft.zone();
+        List<String> zones = new ArrayList<>(ZONES);
+        if (!zones.contains(currentZone)) zones.addFirst(currentZone);
+        DropDownWidget<String> zone = new DropDownWidget.Builder<>(zones).selectedItem(currentZone).maxVisibleItems(8).size(220, 20).build();
+        LocalDateTime selected = draft.dateTime(LocalDate.now());
+        ScheduleDatePicker picker = new ScheduleDatePicker(selected, capabilities.seconds());
+        picker.addMountedWidget(preset);
+        AnimatedButton summary = new AnimatedButton.Builder().active(false).size(260, 22).build();
+        popup.addRow("name", "Name", name, enabled);
+        popup.addRow("timing", "", timingRow);
+        popup.addRow("schedule-picker", "", picker);
+        if (capabilities.cron()) popup.addRow("schedule-cron", "Advanced Cron", advancedCron);
+        if (capabilities.timeZone()) popup.addRow("schedule-zone", "Time Zone", zone);
+        popup.addRow("schedule-summary", "", summary);
+        Runnable updateTiming = () -> {
+            boolean recurring = timing.getValue();
+            String pattern = recurring ? preset.getSelectedItem() : "One Time";
+            picker.pattern(pattern);
+            timingRow.setDescription(recurring ? "Repeats At The Chosen Frequency" : "Runs Once At The Chosen Date And Time");
+            preset.setVisible(capabilities.cron() && recurring);
+            picker.controls(!recurring || !ScheduleTimingGuide.ADVANCED.equals(pattern)
+                    && !ScheduleTimingGuide.SECONDLY.equals(pattern) && (capabilities.seconds() || !ScheduleTimingGuide.MINUTELY.equals(pattern)));
+            popup.getWidget().setRowVisibility("schedule-cron", recurring && ScheduleTimingGuide.ADVANCED.equals(pattern));
+            try {
+                String text = timingSummary(recurring, pattern, picker, advancedCron.getText(), capabilities.timeZone() ? zone.getSelectedItem() : "Panel Time");
+                summary.setMessage(text);
+                summary.setHint(text + (ScheduleTimingGuide.MONTHLY.equals(pattern) || ScheduleTimingGuide.YEARLY.equals(pattern)
+                        ? "\nMonths Without This Date Are Skipped" : ""));
+            } catch (RuntimeException invalid) {
+                summary.setMessage(invalid.getMessage());
+            }
+        };
+        timing.setOnChange(updateTiming);
+        preset.setOnSelectionChanged(value -> updateTiming.run());
+        picker.onChange(updateTiming);
+        zone.setOnSelectionChanged(value -> updateTiming.run());
+        advancedCron.setOnChange(updateTiming);
+        updateTiming.run();
+        popup.addRow("online", "", new MountableButtonWidget.Builder("Only While Running")
+                .description("Skip A Run When The Server Is Offline").addWidget(onlyOnline).build());
 
         List<ServerScheduleModels.Task> tasks = draft.tasks().isEmpty() ? List.of(defaultTask()) : draft.tasks();
         List<TaskEditor> editors = new ArrayList<>();
         AnimatedButton addTask = new AnimatedButton.Builder().label("Add Task").onClick(() -> {
             if (editors.size() >= 32) return;
-            editors.add(new TaskEditor(popup.getWidget(), editors, defaultTask(), capabilities.backup()));
+            editors.add(new TaskEditor(popup.getWidget(), editors, defaultTask(), capabilities.backup(), capabilities.retention()));
             updateTaskRows(popup.getWidget(), editors);
         }).build();
         popup.addRow("add-task", "", addTask);
-        popup.addTitleAction("Save", () -> save(popup, schedule, name, enabled, timing, when, preset, recurringTime,
-                        weekDay, monthDay, advancedCron, zone, onlyOnline, editors),
+        popup.addTitleAction("Save", () -> save(popup, schedule, name, enabled, timing, preset, picker, advancedCron, zone, onlyOnline, editors),
                 PopupWidget.TitleActionRole.PRIMARY);
-        PopupWidget widget = popup.build();
-        for (ServerScheduleModels.Task task : tasks) editors.add(new TaskEditor(widget, editors, task, capabilities.backup()));
+        PopupWidget widget = ScheduleDatePicker.quiet(popup.build());
+        for (ServerScheduleModels.Task task : tasks) editors.add(new TaskEditor(widget, editors, task, capabilities.backup(), capabilities.retention()));
         updateTaskRows(widget, editors);
+        widget.centerOnOwner();
         screen.addDrawableChild(widget);
         widget.show();
     }
@@ -249,6 +279,7 @@ public final class ServerScheduleSettingsController {
         while (addIndex < next.size() && !"add-task".equals(next.get(addIndex).id)) addIndex++;
         for (int index = 0; index < editors.size(); index++) {
             TaskEditor editor = editors.get(index);
+            editor.number.setName("Task " + (index + 1));
             editor.number.setMessage("Task " + (index + 1));
             editor.up.active = index > 0;
             editor.down.active = index + 1 < editors.size();
@@ -265,25 +296,28 @@ public final class ServerScheduleSettingsController {
 
     private final class TaskEditor {
         private final String id;
-        private final ScrollSelectorWidget action;
+        private final DropDownWidget<String> action;
         private final TextInputWidget payload;
         private final TextInputWidget delay;
         private final ToggleWidget continueOnFailure;
-        private final AnimatedButton number;
+        private final MountableButtonWidget number;
+        private final TextInputWidget keep;
+        private final TextInputWidget age;
+        private boolean expanded;
         private final SquareButtonWidget up;
         private final SquareButtonWidget down;
         private final SquareButtonWidget remove;
         private final PopupRow row;
 
-        private TaskEditor(PopupWidget popup, List<TaskEditor> editors, ServerScheduleModels.Task task, boolean backup) {
+        private TaskEditor(PopupWidget popup, List<TaskEditor> editors, ServerScheduleModels.Task task, boolean backup, boolean retention) {
             id = task.id();
             List<String> actions = actionOptions(backup);
-            action = new ScrollSelectorWidget.Builder().options(actions)
-                    .selectedIndex(Math.max(0, actions.indexOf(label(task.action())))).size(95, 20).build();
-            payload = input(task.payload(), task.action() == ServerScheduleModels.Action.COMMAND ? "Command" : "Value", 135);
-            delay = input(String.valueOf(task.delaySeconds()), "Delay", 50);
-            continueOnFailure = new ToggleWidget.Builder().toggled(task.continueOnFailure()).size(36, 18).build();
-            number = new AnimatedButton.Builder().label("Task").active(false).size(54, 20).build();
+            action = new DropDownWidget.Builder<>(actions).selectedItem(label(task.action())).size(FIELD_WIDTH, 20).build();
+            payload = input(task.payload(), task.action() == ServerScheduleModels.Action.COMMAND ? "Command" : "Value", FIELD_WIDTH);
+            delay = input(String.valueOf(task.delaySeconds()), "Seconds", FIELD_WIDTH);
+            continueOnFailure = toggle(task.continueOnFailure(), "Continue With The Next Task If This Task Fails");
+            keep = input(Integer.toString(task.keepBackups()), "0 Keeps All", FIELD_WIDTH);
+            age = input(Integer.toString(task.retentionDays()), "0 Has No Age Limit", FIELD_WIDTH);
             up = new SquareButtonWidget.Builder().imagePath("up.png").hint("Move Up").size(18, 18).onClick(() -> {
                 int index = editors.indexOf(this);
                 if (index > 0) {
@@ -304,67 +338,89 @@ public final class ServerScheduleSettingsController {
                         editors.remove(this);
                         updateTaskRows(popup, editors);
                     }).build();
-            row = new PopupRow.Builder("", number, action, payload, delay, continueOnFailure, up, down, remove)
-                    .id("task-row:" + (++taskRowSequence)).build();
+            number = new MountableButtonWidget.Builder("Task").addButton(up).addButton(down).addButton(remove).build();
+            MountableButtonWidget actionRow = new MountableButtonWidget.Builder("Task Type").description("Choose What This Task Does").addWidget(action).build();
+            MountableButtonWidget valueRow = new MountableButtonWidget.Builder("Value").addWidget(payload).build();
+            MountableButtonWidget delayRow = new MountableButtonWidget.Builder("Wait Before Task").description("Pause Before This Task, In Seconds").addWidget(delay).build();
+            MountableButtonWidget failureRow = new MountableButtonWidget.Builder("Continue After Failure").description("Run The Next Task If This One Fails").addWidget(continueOnFailure).build();
+            MountableButtonWidget keepRow = new MountableButtonWidget.Builder("Keep Backups").description("Newest Successful Copies. 0 Keeps All").addWidget(keep).build();
+            MountableButtonWidget ageRow = new MountableButtonWidget.Builder("Maximum Age").description("Days. 0 Has No Age Limit").addWidget(age).build();
+            MountableButtonWidget retentionInfo = new MountableButtonWidget.Builder("Only This Task's Backups")
+                    .description("Locked Backups And The Newest Successful Copy Are Kept").build();
+            List<AnimatedWidget> details = List.of(actionRow, valueRow, delayRow, failureRow, keepRow, ageRow, retentionInfo);
+            number.setEmbeddedBody(details, false);
+            number.setOnClick(() -> { expanded = !expanded; number.setEmbeddedBody(null, expanded); });
+            Runnable updateAction = () -> {
+                ServerScheduleModels.Action selected = parseAction(action.getSelectedItem());
+                valueRow.setVisible(selected == ServerScheduleModels.Action.COMMAND || selected == ServerScheduleModels.Action.BACKUP);
+                valueRow.setName(selected == ServerScheduleModels.Action.BACKUP ? "Backup Name" : "Command");
+                valueRow.setDescription(selected == ServerScheduleModels.Action.BACKUP ? "A Name For Each New Backup" : "Send This Command To The Server Console");
+                actionRow.setDescription(switch (selected) {
+                    case BACKUP -> "Create A Backup Of The Server";
+                    case COMMAND -> "Send A Console Command";
+                    case START -> "Start The Server";
+                    case STOP -> "Stop The Server";
+                    case RESTART -> "Restart The Server";
+                    default -> label(selected);
+                });
+                keepRow.setVisible(retention && selected == ServerScheduleModels.Action.BACKUP);
+                ageRow.setVisible(retention && selected == ServerScheduleModels.Action.BACKUP);
+                retentionInfo.setVisible(retention && selected == ServerScheduleModels.Action.BACKUP);
+                number.setDescription(selected == ServerScheduleModels.Action.BACKUP && retention
+                        ? "Keep " + (keep.getText().equals("0") ? "All" : keep.getText()) + (age.getText().equals("0") ? "" : " · " + age.getText() + " Days") : label(selected));
+                number.setEmbeddedBody(null, expanded);
+            };
+            action.setOnSelectionChanged(value -> updateAction.run());
+            keep.setOnChange(updateAction);
+            age.setOnChange(updateAction);
+            updateAction.run();
+            ScheduleDatePicker.quiet(number);
+            row = new PopupRow.Builder("", number).id("task-row:" + (++taskRowSequence)).build();
         }
 
         private String id() { return id; }
-        private ScrollSelectorWidget action() { return action; }
+        private DropDownWidget<String> action() { return action; }
         private TextInputWidget payload() { return payload; }
         private TextInputWidget delay() { return delay; }
         private ToggleWidget continueOnFailure() { return continueOnFailure; }
     }
 
+    private String timingSummary(boolean recurring, String pattern, ScheduleDatePicker picker, String advanced, String zone) {
+        if (!recurring) return "Runs Once On " + picker.value().format(DateTimeFormatter.ofPattern("d MMM yyyy HH:mm:ss")) + " In " + zone;
+        String summary = ScheduleTimingGuide.summary(pattern, picker.clock(), picker.weekDay(), picker.monthDay(), advanced, zone);
+        if (ScheduleTimingGuide.YEARLY.equals(pattern)) summary = "Runs Every " + picker.value().format(DateTimeFormatter.ofPattern("d MMM"))
+                + " At " + picker.clock() + " In " + zone;
+        return summary;
+    }
+
     private void save(PopupWidget.Builder popup, ServerScheduleModels.Schedule schedule, TextInputWidget name,
-                      ToggleWidget enabled, ScrollSelectorWidget timing, TextInputWidget when, ScrollSelectorWidget preset,
-                      TextInputWidget recurringTime, ScrollSelectorWidget weekDay, TextInputWidget monthDay,
-                      TextInputWidget advancedCron, TextInputWidget zone,
-                      ToggleWidget onlyOnline, List<TaskEditor> editors) {
+                      ToggleWidget enabled, ToggleWidget timing, DropDownWidget<String> preset, ScheduleDatePicker picker,
+                      TextInputWidget advancedCron, DropDownWidget<String> zone, ToggleWidget onlyOnline, List<TaskEditor> editors) {
         if (closed || action) return;
-        String scheduleName = name.getText().trim();
-        if (scheduleName.isBlank()) {
-            new Notification("Invalid Schedule", "Name Is Required", Notification.Type.WARN);
-            return;
-        }
-        boolean oneTime = "One Time".equals(timing.getSelectedOption());
-        String value;
+        ServerScheduleModels.Mutation mutation;
+        String summary;
         try {
-            value = oneTime ? ScheduleEditorDraft.instant(when.getText(), zone.getText().isBlank() ? ZoneId.systemDefault().getId() : zone.getText().trim())
-                    : ScheduleTimingGuide.cron(preset.getSelectedOption(), recurringTime.getText(),
-                    Math.max(0, ScheduleTimingGuide.WEEKDAYS_LIST.indexOf(weekDay.getSelectedOption())), monthDay.getText(), advancedCron.getText());
-            if (oneTime && !Instant.parse(value).isAfter(Instant.now())) throw new IllegalArgumentException("One Time Schedule Must Be In The Future");
-            if (!oneTime) ScheduleTimingGuide.summary(preset.getSelectedOption(), recurringTime.getText(),
-                    Math.max(0, ScheduleTimingGuide.WEEKDAYS_LIST.indexOf(weekDay.getSelectedOption())), monthDay.getText(), advancedCron.getText(), zone.getText());
+            String scheduleName = name.getText().trim();
+            if (scheduleName.isBlank()) throw new IllegalArgumentException("Name Is Required");
+            ZoneId selectedZone = ZoneId.of(zone.getSelectedItem().isBlank() ? "UTC" : zone.getSelectedItem().trim());
+            boolean recurring = timing.getValue();
+            String runAt = recurring ? "" : picker.value().atZone(selectedZone).toInstant().toString();
+            if (!recurring && enabled.getValue() && !Instant.parse(runAt).isAfter(Instant.now())) {
+                throw new IllegalArgumentException("One Time Schedule Must Be In The Future");
+            }
+            String cron = recurring ? ScheduleTimingGuide.cron(preset.getSelectedItem(), picker.clock(), picker.weekDay(),
+                    picker.monthDay(), picker.month(), advancedCron.getText(), feature.scheduleCapabilities().seconds()) : "";
+            if (!feature.scheduleCapabilities().seconds() && cron.split(" ").length == 6) {
+                throw new IllegalArgumentException("This Backend Supports Timing To The Minute");
+            }
+            ServerScheduleModels.Timing selectedTiming = new ServerScheduleModels.Timing(recurring
+                    ? ServerScheduleModels.TimingType.CRON : ServerScheduleModels.TimingType.ONE_TIME, runAt, cron, selectedZone.getId());
+            mutation = new ServerScheduleModels.Mutation(scheduleName, enabled.getValue(), selectedTiming, onlyOnline.getValue(), capture(editors));
+            summary = timingSummary(recurring, preset.getSelectedItem(), picker, advancedCron.getText(), feature.scheduleCapabilities().timeZone() ? selectedZone.getId() : "Panel Time");
         } catch (RuntimeException failure) {
             new Notification("Invalid Schedule", failure.getMessage(), Notification.Type.WARN);
             return;
         }
-        if (value.isBlank()) {
-            new Notification("Invalid Schedule", oneTime ? "Date And Time Are Required" : "Cron Is Required", Notification.Type.WARN);
-            return;
-        }
-        List<ServerScheduleModels.Task> tasks;
-        try {
-            tasks = capture(editors);
-        } catch (RuntimeException failure) {
-            new Notification("Invalid Schedule", failure.getMessage(), Notification.Type.WARN);
-            return;
-        }
-        String timingSummary;
-        try {
-            timingSummary = oneTime ? "Runs Once At " + ScheduleEditorDraft.display(value,
-                    zone.getText().isBlank() ? ZoneId.systemDefault().getId() : zone.getText().trim()) : ScheduleTimingGuide.summary(preset.getSelectedOption(), recurringTime.getText(),
-                    Math.max(0, ScheduleTimingGuide.WEEKDAYS_LIST.indexOf(weekDay.getSelectedOption())), monthDay.getText(), advancedCron.getText(), zone.getText());
-            if (!oneTime) ZoneId.of(zone.getText().isBlank() ? "UTC" : zone.getText().trim());
-        } catch (RuntimeException failure) {
-            new Notification("Invalid Schedule", "Choose A Valid Time Zone Like UTC Or Europe/Berlin", Notification.Type.WARN);
-            return;
-        }
-        ServerScheduleModels.Timing scheduleTiming = new ServerScheduleModels.Timing(oneTime
-                ? ServerScheduleModels.TimingType.ONE_TIME : ServerScheduleModels.TimingType.CRON,
-                oneTime ? value : "", oneTime ? "" : value, zone.getText().trim());
-        ServerScheduleModels.Mutation mutation = new ServerScheduleModels.Mutation(scheduleName, enabled.getValue(), scheduleTiming,
-                onlyOnline.getValue(), tasks);
         action = true;
         String key = operationKey();
         var operation = schedule == null ? feature.createSchedule(mutation, key)
@@ -373,12 +429,10 @@ public final class ServerScheduleSettingsController {
             if (closed) return;
             action = false;
             if (failure == null && updated != null) {
-                popup.getWidget().setVisible(false);
+                popup.getWidget().hide();
                 upsert(updated);
-                new Notification("Schedule Saved", timingSummary + " · Next " + displayTime(updated.nextRunAt()), Notification.Type.SUCCESS);
-            } else {
-                new Notification("Save Failed", error(failure), Notification.Type.ERROR);
-            }
+                new Notification("Schedule Saved", summary + " · Next " + displayTime(updated.nextRunAt()), Notification.Type.SUCCESS);
+            } else new Notification("Save Failed", error(failure), Notification.Type.ERROR);
             refresh();
         }));
     }
@@ -387,7 +441,7 @@ public final class ServerScheduleSettingsController {
         List<ServerScheduleModels.Task> tasks = new ArrayList<>();
         for (int index = 0; index < editors.size(); index++) {
             TaskEditor editor = editors.get(index);
-            ServerScheduleModels.Action action = parseAction(editor.action().getSelectedOption());
+            ServerScheduleModels.Action action = parseAction(editor.action().getSelectedItem());
             String payload = editor.payload().getText();
             if (action == ServerScheduleModels.Action.COMMAND && payload.isBlank()) {
                 throw new IllegalArgumentException("Command Is Required For Task " + (index + 1));
@@ -399,10 +453,25 @@ public final class ServerScheduleSettingsController {
                 throw new IllegalArgumentException("Task Delay Must Be A Number");
             }
             if (delay < 0 || delay > 86400) throw new IllegalArgumentException("Task Delay Must Be Between 0 And 86400");
-            tasks.add(new ServerScheduleModels.Task(editor.id(), index + 1, action, payload, delay,
-                    editor.continueOnFailure().getValue()));
+            int keep = action == ServerScheduleModels.Action.BACKUP && feature.scheduleCapabilities().retention()
+                    ? retentionNumber(editor.keep.getText(), 1000, "Keep Backups") : 0;
+            int age = action == ServerScheduleModels.Action.BACKUP && feature.scheduleCapabilities().retention()
+                    ? retentionNumber(editor.age.getText(), 3650, "Maximum Age") : 0;
+            tasks.add(new ServerScheduleModels.Task(editor.id(), index + 1, action,
+                    action == ServerScheduleModels.Action.COMMAND || action == ServerScheduleModels.Action.BACKUP ? payload : "", delay,
+                    editor.continueOnFailure().getValue(), keep, age));
         }
         return tasks;
+    }
+
+    private static int retentionNumber(String value, int maximum, String label) {
+        try {
+            int parsed = Integer.parseInt(value.trim());
+            if (parsed < 0 || parsed > maximum) throw new NumberFormatException();
+            return parsed;
+        } catch (NumberFormatException invalid) {
+            throw new IllegalArgumentException(label + " Must Be Between 0 And " + maximum);
+        }
     }
 
     private void run(ServerScheduleModels.Schedule schedule) {
@@ -411,8 +480,10 @@ public final class ServerScheduleSettingsController {
         feature.runSchedule(schedule.id(), operationKey()).whenComplete((run, failure) -> ScreenManager.getInstance().execute(() -> {
             if (closed) return;
             action = false;
-            new Notification(failure == null ? "Schedule Started" : "Run Failed",
-                    failure == null ? schedule.name() : error(failure), failure == null ? Notification.Type.SUCCESS : Notification.Type.ERROR);
+            boolean failed = failure != null || run != null && "FAILED".equals(run.status());
+            String title = failed ? "Run Failed" : run != null && "COMPLETED".equals(run.status()) ? "Schedule Completed" : "Schedule Started";
+            String result = failure != null ? error(failure) : failed && run != null ? run.result() : schedule.name();
+            new Notification(title, result, failed ? Notification.Type.ERROR : Notification.Type.SUCCESS);
             loadError = "";
             loaded = false;
             refresh();
@@ -422,7 +493,7 @@ public final class ServerScheduleSettingsController {
     private void confirmDelete(ServerScheduleModels.Schedule schedule) {
         Screen screen = ScreenManager.getInstance().getCurrentScreen();
         if (screen == null || action) return;
-        PopupWidget.Builder popup = new PopupWidget.Builder("Delete Schedule").pos(70, screen.height / 4).size(360, 150);
+        PopupWidget.Builder popup = new PopupWidget.Builder("Delete Schedule").size(360, 150);
         popup.addRow("confirm", "Delete " + schedule.name() + "?");
         popup.addTitleAction("Delete", () -> {
             popup.getWidget().setVisible(false);
@@ -440,7 +511,8 @@ public final class ServerScheduleSettingsController {
                         refresh();
                     }));
         }, PopupWidget.TitleActionRole.DESTRUCTIVE);
-        PopupWidget widget = popup.build();
+        PopupWidget widget = ScheduleDatePicker.quiet(popup.build());
+        widget.centerOnOwner();
         screen.addDrawableChild(widget);
         widget.show();
     }
@@ -482,6 +554,10 @@ public final class ServerScheduleSettingsController {
         return new ServerScheduleModels.Task("", 1, ServerScheduleModels.Action.RESTART, "", 0, false);
     }
 
+    private ToggleWidget toggle(boolean value, String hint) {
+        return new ToggleWidget.Builder().toggled(value).size(36, 18).hint(hint).build();
+    }
+
     private TextInputWidget input(String value, String placeholder, int width) {
         return new TextInputWidget.Builder().text(value == null ? "" : value).placeholder(placeholder).size(width, 20).build();
     }
@@ -504,18 +580,6 @@ public final class ServerScheduleSettingsController {
         } catch (RuntimeException failure) {
             return value;
         }
-    }
-
-    private static void updateTimingRows(PopupWidget popup, boolean oneTime, boolean timeZone, boolean recurring, String preset) {
-        if (oneTime) popup.setRowVisibility("schedule-when", !recurring);
-        popup.setRowVisibility("schedule-preset", recurring);
-        popup.setRowVisibility("schedule-time", recurring && (ScheduleTimingGuide.DAILY.equals(preset)
-                || ScheduleTimingGuide.WEEKDAYS.equals(preset) || ScheduleTimingGuide.WEEKLY.equals(preset)
-                || ScheduleTimingGuide.MONTHLY.equals(preset)));
-        popup.setRowVisibility("schedule-weekday", recurring && ScheduleTimingGuide.WEEKLY.equals(preset));
-        popup.setRowVisibility("schedule-month-day", recurring && ScheduleTimingGuide.MONTHLY.equals(preset));
-        popup.setRowVisibility("schedule-cron", recurring && ScheduleTimingGuide.ADVANCED.equals(preset));
-        if (timeZone) popup.setRowVisibility("schedule-zone", recurring);
     }
 
     public void cleanup() {

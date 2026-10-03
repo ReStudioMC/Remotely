@@ -67,6 +67,37 @@ class ServerSettingsDataControllerTest {
     }
 
     @Test
+    void missingCreationDocumentKeepsConfiguredServerProperties() {
+        Map<String, String> properties = new LinkedHashMap<>();
+        properties.put("online-mode", "true");
+        ServerSettingsField field = new ServerSettingsField("motd", "motd", ServerSettingsFieldType.TEXT,
+                "Software Settings", "Server", "Message", "Server message", "", null, null, List.of());
+        ServerSettingsDocument document = new ServerSettingsDocument("server.properties", ServerSettingsFormat.PROPERTIES,
+                true, true, List.of(field));
+        ServerSettingsPack pack = new ServerSettingsPack("settings", "Settings", "Settings", 0,
+                List.of("test"), List.of(document));
+        ServerSettingsDocumentTarget target = new ServerSettingsDocumentTarget() {
+            @Override public Collection<String> softwareTokens() { return List.of("test"); }
+            @Override public String property(String key) { return properties.get(key); }
+            @Override public void property(String key, String value) { properties.put(key, value); }
+            @Override public void removeProperty(String key) { properties.remove(key); }
+            @Override public void replaceProperties(Map<String, String> values) { properties.clear(); properties.putAll(values); }
+        };
+        ServerSettingsDocumentStore store = new ServerSettingsDocumentStore() {
+            @Override public Async<Document> read(String path) { return Async.completed(Document.missing()); }
+            @Override public Async<Void> write(String path, String content) { return Async.failed(new AssertionError("Creation Must Not Write Files")); }
+        };
+
+        ServerSettingsDocumentDataController controller = new ServerSettingsDocumentDataController(target,
+                new ServerSettingsSnapshot(List.of(pack)), store, BrowserSafeYaml::parse);
+        controller.load().join();
+
+        assertEquals("true", properties.get("online-mode"));
+        assertEquals(List.of("Software Settings"), controller.tabNames());
+        controller.close();
+    }
+
+    @Test
     void scheduledDocumentLoadPublishesOnlyAfterPreparationAndRejectsClose() {
         List<Runnable> tasks = new ArrayList<>();
         ServerSettingsField field = new ServerSettingsField("name", "name", ServerSettingsFieldType.TEXT, "Server",

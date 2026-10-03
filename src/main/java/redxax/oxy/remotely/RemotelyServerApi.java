@@ -1,5 +1,7 @@
 package redxax.oxy.remotely;
 
+import redxax.oxy.remotely.network.HostedNetworkClient;
+
 import restudio.rescreen.platform.Async;
 import restudio.rebase.backend.DeveloperCapabilityProvider;
 import restudio.rebase.backend.feature.BackupOperations;
@@ -16,6 +18,10 @@ import java.util.Map;
 import java.util.UUID;
 
 public interface RemotelyServerApi {
+    default HostedNetworkClient hostedNetworks() {
+        throw new UnsupportedOperationException("Hosted Networks Are Unavailable");
+    }
+
     default Object studioApi() {
         return null;
     }

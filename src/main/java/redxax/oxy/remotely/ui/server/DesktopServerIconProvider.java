@@ -32,6 +32,7 @@ import java.security.MessageDigest;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -43,17 +44,22 @@ import java.util.stream.Stream;
 
 import static redxax.oxy.remotely.util.DevUtil.devPrint;
 
-public final class DesktopServerIconProvider implements ServerIconProvider {
+public final class DesktopServerIconProvider implements ServerIconProvider, AutoCloseable {
     private static final Set<String> SOFTWARE_ICONS = Set.of("vanilla", "fabric", "forge", "neoforge", "paper", "purpur", "quilt", "spigot", "bukkit", "leaf", "velocity", "waterfall");
+    private static final Map<Path, AssetOwner> OWNERS = new HashMap<>();
     private final Path cacheDir;
     private final Path customizationDir;
-    private final Set<String> remoteIconsLoaded = BrowserSafeState.set();
-    private final Map<String, Identifier> iconIdCache = BrowserSafeState.map();
+    private final Path ownerKey;
+    private final AssetOwner assets;
     private final Map<String, Identifier> defaultIconIds = BrowserSafeState.map();
 
     public DesktopServerIconProvider(Path applicationDir) {
         this.cacheDir = applicationDir == null ? null : AppStoragePaths.cache(applicationDir).resolve("icons");
         this.customizationDir = applicationDir == null ? null : AppStoragePaths.data(applicationDir).resolve("icon-selections");
+        this.ownerKey = applicationDir == null ? null : applicationDir.toAbsolutePath().normalize();
+        synchronized (OWNERS) {
+            this.assets = ownerKey == null ? new AssetOwner() : OWNERS.computeIfAbsent(ownerKey, ignored -> new AssetOwner());
+        }
         if (this.cacheDir != null) this.cacheDir.toFile().mkdirs();
     }
 
@@ -74,17 +80,21 @@ public final class DesktopServerIconProvider implements ServerIconProvider {
         if (instance == null || cacheDir == null) {
             return getDefaultIconId(instance);
         }
-        String instanceKey = getInstanceUniqueId(instance);
-        Identifier cached = iconIdCache.get(instanceKey);
-        if (cached != null) {
-            return cached;
+        synchronized (assets) {
+            if (assets.closed) return getDefaultIconId(instance);
+            while (true) {
+                String key = getInstanceUniqueId(instance);
+                Optional<Identifier> cached = assets.icons.get(key);
+                if (cached == null) {
+                    Identifier image = loadFromCache(instance, key);
+                    if (image == null) image = loadFromInstance(instance, key);
+                    if (!key.equals(getInstanceUniqueId(instance))) continue;
+                    cached = Optional.ofNullable(image);
+                    assets.icons.put(key, cached);
+                }
+                return cached.orElseGet(() -> getDefaultIconId(instance));
+            }
         }
-        Identifier cachedIcon = loadFromCache(instance);
-        if (cachedIcon != null) {
-            return cachedIcon;
-        }
-        Identifier instanceIcon = loadFromInstance(instance);
-        return instanceIcon != null ? instanceIcon : getDefaultIconId(instance);
     }
 
     @Override
@@ -96,23 +106,38 @@ public final class DesktopServerIconProvider implements ServerIconProvider {
         if (instance == null) {
             return getDefaultIconId(null);
         }
-        Identifier cached = iconIdCache.get(getInstanceUniqueId(instance));
-        return cached == null ? getDefaultIconId(instance) : cached;
+        synchronized (assets) {
+            Optional<Identifier> cached = assets.icons.get(getInstanceUniqueId(instance));
+            return cached == null ? getDefaultIconId(instance) : cached.orElseGet(() -> getDefaultIconId(instance));
+        }
     }
 
     @Override
     public Customization getCustomization(Object server) {
         Instance instance = asInstance(server);
-        StoredCustomization stored = loadCustomization(instance);
-        if (stored == null) return ServerIconProvider.super.getCustomization(server);
-        if (!stored.libraryId().isBlank()) {
-            ImportedIconLibrary.Entry imported = ImportedIconLibrary.find(stored.libraryId());
-            if (imported == null) return ServerIconProvider.super.getCustomization(server);
-            Identifier image = ScreenManager.getInstance().imageAssets().registerRemoteImage(imported.source());
-            return image == null ? ServerIconProvider.super.getCustomization(server)
-                    : new Customization(image, stored.tint(), image, imported.source(), imported.id());
+        if (instance == null || customizationDir == null) return ServerIconProvider.super.getCustomization(server);
+        String key = getInstanceUniqueId(instance);
+        long libraryRevision = ImportedIconLibrary.revision();
+        synchronized (assets) {
+            if (assets.closed) return ServerIconProvider.super.getCustomization(server);
+            Optional<StoredCustomization> selected = assets.selections.get(key);
+            if (selected == null) {
+                selected = Optional.ofNullable(loadCustomization(instance));
+                assets.selections.put(key, selected);
+            }
+            if (selected.isEmpty()) return ServerIconProvider.super.getCustomization(server);
+            StoredCustomization stored = selected.get();
+            if (stored.libraryId().isBlank()) return new Customization(stored.image(), stored.tint(), stored.image(), "", "");
+            CachedCustomization cached = assets.customizations.get(key);
+            if (cached == null || cached.libraryRevision() != libraryRevision) {
+                ImportedIconLibrary.Entry imported = ImportedIconLibrary.find(stored.libraryId());
+                Identifier image = imported == null ? null : ScreenManager.getInstance().imageAssets().registerRemoteImage(imported.source());
+                cached = new CachedCustomization(libraryRevision, image == null ? null
+                        : new Customization(image, stored.tint(), image, imported.source(), imported.id()));
+                assets.customizations.put(key, cached);
+            }
+            return cached.value() == null ? ServerIconProvider.super.getCustomization(server) : cached.value();
         }
-        return new Customization(stored.image(), stored.tint(), stored.image(), "", "");
     }
 
     @Override
@@ -130,24 +155,33 @@ public final class DesktopServerIconProvider implements ServerIconProvider {
             ScreenManager.getInstance().execute(() -> onLoaded.accept(getDefaultIconId(instance)));
             return;
         }
-        Identifier cached = iconIdCache.get(getInstanceUniqueId(instance));
-        if (cached != null) {
-            ScreenManager.getInstance().execute(() -> onLoaded.accept(cached));
-            return;
+        String key = getInstanceUniqueId(instance);
+        long generation;
+        synchronized (assets) {
+            generation = assets.generation(key);
+            Optional<Identifier> cached = assets.icons.get(key);
+            if (cached != null) {
+                ScreenManager.getInstance().execute(() -> {
+                    Identifier current;
+                    synchronized (assets) {
+                        current = key.equals(getInstanceUniqueId(instance)) && generation == assets.generation(key)
+                                ? cached.orElseGet(() -> getDefaultIconId(instance)) : getIconId(instance);
+                    }
+                    onLoaded.accept(current);
+                });
+                return;
+            }
         }
         AsyncTools.run(TaskSchedulers.current(), () -> {
             try {
-                Identifier cachedIcon = loadFromCache(instance);
-                if (cachedIcon != null) {
-                    ScreenManager.getInstance().execute(() -> onLoaded.accept(cachedIcon));
-                    return;
-                }
-                Identifier instanceIcon = loadFromInstance(instance);
-                if (instanceIcon != null) {
-                    ScreenManager.getInstance().execute(() -> onLoaded.accept(instanceIcon));
-                    return;
-                }
-                ScreenManager.getInstance().execute(() -> onLoaded.accept(getDefaultIconId(instance)));
+                Identifier loaded = getIconId(instance);
+                ScreenManager.getInstance().execute(() -> {
+                    Identifier current;
+                    synchronized (assets) {
+                        current = key.equals(getInstanceUniqueId(instance)) && generation == assets.generation(key) ? loaded : getIconId(instance);
+                    }
+                    onLoaded.accept(current);
+                });
             } catch (Exception exception) {
                 devPrint("Failed to load icon: " + exception.getMessage());
                 ScreenManager.getInstance().execute(() -> onLoaded.accept(getDefaultIconId(instance)));
@@ -166,13 +200,15 @@ public final class DesktopServerIconProvider implements ServerIconProvider {
         }
         AsyncTools.run(TaskSchedulers.current(), () -> {
             String instanceKey = getInstanceUniqueId(instance);
+            long generation;
+            synchronized (assets) {
+                if (assets.closed || !assets.remoteIconsLoaded.add(instanceKey)) return;
+                generation = assets.generation(instanceKey);
+            }
             boolean loaded = false;
             try {
                 BackendConfig backendConfig = instance.getBackendConfig();
                 if (backendConfig == null || "LOCAL".equalsIgnoreCase(backendConfig.type)) {
-                    return;
-                }
-                if (!remoteIconsLoaded.add(instanceKey)) {
                     return;
                 }
                 Path tempDir = Files.createTempDirectory("icon_load");
@@ -188,9 +224,8 @@ public final class DesktopServerIconProvider implements ServerIconProvider {
                             }
                             BufferedImage icon = ImageIO.read(candidatePath.toFile());
                             if (icon != null) {
-                                saveToCache(instance, icon);
-                                loaded = true;
-                                if (onComplete != null) {
+                                loaded = saveToCache(instance, icon, instanceKey, generation);
+                                if (loaded && onComplete != null) {
                                     ScreenManager.getInstance().execute(onComplete);
                                 }
                                 break;
@@ -203,8 +238,10 @@ public final class DesktopServerIconProvider implements ServerIconProvider {
                 }
             } catch (Exception ignored) {
             } finally {
-                if (!loaded) {
-                    remoteIconsLoaded.remove(instanceKey);
+                synchronized (assets) {
+                    if (!loaded && generation == assets.generation(instanceKey)) {
+                        assets.remoteIconsLoaded.remove(instanceKey);
+                    }
                 }
             }
         });
@@ -219,14 +256,22 @@ public final class DesktopServerIconProvider implements ServerIconProvider {
         if (instance == null || cacheDir == null) {
             return Optional.empty();
         }
-        Optional<Path> cached = resolveCachedIconPath(instance);
-        if (cached.isPresent()) {
-            return cached;
+        Optional<Path> resolved;
+        synchronized (assets) {
+            if (assets.closed) return Optional.empty();
+            while (true) {
+                String key = getInstanceUniqueId(instance);
+                resolved = assets.paths.get(key);
+                if (resolved == null) {
+                    resolved = resolveCachedIconPath(key);
+                    if (resolved.isEmpty()) resolved = resolveLocalIconPath(instance);
+                    if (!key.equals(getInstanceUniqueId(instance))) continue;
+                    assets.paths.put(key, resolved);
+                }
+                break;
+            }
         }
-        Optional<Path> local = resolveLocalIconPath(instance);
-        if (local.isPresent()) {
-            return local;
-        }
+        if (resolved.isPresent()) return resolved;
         BackendConfig backendConfig = instance.getBackendConfig();
         if (loadRemote && backendConfig != null && !"LOCAL".equalsIgnoreCase(backendConfig.type)) {
             loadRemoteIconAsync(instance, onLoaded);
@@ -270,7 +315,9 @@ public final class DesktopServerIconProvider implements ServerIconProvider {
         icon = centerCrop(icon);
         try {
             saveToCache(instance, icon);
-            remoteIconsLoaded.remove(getInstanceUniqueId(instance));
+            synchronized (assets) {
+                assets.remoteIconsLoaded.remove(getInstanceUniqueId(instance));
+            }
             BackendConfig backendConfig = instance.getBackendConfig();
             if (backendConfig == null || "LOCAL".equalsIgnoreCase(backendConfig.type)) {
                 File iconFile = new File(instance.getPath(), "icon.png");
@@ -315,13 +362,13 @@ public final class DesktopServerIconProvider implements ServerIconProvider {
             return;
         }
         try {
-            File cacheFile = getCachePath(instance);
-            if (cacheFile != null && cacheFile.exists()) {
-                cacheFile.delete();
+            synchronized (assets) {
+                String key = getInstanceUniqueId(instance);
+                File cacheFile = getCachePath(key);
+                if (cacheFile != null) Files.deleteIfExists(cacheFile.toPath());
+                assets.invalidate(key);
+                assets.remoteIconsLoaded.remove(key);
             }
-            String instanceKey = getInstanceUniqueId(instance);
-            releaseImageId(iconIdCache.remove(instanceKey));
-            remoteIconsLoaded.remove(instanceKey);
         } catch (Exception exception) {
             devPrint("Failed to clear cache: " + exception.getMessage());
         }
@@ -329,11 +376,43 @@ public final class DesktopServerIconProvider implements ServerIconProvider {
 
     @Override
     public void clearAllRemoteTracking() {
-        remoteIconsLoaded.clear();
+        synchronized (assets) {
+            Set<String> keys = new HashSet<>(assets.generations.keySet());
+            keys.addAll(assets.icons.keySet());
+            keys.addAll(assets.paths.keySet());
+            keys.addAll(assets.remoteIconsLoaded);
+            keys.forEach(assets::invalidate);
+            assets.remoteIconsLoaded.clear();
+            assets.selections.clear();
+            assets.customizations.clear();
+        }
+    }
+
+    @Override
+    public void close() {
+        synchronized (OWNERS) {
+            if (ownerKey != null && OWNERS.get(ownerKey) == assets) OWNERS.remove(ownerKey);
+        }
+        synchronized (assets) {
+            if (assets.closed) return;
+            assets.closed = true;
+            assets.icons.values().forEach(value -> value.ifPresent(DesktopServerIconProvider::releaseImageId));
+            assets.icons.clear();
+            assets.paths.clear();
+            assets.selections.clear();
+            assets.customizations.clear();
+            assets.generations.clear();
+            assets.keys.clear();
+            assets.remoteIconsLoaded.clear();
+        }
     }
 
     private File getCachePath(Instance instance) {
-        return cacheDir == null ? null : new File(cacheDir.toFile(), getInstanceUniqueId(instance) + ".png");
+        return getCachePath(getInstanceUniqueId(instance));
+    }
+
+    private File getCachePath(String key) {
+        return cacheDir == null ? null : new File(cacheDir.toFile(), key + ".png");
     }
 
     private static BufferedImage centerCrop(BufferedImage source) {
@@ -386,25 +465,32 @@ public final class DesktopServerIconProvider implements ServerIconProvider {
         properties.setProperty("type", customization.image().type().name());
         properties.setProperty("tint", Integer.toString(customization.tint()));
         properties.setProperty("libraryId", customization.libraryId());
-        Files.createDirectories(path.getParent());
-        Path temporary = Files.createTempFile(path.getParent(), ".server-icon-selection-", ".properties");
-        try {
-            try (OutputStream output = Files.newOutputStream(temporary)) {
-                properties.store(output, null);
-            }
+        synchronized (assets) {
+            if (assets.closed) throw new IOException("Server icon selection is unavailable");
+            Files.createDirectories(path.getParent());
+            Path temporary = Files.createTempFile(path.getParent(), ".server-icon-selection-", ".properties");
             try {
-                Files.move(temporary, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-            } catch (AtomicMoveNotSupportedException ignored) {
-                Files.move(temporary, path, StandardCopyOption.REPLACE_EXISTING);
+                try (OutputStream output = Files.newOutputStream(temporary)) {
+                    properties.store(output, null);
+                }
+                try {
+                    Files.move(temporary, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                } catch (AtomicMoveNotSupportedException ignored) {
+                    Files.move(temporary, path, StandardCopyOption.REPLACE_EXISTING);
+                }
+            } finally {
+                Files.deleteIfExists(temporary);
             }
-        } finally {
-            Files.deleteIfExists(temporary);
+            String key = getInstanceUniqueId(instance);
+            assets.selections.remove(key);
+            assets.customizations.remove(key);
+            assets.generations.merge(key, 1L, Long::sum);
         }
     }
 
-    private Optional<Path> resolveCachedIconPath(Instance instance) {
+    private Optional<Path> resolveCachedIconPath(String key) {
         try {
-            File cacheFile = getCachePath(instance);
+            File cacheFile = getCachePath(key);
             if (cacheFile != null && cacheFile.exists() && cacheFile.isFile()) {
                 return Optional.of(cacheFile.toPath());
             }
@@ -441,7 +527,15 @@ public final class DesktopServerIconProvider implements ServerIconProvider {
             default -> credentials.getOrDefault("host", credentials.getOrDefault("hostId", "unknown"));
         };
         String path = instance == null || instance.getPath() == null ? "" : instance.getPath();
-        return backendType + "_" + stableHash(identity + "|" + path);
+        String stamp = backendType + "|" + identity + "|" + path;
+        String instanceId = instance == null ? "" : instance.getInstanceId();
+        synchronized (assets) {
+            KeySnapshot cached = assets.keys.get(instanceId);
+            if (cached != null && cached.stamp().equals(stamp)) return cached.key();
+            String key = backendType + "_" + stableHash(identity + "|" + path);
+            assets.keys.put(instanceId, new KeySnapshot(stamp, key));
+            return key;
+        }
     }
 
     private String stableHash(String value) {
@@ -458,14 +552,12 @@ public final class DesktopServerIconProvider implements ServerIconProvider {
         }
     }
 
-    private Identifier loadFromCache(Instance instance) {
+    private Identifier loadFromCache(Instance instance, String key) {
         try {
-            File cacheFile = getCachePath(instance);
+            File cacheFile = getCachePath(key);
             if (cacheFile != null && cacheFile.exists()) {
                 BufferedImage icon = ImageIO.read(cacheFile);
-                if (icon != null) {
-                    return cacheIcon(instance, icon);
-                }
+                if (icon != null && key.equals(getInstanceUniqueId(instance))) return cacheIcon(key, icon);
             }
         } catch (IOException exception) {
             devPrint("Failed to load from cache: " + exception.getMessage());
@@ -473,16 +565,14 @@ public final class DesktopServerIconProvider implements ServerIconProvider {
         return null;
     }
 
-    private Identifier loadFromInstance(Instance instance) {
+    private Identifier loadFromInstance(Instance instance, String key) {
         try {
             BackendConfig backendConfig = instance.getBackendConfig();
             if (backendConfig == null || "LOCAL".equalsIgnoreCase(backendConfig.type)) {
                 File iconFile = new File(instance.getPath(), "icon.png");
                 if (iconFile.exists() && iconFile.isFile()) {
                     BufferedImage icon = ImageIO.read(iconFile);
-                    if (icon != null) {
-                        return cacheIcon(instance, icon);
-                    }
+                    if (icon != null && key.equals(getInstanceUniqueId(instance))) return cacheIcon(key, icon);
                 }
             }
         } catch (Exception exception) {
@@ -492,14 +582,36 @@ public final class DesktopServerIconProvider implements ServerIconProvider {
     }
 
     private void saveToCache(Instance instance, BufferedImage icon) throws IOException {
-        File cacheFile = getCachePath(instance);
-        if (cacheFile == null) {
-            cacheIcon(instance, icon);
-            return;
+        saveToCache(instance, icon, null, null);
+    }
+
+    private boolean saveToCache(Instance instance, BufferedImage icon, String expectedKey, Long expectedGeneration) throws IOException {
+        synchronized (assets) {
+            String key = getInstanceUniqueId(instance);
+            if (assets.closed || expectedKey != null && !expectedKey.equals(key)
+                    || expectedGeneration != null && expectedGeneration != assets.generation(key)) return false;
+            File cacheFile = getCachePath(key);
+            if (cacheFile != null) {
+                Path target = cacheFile.toPath();
+                Files.createDirectories(target.getParent());
+                Path temporary = Files.createTempFile(target.getParent(), ".server-icon-", ".png");
+                try {
+                    if (!ImageIO.write(icon, "png", temporary.toFile())) throw new IOException("Could Not Encode Server Icon");
+                    if (!key.equals(getInstanceUniqueId(instance))) return false;
+                    try {
+                        Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                    } catch (AtomicMoveNotSupportedException ignored) {
+                        Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING);
+                    }
+                } finally {
+                    Files.deleteIfExists(temporary);
+                }
+                assets.paths.put(key, Optional.of(cacheFile.toPath()));
+            }
+            assets.generations.merge(key, 1L, Long::sum);
+            cacheIcon(key, icon);
+            return true;
         }
-        cacheFile.getParentFile().mkdirs();
-        ImageIO.write(icon, "png", cacheFile);
-        cacheIcon(instance, icon);
     }
 
     private Identifier getDefaultIconId(Instance instance) {
@@ -525,11 +637,12 @@ public final class DesktopServerIconProvider implements ServerIconProvider {
         return defaultIconIds.getOrDefault("unknown", Identifier.icon("unknown.png"));
     }
 
-    private Identifier cacheIcon(Instance instance, BufferedImage icon) {
-        String instanceKey = getInstanceUniqueId(instance);
-        releaseImageId(iconIdCache.remove(instanceKey));
-        Identifier id = ResourceManager.getInstance().registerImage(Identifier.generatedImage("remotely", "server-icons/instance/" + safeIconKey(instanceKey)), icon);
-        iconIdCache.put(instanceKey, id);
+    private Identifier cacheIcon(String key, BufferedImage icon) {
+        Optional<Identifier> previous = assets.icons.remove(key);
+        if (previous != null) previous.ifPresent(DesktopServerIconProvider::releaseImageId);
+        String assetKey = ownerKey == null ? key : stableHash(ownerKey.toString()) + "-" + key;
+        Identifier id = ResourceManager.getInstance().registerImage(Identifier.generatedImage("remotely", "server-icons/instance/" + safeIconKey(assetKey)), icon);
+        assets.icons.put(key, Optional.of(id));
         return id;
     }
 
@@ -537,7 +650,7 @@ public final class DesktopServerIconProvider implements ServerIconProvider {
         return value == null || value.isBlank() ? "unknown" : value.replaceAll("[^a-zA-Z0-9._-]", "_");
     }
 
-    private void releaseImageId(Identifier id) {
+    private static void releaseImageId(Identifier id) {
         if (id != null) {
             ResourceManager.getInstance().releaseImage(id);
         }
@@ -592,5 +705,33 @@ public final class DesktopServerIconProvider implements ServerIconProvider {
     }
 
     private record StoredCustomization(Identifier image, int tint, String libraryId) {
+    }
+
+    private record CachedCustomization(long libraryRevision, Customization value) {
+    }
+
+    private record KeySnapshot(String stamp, String key) {
+    }
+
+    private static final class AssetOwner {
+        private final Map<String, Optional<Identifier>> icons = new HashMap<>();
+        private final Map<String, Optional<Path>> paths = new HashMap<>();
+        private final Map<String, Optional<StoredCustomization>> selections = new HashMap<>();
+        private final Map<String, CachedCustomization> customizations = new HashMap<>();
+        private final Map<String, Long> generations = new HashMap<>();
+        private final Map<String, KeySnapshot> keys = new HashMap<>();
+        private final Set<String> remoteIconsLoaded = new HashSet<>();
+        private boolean closed;
+
+        private long generation(String key) {
+            return generations.getOrDefault(key, 0L);
+        }
+
+        private void invalidate(String key) {
+            generations.merge(key, 1L, Long::sum);
+            Optional<Identifier> previous = icons.remove(key);
+            if (previous != null) previous.ifPresent(DesktopServerIconProvider::releaseImageId);
+            paths.remove(key);
+        }
     }
 }

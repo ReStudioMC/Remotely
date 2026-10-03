@@ -32,7 +32,18 @@ public class DesktopServerSettingsDataController extends ServerSettingsDocumentD
 
     public DesktopServerSettingsDataController(Instance instance, ServerSettingsSnapshot snapshot, RebaseAPI api,
                                                ServerSettingsCatalogService.View catalogs) {
-        super(target(instance), snapshot, store(instance, api), false, new DesktopStructuredDocumentParser(), catalogs);
+        this(instance, snapshot, api, catalogs, false);
+    }
+
+    public static DesktopServerSettingsDataController forNewServer(Instance instance, ServerSettingsSnapshot snapshot,
+                                                                    ServerSettingsCatalogService.View catalogs) {
+        return new DesktopServerSettingsDataController(instance, snapshot, null, catalogs, true);
+    }
+
+    private DesktopServerSettingsDataController(Instance instance, ServerSettingsSnapshot snapshot, RebaseAPI api,
+                                                ServerSettingsCatalogService.View catalogs, boolean newServer) {
+        super(target(instance), snapshot, newServer ? emptyStore() : store(instance, api), false,
+                new DesktopStructuredDocumentParser(), catalogs);
         source = instance;
         sourcePath = normalizedPath(instance.getPath());
         sourceApi = api;
@@ -41,6 +52,7 @@ public class DesktopServerSettingsDataController extends ServerSettingsDocumentD
     @Override
     public Async<Void> save(Object target) {
         if (!(target instanceof Instance instance)) return Async.failed(new IllegalArgumentException("A desktop server instance is required"));
+        if (sourceApi == null) return Async.failed(new IllegalStateException("New Server Settings Must Be Included In Creation"));
         boolean sameTarget = Objects.equals(sourcePath, normalizedPath(instance.getPath()));
         return ready().thenCompose(ignored -> saveTo(sameTarget ? store(source, sourceApi)
                 : store(instance, RebaseApiFactory.get(instance)), sameTarget));
@@ -123,6 +135,25 @@ public class DesktopServerSettingsDataController extends ServerSettingsDocumentD
                         .map(entry -> new Entry(entry.displayName != null ? entry.displayName
                                 : entry.path != null && entry.path.getFileName() != null ? entry.path.getFileName().toString() : "", entry.isDirectory))
                         .filter(entry -> !entry.name().isBlank()).toList());
+            }
+        };
+    }
+
+    private static ServerSettingsDocumentStore emptyStore() {
+        return new ServerSettingsDocumentStore() {
+            @Override
+            public Async<Document> read(String relativePath) {
+                return Async.completed(Document.missing());
+            }
+
+            @Override
+            public Async<Void> write(String relativePath, String content) {
+                return Async.failed(new IllegalStateException("New Server Settings Must Be Included In Creation"));
+            }
+
+            @Override
+            public Async<List<Entry>> list(String relativePath) {
+                return Async.completed(List.of());
             }
         };
     }

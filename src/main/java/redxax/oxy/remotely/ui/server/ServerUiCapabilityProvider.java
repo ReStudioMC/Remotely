@@ -351,7 +351,10 @@ public interface ServerUiCapabilityProvider {
         @Override
         public Async<List<RemotelyServerApi.Player>> players(ServerModels.ClientServerView server) {
             String serverId = requiredId(server);
-            return requiredApi().getPlayers(serverId).thenCompose(result -> result == null || !result.supported()
+            return refresh(server).thenCompose(inventory -> inventory.action("players.list").supported()
+                    ? requiredApi().getPlayers(serverId)
+                    : Async.failed(new UnsupportedOperationException("Player Management Is Unavailable")))
+                    .thenCompose(result -> result == null || !result.supported()
                     ? Async.failed(new UnsupportedOperationException("Player Management Is Unavailable"))
                     : Async.completed(result.players()));
         }
@@ -375,7 +378,9 @@ public interface ServerUiCapabilityProvider {
         public Async<String> readPlayerActions(Object server) {
             String serverId = serverId(server);
             if (serverId.isBlank()) return Async.failed(new UnsupportedOperationException("Player Actions Are Unavailable"));
-            return requiredApi().getFileContent(serverId, "Remotely/player-actions.json").exceptionally(ignored -> "");
+            return refresh(server).thenCompose(inventory -> inventory.action("players.actions").supported()
+                    ? requiredApi().getFileContent(serverId, "Remotely/player-actions.json").exceptionally(ignored -> "")
+                    : Async.completed(""));
         }
 
         @Override

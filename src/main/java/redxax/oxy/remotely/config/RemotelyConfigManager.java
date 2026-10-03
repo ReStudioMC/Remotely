@@ -9,6 +9,12 @@ import redxax.oxy.remotely.packcontent.GlyphPreviewMode;
 import restudio.rebase.config.DesktopRebaseConfigManager;
 
 import java.nio.file.Path;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
+import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
@@ -18,6 +24,55 @@ import static restudio.rescreen.config.Config.consoleScrollSpeed;
 
 public class RemotelyConfigManager extends DesktopRebaseConfigManager implements RemotelyConfigStore {
     private final GroupStore groups;
+
+    @Override
+    public String readPendingNetwork(String key) {
+        Path file = pendingNetworkFile(key);
+        try {
+            return Files.exists(file) ? Files.readString(file, StandardCharsets.UTF_8) : "";
+        } catch (IOException error) {
+            throw new IllegalStateException("Pending Network Request Could Not Be Read", error);
+        }
+    }
+
+    @Override
+    public void writePendingNetwork(String key, String body) {
+        Path file = pendingNetworkFile(key);
+        Path temporary = null;
+        try {
+            Files.createDirectories(file.getParent());
+            temporary = Files.createTempFile(file.getParent(), "network-", ".pending");
+            Files.writeString(temporary, body, StandardCharsets.UTF_8, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING);
+            try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.WRITE)) {
+                channel.force(true);
+            }
+            Files.move(temporary, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            if (!body.equals(readPendingNetwork(key))) throw new IllegalStateException("Pending Network Request Was Not Saved");
+        } catch (IOException error) {
+            throw new IllegalStateException("Pending Network Request Could Not Be Saved", error);
+        } finally {
+            if (temporary != null) {
+                try { Files.deleteIfExists(temporary); } catch (IOException ignored) { }
+            }
+        }
+    }
+
+    @Override
+    public void removePendingNetwork(String key) {
+        try {
+            Files.deleteIfExists(pendingNetworkFile(key));
+            if (Files.exists(pendingNetworkFile(key))) throw new IllegalStateException("Pending Network Request Was Not Cleared");
+        } catch (IOException error) {
+            throw new IllegalStateException("Pending Network Request Could Not Be Cleared", error);
+        }
+    }
+
+    private Path pendingNetworkFile(String key) {
+        if (configFile == null || key == null || !key.matches("remotely\\.network\\.pending\\.[A-Za-z0-9_-]+")) {
+            throw new IllegalArgumentException("Pending Network Identity Is Invalid");
+        }
+        return configFile.getParent().resolve("network-pending").resolve(key);
+    }
 
     public RemotelyConfigManager(Path applicationDir) {
         super(applicationDir);

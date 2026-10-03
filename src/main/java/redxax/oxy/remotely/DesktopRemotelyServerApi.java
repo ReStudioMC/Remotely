@@ -1,8 +1,15 @@
 package redxax.oxy.remotely;
 
+import redxax.oxy.remotely.network.HostedNetworkClient;
+
 import com.google.gson.Gson;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
 import redxax.oxy.remotely.flow.ui.marketplace.ReSyncMarketplaceApi;
+import redxax.oxy.remotely.ui.server.HostedNetworkOverviewProvider;
+import redxax.oxy.remotely.ui.server.ServerScreenHost;
 import restudio.rescreen.platform.Async;
+import restudio.rescreen.util.JsonTreeParser;
 import restudio.rebase.platform.jvm.JvmAsyncBridge;
 import restudio.rebase.Rebase;
 import restudio.rebase.backend.feature.BackupOperations;
@@ -28,6 +35,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
@@ -37,11 +45,76 @@ public final class DesktopRemotelyServerApi implements RemotelyServerApi {
     private static final Duration DELETION_RECOVERY_TIMEOUT = Duration.ofMinutes(2);
     private static final Gson GSON = new Gson();
     private final ReStudioApiClient delegate;
+    private final HostedNetworkClient networks;
+    private final Map<String, PendingNetworkMutation> pendingNetworkMutations = new ConcurrentHashMap<>();
+    private String networkAccount = "";
 
     private record ServerDeletionStatus(String serverId, String status, String failedStep) {}
+    private record PendingNetworkMutation(String body, String key) {}
 
     public DesktopRemotelyServerApi(ReStudioApiClient delegate) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
+        this.networks = new HostedNetworkClient(delegate.async()::hostedNetworkRequest);
+    }
+
+    @Override
+    public HostedNetworkClient hostedNetworks() {
+        return networks;
+    }
+
+    public Async<List<ServerScreenHost.NetworkView>> hostedNetworkViews() {
+        return hostedNetworkValueRequest("GET", "/networks", null).thenApply(value -> {
+            if (!value.isJsonArray()) throw new IllegalStateException("Hosted Network List Is Invalid");
+            return HostedNetworkOverviewProvider.views(value);
+        });
+    }
+
+    public Async<JsonObject> hostedNetworkViewRequest(String method, String path, Object body) {
+        return hostedNetworkValueRequest(method, path, body).thenApply(value -> {
+            if (!value.isJsonObject()) throw new IllegalStateException("Hosted Network Response Is Invalid");
+            return value.getAsJsonObject();
+        });
+    }
+
+    private Async<JsonElement> hostedNetworkValueRequest(String method, String path, Object body) {
+        if (path == null || !("/networks".equals(path) || path.startsWith("/networks/"))) {
+            return Async.failed(new IllegalArgumentException("Hosted Network Path Is Invalid"));
+        }
+        ReStudio studio = ReStudio.getInstance();
+        if (studio == null || !studio.isAuthenticated() || studio.getApi() != delegate
+                || studio.getUserId() == null || studio.getUserId().isBlank() || studio.getSessionId() == null) {
+            return Async.failed(new IllegalStateException("Hosted Network Account Is Unavailable"));
+        }
+        UUID sessionId = studio.getSessionId();
+        String userId = studio.getUserId();
+        String content = body == null ? null : GSON.toJson(body);
+        String mutation = method + " " + path;
+        String requestKey = "GET".equals(method) ? null : networkRequestKey(userId + ":" + sessionId, mutation, content);
+        return delegate.async().hostedNetworkRequest(method, "/hosted-networks/views" + ("/networks".equals(path) ? "" : path.substring("/networks".length())), content, requestKey)
+                .thenApply(response -> {
+                    if (ReStudio.getInstance() != studio || !studio.isAuthenticated() || studio.getApi() != delegate
+                            || !sessionId.equals(studio.getSessionId()) || !userId.equals(studio.getUserId())) {
+                        throw new IllegalStateException("Hosted Network Account Changed");
+                    }
+                    JsonElement result = JsonTreeParser.parse(response);
+                    if (requestKey != null) clearNetworkRequestKey(mutation, requestKey);
+                    return result;
+                });
+    }
+
+    private synchronized String networkRequestKey(String account, String mutation, String body) {
+        if (!networkAccount.equals(account)) {
+            pendingNetworkMutations.clear();
+            networkAccount = account;
+        }
+        PendingNetworkMutation pending = pendingNetworkMutations.compute(mutation, (ignored, current) ->
+                current != null && Objects.equals(current.body(), body) ? current : new PendingNetworkMutation(body, UUID.randomUUID().toString()));
+        return pending.key();
+    }
+
+    private synchronized void clearNetworkRequestKey(String mutation, String key) {
+        PendingNetworkMutation pending = pendingNetworkMutations.get(mutation);
+        if (pending != null && pending.key().equals(key)) pendingNetworkMutations.remove(mutation);
     }
 
     public ReStudioApiClient studioApi() {
@@ -316,7 +389,7 @@ public final class DesktopRemotelyServerApi implements RemotelyServerApi {
     @Override
     public ServerScheduleModels.Capabilities scheduleCapabilities(String serverId) {
         return new ServerScheduleModels.Capabilities(true, "", ServerScheduleModels.Durability.BACKEND,
-                true, true, true, true, true);
+                true, true, true, true, true, true, true);
     }
 
     @Override

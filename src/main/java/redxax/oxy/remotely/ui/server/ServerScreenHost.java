@@ -3,6 +3,7 @@ package redxax.oxy.remotely.ui.server;
 import redxax.oxy.remotely.host.ApplicationHost;
 import redxax.oxy.remotely.network.NetworkAdoptionReport;
 import redxax.oxy.remotely.network.NetworkCreationMember;
+import redxax.oxy.remotely.network.HostedNetworkPendingStore;
 import redxax.oxy.remotely.RemotelyClient;
 import redxax.oxy.remotely.RemotelyServerApi;
 import redxax.oxy.remotely.config.RemotelyRecentItem;
@@ -19,6 +20,7 @@ import restudio.rebase.backend.RemotePath;
 import restudio.rebase.storage.StorageBreakdownIndex;
 import restudio.rebase.restudio.api.models.ServerModels;
 import restudio.rebase.resource.ResourcePoolModels;
+import restudio.rebase.resource.ResourcePoolClient;
 import restudio.rebase.health.ServerHealth;
 import restudio.rebase.ui.widgets.TerminalWidget;
 import restudio.rescreen.ui.core.Screen;
@@ -520,6 +522,8 @@ public interface ServerScreenHost {
         return ServerUiCapabilityProvider.unavailable();
     }
 
+    default String collaborationResourceId(Object target) { return ""; }
+
     default ServerModels.ClientServerView serverView(Object target) {
         return target instanceof ServerModels.ClientServerView server ? server : null;
     }
@@ -792,6 +796,10 @@ public interface ServerScreenHost {
         return Async.completed(List.of());
     }
 
+    default ActionAvailability networkMemberAvailability(ServerModels.ClientServerView server) {
+        return ActionAvailability.disabled("Network Configuration Is Unavailable For This Server");
+    }
+
     default NetworkJobView latestNetworkJob(NetworkView network) {
         return null;
     }
@@ -848,8 +856,38 @@ public interface ServerScreenHost {
         return createNetwork(name, proxyId, backends.stream().map(NetworkCreationMember::instanceId).toList(), installReSync);
     }
 
+    default Async<Void> createNetwork(String name, String proxyId, int entryPort, List<NetworkCreationMember> backends,
+                                     boolean installReSync, boolean firewallVerified) {
+        return createNetwork(name, proxyId, entryPort, backends, installReSync);
+    }
+
+    default ResourcePoolClient resourcePools() {
+        return new ResourcePoolClient((method, path, body) -> Async.failed(new UnsupportedOperationException("Resource Pools Are Unavailable")));
+    }
+
+    default Async<String> createHostedNetwork(NetworkCreationPlan plan) {
+        return Async.failed(new UnsupportedOperationException("Hosted Networks Are Unavailable"));
+    }
+
+    default String hostedNetworkViewId(String networkId) {
+        return networkId;
+    }
+
+    default HostedNetworkPendingStore.Pending pendingHostedNetwork() {
+        return null;
+    }
+
+    default Async<String> resumeHostedNetwork() {
+        return Async.failed(new UnsupportedOperationException("Hosted Network Resume Is Unavailable"));
+    }
+
+    default void acknowledgeHostedNetwork(String requestId, String networkId) {
+        throw new UnsupportedOperationException("Hosted Network Recovery Is Unavailable");
+    }
+
     default Async<String> createNetwork(NetworkCreationPlan plan) {
         Objects.requireNonNull(plan, "Network creation plan is required");
+        if (plan.hosted()) return createHostedNetwork(plan);
         List<NetworkCreationPlan.Server> proxies = plan.servers().stream().filter(NetworkCreationPlan.Server::proxy).toList();
         List<NetworkCreationPlan.Server> backends = plan.servers().stream().filter(server -> !server.proxy()).toList();
         if (plan.name().isBlank()) return Async.failed(new IllegalArgumentException("Network Name Is Required"));
@@ -893,8 +931,10 @@ public interface ServerScreenHost {
         Async<String> transaction = creation.thenCompose(ignored -> {
             String proxyId = networkServerId(proxies.getFirst(), resolved);
             List<NetworkCreationMember> members = backends.stream().map(server -> new NetworkCreationMember(
-                networkServerId(server, resolved), server.route(), server.role(), "", 0, server.capacity(), server.reSync())).toList();
-            return createNetwork(plan.name(), proxyId, plan.entryPort(), members, proxies.getFirst().reSync()).thenApply(completed -> proxyId);
+                networkServerId(server, resolved), server.route(), server.role(), server.address(), server.preferredPort(), server.capacity(),
+                server.reSync(), server.management())).toList();
+            return createNetwork(plan.name(), proxyId, plan.entryPort(), members, proxies.getFirst().reSync(), plan.firewallVerified())
+                .thenApply(completed -> proxyId);
         });
         return transaction.exceptionallyCompose(failure -> rollbackNetworkServers(resolved, failure)
             .thenCompose(ignored -> Async.failed(failure)));
@@ -915,8 +955,13 @@ public interface ServerScreenHost {
             creation = Async.failed(error);
         }
         return creation.thenApply(value -> Objects.requireNonNull(value, "Created server is required"))
+            .thenCompose(value -> prepareCreatedNetworkServer(value).thenApply(ignored -> value))
             .exceptionallyCompose(failure -> rollbackPartialNetworkServer(server, failure)
             .thenCompose(ignored -> Async.failed(failure)));
+    }
+
+    default Async<Void> prepareCreatedNetworkServer(Object server) {
+        return Async.completed(null);
     }
 
     private String networkServerId(NetworkCreationPlan.Server server, Map<NetworkCreationPlan.Server, Object> resolved) {
@@ -1140,6 +1185,10 @@ public interface ServerScreenHost {
         return TerminalWidget.getOrCreate(id, x, y, width, height, null);
     }
 
+    default TerminalWidget createShellTerminal(NewTerminalTargetProvider.Shell shell, int x, int y, int width, int height) {
+        throw new UnsupportedOperationException("SSH Host Terminals Require A Connected Desktop Host");
+    }
+
     default void shutdownTerminal(String id) {
         ServerTerminal.shutdown(id);
     }
@@ -1263,6 +1312,10 @@ public interface ServerScreenHost {
 
     default ServerSettingsDataController createServerSettingsController(Object instance, ServerSettingsSnapshot snapshot) {
         return ServerSettingsDataController.unavailable();
+    }
+
+    default ServerSettingsDataController createNewServerSettingsController(Object instance, ServerSettingsSnapshot snapshot) {
+        return createServerSettingsController(instance, snapshot);
     }
 
     default Async<Void> applyInstanceEdit(Object original, Object template, String newName,

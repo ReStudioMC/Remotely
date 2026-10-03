@@ -389,7 +389,7 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
                         ? new DocumentState(definition, loaded.content(), loaded.exists(), adapters.get(adapterFormat(definition.format())))
                         : prepared;
                 if (prepared == null) initializeDocument(state);
-                else if (isServerProperties(definition.relativePath())) updateServerProperties(state.baselineContent);
+                else if (state.exists && isServerProperties(definition.relativePath())) updateServerProperties(state.baselineContent);
                 documents.put(definition.relativePath(), state);
                 availableDocumentPaths.add(definition.relativePath());
             } else if (definition.required() && !definition.createIfMissing()) {
@@ -601,7 +601,7 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
     }
 
     private void initializeDocument(DocumentState document) {
-        if (isServerProperties(document.definition.relativePath())) {
+        if (document.exists && isServerProperties(document.definition.relativePath())) {
             updateServerProperties(document.baselineContent);
         }
         for (ServerSettingsField field : document.definition.fields()) initializeField(document, field);

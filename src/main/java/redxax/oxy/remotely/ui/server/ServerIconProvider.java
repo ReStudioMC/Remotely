@@ -71,6 +71,9 @@ public interface ServerIconProvider {
 
     void clearAllRemoteTracking();
 
+    default void close() {
+    }
+
     default List<Identifier> loadIconAssetIds() {
         return IntStream.rangeClosed(1, 9).mapToObj(index -> Identifier.icon("ic_" + index + ".png")).toList();
     }

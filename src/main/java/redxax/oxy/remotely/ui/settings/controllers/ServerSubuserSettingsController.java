@@ -4,21 +4,26 @@ import redxax.oxy.remotely.util.AsyncTools;
 import redxax.oxy.remotely.util.TaskSchedulers;
 
 import restudio.rebase.restudio.api.models.ServerModels;
+import restudio.rebase.restudio.collaboration.CollaborationModels.Person;
+import restudio.rebase.restudio.community.ReStudioCommunityProvider;
+import restudio.rebase.ui.screens.collaboration.AccessDashboard;
+import restudio.rebase.ui.screens.collaboration.ConfirmButton;
+import restudio.rebase.ui.screens.collaboration.PermissionEditor;
+import restudio.rebase.ui.screens.collaboration.PersonPicker;
+import restudio.rebase.restudio.community.ReStudioCommunityProviders;
 import restudio.rescreen.theme.ThemeManager;
 import restudio.rescreen.ui.core.Screen;
 import restudio.rescreen.ui.core.ScreenManager;
+import restudio.rescreen.ui.core.WidgetCleanup;
 import restudio.rescreen.ui.rescreen.ReScreen;
 import restudio.rescreen.ui.settings.Setting;
 import restudio.rescreen.ui.settings.SettingsScreen;
-import restudio.rescreen.ui.widgets.ScreenWindowWidget;
 import restudio.rescreen.ui.widgets.AnimatedButton;
+import restudio.rescreen.ui.widgets.IconButton;
 import restudio.rescreen.ui.widgets.MountableButtonWidget;
 import restudio.rescreen.ui.widgets.PopupWidget.PopupRow;
 import restudio.rescreen.ui.widgets.PopupWidget;
-import restudio.rescreen.ui.widgets.ScrollSelectorWidget;
-import restudio.rescreen.ui.widgets.SquareButtonWidget;
 import restudio.rescreen.ui.widgets.TextInputWidget;
-import restudio.rescreen.ui.widgets.ToggleWidget;
 import restudio.rescreen.util.Notification;
 import restudio.rescreen.util.Sound;
 
@@ -34,8 +39,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import restudio.rescreen.platform.Async;
-
+import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 
 import static restudio.rescreen.util.SoundUtils.playSound;
 
@@ -43,7 +48,7 @@ public class ServerSubuserSettingsController {
     private static final String SUBUSERS_TAB = "Subusers";
     private static final long LOAD_TIMEOUT_MS = 30000L;
 
-    private final ReScreen parentScreen;
+    private final Supplier<Screen> popupOwner;
     private final SubuserSettingsProvider subuserFeature;
     private final List<ServerModels.Subuser> subuserCache = new ArrayList<>();
     private final Map<String, ServerModels.PermissionCategory> permissionCategoryCache = new LinkedHashMap<>();
@@ -55,7 +60,12 @@ public class ServerSubuserSettingsController {
     private volatile long loadRequestId;
     private volatile boolean closed;
     private Setting setting;
-    private AnimatedButton addSubuserButton;
+    private AccessDashboard dashboard;
+    private PopupWidget popup;
+    private long popupStamp;
+    private PersonPicker people;
+    private IconButton addSubuserButton;
+    private IconButton reloadButton;
     private PopupRow addRow;
     private PopupRow stateRow;
     private PopupRow retryRow;
@@ -63,34 +73,44 @@ public class ServerSubuserSettingsController {
     private final Map<String, PopupRow> subuserRows = new LinkedHashMap<>();
 
     public ServerSubuserSettingsController(ReScreen parentScreen, SubuserSettingsProvider subuserFeature) {
-        this.parentScreen = parentScreen;
+        this(parentScreen, subuserFeature, () -> parentScreen);
+    }
+
+    public ServerSubuserSettingsController(ReScreen parentScreen, SubuserSettingsProvider subuserFeature, Supplier<Screen> popupOwner) {
+        this.popupOwner = popupOwner;
         this.subuserFeature = subuserFeature == null ? SubuserSettingsProvider.unavailable("Subuser Feature Is Unavailable") : subuserFeature;
     }
 
     public void cleanup() {
         closed = true;
+        if (dashboard != null) dashboard.cleanup();
+        closePopup();
+        subuserRows.values().forEach(row -> row.getWidgets().forEach(WidgetCleanup::cleanup));
+        subuserRows.clear();
         loadRequestId++;
         loadingData = false;
         loadingAction = false;
     }
 
     public List<Setting> getSettings() {
+        if (!subuserFeature.collaborationResourceId().isBlank()) {
+            if (dashboard == null && !closed) dashboard = new AccessDashboard(popupOwner, "SERVER", subuserFeature.collaborationResourceId(), ReStudioCommunityProviders.current(),
+                    () -> subuserFeature.getSystemPermissions().thenApply(this::normalizeCategories));
+            return dashboard == null ? List.of() : List.of(dashboard.setting());
+        }
         if (closed) return setting == null ? List.of() : List.of(setting);
         if (setting != null) {
             if (subuserFeature.available()) ensureDataLoaded();
-            refreshRows();
             return List.of(setting);
         }
         if (subuserFeature.available()) ensureDataLoaded();
 
         Setting.Builder builder = new Setting.Builder("Server Subusers");
-        addSubuserButton = new AnimatedButton.Builder()
-                .label("Add Subuser")
-                .accentType(ThemeManager.getAccent("nice"))
-                .onClick(() -> showCreatePopup(permissionCategoryCache))
-                .active(dataLoaded)
-                .build();
-        builder.addRow("", addSubuserButton);
+        addSubuserButton = new IconButton.Builder().imagePath("add.png").hint("Add Subuser").size(18, 18).accentType(null)
+                .onClick(() -> showCreatePopup(permissionCategoryCache)).active(dataLoaded).build();
+        reloadButton = new IconButton.Builder().imagePath("reload.png").hint("Refresh Subusers").size(18, 18).accentType(null).onClick(this::loadData).build();
+        builder.addRow("overview", "", new MountableButtonWidget.Builder("Subusers").iconPath("twoPersons.png")
+                .description("Share Server Features And Edit Their Permissions").addWidget(addSubuserButton).addWidget(reloadButton).build());
         setting = builder.build();
         addRow = setting.getRows().getFirst();
         stateRow = new PopupRow.Builder("", new AnimatedButton.Builder().label("Loading Subusers").active(false).build()).build();
@@ -109,7 +129,8 @@ public class ServerSubuserSettingsController {
             if (!setting.getRows().equals(List.of(unavailableRow))) setting.setRows(List.of(unavailableRow));
             return;
         }
-        addSubuserButton.setActive(dataLoaded && !loadingAction);
+        addSubuserButton.setActive(dataLoaded && !loadingAction && !loadingData);
+        reloadButton.setActive(!loadingAction && !loadingData);
         List<PopupRow> rows = new ArrayList<>();
         rows.add(addRow);
         if (!dataLoaded) {
@@ -117,6 +138,7 @@ public class ServerSubuserSettingsController {
             rows.add(stateRow);
             if (!safe(loadError).isBlank()) rows.add(retryRow);
         } else if (subuserCache.isEmpty()) {
+            subuserRows.values().forEach(row -> row.getWidgets().forEach(WidgetCleanup::cleanup));
             subuserRows.clear();
             ((AnimatedButton) stateRow.getWidgets().getFirst()).setMessage("No Subusers Found");
             rows.add(stateRow);
@@ -139,6 +161,7 @@ public class ServerSubuserSettingsController {
                 next.put(subuser.uuid, row);
                 rows.add(row);
             }
+            subuserRows.forEach((id, row) -> { if (!next.containsKey(id)) row.getWidgets().forEach(WidgetCleanup::cleanup); });
             subuserRows.clear();
             subuserRows.putAll(next);
         }
@@ -241,27 +264,22 @@ public class ServerSubuserSettingsController {
             String description = String.join(" \u00b7 ", descriptionParts);
             String createdAt = safe(subuser.createdAt).isBlank() ? "Unknown" : formatDateTime(subuser.createdAt);
 
-            SquareButtonWidget editButton = new SquareButtonWidget.Builder()
+            IconButton editButton = new IconButton.Builder()
                     .imagePath("edit.png")
                     .hint("Edit Permissions")
                     .onClick(() -> showEditPopup(currentSubuser(subuser.uuid), permissionCategoryCache))
-                    .accentType(ThemeManager.getAccent("nice"))
+                    .accentType(null)
                     .size(18, 18)
                     .build();
 
-            SquareButtonWidget deleteButton = new SquareButtonWidget.Builder()
-                    .imagePath("delete.png")
-                    .hint("Delete Subuser")
-                    .onClick(() -> showDeletePopup(currentSubuser(subuser.uuid)))
-                    .accentType(ThemeManager.getAccent("danger"))
-                    .size(18, 18)
-                    .build();
+            ConfirmButton deleteButton = new ConfirmButton("delete.png", "Delete Subuser", () -> !closed && !loadingAction,
+                    () -> deleteSubuser(currentSubuser(subuser.uuid)));
 
             MountableButtonWidget row = new MountableButtonWidget.Builder(name)
                     .description(description)
                     .hiddenText("Created " + createdAt)
-                    .addButton(editButton)
-                    .addButton(deleteButton)
+                    .addWidget(editButton)
+                    .addWidget(deleteButton)
                     .build();
             return row;
     }
@@ -273,286 +291,102 @@ public class ServerSubuserSettingsController {
         return new ServerModels.Subuser();
     }
 
+    private PopupWidget.Builder form(String title) {
+        if (popup == null) { popup = new PopupWidget.Builder(title).build(); popup.setVisible(false); }
+        popupStamp++;
+        if (people != null) { people.cleanup(); people = null; }
+        popup.getRows().forEach(row -> row.getWidgets().forEach(WidgetCleanup::cleanup));
+        popup.clearFocus(); popup.clearRows(); popup.clearTitleActions(); popup.setTitle(title);
+        return new PopupWidget.Builder(popup).width(Math.min(460, Math.max(280, popupOwner.get().width - 30))).setMinSize(280, 0)
+                .setExpandWithDropdowns(true).setAntiOutOfBound(true).setResizable(false).virtualizeRows(true).padding(5).rowGap(4).onClose(this::closePopup);
+    }
+
+    private void show(PopupWidget.Builder builder) {
+        boolean opening = !popup.isVisible();
+        popup = builder.build(); popup.setOwnerScreen(popupOwner.get()); popup.setAnimateLayout(false);
+        popup.fitContentHeight(Math.max(120, ScreenManager.getInstance().getDesktopWorkArea().height() - 20));
+        popup.centerOnOwner();
+        if (opening) popup.show();
+        else { popup.setVisible(true); popup.active = true; }
+    }
+
+    private void closePopup() {
+        popupStamp++;
+        if (people != null) { people.cleanup(); people = null; }
+        if (popup == null) return;
+        popup.getRows().forEach(row -> row.getWidgets().forEach(WidgetCleanup::cleanup));
+        popup.hide(); popup = null;
+    }
+
+    private void closePopup(PopupWidget owner, long stamp) {
+        if (popup == owner && popupStamp == stamp) closePopup();
+    }
+
     private void showCreatePopup(Map<String, ServerModels.PermissionCategory> categories) {
-        Screen currentScreen = ScreenManager.getInstance().getCurrentScreen();
-        if (currentScreen == null) {
-            return;
-        }
-
-        PopupWidget.Builder popupBuilder = new PopupWidget.Builder("Add Subuser")
-                .pos(50, currentScreen.height / 6)
-                .size(420, 360)
-                .setResizable(true)
-                .setMinSize(360, 260);
-
-        TextInputWidget emailInput = new TextInputWidget.Builder()
-                .placeholder("Username")
-                .search(true)
-                .size(200, 20)
-                .build();
-
-        AnimatedButton searchButton = new AnimatedButton.Builder()
-                .label("Search")
-                .size(70, 20)
-                .onClick(() -> performUserSearch(emailInput))
-                .build();
-
-        popupBuilder.addRow("email", "User", emailInput, searchButton);
-
-        Map<String, ToggleWidget> permissionToggles = new LinkedHashMap<>();
-        ScrollSelectorWidget categorySelector = buildPermissionRows(popupBuilder, categories, permissionToggles, Set.of());
-
-        popupBuilder.addTitleAction("Add", () -> {
-            String email = safe(emailInput.getText()).trim();
-            if (email.isBlank()) {
-                new Notification("Invalid Input", "Username is required", Notification.Type.WARN);
-                return;
+        if (closed || loadingAction || !dataLoaded || popupOwner.get() == null) return;
+        Screen screen = popupOwner.get();
+        ReStudioCommunityProvider provider = ReStudioCommunityProviders.current();
+        String account = provider.userId();
+        boolean authenticated = provider.isAuthenticated();
+        PopupWidget.Builder builder = form("Add Subuser");
+        PopupWidget owner = popup;
+        long stamp = popupStamp;
+        BooleanSupplier current = () -> !closed && popup == owner && popupStamp == stamp && owner.isVisible() && popupOwner.get() == screen
+                && ReStudioCommunityProviders.current() == provider && authenticated == provider.isAuthenticated() && account.equals(provider.userId());
+        TextInputWidget user = new TextInputWidget(0, 0, 260, 20) {
+            @Override
+            public void tick() {
+                super.tick();
+                if (people != null) people.tick();
             }
-
-            List<String> permissions = collectPermissions(permissionToggles);
-            popupBuilder.getWidget().setVisible(false);
-            createSubuser(email, permissions);
+        };
+        user.placeholder = "Username";
+        user.setMaxLength(80);
+        user.setSearch(true);
+        IconButton search = new IconButton.Builder().imagePath("search.png").hint("Search Users").size(18, 18)
+                .onClick(() -> { if (people != null && !loadingAction) people.submit(); }).build();
+        builder.addRow("user", "User", user, search);
+        PermissionEditor editor = new PermissionEditor(builder, categories, null, Set.of());
+        builder.addTitleAction("Add", () -> {
+            if (!current.getAsBoolean() || loadingAction) return;
+            String username = safe(user.getText()).trim();
+            if (username.isBlank()) { new Notification("Enter A Username", "Choose Someone To Share With", Notification.Type.WARN); return; }
+            createSubuser(username, editor.selected());
         }, PopupWidget.TitleActionRole.PRIMARY);
-
-        PopupWidget popup = popupBuilder.build();
-        if (categorySelector != null) {
-            categorySelector.setOnChange(() -> applyCategoryVisibility(popup, categories, categorySelector.getSelectedIndex()));
-        }
-
-        currentScreen.addDrawableChild(popup);
-        popup.show();
-        applyCategoryVisibility(popup, categories, 0);
+        show(builder); editor.attach(popup);
+        people = new PersonPicker(owner, user, provider, current, this::personUnavailable, person -> {
+            if (!current.getAsBoolean() || loadingAction) return;
+            user.setText(person.username());
+            people.hideResults();
+        }, () -> owner.fitContentHeight(Math.max(120, ScreenManager.getInstance().getDesktopWorkArea().height() - 20)),
+                query -> subuserFeature.searchUsers(query).thenApply(results -> results == null ? List.of() : results.stream()
+                        .filter(person -> person != null)
+                        .map(person -> new Person(safe(person.id), safe(person.username), safe(person.displayName), safe(person.avatarUrl))).toList()));
+        people.start();
     }
 
-    private void performUserSearch(TextInputWidget emailInput) {
-        if (closed) return;
-        String query = safe(emailInput.getText()).trim();
-        if (query.length() < 2) {
-            new Notification("Search", "Enter at least 2 characters", Notification.Type.WARN);
-            return;
+    private String personUnavailable(Person person) {
+        if (person.username().isBlank()) return "Username Is Unavailable";
+        for (ServerModels.Subuser subuser : subuserCache) {
+            if (person.username().equalsIgnoreCase(safe(subuser.username)) || subuser.restudioUser != null
+                    && (person.id().equals(safe(subuser.restudioUser.id)) || person.username().equalsIgnoreCase(safe(subuser.restudioUser.username)))) return "Already Added";
         }
-
-        loadingAction = true;
-        updateLoadingState();
-        subuserFeature.searchUsers(query)
-                .thenAccept(results -> ScreenManager.getInstance().execute(() -> {
-                    if (closed) return;
-                    loadingAction = false;
-                    updateLoadingState();
-                    showSearchResults(results, emailInput);
-                }))
-                .exceptionally(error -> {
-                    ScreenManager.getInstance().execute(() -> {
-                    if (closed) return;
-                        loadingAction = false;
-                        updateLoadingState();
-                        new Notification("Search Failed", sanitizeError(error), Notification.Type.ERROR);
-                    });
-                    return null;
-                });
-    }
-
-    private void showSearchResults(List<ServerModels.ReStudioUserInfo> results, TextInputWidget emailInput) {
-        if (results.isEmpty()) {
-            new Notification("No Users Found", "Try a different search term", Notification.Type.INFO);
-            return;
-        }
-
-        Screen currentScreen = ScreenManager.getInstance().getCurrentScreen();
-        if (currentScreen == null) {
-            return;
-        }
-
-        int popupHeight = Math.min(60 + results.size() * 28, 300);
-        PopupWidget.Builder searchPopupBuilder = new PopupWidget.Builder("Select User")
-                .size(340, popupHeight)
-                .setResizable(true)
-                .setMinSize(280, 120);
-
-        for (ServerModels.ReStudioUserInfo user : results) {
-            String displayName = safe(user.displayName);
-            String username = safe(user.username);
-            String label = displayName.isBlank() ? "User" : displayName;
-            if (!username.isBlank()) {
-                label += " @" + username;
-            }
-
-            MountableButtonWidget resultRow = new MountableButtonWidget.Builder(label)
-                    .onClick(() -> {
-                        if (!username.isBlank()) {
-                            emailInput.setText(username);
-                        }
-                        searchPopupBuilder.getWidget().setVisible(false);
-                    })
-                    .build();
-            searchPopupBuilder.addRow("", resultRow);
-        }
-
-        PopupWidget searchPopup = searchPopupBuilder.build();
-        currentScreen.addDrawableChild(searchPopup);
-        searchPopup.show();
+        return "";
     }
 
     private void showEditPopup(ServerModels.Subuser subuser, Map<String, ServerModels.PermissionCategory> categories) {
-        Screen currentScreen = ScreenManager.getInstance().getCurrentScreen();
-        if (currentScreen == null) {
-            return;
-        }
-
-        PopupWidget.Builder popupBuilder = new PopupWidget.Builder("Edit Subuser")
-                .pos(50, currentScreen.height / 6)
-                .size(420, 360)
-                .setResizable(true)
-                .setMinSize(360, 260);
-
-        String identity = resolveSubuserDisplayName(subuser);
-        popupBuilder.addRow("identity", "Subuser", new AnimatedButton.Builder().label(identity).active(false).build());
-
-        Set<String> selectedPermissions = new LinkedHashSet<>();
-        if (subuser.permissions != null) {
-            selectedPermissions.addAll(subuser.permissions);
-        }
-
-        Map<String, ToggleWidget> permissionToggles = new LinkedHashMap<>();
-        ScrollSelectorWidget categorySelector = buildPermissionRows(popupBuilder, categories, permissionToggles, selectedPermissions);
-
-        popupBuilder.addTitleAction("Update", () -> {
-            List<String> permissions = collectPermissions(permissionToggles);
-            popupBuilder.getWidget().setVisible(false);
-            updateSubuser(subuser, permissions);
-        }, PopupWidget.TitleActionRole.PRIMARY);
-
-        PopupWidget popup = popupBuilder.build();
-        if (categorySelector != null) {
-            categorySelector.setOnChange(() -> applyCategoryVisibility(popup, categories, categorySelector.getSelectedIndex()));
-        }
-
-        currentScreen.addDrawableChild(popup);
-        popup.show();
-        applyCategoryVisibility(popup, categories, 0);
-    }
-
-    private ScrollSelectorWidget buildPermissionRows(PopupWidget.Builder popupBuilder,
-                                                     Map<String, ServerModels.PermissionCategory> categories,
-                                                     Map<String, ToggleWidget> permissionToggles,
-                                                     Set<String> selectedPermissions) {
-        if (categories.isEmpty()) {
-            popupBuilder.addRow("permissions-empty", "Permissions", new AnimatedButton.Builder().label("No permissions available").active(false).build());
-            return null;
-        }
-
-        List<String> categoryKeys = new ArrayList<>(categories.keySet());
-        List<String> categoryLabels = categoryKeys.stream()
-                .map(key -> {
-                    ServerModels.PermissionCategory category = categories.get(key);
-                    int permissionCount = category == null || category.keys == null ? 0 : category.keys.size();
-                    return toTitle(key) + " (" + permissionCount + ")";
-                })
-                .toList();
-
-        ScrollSelectorWidget categorySelector = new ScrollSelectorWidget.Builder()
-                .options(categoryLabels)
-                .selectedIndex(0)
-                .size(300, 18)
-                .build();
-        popupBuilder.addRow("permissions-categories", "Category", categorySelector);
-
-        for (String categoryKey : categoryKeys) {
-            ServerModels.PermissionCategory category = categories.get(categoryKey);
-            if (category == null || category.keys == null || category.keys.isEmpty()) {
-                popupBuilder.addRow(new PopupWidget.PopupRow.Builder("No permissions", new AnimatedButton.Builder().label("Empty").active(false).size(80, 18).build())
-                        .id(permissionGroupRowId(categoryKey, "empty")).alignRight().build());
-                continue;
-            }
-
-            List<Map.Entry<String, String>> sortedPermissions = new ArrayList<>(category.keys.entrySet());
-            sortedPermissions.sort((a, b) -> formatPermissionLabel(categoryKey, a.getKey()).compareToIgnoreCase(formatPermissionLabel(categoryKey, b.getKey())));
-
-            for (Map.Entry<String, String> entry : sortedPermissions) {
-                String permissionKey = normalizePermissionKey(categoryKey, entry.getKey());
-                if (permissionKey.isBlank()) {
-                    continue;
-                }
-                String permissionLabel = formatPermissionLabel(categoryKey, entry.getKey());
-                String permissionDescription = safe(entry.getValue());
-
-                ToggleWidget toggle = new ToggleWidget.Builder()
-                        .toggled(selectedPermissions.contains(permissionKey))
-                        .size(44, 18)
-                        .build();
-                permissionToggles.put(permissionKey, toggle);
-
-                MountableButtonWidget.Builder permissionRowBuilder = new MountableButtonWidget.Builder(permissionLabel)
-                        .hiddenText(permissionKey)
-                        .addWidget(toggle);
-                if (!permissionDescription.isBlank()) {
-                    permissionRowBuilder.description(permissionDescription);
-                }
-                MountableButtonWidget permissionRow = permissionRowBuilder.build();
-                popupBuilder.addRow(new PopupWidget.PopupRow.Builder("", permissionRow).id(permissionGroupRowId(categoryKey, permissionKey)).build());
-            }
-        }
-
-        return categorySelector;
-    }
-
-    private void applyCategoryVisibility(PopupWidget popup, Map<String, ServerModels.PermissionCategory> categories, int selectedIndex) {
-        if (popup == null || categories.isEmpty()) {
-            return;
-        }
-
-        List<String> categoryKeys = new ArrayList<>(categories.keySet());
-        int safeIndex = Math.max(0, Math.min(selectedIndex, categoryKeys.size() - 1));
-        String selectedCategory = categoryKeys.get(safeIndex);
-
-        for (String categoryKey : categoryKeys) {
-            ServerModels.PermissionCategory category = categories.get(categoryKey);
-            if (category == null || category.keys == null || category.keys.isEmpty()) {
-                popup.setRowVisibility(permissionGroupRowId(categoryKey, "empty"), categoryKey.equals(selectedCategory));
-                continue;
-            }
-
-            boolean visible = categoryKey.equals(selectedCategory);
-            for (String permissionKey : category.keys.keySet()) {
-                popup.setRowVisibility(permissionGroupRowId(categoryKey, normalizePermissionKey(categoryKey, permissionKey)), visible);
-            }
-        }
-    }
-
-    private void showDeletePopup(ServerModels.Subuser subuser) {
-        Screen currentScreen = ScreenManager.getInstance().getCurrentScreen();
-        if (currentScreen == null) {
-            return;
-        }
-
-        PopupWidget.Builder popupBuilder = new PopupWidget.Builder("Delete Subuser")
-                .width(320)
-                .setResizable(false);
-
-        String identity = resolveSubuserDisplayName(subuser);
-        if (identity.equals("Pending Invite")) {
-            identity = safe(subuser.uuid).isBlank() ? "Subuser" : subuser.uuid;
-        }
-
-        AnimatedButton deleteButton = new AnimatedButton.Builder()
-                .label("Delete")
-                .accentType(ThemeManager.getAccent("danger"))
-                .onClick(() -> {
-                    popupBuilder.getWidget().setVisible(false);
-                    deleteSubuser(subuser);
-                })
-                .build();
-
-        popupBuilder.addRow(new PopupWidget.PopupRow.Builder("Delete " + identity + "?").id("confirm").build());
-        popupBuilder.addTitleAction("Delete", () -> deleteButton.onClick(0, 0, 0), PopupWidget.TitleActionRole.DESTRUCTIVE);
-
-        PopupWidget popup = popupBuilder.build();
-        currentScreen.addDrawableChild(popup);
-        popup.show();
+        if (closed || loadingAction || safe(subuser.uuid).isBlank() || popupOwner.get() == null) return;
+        PopupWidget.Builder builder = form("Edit Subuser");
+        builder.addRow("identity", "", new MountableButtonWidget.Builder(resolveSubuserDisplayName(subuser)).iconPath("person.png").description("Choose The Server Features They Can Use").build());
+        Set<String> selected = subuser.permissions == null ? Set.of() : new LinkedHashSet<>(subuser.permissions);
+        PermissionEditor editor = new PermissionEditor(builder, categories, null, selected);
+        builder.addTitleAction("Update", () -> { if (!closed && !loadingAction) updateSubuser(subuser, editor.selected()); }, PopupWidget.TitleActionRole.PRIMARY);
+        show(builder); editor.attach(popup);
     }
 
     private void createSubuser(String userIdentifier, List<String> permissions) {
-        if (closed) return;
+        if (closed || loadingAction) return;
+        PopupWidget owner = popup; long stamp = popupStamp;
         loadingAction = true;
         updateLoadingState();
         subuserFeature.createSubuser(userIdentifier, permissions)
@@ -564,6 +398,7 @@ public class ServerSubuserSettingsController {
                         updateLoadingState();
                         return;
                     }
+                    closePopup(owner, stamp);
                     playSound(Sound.SUCCESS);
                     String name = subuser.restudioUser != null ? safe(subuser.restudioUser.displayName) : userIdentifier;
                     new Notification("Subuser Added", name.isBlank() ? userIdentifier : name, Notification.Type.SUCCESS);
@@ -585,7 +420,8 @@ public class ServerSubuserSettingsController {
     }
 
     private void updateSubuser(ServerModels.Subuser subuser, List<String> permissions) {
-        if (closed) return;
+        if (closed || loadingAction) return;
+        PopupWidget owner = popup; long stamp = popupStamp;
         loadingAction = true;
         updateLoadingState();
         subuserFeature.updateSubuser(subuser.uuid, permissions)
@@ -597,6 +433,7 @@ public class ServerSubuserSettingsController {
                         updateLoadingState();
                         return;
                     }
+                    closePopup(owner, stamp);
                     playSound(Sound.SUCCESS);
                     String name = resolveSubuserDisplayName(updated);
                     new Notification("Permissions Updated", name, Notification.Type.SUCCESS);
@@ -618,7 +455,7 @@ public class ServerSubuserSettingsController {
     }
 
     private void deleteSubuser(ServerModels.Subuser subuser) {
-        if (closed) return;
+        if (closed || loadingAction || safe(subuser.uuid).isBlank()) return;
         loadingAction = true;
         updateLoadingState();
         subuserFeature.deleteSubuser(subuser.uuid)
@@ -647,33 +484,7 @@ public class ServerSubuserSettingsController {
     private void refreshSubusers() {
         if (closed) return;
         refreshRows();
-        ScreenManager screenManager = ScreenManager.getInstance();
-        Screen current = screenManager.getCurrentScreen();
-        List<SettingsScreen> targets = new ArrayList<>();
-        if (current instanceof SettingsScreen settingsScreen) {
-            targets.add(settingsScreen);
-        }
-        if (screenManager.getDesktopWindowsOverlay() != null) {
-            for (ScreenWindowWidget window : screenManager.getDesktopWindowsOverlay().getWindows()) {
-                if (window.getScreen() instanceof SettingsScreen settingsScreen && !targets.contains(settingsScreen)) {
-                    targets.add(settingsScreen);
-                }
-            }
-        }
-        for (SettingsScreen settingsScreen : targets) {
-            settingsScreen.refreshTab(SUBUSERS_TAB);
-        }
-    }
-
-    private List<String> collectPermissions(Map<String, ToggleWidget> toggles) {
-        List<String> selected = new ArrayList<>();
-        for (Map.Entry<String, ToggleWidget> entry : toggles.entrySet()) {
-            if (entry.getValue().getValue()) {
-                selected.add(entry.getKey());
-            }
-        }
-        selected.sort(String::compareToIgnoreCase);
-        return selected;
+        if (popupOwner.get() instanceof SettingsScreen settings) settings.refreshTab(SUBUSERS_TAB);
     }
 
     private Map<String, ServerModels.PermissionCategory> normalizeCategories(ServerModels.SystemPermissions permissions) {
@@ -692,13 +503,13 @@ public class ServerSubuserSettingsController {
     }
 
     private void setLoading(boolean loading) {
-        if (parentScreen != null) {
-            parentScreen.setLoading(loading);
-        }
+        if (popupOwner.get() instanceof ReScreen screen) screen.setLoading(loading);
     }
 
     private void updateLoadingState() {
         setLoading(loadingData || loadingAction);
+        if (addSubuserButton != null) addSubuserButton.setActive(dataLoaded && !loadingAction && !loadingData);
+        if (reloadButton != null) reloadButton.setActive(!loadingAction && !loadingData);
     }
 
     private void upsertSubuser(ServerModels.Subuser subuser) {
@@ -722,39 +533,6 @@ public class ServerSubuserSettingsController {
         subuserCache.removeIf(subuser -> uuid.equals(subuser.uuid));
     }
 
-    private String permissionGroupRowId(String category, String key) {
-        return "perm-" + sanitizeId(category) + "-" + sanitizeId(key);
-    }
-
-    private String normalizePermissionKey(String categoryKey, String rawPermissionKey) {
-        String key = safe(rawPermissionKey).trim();
-        if (key.isBlank()) {
-            return "";
-        }
-        if ("*".equals(key) || key.contains(".")) {
-            return key;
-        }
-        return categoryKey + "." + key;
-    }
-
-    private String formatPermissionLabel(String categoryKey, String rawPermissionKey) {
-        String key = normalizePermissionKey(categoryKey, rawPermissionKey);
-        if (key.isBlank()) {
-            return "Unknown";
-        }
-        int dotIndex = key.indexOf('.');
-        String token = dotIndex >= 0 && dotIndex < key.length() - 1 ? key.substring(dotIndex + 1) : key;
-        return toTitle(token);
-    }
-
-    private String sanitizeId(String value) {
-        String safe = safe(value);
-        if (safe.isBlank()) {
-            return "none";
-        }
-        return safe.replaceAll("[^A-Za-z0-9._-]", "-");
-    }
-
     private String formatDateTime(String isoDateTime) {
         try {
             ZonedDateTime dateTime = ZonedDateTime.parse(isoDateTime);
@@ -774,23 +552,6 @@ public class ServerSubuserSettingsController {
 
     private boolean hasLoadTimedOut() {
         return loadStartedAt > 0L && System.currentTimeMillis() - loadStartedAt > LOAD_TIMEOUT_MS;
-    }
-
-    private String toTitle(String value) {
-        String source = safe(value).replace('_', ' ').replace('-', ' ').trim();
-        if (source.isBlank()) {
-            return "Unknown";
-        }
-        String[] parts = source.split("\\s+");
-        List<String> normalized = new ArrayList<>();
-        for (String part : parts) {
-            if (part.isBlank()) {
-                continue;
-            }
-            String lower = part.toLowerCase(Locale.ROOT);
-            normalized.add(Character.toUpperCase(lower.charAt(0)) + lower.substring(1));
-        }
-        return String.join(" ", normalized);
     }
 
     private String safe(String value) {

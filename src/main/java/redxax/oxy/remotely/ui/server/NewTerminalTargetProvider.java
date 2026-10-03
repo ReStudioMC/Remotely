@@ -8,6 +8,15 @@ import java.util.UUID;
 public interface NewTerminalTargetProvider {
     NewTerminalTargetProvider LOCAL = targets -> Async.completed(UUID.randomUUID().toString());
 
+    record Shell(String id, String hostId, String name) {
+        public Shell {
+            if (id == null || id.isBlank() || hostId == null || hostId.isBlank()) {
+                throw new IllegalArgumentException("SSH Terminal Identity Is Required");
+            }
+            name = name == null || name.isBlank() ? hostId : name;
+        }
+    }
+
     record Tab(Object target, String name) {
         public Tab {
             name = name == null ? "" : name.trim();
@@ -24,7 +33,7 @@ public interface NewTerminalTargetProvider {
     Async<Object> newTarget(List<Object> openTargets);
 
     default boolean supports(Object target) {
-        return true;
+        return !(target instanceof Shell);
     }
 
     default Async<Object> resolve(Object target) {

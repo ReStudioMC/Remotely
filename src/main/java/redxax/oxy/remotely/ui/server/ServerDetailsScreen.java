@@ -3,6 +3,7 @@ package redxax.oxy.remotely.ui.server;
 import redxax.oxy.remotely.RemotelyClient;
 import redxax.oxy.remotely.RemotelyComposition;
 import redxax.oxy.remotely.config.RemotelyViewStateStore;
+import redxax.oxy.remotely.config.RemotelyConfigStore;
 import redxax.oxy.remotely.data.flow.ReSyncNotificationLevel;
 import redxax.oxy.remotely.data.integrations.luckperms.ReSyncLuckPermsClient;
 import redxax.oxy.remotely.host.ApplicationHost;
@@ -12,6 +13,7 @@ import redxax.oxy.remotely.session.TerminalSession;
 import redxax.oxy.remotely.ui.server.containers.PlayersContainer;
 import redxax.oxy.remotely.ui.widgets.management.PlayerManagerController;
 import restudio.rebase.api.unified.internal.StandardOutputStateParser;
+import restudio.rebase.backend.FileExplorerProviders;
 import restudio.rescreen.platform.Async;
 import restudio.rescreen.platform.TaskScheduler;
 import restudio.rebase.restudio.api.models.ServerModels;
@@ -36,6 +38,7 @@ import restudio.rescreen.ui.rescreen.*;
 import restudio.rescreen.ui.rescreen.layout.ManagedLayout;
 import restudio.rescreen.theme.ThemeManager;
 import restudio.rescreen.ui.widgets.IconButton;
+import restudio.rescreen.ui.widgets.ItemSelectorWidget;
 import restudio.rescreen.ui.widgets.AnimatedButton;
 import restudio.rescreen.ui.widgets.PopupWidget;
 import restudio.rescreen.ui.widgets.AnimatedWidget;
@@ -92,6 +95,10 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
     private volatile long serverHealthAccountGeneration;
     private boolean serverHealthAuthStateListenerRegistered;
     private final Map<String, Consumer<ServerScreenHost.ServerState>> restartListeners = new HashMap<>();
+    private ItemSelectorWidget terminalTargetSelector;
+    private Async<List<ServerScreenHost.HostView>> terminalHostsRequest;
+    private Async<List<ServerModels.ClientServerView>> terminalServersRequest;
+    private long terminalSelectorGeneration;
     private Async<Object> newTerminalTargetRequest;
     private Async<NewTerminalTargetProvider.State> terminalRestoreRequest;
     private long newTerminalTargetGeneration;
@@ -375,7 +382,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
             viewSwitcher.cleanup();
             viewSwitcher = null;
         }
-        destroyAllSessions();
+        destroyAllSessions(true);
         for (TabContext context : new ArrayList<>(tabContexts.values())) {
             if (context instanceof ServerTabStatusContext statusContext) statusContext.invalidateMetricsRequest();
             if (context.capabilityProvider != null && context.capabilityListener != null) {
@@ -424,6 +431,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
 
     private String reinitializationKey(Object target) {
         if (target instanceof String value) return "terminal:" + value;
+        if (target instanceof NewTerminalTargetProvider.Shell shell) return "terminal:" + shell.id();
         String id = detailsTarget(target).id();
         return id.isBlank() ? "object:" + System.identityHashCode(target) : "server:" + id;
     }
@@ -578,7 +586,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         tabs().builder()
             .position(5, 35).size(width - 10, 18)
             .allowAdd(true).allowClose(true).allowReorder(true).allowRename(true)
-            .onPlusButtonClicked(this::addNewTerminalTab)
+            .onPlusButtonClicked(this::showTerminalTargets)
             .onTabSelected(this::onTabSelected)
             .onTabClosed(this::onTabClosed)
             .onTabsReordered(this::onTabsReordered)
@@ -592,7 +600,8 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
             Object canonical = canonicalTab(entry);
             if (canonical == null || !targetProvider.supports(canonical)) continue;
             boolean duplicate = canonicalTabs.stream().anyMatch(existing -> sameTab(existing.target(), canonical));
-            if (!duplicate) canonicalTabs.add(new NewTerminalTargetProvider.Tab(canonical, detailsTarget(canonical).name()));
+            if (!duplicate) canonicalTabs.add(new NewTerminalTargetProvider.Tab(canonical,
+                    canonical instanceof NewTerminalTargetProvider.Shell shell ? shell.name() : detailsTarget(canonical).name()));
         }
         Object requestedInstance = canonicalTab(initialInstanceToOpen);
         if (requestedInstance != null && !targetProvider.supports(requestedInstance)) requestedInstance = null;
@@ -643,7 +652,8 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         terminalRestoreRequest = null;
         List<NewTerminalTargetProvider.Tab> restored = state == null ? List.of() : state.tabs().stream()
                 .filter(tab -> provider.supports(tab.target()))
-                .filter(tab -> tab.target() instanceof String || screenHost().serverView(tab.target()) != null)
+                .filter(tab -> tab.target() instanceof String || tab.target() instanceof NewTerminalTargetProvider.Shell
+                        || screenHost().serverView(tab.target()) != null)
                 .toList();
         List<Object> tabStore = getTabStore();
         tabStore.clear();
@@ -682,9 +692,11 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
     }
 
     private void createAndAddTab(Object tabInfo, boolean setActive, boolean initialize, String savedName) {
-        Object inst = tabInfo instanceof String ? null : tabInfo;
-        String localId = (tabInfo instanceof String) ? (String) tabInfo : null;
-        String name = savedName == null || savedName.isBlank() ? inst != null ? detailsTarget(inst).name() : "Terminal" : savedName;
+        Object inst = tabInfo instanceof String || tabInfo instanceof NewTerminalTargetProvider.Shell ? null : tabInfo;
+        String localId = tabInfo instanceof NewTerminalTargetProvider.Shell shell ? shell.id() : tabInfo instanceof String id ? id : null;
+        String name = savedName == null || savedName.isBlank()
+                ? tabInfo instanceof NewTerminalTargetProvider.Shell shell ? shell.name() : inst != null ? detailsTarget(inst).name() : "Terminal"
+                : savedName;
         if (inst == null && localId == null) {
             long count = contextInfos.values().stream().filter(TerminalSession::isLocalTerminalMode).count() + 1;
             name = "Terminal " + count;
@@ -726,7 +738,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
 
         Object tabInfo = ctx.id;
         Object inst = ctx.instance;
-        String localId = (tabInfo instanceof String) ? (String) tabInfo : null;
+        String localId = tabInfo instanceof NewTerminalTargetProvider.Shell shell ? shell.id() : tabInfo instanceof String id ? id : null;
         int statusPad = inst != null ? 15 : 0;
         TerminalSession info = initializeTabContext(ctx, tabInfo, inst, localId, statusPad);
         contextInfos.put(ctx, info);
@@ -753,8 +765,9 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
             return info;
         }
         ServerModels.ClientServerView server = screenHost().serverView(inst);
-        TerminalWidget terminal = server == null
-                ? screenHost().createLocalTerminal(localId, 5, 60, width - 10, height - 66)
+        TerminalWidget terminal = tabInfo instanceof NewTerminalTargetProvider.Shell shell
+                ? screenHost().createShellTerminal(shell, 5, 60, width - 10, height - 66)
+                : server == null ? screenHost().createLocalTerminal(localId, 5, 60, width - 10, height - 66)
                 : screenHost().createTerminal(remotelyClient.getApiClient(), server, localId, 5, 60,
                 width - 10, height - 66 - statusPad, null);
         if (terminal == null) return info;
@@ -840,6 +853,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         boolean panel = server && screenHost().isPanel(context.instance);
         DevelopmentTabState development = developmentTabs.get(context);
         boolean developmentAvailable = development != null || server && screenHost().supportsDevelopment(context.instance);
+        header().setButtonVisible("steve.png", server && !screenHost().collaborationResourceId(context.instance).isBlank());
         header().setButtonVisible("explorer.png", server);
         header().setButtonVisible("edit.png", server && !panel);
         header().setButtonVisible("merge.png", !panel && developmentAvailable);
@@ -973,7 +987,9 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         if (resourcePoolButton != null) {
             resourcePoolButton.setVisible(false);
         }
-        if (resourcePoolController != null && screenHost().accountIdentity().authenticated()) {
+        TabContext context = getActiveContext();
+        if (resourcePoolController != null && screenHost().accountIdentity().authenticated()
+                && screenHost().managerAction(ServerScreenHost.Action.RESOURCES, context == null ? null : context.instance).available()) {
             resourcePoolController.refresh();
         }
     }
@@ -1218,9 +1234,127 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         provider.persist(new NewTerminalTargetProvider.State(persisted, tabs().getActiveTabIndex()));
     }
 
+    private void showTerminalTargets() {
+        hideTerminalTargets();
+        long generation = ++terminalSelectorGeneration;
+        String localHint = screenHost().newTerminalTargetProvider().supports("local")
+                ? "Open A Shell On This PC" : "Local Terminals Require A Connected Desktop Host";
+        ItemSelectorWidget.Builder builder = new ItemSelectorWidget.Builder(this)
+                .size(Math.min(300, Math.max(210, width - 20)), 240)
+                .entryHeight(18)
+                .searchPlaceholder("Search Terminals")
+                .emptyMessage("No Terminals")
+                .onClose(this::hideTerminalTargets)
+                .beginBatch();
+        builder.addSectionHeader("Local")
+                .addItem("Local Terminal", "terminal.png", localHint, "local terminal shell", this::addNewTerminalTab)
+                .addSectionHeader("Remote Hosts")
+                .addItem("Loading Hosts", null);
+        ItemSelectorWidget selector = builder.endBatch().build();
+        terminalTargetSelector = selector;
+        addDrawableChild(selector);
+        SquareButtonWidget plus = tabs().getPlusButton();
+        selector.show(Math.min(plus.getX() + plus.getWidth() + 4, Math.max(4, width - selector.getWidth() - 4)),
+                plus.getY() + plus.getHeight() + 4);
+        List<FileExplorerProviders.Root> serverRoots = FileExplorerProviders.serverRoots();
+        Async<List<ServerModels.ClientServerView>> serversRequest = screenHost().restudioServers();
+        terminalServersRequest = serversRequest;
+        Async<List<ServerScreenHost.HostView>> request = screenHost().remoteHosts();
+        terminalHostsRequest = request;
+        request.whenComplete((hosts, failure) -> screenHost().application().execute(() -> {
+            if (closed || generation != terminalSelectorGeneration || terminalTargetSelector != selector || !selector.isOpen()) return;
+            terminalHostsRequest = null;
+            builder.beginBatch().clearItems().addSectionHeader("Local")
+                    .addItem("Local Terminal", "terminal.png", localHint, "local terminal shell", this::addNewTerminalTab)
+                    .addSectionHeader("Remote Hosts");
+            List<ServerScreenHost.HostView> sshHosts = hosts == null ? List.of() : hosts.stream()
+                    .filter(host -> host != null && !host.id().isBlank() && "SSH".equalsIgnoreCase(host.type())).toList();
+            if (failure != null) {
+                builder.addItem("Hosts Unavailable", message(failure), "remote ssh host", () ->
+                        host().notify("Terminal", message(failure), ReSyncNotificationLevel.WARN));
+            } else if (sshHosts.isEmpty()) {
+                builder.addItem("No SSH Hosts", "Add A Remote Host In Servers", "remote ssh host", () -> screenHost().openRemoteHost(this));
+            } else {
+                for (ServerScreenHost.HostView host : sshHosts) {
+                    builder.addItem(host.name(), "terminal.png", host.user() + "@" + host.address() + ":" + host.port(),
+                            host.name() + " " + host.address() + " " + host.user(), () -> {
+                                NewTerminalTargetProvider.Shell shell = new NewTerminalTargetProvider.Shell(UUID.randomUUID().toString(), host.id(), host.name());
+                                NewTerminalTargetProvider provider = screenHost().newTerminalTargetProvider();
+                                if (!provider.supports(shell)) {
+                                    host().notify("Terminal", "SSH Host Is Unavailable", ReSyncNotificationLevel.WARN);
+                                    return;
+                                }
+                                getTabStore().add(shell);
+                                createAndAddTab(shell, true);
+                                persistTerminalState();
+                            });
+                }
+            }
+            builder.addSectionHeader("Servers");
+            Set<String> serverIds = new HashSet<>();
+            for (FileExplorerProviders.Root root : serverRoots) {
+                if (root.context() instanceof ServerModels.ClientServerView) continue;
+                addTerminalServer(builder, root.context(), root.name(), root.path().toString(), root.icon(), serverIds);
+            }
+            builder.endBatch();
+            serversRequest.whenComplete((servers, serverFailure) -> screenHost().application().execute(() -> {
+                if (closed || generation != terminalSelectorGeneration || terminalTargetSelector != selector || !selector.isOpen()) return;
+                terminalServersRequest = null;
+                builder.beginBatch();
+                RemotelyConfigStore config = remotelyClient.getComposition().configManager();
+                List<String> hidden = config == null ? List.of() : config.getHiddenRestudioServers();
+                if (servers != null) {
+                    for (ServerModels.ClientServerView server : servers) {
+                        if (server == null || hidden.contains(detailsTarget(server).id()) || hidden.contains(server.name)) continue;
+                        addTerminalServer(builder, server, server.name, server.nodeName,
+                                screenHost().iconProvider().getQuickIconId(screenHost().iconTarget(server)), serverIds);
+                    }
+                }
+                if (serverFailure != null) {
+                    builder.addItem("Servers Unavailable", message(serverFailure), "server console", () ->
+                            host().notify("Terminal", message(serverFailure), ReSyncNotificationLevel.WARN));
+                } else if (serverIds.isEmpty()) {
+                    builder.addItem("No Servers", "Add A Server In Servers", "server console", () -> screenHost().createServer(this));
+                }
+                builder.endBatch();
+            }));
+        }));
+    }
+
+    private void addTerminalServer(ItemSelectorWidget.Builder builder, Object target, String name, String hint,
+                                   Identifier icon, Set<String> serverIds) {
+        Object canonical = developmentSource(target);
+        if (canonical == null || !screenHost().newTerminalTargetProvider().supports(canonical)) return;
+        String id = detailsTarget(canonical).id();
+        if (id.isBlank() || !serverIds.add(id)) return;
+        String label = name == null || name.isBlank() ? detailsTarget(canonical).name() : name;
+        builder.addIconItem(label, icon == null ? Identifier.icon("terminal.png") : icon, hint,
+                label + " " + id + " " + (hint == null ? "" : hint), () -> addInstanceTab(canonical));
+    }
+
+    private void hideTerminalTargets() {
+        terminalSelectorGeneration++;
+        ItemSelectorWidget selector = terminalTargetSelector;
+        terminalTargetSelector = null;
+        if (selector != null) {
+            selector.hide();
+            remove(selector);
+        }
+        Async<List<ServerScreenHost.HostView>> request = terminalHostsRequest;
+        terminalHostsRequest = null;
+        if (request != null) request.cancel();
+        Async<List<ServerModels.ClientServerView>> serversRequest = terminalServersRequest;
+        terminalServersRequest = null;
+        if (serversRequest != null) serversRequest.cancel();
+    }
+
     private void addNewTerminalTab() {
         if (newTerminalTargetRequest != null) return;
         NewTerminalTargetProvider provider = screenHost().newTerminalTargetProvider();
+        if (!provider.supports("local")) {
+            host().notify("Terminal", "Local Terminals Require A Connected Desktop Host", ReSyncNotificationLevel.WARN);
+            return;
+        }
         long generation = ++newTerminalTargetGeneration;
         Async<Object> request;
         try {
@@ -1255,9 +1389,9 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
             host().notify("Terminal", "Terminal Target Is Unavailable", ReSyncNotificationLevel.WARN);
             return;
         }
-        if (target instanceof String id) {
-            getTabStore().add(id);
-            createAndAddTab(id, true);
+        if (target instanceof String || target instanceof NewTerminalTargetProvider.Shell) {
+            getTabStore().add(target);
+            createAndAddTab(target, true);
             persistTerminalState();
         } else {
             addInstanceTab(target);
@@ -1265,6 +1399,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
     }
 
     private void cancelNewTerminalTargetRequest() {
+        hideTerminalTargets();
         newTerminalTargetGeneration++;
         Async<Object> request = newTerminalTargetRequest;
         newTerminalTargetRequest = null;
@@ -1411,11 +1546,12 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
     }
 
     private boolean sameTab(Object a, Object b) {
-        return a instanceof String || b instanceof String ? Objects.equals(a, b) : sameInstance(a, b);
+        return a instanceof String || b instanceof String || a instanceof NewTerminalTargetProvider.Shell || b instanceof NewTerminalTargetProvider.Shell
+                ? Objects.equals(a, b) : sameInstance(a, b);
     }
 
     private Object canonicalTab(Object candidate) {
-        return candidate instanceof String ? candidate : developmentSource(candidate);
+        return candidate instanceof String || candidate instanceof NewTerminalTargetProvider.Shell ? candidate : developmentSource(candidate);
     }
 
     private void launchOrStopInstance() {
@@ -2948,6 +3084,9 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         TabContext context = getActiveContext();
         if (context == null) return List.of("No Active Context");
         TerminalSession info = contextInfos.get(context);
+        if (info != null && context.id instanceof NewTerminalTargetProvider.Shell shell) {
+            return List.of("Mode: SSH Terminal", "Host: " + shell.name(), "Term ID: " + shell.id());
+        }
         if (info != null && info.isLocalTerminalMode()) {
             return List.of("Mode: Local Terminal", "Term ID: " + info.getLocalTerminalId());
         }
@@ -3048,6 +3187,10 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
     }
 
     private void destroyAllSessions() {
+        destroyAllSessions(false);
+    }
+
+    private void destroyAllSessions(boolean preserveShells) {
         if (remotelyClient == null) return;
         Set<TerminalSession> sessions = Collections.newSetFromMap(new IdentityHashMap<>());
         sessions.addAll(contextInfos.values());
@@ -3058,7 +3201,12 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
             }
         });
         sessions.remove(null);
-        sessions.forEach(session -> remotelyClient.getSessionManager().destroySession(session.getTabId()));
+        NewTerminalTargetProvider provider = screenHost().newTerminalTargetProvider();
+        sessions.forEach(session -> {
+            if (!preserveShells || !(session.getTabId() instanceof NewTerminalTargetProvider.Shell shell) || !provider.supports(shell)) {
+                remotelyClient.getSessionManager().destroySession(session.getTabId());
+            }
+        });
     }
 
     private static final class StreamDataParser implements BiConsumer<Integer, String> {
