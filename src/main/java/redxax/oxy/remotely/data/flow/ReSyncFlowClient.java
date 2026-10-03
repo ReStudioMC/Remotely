@@ -19485,7 +19485,12 @@ public class ReSyncFlowClient {
         if (!authenticated.get()) {
             String message = switch (errorCode) {
                 case 400 -> "ReSync Protocol Mismatch. Update ReSync And Remotely";
-                case 401 -> "ReSync Access Denied. Check The API Key Or Bridge Permission";
+                case 401 -> switch (errorText) {
+                    case "Invalid API key" -> "ReSync Access Denied. The API Key Does Not Match This Server. Reconnect To Refresh Its Configuration";
+                    case "No Permission" -> "ReSync Access Denied. Your Player Needs resync.api.access Or Operator Permission";
+                    case "Invalid client id" -> "ReSync Access Denied. The Client Identity Is Invalid. Reconnect";
+                    default -> "ReSync Access Denied. Check The API Key Or Bridge Permission";
+                };
                 default -> "ReSync Connection Rejected. Retrying";
             };
             failConnectionAttempt(message, generation);

@@ -52,6 +52,8 @@ import restudio.rescreen.logging.ReLog;
 import restudio.rescreen.platform.Async;
 import restudio.rebase.platform.jvm.JvmAsyncBridge;
 
+import restudio.rescreen.config.AppStoragePaths;
+
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -141,7 +143,7 @@ public class RemotelyManager implements IRebaseManager {
         BackendFactory.register("RESTUDIO", ReStudioBackend::new);
         desktopServerSettingsRegistry = new DesktopServerSettingsRegistry(
                 ServerSettingsRegistry.getInstance(),
-                configManager.getApplicationDir().resolve("server-settings")
+                AppStoragePaths.config(configManager.getApplicationDir()).resolve("server-settings")
         );
     }
 

@@ -5,6 +5,8 @@ import com.google.gson.JsonParser;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import redxax.oxy.remotely.DesktopRemotelyServerApi;
 import redxax.oxy.remotely.RemotelyClient;
 import redxax.oxy.remotely.RemotelyComposition;
@@ -15,6 +17,9 @@ import redxax.oxy.remotely.util.DesktopTaskIdentities;
 import restudio.rebase.restudio.api.ReStudioApiClient;
 import restudio.rebase.restudio.api.models.ServerModels;
 import restudio.rescreen.game.MinecraftGameAssets;
+import restudio.rebase.platform.jvm.JvmTaskScheduler;
+import restudio.rescreen.platform.TaskScheduler;
+import redxax.oxy.remotely.util.TaskSchedulers;
 import restudio.rescreen.platform.Async;
 import restudio.rescreen.ui.core.Screen;
 import restudio.resync.flow.identity.ServerId;
@@ -55,11 +60,16 @@ class ReSyncFlowClientConnectionLifecycleTest {
     private static final short PLUGIN_CHANNEL_ID = 50;
     private static final ServerId TEST_SERVER = new ServerId(UUID.fromString("123e4567-e89b-42d3-a456-426614174000"));
 
+    private static TaskScheduler previousScheduler;
+    private static JvmTaskScheduler scheduler;
     private static Async.Snapshot asyncSnapshot;
     private static ExecutorService asyncPool;
 
     @BeforeAll
     static void setUpAll() {
+        previousScheduler = TaskSchedulers.current();
+        scheduler = new JvmTaskScheduler();
+        TaskSchedulers.configure(scheduler);
         DesktopTaskIdentities.install();
         DesktopReSyncLocalInstances.install();
         DesktopReSyncDirectSockets.install();
@@ -70,6 +80,8 @@ class ReSyncFlowClientConnectionLifecycleTest {
 
     @AfterAll
     static void tearDownAll() {
+        TaskSchedulers.configure(previousScheduler);
+        scheduler.close();
         if (asyncSnapshot != null) {
             Async.restore(asyncSnapshot);
         }
@@ -303,15 +315,18 @@ class ReSyncFlowClientConnectionLifecycleTest {
         }
     }
 
-    @Test
-    void handshakeErrorStopsConnectingAndAllowsRetry() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"Invalid API key", "No Permission", "Invalid client id"})
+    void handshakeErrorStopsConnectingAndAllowsRetry(String denial) throws Exception {
         AtomicInteger notifications = new AtomicInteger();
+        AtomicReference<String> denialMessage = new AtomicReference<>();
         CountDownLatch notified = new CountDownLatch(1);
         CountDownLatch connected = new CountDownLatch(1);
         TestTransport transport = new TestTransport();
         ReSyncFlowClient client = new ReSyncFlowClient(TEST_SERVER.canonicalText(), transport, null);
         client.setConnectionListener(connected::countDown);
         client.setErrorListener((nodeId, message) -> {
+            denialMessage.set(message);
             notifications.incrementAndGet();
             notified.countDown();
         });
@@ -319,7 +334,7 @@ class ReSyncFlowClientConnectionLifecycleTest {
         try {
             client.connect().join();
 
-            byte[] message = "Invalid API key".getBytes(StandardCharsets.UTF_8);
+            byte[] message = denial.getBytes(StandardCharsets.UTF_8);
             ByteBuffer payload = ByteBuffer.allocate(Integer.BYTES * 2 + message.length);
             payload.putInt(401);
             payload.putInt(message.length);
@@ -329,6 +344,12 @@ class ReSyncFlowClientConnectionLifecycleTest {
             assertTrue(notified.await(2, TimeUnit.SECONDS));
             assertEquals(ReSyncFlowClient.ConnectionState.DISCONNECTED, client.connectionState());
             assertEquals(1, notifications.get());
+            assertEquals(ReSyncFlowClient.ConnectionFailure.ACCESS_DENIED, client.connectionFailure());
+            assertTrue(denialMessage.get().contains(switch (denial) {
+                case "Invalid API key" -> "API Key Does Not Match This Server";
+                case "No Permission" -> "resync.api.access";
+                default -> "Client Identity Is Invalid";
+            }));
 
             client.connect().join();
             transport.receive(handshakeFrame());

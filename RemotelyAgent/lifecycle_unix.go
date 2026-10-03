@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -247,51 +248,157 @@ func lifecycleConsole(dir string) error {
 	if err != nil {
 		return err
 	}
+	defer os.Stdin.Close()
 	oldState, rawErr := term.MakeRaw(int(os.Stdin.Fd()))
 	if rawErr == nil {
 		defer term.Restore(int(os.Stdin.Fd()), oldState)
 	}
 	_ = pty.InheritSize(os.Stdin, os.Stdout)
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, syscall.SIGWINCH)
+	changes := make(chan os.Signal, 4)
+	signal.Notify(changes, syscall.SIGWINCH, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(changes)
+	return lifecycleConsoleStream(os.Stdin, os.Stdout, paths.SocketPath, paths.LogPath, changes)
+}
+
+type lifecycleInput struct {
+	generation uint64
+	data       []byte
+	err        error
+}
+
+func lifecycleConsoleStream(input io.Reader, output io.Writer, socket string, log string, changes <-chan os.Signal) error {
+	packets := make(chan lifecycleInput, 16)
+	stopped := make(chan struct{})
+	defer close(stopped)
+	var active atomic.Uint64
 	go func() {
-		for range ch {
-			_ = lifecycleResize(paths.SocketPath)
+		buffer := make([]byte, 8192)
+		for {
+			n, err := input.Read(buffer)
+			generation := active.Load()
+			if n > 0 && generation != 0 {
+				packet := lifecycleInput{generation: generation, data: append([]byte(nil), buffer[:n]...)}
+				select {
+				case packets <- packet:
+				case <-stopped:
+					return
+				}
+			}
+			if err != nil {
+				select {
+				case packets <- lifecycleInput{err: err}:
+				case <-stopped:
+				}
+				return
+			}
+			select {
+			case <-stopped:
+				return
+			default:
+			}
 		}
 	}()
-	defer signal.Stop(ch)
+	generation := uint64(0)
 	announced := false
 	for {
-		conn, err := net.DialTimeout("unix", paths.SocketPath, 500*time.Millisecond)
+		conn, err := net.DialTimeout("unix", socket, 500*time.Millisecond)
 		if err != nil {
 			if !announced {
-				fmt.Print("\r\nServer Not Running\r\nWaiting For Start\r\n")
+				if _, err := fmt.Fprint(output, "\r\nServer Not Running\r\nWaiting For Start\r\n"); err != nil {
+					return err
+				}
 				announced = true
 			}
-			time.Sleep(500 * time.Millisecond)
+			timer := time.NewTimer(500 * time.Millisecond)
+			waiting := true
+			for waiting {
+				select {
+				case packet := <-packets:
+					if packet.err != nil {
+						timer.Stop()
+						if errors.Is(packet.err, io.EOF) {
+							return nil
+						}
+						return packet.err
+					}
+				case change := <-changes:
+					if change != syscall.SIGWINCH {
+						timer.Stop()
+						return nil
+					}
+				case <-timer.C:
+					waiting = false
+				}
+			}
 			continue
 		}
 		announced = false
-		if data, readErr := os.ReadFile(paths.LogPath); readErr == nil && len(data) > 0 {
-			_, _ = os.Stdout.Write(data)
+		if history, readErr := os.Open(log); readErr == nil {
+			stamp, statErr := history.Stat()
+			if statErr != nil {
+				_ = history.Close()
+				_ = conn.Close()
+				return statErr
+			}
+			_, replayErr := io.Copy(output, io.LimitReader(history, stamp.Size()))
+			_ = history.Close()
+			if replayErr != nil {
+				_ = conn.Close()
+				return replayErr
+			}
 		}
 		if _, err := conn.Write([]byte("ATTACH\n")); err != nil {
 			_ = conn.Close()
 			continue
 		}
-		_ = lifecycleResize(paths.SocketPath)
-		done := make(chan struct{}, 2)
+		generation++
+		active.Store(generation)
+		_ = lifecycleResize(socket)
+		done := make(chan struct{})
 		go func() {
-			_, _ = io.Copy(conn, os.Stdin)
-			done <- struct{}{}
+			_, _ = io.Copy(output, conn)
+			_ = conn.Close()
+			close(done)
 		}()
-		go func() {
-			_, _ = io.Copy(os.Stdout, conn)
-			done <- struct{}{}
-		}()
-		<-done
+		var inputErr error
+		attached := true
+		for attached {
+			select {
+			case packet := <-packets:
+				if packet.err != nil {
+					inputErr = packet.err
+					attached = false
+				} else if packet.generation == generation {
+					_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+					written, err := conn.Write(packet.data)
+					if err != nil || written != len(packet.data) {
+						attached = false
+					}
+				}
+			case change := <-changes:
+				if change == syscall.SIGWINCH {
+					_ = lifecycleResize(socket)
+				}
+				if change != syscall.SIGWINCH {
+					inputErr = io.EOF
+					attached = false
+				}
+			case <-done:
+				attached = false
+			}
+		}
+		active.Store(0)
 		_ = conn.Close()
-		fmt.Print("\r\nServer Closed\r\nWaiting For Start\r\n")
+		<-done
+		if inputErr != nil {
+			if errors.Is(inputErr, io.EOF) {
+				return nil
+			}
+			return inputErr
+		}
+		if _, err := fmt.Fprint(output, "\r\nServer Closed\r\nWaiting For Start\r\n"); err != nil {
+			return err
+		}
 		announced = true
 	}
 }

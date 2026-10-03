@@ -219,6 +219,7 @@ public class RemotelyClient {
         if (composition.serverSettingsCatalogService() != null) {
             composition.serverSettingsCatalogService().close();
         }
+        composition.serverIconProvider().close();
         if (networkManager != null) {
             networkManager.close();
         }

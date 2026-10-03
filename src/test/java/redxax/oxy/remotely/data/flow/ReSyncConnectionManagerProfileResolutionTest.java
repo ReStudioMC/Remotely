@@ -4,6 +4,9 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import redxax.oxy.remotely.util.DesktopTaskIdentities;
+import restudio.rebase.platform.jvm.JvmTaskScheduler;
+import restudio.rescreen.platform.TaskScheduler;
+import redxax.oxy.remotely.util.TaskSchedulers;
 import restudio.rescreen.platform.Async;
 import restudio.rebase.backend.BackendConfig;
 import restudio.rebase.backend.BackendFeature;
@@ -39,11 +42,16 @@ import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ReSyncConnectionManagerProfileResolutionTest {
+    private static TaskScheduler previousScheduler;
+    private static JvmTaskScheduler scheduler;
     private static Async.Snapshot asyncSnapshot;
     private static ExecutorService asyncPool;
 
     @BeforeAll
     static void setUpAll() {
+        previousScheduler = TaskSchedulers.current();
+        scheduler = new JvmTaskScheduler();
+        TaskSchedulers.configure(scheduler);
         DesktopTaskIdentities.install();
         DesktopReSyncLocalInstances.install();
         DesktopReSyncDirectSockets.install();
@@ -54,6 +62,8 @@ class ReSyncConnectionManagerProfileResolutionTest {
 
     @AfterAll
     static void tearDownAll() {
+        TaskSchedulers.configure(previousScheduler);
+        scheduler.close();
         if (asyncSnapshot != null) {
             Async.restore(asyncSnapshot);
         }
