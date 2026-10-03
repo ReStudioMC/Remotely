@@ -74,8 +74,10 @@ public class NetworkDesiredStatePlanner {
         add(mutations, proxy, "velocity.toml", ConfigurationFormat.TOML, "online-mode", "", String.valueOf(network.forwarding().proxyOnlineMode()), false, true, "Set Proxy Online Mode");
         add(mutations, proxy, "velocity.toml", ConfigurationFormat.TOML, "player-info-forwarding-mode", "", quote(forwardingValue(network.forwarding().mode())), false, true, "Set Forwarding Mode");
         remove(mutations, proxy, "velocity.toml", ConfigurationFormat.TOML, "forwarding-secret", true, true, "Remove Deprecated Forwarding Secret");
-        add(mutations, proxy, "velocity.toml", ConfigurationFormat.TOML, "forwarding-secret-file", "", quote("forwarding.secret"), false, true, "Set Forwarding Secret File");
-        add(mutations, proxy, "forwarding.secret", ConfigurationFormat.SECRET, "content", "", forwardingSecret, true, true, "Write Forwarding Secret");
+        if (network.forwarding().mode() != ForwardingMode.NONE) {
+            add(mutations, proxy, "velocity.toml", ConfigurationFormat.TOML, "forwarding-secret-file", "", quote("forwarding.secret"), false, true, "Set Forwarding Secret File");
+            add(mutations, proxy, "forwarding.secret", ConfigurationFormat.SECRET, "content", "", forwardingSecret, true, true, "Write Forwarding Secret");
+        }
         Map<String, String> routes = new LinkedHashMap<>();
         for (NetworkMember member : network.members()) {
             if (!member.isProxy()) {
@@ -85,8 +87,7 @@ public class NetworkDesiredStatePlanner {
                 routes.put(member.routeName(), quote(member.address() + ":" + member.port()));
             }
         }
-        List<String> fallbackRoutes = network.routingGroups().stream().filter(group -> group.id().equals("fallback")).flatMap(group -> group.nodeIds().stream()).map(nodeId -> routeForNode(network, nodeId)).filter(value -> !value.isBlank()).toList();
-        routes.put("try", tomlArray(fallbackRoutes));
+        routes.put("try", tomlArray(fallbackRoutes(network)));
         add(mutations, proxy, "velocity.toml", ConfigurationFormat.TOML, "servers.*", "", tomlSection(routes), false, true, "Set Proxy Routes");
         Map<String, String> forcedHosts = new LinkedHashMap<>();
         for (RoutingGroup group : network.routingGroups()) {
@@ -95,6 +96,7 @@ public class NetworkDesiredStatePlanner {
                 forcedHosts.put(forcedHost, tomlArray(hostsRoutes));
             }
         }
+        remove(mutations, proxy, "velocity.toml", ConfigurationFormat.TOML, "forced-hosts", false, true, "Normalize Forced Hosts");
         add(mutations, proxy, "velocity.toml", ConfigurationFormat.TOML, "forced-hosts.*", "", tomlSection(forcedHosts), false, true, "Set Forced Hosts");
         planRuntimeHub(network, proxy, secrets, enrollments, mutations, issues);
     }
@@ -152,7 +154,7 @@ public class NetworkDesiredStatePlanner {
             if (transferRealm != null) {
                 capabilities.add("state:" + transferRealm.id());
             }
-            if (network.featureEnabled(NetworkDefinition.FEATURE_SHARED_RESOURCES) || pathSyncEnabled(network, member)) {
+            if (network.featureEnabled(NetworkDefinition.FEATURE_SHARED_RESOURCES) || network.featureEnabled(NetworkDefinition.FEATURE_SHARED_CHAT) || pathSyncEnabled(network, member)) {
                 capabilities.add("resources");
             }
             add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, prefix + "capabilities", "", String.join(",", capabilities), false, true, "Set ReSync Node Capabilities");
@@ -167,11 +169,31 @@ public class NetworkDesiredStatePlanner {
             add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, prefix + "address", "", member.address(), false, true, "Set ReSync Route Address");
             add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, prefix + "port", "", String.valueOf(member.port()), false, true, "Set ReSync Route Port");
         }
-        String maintenanceRoute = network.routingGroups().stream().filter(group -> group.id().equals("fallback")).flatMap(group -> group.nodeIds().stream()).map(nodeId -> routeForNode(network, nodeId)).filter(route -> !route.isBlank()).findFirst().orElse(routes.isEmpty() ? "" : routes.getFirst().routeName());
+        String maintenanceRoute = fallbackRoutes(network).stream().findFirst().orElse("");
         add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, "maintenance-route", "", maintenanceRoute, false, true, "Set ReSync Maintenance Route");
+        planRoutingGroups(network.routingGroups(), proxy, mutations);
+    }
+
+    static void planRoutingGroups(List<RoutingGroup> groups, NetworkServerDescriptor proxy, List<NetworkConfigMutation> mutations) {
+        String path = "plugins/resyncvelocity/network.properties";
+        add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, "routing.groups", "", groups.stream().map(RoutingGroup::id).collect(Collectors.joining(",")), false, true, "Set Join Rules");
+        for (RoutingGroup group : groups) {
+            String prefix = "routing.group." + group.id() + ".";
+            add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, prefix + "name", "", group.name(), false, true, "Name Join Rule");
+            add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, prefix + "strategy", "", group.strategy().name(), false, true, "Set Join Strategy");
+            add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, prefix + "nodes", "", String.join(",", group.nodeIds()), false, true, "Set Join Servers");
+            add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, prefix + "fallback", "", group.fallbackGroupId(), false, true, "Set Join Fallback");
+            add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, prefix + "forced-hosts", "", group.forcedHosts().stream().sorted().collect(Collectors.joining(",")), false, true, "Set Join Addresses");
+            add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, prefix + "permission", "", group.permission(), false, true, "Set Join Permission");
+            add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, prefix + "weights", "", group.weights().keySet().stream().sorted().collect(Collectors.joining(",")), false, true, "Set Join Priorities");
+            for (String nodeId : group.weights().keySet()) {
+                add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, prefix + "weight." + nodeId, "", String.valueOf(group.weights().getOrDefault(nodeId, 1)), false, true, "Set Join Priority");
+            }
+        }
     }
 
     private void planBackend(NetworkDefinition network, NetworkServerDescriptor backend, NetworkMember member, NetworkMember proxyMember, String forwardingSecret, NetworkSecrets secrets, Map<String, NetworkEnrollment> enrollments, List<NetworkConfigMutation> mutations, List<NetworkValidationIssue> issues) {
+        boolean runtimeEnabled = network.runtime().enabled() && member.resyncEnabled();
         add(mutations, backend, "server.properties", ConfigurationFormat.PROPERTIES, "server-port", backend.property("server-port", "25565"), String.valueOf(member.port()), false, true, "Set Backend Port");
         add(mutations, backend, "server.properties", ConfigurationFormat.PROPERTIES, "online-mode", backend.property("online-mode", "true"), "false", false, true, "Delegate Authentication To Proxy");
         if (proxyMember != null && proxyMember.hostScope().equals(member.hostScope())) {
@@ -180,55 +202,56 @@ public class NetworkDesiredStatePlanner {
         if (network.forwarding().mode() == ForwardingMode.MODERN) {
             planModernForwarding(network, backend, forwardingSecret, mutations, issues);
         }
-        add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.id", "", network.networkId(), false, true, "Set ReSync Network");
-        add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.node-id", "", member.nodeId(), false, true, "Set ReSync Node");
-        add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.display-name", "", member.routeName(), false, true, "Set ReSync Node Name");
-        add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.enabled", "", String.valueOf(member.resyncEnabled()), false, true, "Set ReSync Network Runtime");
-        add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.chat.enabled", "", String.valueOf(member.resyncEnabled() && network.featureEnabled(NetworkDefinition.FEATURE_SHARED_CHAT)), false, true, "Set Shared Chat");
-        add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.chat.channel-mode", "", network.sharedDataPolicy().chatChannelMode().name(), false, true, "Set Shared Chat Channels");
-        add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.chat.channels", "", String.join(",", network.sharedDataPolicy().chatChannels()), false, true, "Set Shared Chat Channel List");
-        add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.chat.retention-millis", "", String.valueOf(network.sharedDataPolicy().chatRetentionMillis()), false, true, "Set Shared Chat Retention");
-        add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.resources.enabled", "", String.valueOf(member.resyncEnabled() && network.featureEnabled(NetworkDefinition.FEATURE_SHARED_RESOURCES)), false, true, "Set Shared Resources");
-        add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.resources.type-mode", "", network.sharedDataPolicy().resourceTypeMode().name(), false, true, "Set Shared Resource Types");
-        add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.resources.types", "", String.join(",", network.sharedDataPolicy().resourceTypes()), false, true, "Set Shared Resource Type List");
-        add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.resources.conflict-policy", "", network.sharedDataPolicy().resourceConflictPolicy().name(), false, true, "Set Shared Resource Conflicts");
-        remove(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.paths.enabled", false, true, "Remove Legacy Path Sync");
-        remove(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.paths.entries", false, true, "Remove Legacy Path Sync Paths");
-        remove(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.paths.conflict-policy", false, true, "Remove Legacy Path Sync Conflicts");
-        add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.path-sync.ids", "", network.sharedDataPolicy().pathSyncs().stream().map(NetworkPathSync::id).collect(Collectors.joining(",")), false, true, "Set Path Sync Entries");
+        add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.config-version", "", "1", false, true, "Set ReSync Settings Version");
+        add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.id", "", network.networkId(), false, true, "Set ReSync Network");
+        add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.node-id", "", member.nodeId(), false, true, "Set ReSync Node");
+        add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.display-name", "", member.routeName(), false, true, "Set ReSync Node Name");
+        add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.enabled", "", String.valueOf(runtimeEnabled), false, true, "Set ReSync Network Runtime");
+        add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.chat.enabled", "", String.valueOf(runtimeEnabled && network.featureEnabled(NetworkDefinition.FEATURE_SHARED_CHAT)), false, true, "Set Shared Chat");
+        add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.chat.channel-mode", "", network.sharedDataPolicy().chatChannelMode().name(), false, true, "Set Shared Chat Channels");
+        add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.chat.channels", "", String.join(",", network.sharedDataPolicy().chatChannels()), false, true, "Set Shared Chat Channel List");
+        add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.chat.retention-millis", "", String.valueOf(network.sharedDataPolicy().chatRetentionMillis()), false, true, "Set Shared Chat Retention");
+        add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.resources.enabled", "", String.valueOf(runtimeEnabled && network.featureEnabled(NetworkDefinition.FEATURE_SHARED_RESOURCES)), false, true, "Set Shared Resources");
+        add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.resources.type-mode", "", network.sharedDataPolicy().resourceTypeMode().name(), false, true, "Set Shared Resource Types");
+        add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.resources.types", "", String.join(",", network.sharedDataPolicy().resourceTypes()), false, true, "Set Shared Resource Type List");
+        add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.resources.conflict-policy", "", network.sharedDataPolicy().resourceConflictPolicy().name(), false, true, "Set Shared Resource Conflicts");
+        remove(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.paths.enabled", false, true, "Remove Legacy Path Sync");
+        remove(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.paths.entries", false, true, "Remove Legacy Path Sync Paths");
+        remove(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.paths.conflict-policy", false, true, "Remove Legacy Path Sync Conflicts");
+        add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.path-sync.ids", "", network.sharedDataPolicy().pathSyncs().stream().map(NetworkPathSync::id).collect(Collectors.joining(",")), false, true, "Set Path Sync Entries");
         for (NetworkPathSync sync : network.sharedDataPolicy().pathSyncs()) {
             String prefix = "network.path-sync." + sync.id() + ".";
-            boolean enabled = member.resyncEnabled() && network.featureEnabled(NetworkDefinition.FEATURE_PATH_SYNC) && sync.enabled() && sync.nodeIds().contains(member.nodeId());
-            add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, prefix + "enabled", "", String.valueOf(enabled), false, true, "Set " + sync.name());
-            add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, prefix + "name", "", sync.name(), false, true, "Name " + sync.name());
-            add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, prefix + "paths", "", String.join(",", sync.paths()), false, true, "Set " + sync.name() + " Files");
-            add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, prefix + "conflict-policy", "", sync.conflictPolicy().name(), false, true, "Set " + sync.name() + " Conflicts");
-            add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, prefix + "command-count", "", String.valueOf(sync.commands().size()), false, true, "Set " + sync.name() + " Commands");
+            boolean enabled = runtimeEnabled && network.featureEnabled(NetworkDefinition.FEATURE_PATH_SYNC) && sync.enabled() && sync.nodeIds().contains(member.nodeId());
+            add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, prefix + "enabled", "", String.valueOf(enabled), false, true, "Set " + sync.name());
+            add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, prefix + "name", "", sync.name(), false, true, "Name " + sync.name());
+            add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, prefix + "paths", "", String.join(",", sync.paths()), false, true, "Set " + sync.name() + " Files");
+            add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, prefix + "conflict-policy", "", sync.conflictPolicy().name(), false, true, "Set " + sync.name() + " Conflicts");
+            add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, prefix + "command-count", "", String.valueOf(sync.commands().size()), false, true, "Set " + sync.name() + " Commands");
             for (int index = 0; index < sync.commands().size(); index++) {
-                add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, prefix + "command." + index, "", sync.commands().get(index), false, true, "Set " + sync.name() + " Command");
+                add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, prefix + "command." + index, "", sync.commands().get(index), false, true, "Set " + sync.name() + " Command");
             }
         }
-        if (member.resyncEnabled() && network.runtime().enabled()) {
-            add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.hub-url", "", network.runtime().hubUrl(), false, true, "Set ReSync Hub");
+        if (runtimeEnabled) {
+            add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.hub-url", "", network.runtime().hubUrl(), false, true, "Set ReSync Hub");
             NetworkEnrollment enrollment = enrollment(network, member.nodeId(), secrets, enrollments, issues);
-            add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.enrollment-token", "", enrollment.token(), true, true, "Set ReSync Enrollment Token");
-            add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.credential-file", "", "network/node.credential", false, true, "Set ReSync Credential File");
-            add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.capacity", "", String.valueOf(member.capacity()), false, true, "Set ReSync Capacity");
-            add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.maximum-frame-bytes", "", "1048576", false, true, "Set ReSync Frame Limit");
-            add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.maximum-payload-bytes", "", String.valueOf(network.sharedDataPolicy().maximumPayloadBytes()), false, true, "Set ReSync Payload Limit");
-            add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.heartbeat-interval-ticks", "", "100", false, true, "Set ReSync Heartbeat Interval");
-            add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.reconnect-delay-ticks", "", "100", false, true, "Set ReSync Reconnect Delay");
+            add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.enrollment-token", "", enrollment.token(), true, true, "Set ReSync Enrollment Token");
+            add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.credential-file", "", "network/node.credential", false, true, "Set ReSync Credential File");
+            add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.capacity", "", String.valueOf(member.capacity()), false, true, "Set ReSync Capacity");
+            add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.maximum-frame-bytes", "", "1048576", false, true, "Set ReSync Frame Limit");
+            add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.maximum-payload-bytes", "", String.valueOf(network.sharedDataPolicy().maximumPayloadBytes()), false, true, "Set ReSync Payload Limit");
+            add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.heartbeat-interval-ticks", "", "100", false, true, "Set ReSync Heartbeat Interval");
+            add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.reconnect-delay-ticks", "", "100", false, true, "Set ReSync Reconnect Delay");
             planTransferRealm(network, backend, member, mutations, issues);
             if (network.runtime().security() == NetworkTransportSecurity.WSS) {
-                add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.tls.trust-store", "", "network/ca.p12", false, true, "Set ReSync Network Trust");
-                add(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.tls.trust-store-password-env", "", "RESYNC_NETWORK_TRUSTSTORE_PASSWORD", false, true, "Set ReSync Trust Password Source");
+                add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.tls.trust-store", "", "network/ca.p12", false, true, "Set ReSync Network Trust");
+                add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.tls.trust-store-password-env", "", "RESYNC_NETWORK_TRUSTSTORE_PASSWORD", false, true, "Set ReSync Trust Password Source");
             }
         }
     }
 
     private void planTransferRealm(NetworkDefinition network, NetworkServerDescriptor backend, NetworkMember member, List<NetworkConfigMutation> mutations, List<NetworkValidationIssue> issues) {
         SyncRealm realm = stateRealm(network, member);
-        String path = "plugins/ReSync/resync.properties";
+        String path = "plugins/.resync-network.properties";
         if (realm == null) {
             add(mutations, backend, path, ConfigurationFormat.PROPERTIES, "network.transfer.profile", "", "PRESENCE_ONLY", false, true, "Disable Player State Transfer");
             add(mutations, backend, path, ConfigurationFormat.PROPERTIES, "network.transfer.realm", "", "", false, true, "Clear Player State Realm");
@@ -294,7 +317,7 @@ public class NetworkDesiredStatePlanner {
         }
     }
 
-    private void add(List<NetworkConfigMutation> mutations, NetworkServerDescriptor server, String path, ConfigurationFormat format, String key, String currentValue, String desiredValue, boolean sensitive, boolean restartRequired, String description) {
+    private static void add(List<NetworkConfigMutation> mutations, NetworkServerDescriptor server, String path, ConfigurationFormat format, String key, String currentValue, String desiredValue, boolean sensitive, boolean restartRequired, String description) {
         mutations.add(new NetworkConfigMutation(server.serverId(), path, format, key, currentValue, desiredValue, sensitive, restartRequired, description));
     }
 
@@ -320,8 +343,15 @@ public class NetworkDesiredStatePlanner {
         return enrollment;
     }
 
-    private String routeForNode(NetworkDefinition network, String nodeId) {
+    private static String routeForNode(NetworkDefinition network, String nodeId) {
         return network.members().stream().filter(member -> member.nodeId().equals(nodeId)).map(NetworkMember::routeName).findFirst().orElse("");
+    }
+
+    static List<String> fallbackRoutes(NetworkDefinition network) {
+        List<String> routes = network.routingGroups().stream().filter(group -> group.id().equals("fallback")).flatMap(group -> group.nodeIds().stream()).map(nodeId -> routeForNode(network, nodeId)).filter(value -> !value.isBlank()).toList();
+        if (!routes.isEmpty()) return routes;
+        return network.members().stream().filter(member -> !member.isProxy() && member.routeName().equals("lobby")).map(NetworkMember::routeName).findFirst()
+                .map(List::of).orElseGet(() -> network.members().stream().filter(member -> !member.isProxy()).map(NetworkMember::routeName).findFirst().map(List::of).orElse(List.of()));
     }
 
     private String forwardingValue(ForwardingMode mode) {

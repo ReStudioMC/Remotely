@@ -10,6 +10,10 @@ public record NetworkForwardingPolicy(ForwardingMode mode, boolean proxyOnlineMo
         return new NetworkForwardingPolicy(ForwardingMode.MODERN, true, secretReference, false);
     }
 
+    public boolean needsRepair() {
+        return mode == ForwardingMode.NONE || mode == ForwardingMode.MODERN && secretReference.isBlank();
+    }
+
     private static String normalize(String value) {
         return value == null ? "" : value.trim();
     }

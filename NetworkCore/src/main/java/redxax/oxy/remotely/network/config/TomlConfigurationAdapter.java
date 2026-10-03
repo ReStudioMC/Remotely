@@ -118,8 +118,20 @@ public class TomlConfigurationAdapter implements NetworkConfigurationAdapter {
         KeyLocation location = locate(key);
         Bounds bounds = bounds(lines, location.section());
         if (location.key().equals("*")) {
-            replaceSection(lines, location.section(), bounds, tomlMap(value));
+            Map<Object, Object> values = tomlMap(value);
+            if (!bounds.exists() && values.isEmpty() && emptyInlineTable(lines, location.section()) >= 0) {
+                return join(lines, ending);
+            }
+            removeInlineTable(lines, location.section());
+            replaceSection(lines, location.section(), bounds(lines, location.section()), values);
             return join(lines, ending);
+        }
+        if (!bounds.exists() && !location.section().isBlank()) {
+            if (inlineTable(lines, location.section()) >= 0 && emptyInlineTable(lines, location.section()) < 0) {
+                throw new IllegalArgumentException("Cannot edit a key inside a nonempty inline TOML table: " + location.section());
+            }
+            removeInlineTable(lines, location.section());
+            bounds = bounds(lines, location.section());
         }
         String renderedKey = renderKey(location.key());
         for (int index = bounds.start(); index < bounds.end(); index++) {
@@ -158,9 +170,17 @@ public class TomlConfigurationAdapter implements NetworkConfigurationAdapter {
         KeyLocation location = locate(key);
         Bounds bounds = bounds(lines, location.section());
         if (location.key().equals("*")) {
+            if (!bounds.exists() && inlineTable(lines, location.section()) >= 0) {
+                removeInlineTable(lines, location.section());
+                ensureSection(lines, location.section(), false);
+                return join(lines, ending);
+            }
             removeSectionAssignments(lines, bounds);
             ensureSection(lines, location.section(), bounds.exists());
             return join(lines, ending);
+        }
+        if (!bounds.exists() && inlineTable(lines, location.section()) >= 0) {
+            throw new IllegalArgumentException("Cannot remove a key inside an inline TOML table: " + location.section());
         }
         for (int index = bounds.start(); index < bounds.end(); index++) {
             Assignment assignment = parseAssignment(lines.get(index));
@@ -325,6 +345,28 @@ public class TomlConfigurationAdapter implements NetworkConfigurationAdapter {
         if (!lines.isEmpty()) lines.add("");
         lines.add("[" + section + "]");
         lines.add("");
+    }
+
+    private int emptyInlineTable(List<String> lines, String section) {
+        int index = inlineTable(lines, section);
+        if (index < 0) return -1;
+        Assignment assignment = parseAssignment(lines.get(index));
+        return assignment.value().equals("{}") ? index : -1;
+    }
+
+    private int inlineTable(List<String> lines, String section) {
+        if (section.isBlank()) return -1;
+        int end = firstSection(lines);
+        for (int index = 0; index < end; index++) {
+            Assignment assignment = parseAssignment(lines.get(index));
+            if (assignment != null && assignment.key().equals(section) && assignment.value().startsWith("{") && assignment.value().endsWith("}")) return index;
+        }
+        return -1;
+    }
+
+    private void removeInlineTable(List<String> lines, String section) {
+        int index = inlineTable(lines, section);
+        if (index >= 0) lines.remove(index);
     }
 
     private int valueEnd(List<String> lines, int start, int boundEnd, String firstValue) {

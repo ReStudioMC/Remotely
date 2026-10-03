@@ -128,7 +128,9 @@ public class NetworkRepository implements NetworkStore {
             }
             migratePathSync(root, schemaVersion);
             NetworkDefinition network = GSON.fromJson(root, NetworkDefinition.class).migrated();
-            NetworkValidator.requireValid(network);
+            List<NetworkValidationIssue> errors = NetworkValidator.validate(network).stream().filter(NetworkValidationIssue::blocksPersistence)
+                    .filter(issue -> !issue.code().equals("forwarding.secret.missing") || !network.forwarding().needsRepair()).toList();
+            if (!errors.isEmpty()) throw new IllegalArgumentException(errors.getFirst().message());
             String expectedName = network.networkId() + ".json";
             if (!file.getFileName().toString().equals(expectedName)) {
                 throw new NetworkPersistenceException("Network file name must match its ID: " + file);

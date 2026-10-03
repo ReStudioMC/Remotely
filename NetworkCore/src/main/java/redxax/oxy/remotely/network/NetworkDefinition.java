@@ -7,6 +7,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 public record NetworkDefinition(int schemaVersion, String networkId, String name, long revision, String proxyInstanceId, NetworkDesiredState desiredState, NetworkForwardingPolicy forwarding, List<NetworkEntryPoint> entryPoints, List<NetworkMember> members, List<RoutingGroup> routingGroups, List<SyncRealm> syncRealms, NetworkRuntimePolicy runtime, Map<String, Boolean> features, NetworkSharedDataPolicy sharedDataPolicy, long createdAt, long updatedAt) {
     public static final int CURRENT_SCHEMA_VERSION = 5;
@@ -17,6 +18,16 @@ public record NetworkDefinition(int schemaVersion, String networkId, String name
     public static final String FEATURE_SHARED_CHAT = "sharedChat";
     public static final String FEATURE_SHARED_RESOURCES = "sharedResources";
     public static final String FEATURE_PATH_SYNC = "pathSync";
+
+    private static final Map<String, Boolean> DEFAULT_FEATURES = Map.of(
+            FEATURE_RUNTIME, true,
+            FEATURE_PRESENCE, true,
+            FEATURE_SHARED_STATE, false,
+            FEATURE_FLOW_EVENTS, true,
+            FEATURE_SHARED_CHAT, true,
+            FEATURE_SHARED_RESOURCES, true,
+            FEATURE_PATH_SYNC, false
+    );
 
     public NetworkDefinition {
         schemaVersion = schemaVersion <= 0 ? CURRENT_SCHEMA_VERSION : schemaVersion;
@@ -74,6 +85,28 @@ public record NetworkDefinition(int schemaVersion, String networkId, String name
         return new NetworkDefinition(schemaVersion, networkId, name, revision + 1, proxyInstanceId, updatedDesiredState, forwarding, entryPoints, updatedMembers, updatedRoutingGroups, updatedSyncRealms, runtime, features, sharedDataPolicy, createdAt, Objects.requireNonNull(clock, "clock").millis());
     }
 
+    public NetworkDefinition withoutMember(String instanceId) {
+        NetworkMember removed = members.stream().filter(member -> member.instanceId().equals(instanceId)).findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("Network Member Is Unavailable"));
+        if (removed.isProxy()) throw new IllegalArgumentException("Network Proxy Cannot Be Detached");
+        List<NetworkMember> remaining = members.stream().filter(member -> !member.instanceId().equals(instanceId)).toList();
+        List<RoutingGroup> groups = routingGroups.stream().map(group -> {
+            Map<String, Integer> weights = new LinkedHashMap<>(group.weights());
+            weights.remove(removed.nodeId());
+            return new RoutingGroup(group.id(), group.name(), group.strategy(), group.nodeIds().stream().filter(node -> !node.equals(removed.nodeId())).toList(),
+                    weights, group.fallbackGroupId(), group.forcedHosts(), group.permission());
+        }).toList();
+        List<SyncRealm> realms = syncRealms.stream().map(realm -> new SyncRealm(realm.id(), realm.name(),
+                realm.nodeIds().stream().filter(node -> !node.equals(removed.nodeId())).collect(Collectors.toSet()), realm.dataFamilies(),
+                realm.locationPolicy(), realm.persistentDataNamespaces(), realm.retainedSnapshots(), realm.retentionDays())).toList();
+        List<NetworkPathSync> paths = sharedDataPolicy.pathSyncs().stream().map(sync -> new NetworkPathSync(sync.id(), sync.name(), sync.enabled(),
+                sync.nodeIds().stream().filter(node -> !node.equals(removed.nodeId())).collect(Collectors.toSet()), sync.paths(), sync.conflictPolicy(), sync.commands())).toList();
+        NetworkSharedDataPolicy policy = new NetworkSharedDataPolicy(sharedDataPolicy.chatChannelMode(), sharedDataPolicy.chatChannels(), sharedDataPolicy.chatRetentionMillis(),
+                sharedDataPolicy.resourceTypeMode(), sharedDataPolicy.resourceTypes(), paths, sharedDataPolicy.resourceConflictPolicy(), sharedDataPolicy.maximumPayloadBytes());
+        return new NetworkDefinition(schemaVersion, networkId, name, revision + 1, proxyInstanceId, desiredState, forwarding, entryPoints, remaining, groups, realms,
+                runtime, features, policy, createdAt, NetworkClock.SYSTEM.millis());
+    }
+
     public NetworkDefinition renamed(String updatedName) {
         return renamed(updatedName, NetworkClock.SYSTEM);
     }
@@ -111,15 +144,7 @@ public record NetworkDefinition(int schemaVersion, String networkId, String name
     }
 
     private static Map<String, Boolean> defaultFeatures() {
-        return Map.of(
-            FEATURE_RUNTIME, true,
-            FEATURE_PRESENCE, true,
-            FEATURE_SHARED_STATE, false,
-            FEATURE_FLOW_EVENTS, true,
-            FEATURE_SHARED_CHAT, true,
-            FEATURE_SHARED_RESOURCES, true,
-            FEATURE_PATH_SYNC, false
-        );
+        return DEFAULT_FEATURES;
     }
 
     private static NetworkRuntimePolicy defaultRuntime(String proxyInstanceId, List<NetworkEntryPoint> entryPoints, List<NetworkMember> members) {

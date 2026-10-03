@@ -12,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class NetworkPreflightServiceTest {
     @Test
@@ -25,6 +26,25 @@ class NetworkPreflightServiceTest {
             assertEquals("Velocity Test", response.version());
             assertEquals(3, response.onlinePlayers());
             assertEquals(100, response.maximumPlayers());
+        }
+    }
+
+    @Test
+    void rejectsPayloadThatCrossesTheDeclaredPacketBoundary() throws Exception {
+        try (ServerSocket server = new ServerSocket(0)) {
+            CompletableFuture<Void> responder = CompletableFuture.runAsync(() -> {
+                try (Socket socket = server.accept()) {
+                    DataInputStream input = new DataInputStream(socket.getInputStream());
+                    input.readNBytes(readVarInt(input));
+                    input.readNBytes(readVarInt(input));
+                    socket.getOutputStream().write(new byte[]{2, 0, 2, '{', '}'});
+                } catch (IOException exception) {
+                    throw new IllegalStateException(exception);
+                }
+            });
+
+            assertThrows(IOException.class, () -> new NetworkPreflightService(null, null, null, null).minecraftStatus("127.0.0.1", server.getLocalPort()));
+            responder.join();
         }
     }
 

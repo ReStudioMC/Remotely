@@ -16,6 +16,7 @@ import redxax.oxy.remotely.network.RoutingGroup;
 import redxax.oxy.remotely.network.SyncRealm;
 import restudio.rescreen.platform.Async;
 import restudio.rescreen.ui.core.Screen;
+import restudio.rescreen.util.Identifier;
 
 import java.util.List;
 import java.util.Map;
@@ -39,14 +40,19 @@ public interface NetworkOverviewProvider {
     }
 
     record ServerView(String id, String name, boolean proxy, boolean managed, String hostScope, String address,
-                      int port, String state, String icon) {
+                      int port, String state, Identifier icon) {
+        public ServerView(String id, String name, boolean proxy, boolean managed, String hostScope, String address,
+                          int port, String state, String icon) {
+            this(id, name, proxy, managed, hostScope, address, port, state,
+                    icon == null || icon.isBlank() ? null : icon.contains(":") ? Identifier.of(icon) : Identifier.icon(icon));
+        }
+
         public ServerView {
             id = id == null ? "" : id;
             name = name == null || name.isBlank() ? id : name;
             hostScope = hostScope == null ? "" : hostScope;
             address = address == null ? "" : address;
             state = state == null ? "" : state;
-            icon = icon == null ? "" : icon;
         }
     }
 

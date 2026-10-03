@@ -2,14 +2,11 @@ package redxax.oxy.remotely.ui.server;
 
 import restudio.rebase.resource.ResourcePoolModels;
 import restudio.rebase.storage.StorageBreakdownController;
-import restudio.rescreen.platform.IDrawContext;
 import restudio.rescreen.platform.input.ReMouseButton;
 import restudio.rescreen.platform.input.ReMouseEvent;
 import restudio.rescreen.theme.Accent;
-import restudio.rescreen.theme.Theme;
 import restudio.rescreen.theme.ThemeColor;
-import restudio.rescreen.theme.ThemeManager;
-import restudio.rescreen.ui.widgets.MountableButtonWidget;
+import restudio.rescreen.ui.widgets.ResourceBarWidget;
 import restudio.rescreen.util.Identifier;
 
 import java.math.BigDecimal;
@@ -26,26 +23,14 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
-import static restudio.rescreen.config.Config.animationsEnabled;
-import static restudio.rescreen.config.Config.deltaTime;
-import static restudio.rescreen.config.Config.globalExpandSpeed;
-
-final class ResourceAllocationBarWidget extends MountableButtonWidget implements StorageBreakdownController.StorageBar {
-    private static final int LABEL_SIZE = 18;
-    private static final int ICON_SIZE = 16;
+final class ResourceAllocationBarWidget extends ResourceBarWidget implements StorageBreakdownController.StorageBar {
     private static final Identifier RAM_ICON = Identifier.image("textures/icons/ram.png");
     private static final Identifier CPU_ICON = Identifier.image("textures/icons/cpu.png");
     private static final Identifier DISK_ICON = Identifier.image("textures/icons/disk.png");
-    private static final String[] ACCENTS = {
-            "calm", "copper", "diamond", "silver", "midnight", "love", "oxidize", "obsidian"
-    };
 
     record HoveredServer(String serverId, Accent accent) {}
 
     record StoragePart(String name, long bytes) {}
-
-    private record Part(String name, BigInteger amount, int background, int border, int bottom, int outer,
-                        String serverId, Accent accent, String status, boolean disabled, boolean restartRequired) {}
 
     private final PoolAllocationEditor editor;
     private final PoolCreationPreview creation;
@@ -57,19 +42,10 @@ final class ResourceAllocationBarWidget extends MountableButtonWidget implements
     private ResourcePoolController.PoolView accentView;
     private Map<String, Integer> accentIndexes = Map.of();
     private final Function<String, String> names;
-    private final String unit;
-    private final String title;
-    private final Identifier icon;
-    private List<Part> parts = List.of();
-    private float[] currentEnds = new float[0];
-    private float[] targetEnds = new float[0];
-    private int[] drawnEnds = new int[0];
-    private BigInteger scale = BigInteger.ONE;
-    private Theme theme;
-    private String hoveredPart = "";
-    private int hoverX;
     private Runnable onChange = () -> {};
     private Consumer<HoveredServer> onHover = ignored -> {};
+    private HoveredSegment lastHover;
+    private HoveredServer lastHoveredServer;
     private boolean dragging;
     private String draggedServerId;
     private BigInteger dragBase = BigInteger.ZERO;
@@ -78,7 +54,7 @@ final class ResourceAllocationBarWidget extends MountableButtonWidget implements
 
     ResourceAllocationBarWidget(PoolAllocationEditor editor, PoolAllocationEditor.Resource resource,
                                 List<ResourcePoolModels.Allocation> allocations, Function<String, String> names) {
-        super(title(resource), null, null, new ArrayList<>(), null);
+        super(title(resource), icon(resource), unit(resource));
         this.editor = editor;
         this.creation = null;
         this.resource = resource;
@@ -87,10 +63,7 @@ final class ResourceAllocationBarWidget extends MountableButtonWidget implements
         this.allocations = ordered(allocations);
         updateEditableServers();
         this.names = names;
-        title = title(resource);
-        icon = icon(resource);
-        unit = unit(resource);
-        setHint(title + " Allocation");
+        initializeHover();
         refresh();
     }
 
@@ -101,7 +74,7 @@ final class ResourceAllocationBarWidget extends MountableButtonWidget implements
 
     ResourceAllocationBarWidget(PoolCreationPreview creation, PoolAllocationEditor editor,
                                 PoolAllocationEditor.Resource resource, Function<String, String> names) {
-        super(title(resource), null, null, new ArrayList<>(), null);
+        super(title(resource), icon(resource), unit(resource));
         this.editor = editor;
         this.creation = creation;
         this.resource = resource;
@@ -110,15 +83,12 @@ final class ResourceAllocationBarWidget extends MountableButtonWidget implements
         this.allocations = ordered(creation.view().allocations());
         updateEditableServers();
         this.names = names;
-        title = title(resource);
-        icon = icon(resource);
-        unit = unit(resource);
-        setHint(title + " Allocation");
+        initializeHover();
         refresh();
     }
 
     ResourceAllocationBarWidget(String title, List<StoragePart> parts, BigInteger capacityBytes) {
-        super(title, null, null, new ArrayList<>(), null);
+        super(title, DISK_ICON, " bytes");
         editor = null;
         creation = null;
         resource = PoolAllocationEditor.Resource.DISK;
@@ -126,9 +96,8 @@ final class ResourceAllocationBarWidget extends MountableButtonWidget implements
         storageCapacity = capacityBytes.max(BigInteger.ZERO);
         allocations = List.of();
         names = ignored -> "";
-        this.title = title;
-        icon = DISK_ICON;
-        unit = " bytes";
+        setAmountFormatter(ResourceAllocationBarWidget::storageSize);
+        initializeHover();
         setHint(title + " Storage");
         refresh();
     }
@@ -183,14 +152,11 @@ final class ResourceAllocationBarWidget extends MountableButtonWidget implements
     }
 
     void refresh() {
-        theme = ThemeManager.getCurrentTheme();
         if (storageParts != null) {
             refreshStorage();
             return;
         }
-        List<Part> next = new ArrayList<>(allocations.size() + 3);
-        Map<String, Accent> accents = ThemeManager.getRegisteredAccents();
-        Theme defaults = ThemeManager.getTheme("default");
+        List<Segment> next = new ArrayList<>(allocations.size() + 3);
         ResourcePoolController.PoolView view = creation == null ? editor.view() : creation.view();
         if (accentView != view) {
             Map<String, Integer> nextIndexes = new HashMap<>();
@@ -224,7 +190,7 @@ final class ResourceAllocationBarWidget extends MountableButtonWidget implements
                 case DISABLE_PENDING -> "Disabling";
             };
             next.add(serverPart(allocation.serverId(), names.apply(allocation.serverId()), amount,
-                    accentIndexes.getOrDefault(allocation.serverId(), i), accents, defaults, status,
+                    accentIndexes.getOrDefault(allocation.serverId(), i), status,
                     allocation.state() == ResourcePoolModels.AllocationState.DISABLED, restartRequired));
             used = used.add(amount);
         }
@@ -242,7 +208,7 @@ final class ResourceAllocationBarWidget extends MountableButtonWidget implements
             if (amount.signum() == 0) continue;
             Integer existingIndex = accentIndexes.get(draft.serverId());
             next.add(serverPart(draft.serverId(), draft.metadata().name(), amount,
-                    existingIndex == null ? draftIndex++ : existingIndex, accents, defaults,
+                    existingIndex == null ? draftIndex++ : existingIndex,
                     "Server Draft", false, false));
             shownDrafts = shownDrafts.add(amount);
         }
@@ -250,85 +216,52 @@ final class ResourceAllocationBarWidget extends MountableButtonWidget implements
         BigInteger other = creation == null ? editor.other(resource) : creation.other(resource);
         other = other.subtract(shownDrafts).max(BigInteger.ZERO);
         used = used.add(other);
-        next.add(new Part("Other Servers", other,
-                ThemeManager.getColor(ThemeColor.elementHoverBackground),
-                ThemeManager.getColor(ThemeColor.innerBorder),
-                ThemeManager.getColor(ThemeColor.inClickableBackground),
-                ThemeManager.getColor(ThemeColor.globalOuterBorder), null, null, "", false, false));
+        next.add(new Segment("other", "Other Servers", other,
+                Style.theme(ThemeColor.elementHoverBackground, ThemeColor.innerBorder, ThemeColor.inClickableBackground, ThemeColor.globalOuterBorder),
+                "", false, false, ""));
         BigInteger pendingRelease = editor == null ? BigInteger.ZERO : editor.pendingRelease(resource);
         if (pendingRelease.signum() > 0) {
-            next.add(new Part("Pending Release", pendingRelease,
-                    ThemeManager.getColor(ThemeColor.elementHoverBackground),
-                    ThemeManager.getColor(ThemeColor.elementHoverBorder),
-                    ThemeManager.getColor(ThemeColor.elementBackground),
-                    ThemeManager.getColor(ThemeColor.globalOuterBorder), null, null, "Not Free Yet", false, restartRelease));
+            next.add(new Segment("pending-release", "Pending Release", pendingRelease,
+                    Style.theme(ThemeColor.elementHoverBackground, ThemeColor.elementHoverBorder, ThemeColor.elementBackground, ThemeColor.globalOuterBorder),
+                    "Not Free Yet", false, restartRelease, ""));
             used = used.add(pendingRelease);
         }
         if (creation != null) {
-            Accent accent = accents.get("nice");
-            if (accent == null && defaults != null) accent = defaults.getAccent("nice");
-            if (accent == null) accent = ThemeManager.getDefaultAccent();
             BigInteger requested = creation.reserved(resource);
-            next.add(new Part("New Server", requested, accent.getAccentDarkColor(), accent.getAccentColor(),
-                    accent.getBottomColor(), accent.getOuterBorderColor(), null, null, "Preview", false, false));
+            next.add(new Segment("new-server", "New Server", requested, Style.namedAccent("nice"), "Preview", false, false, "Drag To Allocate"));
             used = used.add(requested);
         }
         BigInteger free = creation == null ? editor.previewAvailable(resource) : creation.free(resource);
         BigInteger scale = (creation == null ? editor.total(resource) : creation.total(resource)).max(used.add(free)).max(BigInteger.ONE);
-        this.scale = scale;
         BigInteger unavailable = scale.subtract(used).subtract(free).max(BigInteger.ZERO);
-        next.add(new Part("Free", free,
-                ThemeManager.getColor(ThemeColor.inClickableBackground),
-                ThemeManager.getColor(ThemeColor.inClickableBorder),
-                ThemeManager.getColor(ThemeColor.inClickableBackground),
-                ThemeManager.getColor(ThemeColor.globalOuterBorder), null, null, "Available Now", false, false));
-        next.add(new Part("Unavailable", unavailable,
-                ThemeManager.getColor(ThemeColor.innerBackground),
-                ThemeManager.getColor(ThemeColor.innerBorder),
-                ThemeManager.getColor(ThemeColor.innerBackground),
-                ThemeManager.getColor(ThemeColor.globalOuterBorder), null, null, "Not Available", false, false));
-        float[] nextTargets = new float[next.size()];
-        BigInteger running = BigInteger.ZERO;
-        for (int i = 0; i < next.size(); i++) {
-            running = running.add(next.get(i).amount());
-            nextTargets[i] = new BigDecimal(running).divide(new BigDecimal(scale), 8, RoundingMode.HALF_UP).floatValue();
-        }
-        if (currentEnds.length != nextTargets.length) currentEnds = nextTargets.clone();
-        targetEnds = nextTargets;
-        drawnEnds = new int[nextTargets.length];
-        parts = List.copyOf(next);
+        next.add(new Segment("free", "Free", free,
+                Style.theme(ThemeColor.inClickableBackground, ThemeColor.inClickableBorder, ThemeColor.inClickableBackground, ThemeColor.globalOuterBorder),
+                "Available Now", false, false, creation == null ? "" : "Drag To Allocate"));
+        next.add(new Segment("unavailable", "Unavailable", unavailable,
+                Style.theme(ThemeColor.innerBackground, ThemeColor.innerBorder, ThemeColor.innerBackground, ThemeColor.globalOuterBorder),
+                "Not Available", false, false, ""));
+        setSegments(next, scale);
     }
 
     private void refreshStorage() {
-        List<Part> next = new ArrayList<>(storageParts.size() + 1);
-        Map<String, Accent> accents = ThemeManager.getRegisteredAccents();
-        Theme defaults = ThemeManager.getTheme("default");
+        List<Segment> next = new ArrayList<>(storageParts.size() + 1);
+        Map<String, Integer> occurrences = new HashMap<>();
         BigInteger used = BigInteger.ZERO;
         for (int index = 0; index < storageParts.size(); index++) {
             StoragePart item = storageParts.get(index);
             if (item.bytes() < 0) continue;
-            Part colored = serverPart(null, item.name(), BigInteger.valueOf(item.bytes()), index, accents, defaults, "", false, false);
+            int occurrence = occurrences.merge(item.name(), 1, Integer::sum);
+            String key = occurrence == 1 ? "storage:" + item.name() : "storage-repeat:" + item.name().length() + ":" + item.name() + ":" + occurrence;
+            Segment colored = new Segment(key, item.name(), BigInteger.valueOf(item.bytes()), Style.accent(index), "", false, false, "");
             next.add(colored);
             used = used.add(colored.amount());
         }
         if (storageCapacity.compareTo(used) > 0) {
-            next.add(new Part("Unused Allocation", storageCapacity.subtract(used),
-                    ThemeManager.getColor(ThemeColor.inClickableBackground),
-                    ThemeManager.getColor(ThemeColor.inClickableBorder),
-                    ThemeManager.getColor(ThemeColor.inClickableBackground),
-                    ThemeManager.getColor(ThemeColor.globalOuterBorder), null, null, "", false, false));
+            next.add(new Segment("unused", "Unused Allocation", storageCapacity.subtract(used),
+                    Style.theme(ThemeColor.inClickableBackground, ThemeColor.inClickableBorder, ThemeColor.inClickableBackground, ThemeColor.globalOuterBorder),
+                    "", false, false, ""));
         }
-        scale = storageCapacity.max(used).max(BigInteger.ONE);
-        float[] nextTargets = new float[next.size()];
-        BigInteger running = BigInteger.ZERO;
-        for (int index = 0; index < next.size(); index++) {
-            running = running.add(next.get(index).amount());
-            nextTargets[index] = new BigDecimal(running).divide(new BigDecimal(scale), 8, RoundingMode.HALF_UP).floatValue();
-        }
-        if (currentEnds.length != nextTargets.length) currentEnds = nextTargets.clone();
-        targetEnds = nextTargets;
-        drawnEnds = new int[nextTargets.length];
-        parts = List.copyOf(next);
+        setSegments(next, storageCapacity.max(used).max(BigInteger.ONE));
     }
 
     void setAllocations(List<ResourcePoolModels.Allocation> next) {
@@ -344,18 +277,25 @@ final class ResourceAllocationBarWidget extends MountableButtonWidget implements
                 .map(ResourcePoolModels.Allocation::serverId).collect(Collectors.toUnmodifiableSet());
     }
 
-    private static Part serverPart(String serverId, String name, BigInteger amount, int index,
-                                   Map<String, Accent> accents, Theme defaults, String status,
-                                   boolean disabled, boolean restartRequired) {
-        String accentName = ACCENTS[index % ACCENTS.length];
-        Accent accent = accents.get(accentName);
-        if (accent == null && defaults != null) accent = defaults.getAccent(accentName);
-        if (accent == null) accent = ThemeManager.getDefaultAccent();
-        boolean brighter = (index / ACCENTS.length) % 2 == 1;
-        return new Part(name, amount, brighter ? accent.getAccentDarkHoverColor() : accent.getAccentDarkColor(),
-                brighter ? accent.getAccentHoverColor() : accent.getAccentColor(),
-                brighter ? accent.getBottomHoverColor() : accent.getBottomColor(), accent.getOuterBorderColor(),
-                serverId, accent, status, disabled, restartRequired);
+    private Segment serverPart(String serverId, String name, BigInteger amount, int index, String status, boolean disabled, boolean restartRequired) {
+        String key = serverId == null ? "storage:" + name : "server:" + serverId;
+        String hint = serverId != null && editor != null && editableServers.contains(serverId) ? "Drag Divider To Preview" : "";
+        return new Segment(key, name, amount, Style.accent(index), status, disabled, restartRequired, hint);
+    }
+
+    private static String serverId(Segment segment) {
+        return segment.key().startsWith("server:") ? segment.key().substring("server:".length()) : null;
+    }
+
+    private void initializeHover() {
+        setOnHover(hover -> {
+            if (lastHover != hover) {
+                lastHover = hover;
+                String serverId = hover == null ? null : serverId(hover.segment());
+                lastHoveredServer = serverId == null ? null : new HoveredServer(serverId, hover.accent());
+            }
+            onHover.accept(lastHoveredServer);
+        });
     }
 
     void onChange(Runnable action) {
@@ -376,6 +316,7 @@ final class ResourceAllocationBarWidget extends MountableButtonWidget implements
             return super.mouseClicked(event);
         }
         int left = chartLeft();
+        List<Segment> parts = segments();
         int newIndex = -1;
         int freeIndex = -1;
         for (int i = 0; i < parts.size(); i++) {
@@ -386,11 +327,12 @@ final class ResourceAllocationBarWidget extends MountableButtonWidget implements
         double first = (newIndex == 0 ? left : boundaryAt(newIndex - 1)) - 6;
         double last = boundaryAt(freeIndex) + 2;
         if (event.x() < first || event.x() > last) return super.mouseClicked(event);
-        dragBase = parts.subList(0, newIndex).stream().map(Part::amount).reduce(BigInteger.ZERO, BigInteger::add);
+        dragBase = parts.subList(0, newIndex).stream().map(Segment::amount).reduce(BigInteger.ZERO, BigInteger::add);
         dragStartValue = creation.value(resource);
         dragStartX = event.x();
         draggedServerId = null;
         dragging = true;
+        setImmediate(true);
         if (!event.modifiers().shift()) moveBoundary(event.x(), false);
         return event.finish(true);
     }
@@ -399,9 +341,10 @@ final class ResourceAllocationBarWidget extends MountableButtonWidget implements
         if (editor == null || editor.locked()) return false;
         int bestIndex = -1;
         double nearest = 7;
+        List<Segment> parts = segments();
         for (int i = 0; i < parts.size(); i++) {
-            Part part = parts.get(i);
-            if (part.serverId() == null || part.amount().signum() <= 0) continue;
+            Segment part = parts.get(i);
+            if (serverId(part) == null || part.amount().signum() <= 0) continue;
             double distance = Math.abs(mouseX - boundaryAt(i));
             if (distance < nearest) {
                 nearest = distance;
@@ -409,7 +352,7 @@ final class ResourceAllocationBarWidget extends MountableButtonWidget implements
             }
         }
         if (bestIndex < 0) return false;
-        String serverId = parts.get(bestIndex).serverId();
+        String serverId = serverId(parts.get(bestIndex));
         ResourcePoolController.PoolView view = creation == null ? editor.view() : creation.view();
         ResourcePoolModels.Allocation allocation = view.allocations().stream()
                 .filter(value -> value.serverId().equals(serverId)).findFirst().orElse(null);
@@ -418,10 +361,11 @@ final class ResourceAllocationBarWidget extends MountableButtonWidget implements
         if (editor.busy(serverId) || editor.submitted(serverId)) return false;
         if (editor.selected() == null || !editor.selected().serverId().equals(serverId)) editor.select(serverId);
         draggedServerId = serverId;
-        dragBase = parts.subList(0, bestIndex).stream().map(Part::amount).reduce(BigInteger.ZERO, BigInteger::add);
+        dragBase = parts.subList(0, bestIndex).stream().map(Segment::amount).reduce(BigInteger.ZERO, BigInteger::add);
         dragStartValue = editor.value(resource);
         dragStartX = mouseX;
         dragging = true;
+        setImmediate(true);
         onChange.run();
         return true;
     }
@@ -437,6 +381,7 @@ final class ResourceAllocationBarWidget extends MountableButtonWidget implements
     public boolean mouseReleased(ReMouseEvent event) {
         if (!dragging) return super.mouseReleased(event);
         dragging = false;
+        setImmediate(false);
         draggedServerId = null;
         return event.finish(true);
     }
@@ -444,6 +389,7 @@ final class ResourceAllocationBarWidget extends MountableButtonWidget implements
     @Override
     public void onRelease(double mouseX, double mouseY) {
         dragging = false;
+        setImmediate(false);
         draggedServerId = null;
         super.onRelease(mouseX, mouseY);
     }
@@ -452,7 +398,7 @@ final class ResourceAllocationBarWidget extends MountableButtonWidget implements
         int left = chartLeft();
         int span = Math.max(1, getX() + getWidth() - 1 - left);
         BigInteger amount = fine ? dragStartValue.add(BigInteger.valueOf(Math.round(mouseX - dragStartX)))
-                : new BigDecimal(scale).multiply(BigDecimal.valueOf(Math.clamp(mouseX - left, 0, span)))
+                : new BigDecimal(capacity()).multiply(BigDecimal.valueOf(Math.clamp(mouseX - left, 0, span)))
                 .divide(BigDecimal.valueOf(span), 0, RoundingMode.HALF_UP).toBigInteger().subtract(dragBase);
         if (draggedServerId != null) {
             if (editor.selected() == null || !draggedServerId.equals(editor.selected().serverId())) return;
@@ -463,118 +409,6 @@ final class ResourceAllocationBarWidget extends MountableButtonWidget implements
             BigInteger bounded = amount.max(PoolCreationPreview.minimum(resource)).min(creation.available(resource));
             if (creation.set(resource, bounded) && !previous.equals(creation.value(resource))) onChange.run();
         }
-    }
-
-    private int chartLeft() {
-        return getX() + LABEL_SIZE;
-    }
-
-    private int boundaryAt(int index) {
-        if (drawnEnds[index] != 0) return drawnEnds[index];
-        int left = chartLeft();
-        return left + Math.round(targetEnds[index] * Math.max(1, getX() + getWidth() - 1 - left));
-    }
-
-    @Override
-    protected void drawSurface(IDrawContext ctx) {
-        if (theme != ThemeManager.getCurrentTheme()) refresh();
-        super.drawSurface(ctx);
-        int x = getX();
-        int y = getY();
-        int width = getWidth();
-        int height = getHeight();
-        if (width <= 2 || height <= 2) return;
-        int left = chartLeft();
-        int right = x + width - 1;
-        int top = y + 1;
-        int bottom = y + height - 1;
-        float factor = dragging || !animationsEnabled ? 1f : Math.min(1f, globalExpandSpeed * deltaTime);
-        int start = left;
-        Part previous = null;
-        for (int i = 0; i < parts.size(); i++) {
-            currentEnds[i] += (targetEnds[i] - currentEnds[i]) * factor;
-            if (Math.abs(currentEnds[i] - targetEnds[i]) < 0.0005f) currentEnds[i] = targetEnds[i];
-            int end = i == parts.size() - 1 ? right : Math.clamp(left + Math.round(currentEnds[i] * (right - left)), start, right);
-            drawnEnds[i] = end;
-            if (end > start) {
-                Part part = parts.get(i);
-                int outerStart = start == left ? left - 1 : start;
-                int outerEnd = end == right ? x + width + 1 : end;
-                ctx.fill(outerStart, y - 1, outerEnd, y, part.outer());
-                ctx.fill(start, y, end, top, part.border());
-                ctx.fill(start, top, end, bottom - 1, part.background());
-                if (part.disabled()) {
-                    for (int mark = start + 3; mark < end - 2; mark += 8) {
-                        ctx.fill(mark, top + 2, Math.min(mark + 2, end), bottom - 2, part.border());
-                    }
-                }
-                if (part.restartRequired() && end - start >= 13) {
-                    ctx.drawText("*", start + 3, y + 3, ThemeManager.getColor(ThemeColor.text), true);
-                }
-                ctx.fill(start, bottom - 1, end, bottom, part.bottom());
-                ctx.fill(start, bottom, end, y + height, part.border());
-                ctx.fill(start, y + height, end, y + height + 2, part.bottom());
-                ctx.fill(outerStart, y + height + 2, outerEnd, y + height + 3, part.outer());
-                if (start == left) {
-                    ctx.fill(left - 1, y, left, y + height, part.border());
-                }
-                if (end == right) {
-                    ctx.fill(right, y, x + width, y + height, part.border());
-                    ctx.fill(x + width, y, x + width + 1, y + height + 2, part.outer());
-                }
-                if (previous != null) {
-                    ctx.fill(start - 1, y, start, y + height, previous.border());
-                    ctx.fill(start, y, start + 1, y + height, part.border());
-                }
-                start = end;
-                previous = part;
-            }
-        }
-    }
-
-    @Override
-    protected void drawContent(IDrawContext ctx, int mouseX, int mouseY) {
-        int x = getX();
-        int y = getY();
-        int height = getHeight();
-        ctx.drawPixelArt(icon, x + 1, y + (height - ICON_SIZE) / 2, ICON_SIZE, ICON_SIZE);
-        String hover = title + " Allocation";
-        HoveredServer hoveredServer = null;
-        hoverX = mouseX;
-        int start = chartLeft();
-        for (int i = 0; i < parts.size(); i++) {
-            int end = drawnEnds[i];
-            if (mouseX >= start && mouseX < end && mouseY >= y && mouseY < y + height) {
-                Part part = parts.get(i);
-                hover = part.name() + "  " + (storageParts == null ? part.amount() + unit : storageSize(part.amount()));
-                if (!part.status().isEmpty()) hover += "  •  " + part.status();
-                if (part.restartRequired()) hover += "  •  * Stop Or Restart To Free The Reduction";
-                if (part.serverId() != null) hoveredServer = new HoveredServer(part.serverId(), part.accent());
-                if (part.serverId() != null && editor != null && editableServers.contains(part.serverId())) {
-                    hover += "  •  Drag Divider To Preview";
-                }
-                if (creation != null && ("New Server".equals(part.name()) || "Free".equals(part.name()))) {
-                    hover += "  •  Drag To Allocate";
-                }
-                break;
-            }
-            start = end;
-        }
-        if (!hover.equals(hoveredPart)) {
-            hoveredPart = hover;
-            setHint(hover);
-        }
-        onHover.accept(hoveredServer);
-    }
-
-    @Override
-    protected float hintAnchorX() {
-        return Math.clamp(hoverX, getX() + 4, getX() + getWidth() - 4);
-    }
-
-    @Override
-    protected float hintAnchorWidth() {
-        return 0;
     }
 
     static String storageSize(BigInteger bytes) {

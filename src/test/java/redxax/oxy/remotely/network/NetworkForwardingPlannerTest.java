@@ -1,6 +1,7 @@
 package redxax.oxy.remotely.network;
 
 import org.junit.jupiter.api.Test;
+import redxax.oxy.remotely.network.config.NetworkConfigurationAdapters;
 import redxax.oxy.remotely.network.config.TomlConfigurationAdapter;
 import redxax.oxy.remotely.settings.server.BrowserSafeYaml;
 import restudio.rebase.instance.Instance;
@@ -11,10 +12,31 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class NetworkForwardingPlannerTest {
+    @Test
+    void sharedChatRetainsItsTransportPermissionWhenSharedResourcesAreDisabled() {
+        Instance proxy = instance("Proxy", ModLoader.VELOCITY);
+        Instance backend = instance("Lobby", ModLoader.PAPER);
+        NetworkDefinition base = network(proxy, backend);
+        Map<String, Boolean> features = new LinkedHashMap<>(base.features());
+        features.put(NetworkDefinition.FEATURE_SHARED_RESOURCES, false);
+        features.put(NetworkDefinition.FEATURE_SHARED_CHAT, true);
+        NetworkDefinition network = new NetworkDefinition(base.schemaVersion(), base.networkId(), base.name(), base.revision(),
+                base.proxyInstanceId(), base.desiredState(), base.forwarding(), base.entryPoints(), base.members(), base.routingGroups(),
+                base.syncRealms(), base.runtime(), features, base.sharedDataPolicy(), base.createdAt(), base.updatedAt());
+
+        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(DesktopNetworkPlanInput.from(discovery(network, proxy, backend)), secrets());
+
+        assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.key().equals("node." + network.members().get(1).nodeId() + ".capabilities")
+                && Set.of(mutation.desiredValue().split(",")).contains("resources")));
+        assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.key().equals("network.resources.enabled") && mutation.desiredValue().equals("false")));
+        assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.key().equals("network.chat.enabled") && mutation.desiredValue().equals("true")));
+    }
+
     @Test
     void browserParserAppliesForcedHostSection() {
         TomlConfigurationAdapter adapter = new TomlConfigurationAdapter(BrowserSafeYaml::parse);
@@ -227,6 +249,77 @@ class NetworkForwardingPlannerTest {
     }
 
     @Test
+    void reappliesVelocitySettingsWithoutDuplicateForcedHostsOrEmptyFallback() {
+        Instance proxy = instance("Proxy", ModLoader.VELOCITY);
+        Instance backend = instance("Lobby", ModLoader.PAPER);
+        NetworkMember proxyMember = NetworkMember.proxy(proxy.getInstanceId(), 40000);
+        NetworkMember lobby = NetworkMember.backend(backend.getInstanceId(), "lobby", NetworkMemberRole.LOBBY, 40001);
+        NetworkDefinition network = NetworkDefinition.create("Network", proxy.getInstanceId(), NetworkForwardingPolicy.secureDefault("secret"), List.of(NetworkEntryPoint.primary(40000)), List.of(proxyMember, lobby));
+        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(DesktopNetworkPlanInput.from(discovery(network, proxy, backend)), secrets());
+        NetworkConfigDocumentKey key = new NetworkConfigDocumentKey(proxy.getInstanceId(), "velocity.toml");
+        String source = "config-version = \"2.8\"\nforced-hosts = {}\n\n[servers]\nlobby = \"127.0.0.1:40001\"\ntry = []\n\n[advanced]\ncompression-threshold = 256\n";
+        NetworkMutationEngine engine = new NetworkMutationEngine(new NetworkConfigurationAdapters(BrowserSafeYaml::parse));
+        NetworkReconciliationPlan resolved = engine.resolveCurrentValues(plan, Map.of(key, source));
+        List<NetworkConfigMutation> changes = resolved.changes().stream().filter(mutation -> mutation.instanceId().equals(proxy.getInstanceId()) && mutation.path().equals("velocity.toml")).toList();
+
+        String updated = engine.apply(source, changes);
+
+        assertTrue(updated.contains("config-version = \"2.8\""));
+        assertTrue(updated.contains("player-info-forwarding-mode = \"modern\""));
+        assertTrue(updated.contains("try = [\"lobby\"]"));
+        assertTrue(updated.contains("compression-threshold = 256"));
+        assertTrue(updated.contains("[forced-hosts]"));
+        assertFalse(updated.contains("forced-hosts = {}"));
+        assertEquals(updated, engine.apply(updated, engine.resolveCurrentValues(plan, Map.of(key, updated)).changes().stream().filter(mutation -> mutation.instanceId().equals(proxy.getInstanceId()) && mutation.path().equals("velocity.toml")).toList()));
+
+        String damaged = source + "\n[forced-hosts]\n";
+        List<NetworkConfigMutation> repair = engine.resolveCurrentValues(plan, Map.of(key, damaged)).changes().stream().filter(mutation -> mutation.instanceId().equals(proxy.getInstanceId()) && mutation.path().equals("velocity.toml")).toList();
+        String repaired = engine.apply(damaged, repair);
+        assertTrue(repaired.contains("[forced-hosts]"));
+        assertFalse(repaired.contains("forced-hosts = {}"));
+    }
+
+    @Test
+    void disabledForwardingLeavesExistingSecretFileUntouched() {
+        Instance proxy = instance("Proxy", ModLoader.VELOCITY);
+        Instance backend = instance("Lobby", ModLoader.PAPER);
+        NetworkDefinition base = network(proxy, backend);
+        NetworkDefinition disabled = base.withForwarding(new NetworkForwardingPolicy(ForwardingMode.NONE, true, "", false));
+
+        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(DesktopNetworkPlanInput.from(discovery(disabled, proxy, backend)), secrets());
+
+        assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.key().equals("player-info-forwarding-mode") && mutation.desiredValue().equals("\"none\"")));
+        assertFalse(plan.mutations().stream().anyMatch(mutation -> mutation.path().equals("forwarding.secret")));
+        assertFalse(plan.mutations().stream().anyMatch(mutation -> mutation.key().equals("forwarding-secret-file")));
+    }
+
+    @Test
+    void enablingModernForwardingWritesOneKeyToProxyAndBackend() {
+        Instance proxy = instance("Proxy", ModLoader.VELOCITY);
+        Instance backend = instance("Lobby", ModLoader.PAPER);
+        NetworkDefinition base = network(proxy, backend).withForwarding(new NetworkForwardingPolicy(ForwardingMode.NONE, true, "", false));
+        NetworkDefinition enabled = base.withForwarding(new NetworkForwardingPolicy(ForwardingMode.MODERN, true, "new-secret", false));
+        NetworkSecretStore secrets = new NetworkSecretStore() {
+            @Override
+            public String resolveForwardingSecret(String reference) {
+                return reference.equals("new-secret") ? "shared-key" : "";
+            }
+
+            @Override
+            public String getOrCreateEnrollmentToken(String networkId, String nodeId) {
+                return "enrollment-token";
+            }
+        };
+
+        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(DesktopNetworkPlanInput.from(discovery(enabled, proxy, backend)), secrets);
+
+        assertTrue(plan.canApply());
+        assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.instanceId().equals(proxy.getInstanceId()) && mutation.key().equals("player-info-forwarding-mode") && mutation.desiredValue().equals("\"modern\"")));
+        assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.instanceId().equals(proxy.getInstanceId()) && mutation.path().equals("forwarding.secret") && mutation.desiredValue().equals("shared-key")));
+        assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.instanceId().equals(backend.getInstanceId()) && mutation.key().equals("proxies.velocity.secret") && mutation.desiredValue().equals("shared-key")));
+    }
+
+    @Test
     void blocksBackendRouteThatWouldReplaceVelocityFallbackList() {
         Instance proxy = instance("Proxy", ModLoader.VELOCITY);
         Instance backend = instance("Backend", ModLoader.PAPER);
@@ -239,6 +332,41 @@ class NetworkForwardingPlannerTest {
 
         assertFalse(plan.canApply());
         assertTrue(plan.issues().stream().anyMatch(issue -> issue.code().equals("member.route.reserved")));
+    }
+
+    @Test
+    void disablingRuntimeDisablesBackendSharingAndEnrollment() {
+        Instance proxy = instance("Proxy", ModLoader.VELOCITY);
+        Instance backend = instance("Lobby", ModLoader.PAPER);
+        NetworkDefinition base = network(proxy, backend);
+        NetworkDefinition disabled = new NetworkDefinition(base.schemaVersion(), base.networkId(), base.name(), base.revision() + 1, base.proxyInstanceId(), base.desiredState(), base.forwarding(), base.entryPoints(), base.members(), base.routingGroups(), base.syncRealms(), NetworkRuntimePolicy.disabled(), base.features(), base.sharedDataPolicy(), base.createdAt(), base.updatedAt());
+
+        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(DesktopNetworkPlanInput.from(discovery(disabled, proxy, backend)), secrets());
+
+        for (String key : List.of("network.enabled", "network.chat.enabled", "network.resources.enabled")) {
+            assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.instanceId().equals(backend.getInstanceId()) && mutation.key().equals(key) && mutation.desiredValue().equals("false")));
+        }
+        assertFalse(plan.mutations().stream().anyMatch(mutation -> mutation.key().equals("network.enrollment-token")));
+    }
+
+    @Test
+    void persistsCompleteJoinRuleForProxyStartup() {
+        Instance proxy = instance("Proxy", ModLoader.VELOCITY);
+        Instance backend = instance("Lobby", ModLoader.PAPER);
+        NetworkDefinition base = network(proxy, backend);
+        String nodeId = base.members().get(1).nodeId();
+        RoutingGroup group = new RoutingGroup("play", "Play", RoutingStrategy.WEIGHTED, List.of(nodeId), Map.of(nodeId, 3), "", Set.of("play.example.com"), "network.play");
+        NetworkDefinition routed = base.nextRevision(base.members(), List.of(group), base.syncRealms(), base.desiredState());
+        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(DesktopNetworkPlanInput.from(discovery(routed, proxy, backend)), secrets());
+        Map<String, String> properties = new LinkedHashMap<>();
+        plan.mutations().stream().filter(mutation -> mutation.path().equals("plugins/resyncvelocity/network.properties")).forEach(mutation -> properties.put(mutation.key(), mutation.desiredValue()));
+
+        assertEquals("play", properties.get("routing.groups"));
+        assertEquals("WEIGHTED", properties.get("routing.group.play.strategy"));
+        assertEquals("3", properties.get("routing.group.play.weight." + nodeId));
+        assertEquals(nodeId, properties.get("routing.group.play.weights"));
+        assertEquals("play.example.com", properties.get("routing.group.play.forced-hosts"));
+        assertEquals("network.play", properties.get("routing.group.play.permission"));
     }
 
     private NetworkDefinition network(Instance proxy, Instance backend) {

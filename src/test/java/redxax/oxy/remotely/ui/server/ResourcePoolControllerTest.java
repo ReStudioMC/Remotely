@@ -9,6 +9,7 @@ import restudio.rescreen.platform.Async;
 import restudio.rescreen.platform.TaskScheduler;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -22,6 +23,47 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ResourcePoolControllerTest {
+    @Test
+    void checkoutKeepsReviewedQuoteIdentityAcrossSubmission() {
+        UUID planId = UUID.randomUUID();
+        UUID quoteId = UUID.randomUUID();
+        UUID purchaseId = UUID.randomUUID();
+        UUID poolId = UUID.randomUUID();
+        List<String> posts = new ArrayList<>();
+        ResourcePoolClient client = new ResourcePoolClient((method, path, body) -> {
+            if (path.equals("/resource-pools?page=0&size=25")) return Async.completed(emptyPage());
+            if (path.equals("/billing/resource-pools/rates")) return Async.completed("[]");
+            if (path.equals("/billing/resource-pools/availability")) return Async.completed("[]");
+            if (path.equals("/billing/resource-pools/offers")) {
+                return Async.completed(offerJson().replace("\"planId\":\"plan\"", "\"planId\":\"" + planId + "\""));
+            }
+            if (path.startsWith("/billing/resource-pools/purchases?")) return Async.completed(emptyPage());
+            if (path.equals("/billing/resource-pools/checkout")) {
+                posts.add(body);
+                return Async.completed(checkoutJson(UUID.fromString(field(body, "purchaseRequestId")), purchaseId, poolId));
+            }
+            return Async.failed(new AssertionError("Unexpected Request " + path));
+        });
+        ResourcePoolController controller = controller(client, new AtomicReference<>("account"));
+        controller.refresh();
+        ResourcePoolModels.Offer offer = controller.snapshot().offers().getFirst();
+        ResourcePoolModels.Resources resources = new ResourcePoolModels.Resources("2048", "200", "10240", "0");
+        ResourcePoolModels.Price price = new ResourcePoolModels.Price("USD", 30, resources, "500", "300", "200",
+                "0", "1000", "0", "1000", "1000", "");
+        Instant now = Instant.now();
+        ResourcePoolModels.Quote quote = new ResourcePoolModels.Quote(quoteId, offer.id(), planId, "product",
+                new ResourcePoolModels.Domain(offer.location(), offer.cpuClass()), "1", price, now.toString(),
+                now.plusSeconds(900).toString(), null, "0", "1000");
+
+        ResourcePoolController.PurchaseIntent intent = controller.beginPurchase(offer, quote);
+        assertTrue(controller.checkout(new ResourcePoolController.PurchaseIntent(intent.purchaseRequestId(), offer.id(),
+                UUID.randomUUID())).failure() != null);
+        assertTrue(posts.isEmpty());
+        controller.checkout(intent).join();
+        assertEquals(quoteId.toString(), field(posts.getFirst(), "quoteId"));
+        assertEquals(1, posts.size());
+    }
+
     @Test
     void assignmentIdentityIsAvailableBeforeAdmissionOrAnySnapshotCanComplete() {
         UUID poolId = UUID.randomUUID();
@@ -170,6 +212,8 @@ class ResourcePoolControllerTest {
         AtomicReference<String> account = new AtomicReference<>("first");
         List<Async<String>> responses = new ArrayList<>();
         ResourcePoolClient client = new ResourcePoolClient((method, path, body) -> {
+            if (path.equals("/billing/resource-pools/rates")) return Async.completed("[]");
+            if (path.equals("/billing/resource-pools/availability")) return Async.completed("[]");
             if (path.equals("/billing/resource-pools/offers")) {
                 return Async.completed("[]");
             }
@@ -202,6 +246,8 @@ class ResourcePoolControllerTest {
     void explicitRefreshReplacesAStalledRead() {
         List<Async<String>> responses = new ArrayList<>();
         ResourcePoolClient client = new ResourcePoolClient((method, path, body) -> {
+            if (path.equals("/billing/resource-pools/rates")) return Async.completed("[]");
+            if (path.equals("/billing/resource-pools/availability")) return Async.completed("[]");
             if (path.equals("/billing/resource-pools/offers")) return Async.completed("[]");
             if (path.startsWith("/billing/resource-pools/purchases?")) return Async.completed(emptyPage());
             Async<String> response = Async.pending();
@@ -286,6 +332,8 @@ class ResourcePoolControllerTest {
                 return Async.completed(page(2, false, poolJson(firstPool)));
             }
             if (path.contains("/drafts?") || path.contains("/allocations?")) return Async.completed(emptyPage());
+            if (path.equals("/billing/resource-pools/rates")) return Async.completed("[]");
+            if (path.equals("/billing/resource-pools/availability")) return Async.completed("[]");
             if (path.equals("/billing/resource-pools/offers")) return Async.completed("[]");
             if (path.startsWith("/billing/resource-pools/purchases?")) return Async.completed(emptyPage());
             return Async.failed(new AssertionError("Unexpected Request " + method + " " + path));
@@ -350,6 +398,8 @@ class ResourcePoolControllerTest {
         UUID poolId = UUID.randomUUID();
         ResourcePoolClient client = new ResourcePoolClient((method, path, body) -> {
             if (path.equals("/resource-pools?page=0&size=25")) return Async.completed(emptyPage());
+            if (path.equals("/billing/resource-pools/rates")) return Async.completed("[]");
+            if (path.equals("/billing/resource-pools/availability")) return Async.completed("[]");
             if (path.equals("/billing/resource-pools/offers")) return Async.completed(offerJson());
             if (path.startsWith("/billing/resource-pools/purchases?")) return Async.completed(emptyPage());
             if (method.equals("POST") && path.equals("/billing/resource-pools/checkout")) {
@@ -484,6 +534,8 @@ class ResourcePoolControllerTest {
         int[] posts = {0};
         ResourcePoolClient client = new ResourcePoolClient((method, path, body) -> {
             if (path.equals("/resource-pools?page=0&size=25")) return Async.completed(emptyPage());
+            if (path.equals("/billing/resource-pools/rates")) return Async.completed("[]");
+            if (path.equals("/billing/resource-pools/availability")) return Async.completed("[]");
             if (path.equals("/billing/resource-pools/offers")) return Async.completed(offerJson());
             if (path.startsWith("/billing/resource-pools/purchases?")) return Async.completed(emptyPage());
             if (method.equals("POST") && path.equals("/billing/resource-pools/checkout")) {
@@ -560,6 +612,8 @@ class ResourcePoolControllerTest {
             if (path.equals("/resource-pools?page=0&size=25")) return Async.completed(page(poolJson(poolId)));
             if (path.contains("/drafts?")) return Async.completed(emptyPage());
             if (path.contains("/allocations?")) return Async.completed(page(allocationJson(poolId)));
+            if (path.equals("/billing/resource-pools/rates")) return Async.completed("[]");
+            if (path.equals("/billing/resource-pools/availability")) return Async.completed("[]");
             if (path.equals("/billing/resource-pools/offers")) return Async.completed("[]");
             if (path.startsWith("/billing/resource-pools/purchases?")) return Async.completed(emptyPage());
             return Async.failed(new AssertionError("Unexpected Request " + method + " " + path));
@@ -582,7 +636,7 @@ class ResourcePoolControllerTest {
     }
 
     @Test
-    void pendingPurchasePollingStopsAtTheBound() {
+    void pendingPurchasePollingBacksOffAtTheBoundAndKeepsAvailabilityFresh() {
         PollScheduler scheduler = new PollScheduler();
         int[] purchaseReads = {0};
         ResourcePoolClient client = pollingClient(purchaseReads);
@@ -594,8 +648,12 @@ class ResourcePoolControllerTest {
         }
 
         assertEquals(121, purchaseReads[0]);
-        assertTrue(controller.snapshot().message().contains("Automatic Refresh Paused"));
         assertFalse(scheduler.runPoll());
+        assertTrue(scheduler.runAfter(Duration.ofSeconds(7)));
+        assertEquals(122, purchaseReads[0]);
+        assertFalse(scheduler.runPoll());
+        controller.dispose();
+        assertFalse(scheduler.runAfter(Duration.ofSeconds(7)));
     }
 
     @Test
@@ -612,6 +670,8 @@ class ResourcePoolControllerTest {
             if (path.contains("/allocations?")) return Async.completed(page(allocation));
             if (path.contains("/operations/")) return Async.completed("{\"operation\":"
                     + operationJson(requestId, "0", "0", "0", state.get()) + ",\"hosting\":null}");
+            if (path.equals("/billing/resource-pools/rates")) return Async.completed("[]");
+            if (path.equals("/billing/resource-pools/availability")) return Async.completed("[]");
             if (path.equals("/billing/resource-pools/offers")) return Async.completed("[]");
             if (path.startsWith("/billing/resource-pools/purchases?")) return Async.completed(emptyPage());
             return Async.failed(new AssertionError("Unexpected Request " + method + " " + path));
@@ -676,6 +736,8 @@ class ResourcePoolControllerTest {
         UUID poolId = UUID.randomUUID();
         return new ResourcePoolClient((method, path, body) -> {
             if (path.equals("/resource-pools?page=0&size=25")) return Async.completed(emptyPage());
+            if (path.equals("/billing/resource-pools/rates")) return Async.completed("[]");
+            if (path.equals("/billing/resource-pools/availability")) return Async.completed("[]");
             if (path.equals("/billing/resource-pools/offers")) return Async.completed("[]");
             if (path.startsWith("/billing/resource-pools/purchases?")) {
                 purchaseReads[0]++;
@@ -849,6 +911,8 @@ class ResourcePoolControllerTest {
                 }
                 return Async.completed(page(page, start + 25 < purchases.size(), items));
             }
+            if (path.equals("/billing/resource-pools/rates")) return Async.completed("[]");
+            if (path.equals("/billing/resource-pools/availability")) return Async.completed("[]");
             if (path.equals("/billing/resource-pools/offers")) return Async.completed("[]");
             if (path.startsWith("/resource-pools?") && !path.contains("/drafts") && !path.contains("/allocations")) {
                 int start = page * 25;
@@ -893,6 +957,8 @@ class ResourcePoolControllerTest {
             }
             if (path.equals("/resource-pools?page=1&size=25")) return continuation;
             if (path.contains("/drafts?") || path.contains("/allocations?")) return Async.completed(emptyPage());
+            if (path.equals("/billing/resource-pools/rates")) return Async.completed("[]");
+            if (path.equals("/billing/resource-pools/availability")) return Async.completed("[]");
             if (path.equals("/billing/resource-pools/offers")) return Async.completed("[]");
             if (path.startsWith("/billing/resource-pools/purchases?")) return Async.completed(emptyPage());
             return Async.failed(new AssertionError("Unexpected Request " + method + " " + path));
@@ -910,6 +976,8 @@ class ResourcePoolControllerTest {
         @Override
         public Async<String> request(String method, String path, String body) {
             if (path.equals("/resource-pools?page=0&size=25")) return Async.completed(emptyPage());
+            if (path.equals("/billing/resource-pools/rates")) return Async.completed("[]");
+            if (path.equals("/billing/resource-pools/availability")) return Async.completed("[]");
             if (path.equals("/billing/resource-pools/offers")) return Async.completed(offerJson());
             if (path.startsWith("/billing/resource-pools/purchases?")) {
                 return requestId == null ? Async.completed(emptyPage())
@@ -934,6 +1002,8 @@ class ResourcePoolControllerTest {
         @Override
         public Async<String> request(String method, String path, String body) {
             if (path.equals("/resource-pools?page=0&size=25")) return Async.completed(emptyPage());
+            if (path.equals("/billing/resource-pools/rates")) return Async.completed("[]");
+            if (path.equals("/billing/resource-pools/availability")) return Async.completed("[]");
             if (path.equals("/billing/resource-pools/offers")) return Async.completed(offerJson());
             if (path.startsWith("/billing/resource-pools/purchases?")) {
                 return requestId == null ? Async.completed(emptyPage()) : Async.completed(page(purchaseJson(
@@ -999,7 +1069,11 @@ class ResourcePoolControllerTest {
         }
 
         private boolean runPoll() {
-            Scheduled next = tasks.stream().filter(task -> !task.cancelled && task.delay.equals(Duration.ofSeconds(3)))
+            return runAfter(Duration.ofSeconds(3));
+        }
+
+        private boolean runAfter(Duration delay) {
+            Scheduled next = tasks.stream().filter(task -> !task.cancelled && task.delay.equals(delay))
                     .findFirst().orElse(null);
             if (next == null) return false;
             next.cancelled = true;

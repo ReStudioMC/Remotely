@@ -82,11 +82,50 @@ class NetworkDetachPlannerTest {
         assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.instanceId().equals(survival.getInstanceId()) && mutation.key().equals("proxies.velocity.enabled") && mutation.desiredValue().equals("false")));
         assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.instanceId().equals(survival.getInstanceId()) && mutation.key().equals("network.enabled") && mutation.desiredValue().equals("true")));
         assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.key().equals("network.id") && mutation.action() == NetworkMutationAction.REMOVE));
+        assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.path().equals("plugins/.resync-network.properties")
+                && mutation.key().equals("network.enabled") && mutation.desiredValue().equals("true")));
+        assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.path().equals("plugins/.resync-network.properties")
+                && mutation.key().equals("network.id") && mutation.action() == NetworkMutationAction.REMOVE));
         assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.instanceId().equals(proxy.getInstanceId()) && mutation.key().equals("nodes") && !mutation.desiredValue().contains(survivalMember.nodeId())));
         assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.instanceId().equals(proxy.getInstanceId()) && mutation.key().equals("node." + survivalMember.nodeId() + ".enrollment-token-hash") && mutation.action() == NetworkMutationAction.REMOVE));
         assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.instanceId().equals(proxy.getInstanceId()) && mutation.key().equals("routes") && mutation.desiredValue().equals("lobby")));
         assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.instanceId().equals(proxy.getInstanceId()) && mutation.key().equals("route.survival.port") && mutation.action() == NetworkMutationAction.REMOVE));
         assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.instanceId().equals(survival.getInstanceId()) && mutation.path().equals("plugins/ReSync/network/node.credential") && mutation.sensitive() && mutation.desiredValue().equals("original-credential")));
+        NetworkDefinition remaining = network.withoutMember(survival.getInstanceId());
+        assertEquals(List.of(lobbyMember.nodeId()), remaining.routingGroups().getFirst().nodeIds());
+        assertEquals(List.of(lobbyMember.nodeId(), survivalMember.nodeId()), network.routingGroups().getFirst().nodeIds());
+        assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.key().equals("routing.group.fallback.nodes") && mutation.desiredValue().equals(lobbyMember.nodeId())));
+        assertTrue(new NetworkDetachPlanner().planDissolve(DesktopNetworkPlanInput.from(discovery)).mutations().stream()
+                .anyMatch(mutation -> mutation.key().equals("routing.groups") && mutation.desiredValue().isBlank()));
+    }
+
+    @Test
+    void requiresAnExplicitPlayerSharingChoiceBeforeDetachingItsPartner() {
+        Instance proxy = new Instance("Proxy", "1.21.10", "proxy");
+        proxy.setServer(true);
+        proxy.setModLoader(ModLoader.VELOCITY);
+        Instance lobby = new Instance("Lobby", "1.21.10", "lobby");
+        lobby.setServer(true);
+        lobby.setModLoader(ModLoader.PAPER);
+        Instance survival = new Instance("Survival", "1.21.10", "survival");
+        survival.setServer(true);
+        survival.setModLoader(ModLoader.PAPER);
+        NetworkMember proxyMember = NetworkMember.proxy(proxy.getInstanceId(), 25565);
+        NetworkMember lobbyMember = NetworkMember.backend(lobby.getInstanceId(), "lobby", NetworkMemberRole.LOBBY, 25566);
+        NetworkMember survivalMember = NetworkMember.backend(survival.getInstanceId(), "survival", NetworkMemberRole.GAMEPLAY, 25567);
+        NetworkDefinition base = NetworkDefinition.create("Network", proxy.getInstanceId(), NetworkForwardingPolicy.secureDefault("secret"),
+                List.of(NetworkEntryPoint.primary(25565)), List.of(proxyMember, lobbyMember, survivalMember));
+        SyncRealm realm = new SyncRealm("shared", "Shared Survival", Set.of(lobbyMember.nodeId(), survivalMember.nodeId()),
+                Set.of(SyncDataFamily.INVENTORY), SyncLocationPolicy.NEVER, Set.of(), 10, 30);
+        NetworkDefinition network = base.nextRevision(base.members(), base.routingGroups(), List.of(realm), base.desiredState());
+        NetworkDiscoveryResult discovery = new NetworkDiscoveryResult(network, Map.of(proxy.getInstanceId(), proxy,
+                lobby.getInstanceId(), lobby, survival.getInstanceId(), survival), List.of(), List.of(), List.of());
+
+        NetworkReconciliationPlan plan = new NetworkDetachPlanner().plan(DesktopNetworkPlanInput.from(discovery), survival.getInstanceId());
+
+        assertFalse(plan.canApply());
+        assertTrue(plan.issues().stream().anyMatch(issue -> issue.code().equals("detach.realm.insufficient")));
+        assertEquals(realm, network.syncRealms().getFirst());
     }
 
     @Test

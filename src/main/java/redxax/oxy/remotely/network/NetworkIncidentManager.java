@@ -63,7 +63,8 @@ public class NetworkIncidentManager {
                 continue;
             }
             if (presence.status() == NetworkRuntimeNodeStatus.OFFLINE || presence.status() == NetworkRuntimeNodeStatus.REVOKED) {
-                nodes.put("runtime.node.status:" + member.nodeId(), new Condition(member.nodeId(), "runtime.node.status", NetworkIncidentSeverity.CRITICAL, member.routeName() + " Is " + titleCase(presence.status().name()), "Last Runtime Observation " + presence.observedAt()));
+                String detail = presence.observedAt() > 0 ? "Last Runtime Observation " + presence.observedAt() : "No Runtime Observation Yet";
+                nodes.put("runtime.node.status:" + member.nodeId(), new Condition(member.nodeId(), "runtime.node.status", NetworkIncidentSeverity.CRITICAL, member.routeName() + " Is " + titleCase(presence.status().name()), detail));
                 continue;
             }
             if (presence.mspt() >= 50 || presence.tps() >= 0 && presence.tps() < 18) {

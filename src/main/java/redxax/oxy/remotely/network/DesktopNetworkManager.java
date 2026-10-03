@@ -161,6 +161,16 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
         }).findFirst();
     }
 
+    public synchronized void requireCreationRemovalSafe(String instanceId) {
+        for (NetworkJob job : jobManager.getJobs()) {
+            if (job.type() != NetworkJobType.QUICK_CREATE || job.status() == NetworkJobStatus.ROLLED_BACK) continue;
+            NetworkDefinition candidate = creationCandidateFromContext(job.context());
+            if (candidate.members().stream().noneMatch(member -> member.instanceId().equals(instanceId))) continue;
+            if (job.status() == NetworkJobStatus.BLOCKED && job.documents().isEmpty()) continue;
+            throw new IllegalStateException("Network Recovery Is Required Before Removing This Server");
+        }
+    }
+
     public synchronized NetworkDefinition save(NetworkDefinition network) {
         return saveInternal(network, false);
     }
@@ -261,6 +271,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
         Map<String, String> context = Map.of(
             "network", GSON.toJson(candidate),
             "secretReference", candidate.forwarding().secretReference(),
+            "creationMetadataPending", "true",
             "bindings", GSON.toJson(captureCreationBindings(candidate, instances))
         );
         return withMutationLock(candidate.networkId(), () -> jobManager.executePrepared(candidate, creationPrepared.prepared(), instances, NetworkJobType.QUICK_CREATE, initiator, context).thenCompose(job -> {
@@ -277,11 +288,11 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
         if (current == null || current.revision() != network.revision()) {
             return Async.failed(new IllegalArgumentException("Network changed before secret rotation review started"));
         }
-        if (current.forwarding().mode() != ForwardingMode.MODERN) {
-            return Async.failed(new IllegalStateException("Secret Rotation Requires Modern Forwarding"));
+        if (current.forwarding().mode() != ForwardingMode.MODERN && current.forwarding().mode() != ForwardingMode.NONE) {
+            return Async.failed(new IllegalStateException("Connection Key Changes Require Modern Or Disabled Forwarding"));
         }
         if (current.members().stream().anyMatch(member -> !member.isManaged())) {
-            return Async.failed(new IllegalStateException("Detach Or Import External Backends Before Rotating The Secret"));
+            return Async.failed(new IllegalStateException("Detach Or Import External Backends Before Changing The Connection Key"));
         }
         try {
             requireManagedServersStopped(current, instances, "Stop Every Managed Network Server Before Rotating The Secret");
@@ -290,7 +301,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
         }
         NetworkSecretStore.Secret secret = secretStore.createForwardingSecret();
         try {
-            NetworkForwardingPolicy forwarding = new NetworkForwardingPolicy(current.forwarding().mode(), current.forwarding().proxyOnlineMode(), secret.reference(), current.forwarding().firewallVerified());
+            NetworkForwardingPolicy forwarding = new NetworkForwardingPolicy(ForwardingMode.MODERN, current.forwarding().proxyOnlineMode(), secret.reference(), current.forwarding().firewallVerified());
             NetworkDefinition candidate = current.withForwarding(forwarding);
             NetworkReconciliationPlan plan = desiredStatePlanner.plan(DesktopNetworkPlanInput.from(discoverObserved(candidate, instances, List.of())), secretStore);
             if (!plan.canApply()) {
@@ -1004,40 +1015,31 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
         if (current == null || current.revision() != network.revision()) {
             return Async.failed(new IllegalArgumentException("Network changed before the lifecycle operation started"));
         }
-        return withMutationLock(current.networkId(), () -> {
-            Async<NetworkJob> preflight = Async.completed(null);
-            if (operation == NetworkLifecycleOperation.START || operation == NetworkLifecycleOperation.RESTART || operation == NetworkLifecycleOperation.ROLLING_RESTART) {
-                NetworkReconciliationPlan plan = desiredStatePlanner.plan(DesktopNetworkPlanInput.from(discoverObserved(current, instances, List.of())), secretStore);
-                List<NetworkValidationIssue> blocking = plan.issues().stream().filter(NetworkValidationIssue::blocksPersistence).toList();
-                if (!blocking.isEmpty()) {
-                    return Async.failed(new IllegalStateException(blocking.getFirst().message()));
+        boolean starting = operation == NetworkLifecycleOperation.START || operation == NetworkLifecycleOperation.RESTART || operation == NetworkLifecycleOperation.ROLLING_RESTART;
+        if (!starting) return runLifecycleReady(current, instances, operation, initiator);
+        if (current.forwarding().needsRepair()) {
+            return runJob(current, instances, List.of(), NetworkJobType.RECONCILE, initiator + " Repair").thenCompose(job -> {
+                if (job.status() != NetworkJobStatus.SUCCEEDED) return Async.failed(new IllegalStateException(job.message()));
+                NetworkDefinition repaired = getNetwork(current.networkId()).orElseThrow(() -> new IllegalStateException("Network Is Unavailable"));
+                if (repaired.revision() != current.revision() + 1 || repaired.forwarding().mode() != ForwardingMode.MODERN) {
+                    return Async.failed(new IllegalStateException("Network Changed During Startup Repair. Try Again"));
                 }
-                Map<String, Instance> instancesById = indexInstances(instances);
-                preflight = configurationTransaction.prepare(plan, instances).thenCompose(prepared -> {
-                    List<NetworkJobDocument> changes = configurationTransaction.describe(prepared, current, instances).stream().filter(NetworkJobDocument::changed).toList();
-                    if (changes.isEmpty()) {
-                        return Async.completed(null);
-                    }
-                    boolean allStopped = current.members().stream().map(NetworkMember::instanceId).map(instancesById::get).filter(Objects::nonNull).allMatch(this::isStopped);
-                    if (!allStopped) {
-                        String paths = changes.stream().map(change -> change.key().path()).limit(3).collect(Collectors.joining(", "));
-                        return Async.failed(new IllegalStateException("Stop The Network Before Applying Pending Configuration In " + paths));
-                    }
-                    return jobManager.executePrepared(current, prepared, instances, NetworkJobType.RECONCILE, initiator + " Preflight").thenCompose(job -> {
-                        if (job.status() != NetworkJobStatus.SUCCEEDED) {
-                            return Async.completed(job);
-                        }
-                        return configurationTransaction.prepare(plan, instances).thenApply(verified -> {
-                            List<NetworkJobDocument> remaining = configurationTransaction.describe(verified, current, instances).stream().filter(NetworkJobDocument::changed).toList();
-                            if (!remaining.isEmpty()) {
-                                String paths = remaining.stream().map(change -> change.key().path()).limit(3).collect(Collectors.joining(", "));
-                                throw new IllegalStateException("Network Configuration Still Differs After Apply: " + paths);
-                            }
-                            return job;
-                        });
-                    });
-                });
-            }
+                return runLifecycleReady(repaired, instances, operation, initiator);
+            });
+        }
+        return ensureForwardingSecret(current, instances).thenCompose(unused -> runLifecycleReady(current, instances, operation, initiator));
+    }
+
+    private synchronized Async<NetworkLifecycleJob> runLifecycleReady(NetworkDefinition network, Collection<Instance> instances, NetworkLifecycleOperation operation, String initiator) {
+        Objects.requireNonNull(network, "Network is required");
+        Objects.requireNonNull(operation, "Lifecycle operation is required");
+        NetworkDefinition current = networks.get(network.networkId());
+        if (current == null || current.revision() != network.revision()) {
+            return Async.failed(new IllegalArgumentException("Network changed before the lifecycle operation started"));
+        }
+        return withMutationLock(current.networkId(), () -> {
+            boolean starting = operation == NetworkLifecycleOperation.START || operation == NetworkLifecycleOperation.RESTART || operation == NetworkLifecycleOperation.ROLLING_RESTART;
+            Async<NetworkJob> preflight = starting ? prepareStartup(current, instances, initiator) : Async.completed(null);
             return preflight.thenCompose(configurationJob -> {
                 if (configurationJob != null && configurationJob.status() != NetworkJobStatus.SUCCEEDED) {
                     return Async.failed(new IllegalStateException(configurationJob.message()));
@@ -1052,7 +1054,66 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
         });
     }
 
+    private Async<NetworkJob> prepareStartup(NetworkDefinition current, Collection<Instance> instances, String initiator) {
+        NetworkReconciliationPlan plan = desiredStatePlanner.plan(DesktopNetworkPlanInput.from(discoverObserved(current, instances, List.of())), secretStore);
+        List<NetworkValidationIssue> blocking = plan.issues().stream().filter(NetworkValidationIssue::blocksPersistence).toList();
+        if (!blocking.isEmpty()) {
+            return Async.failed(new IllegalStateException(blocking.getFirst().message()));
+        }
+        Map<String, Instance> instancesById = indexInstances(instances);
+        return configurationTransaction.prepare(plan, instances).thenCompose(prepared -> {
+            List<NetworkJobDocument> changes = configurationTransaction.describe(prepared, current, instances).stream().filter(NetworkJobDocument::changed).toList();
+            if (changes.isEmpty()) {
+                return Async.completed(null);
+            }
+            boolean allStopped = current.members().stream().map(NetworkMember::instanceId).map(instancesById::get).filter(Objects::nonNull).allMatch(this::isStopped);
+            if (!allStopped) {
+                String paths = changes.stream().map(change -> change.key().path()).limit(3).collect(Collectors.joining(", "));
+                return Async.failed(new IllegalStateException("Stop The Network Before Applying Pending Configuration In " + paths));
+            }
+            return jobManager.executePrepared(current, prepared, instances, NetworkJobType.RECONCILE, initiator + " Preflight").thenCompose(job -> {
+                if (job.status() != NetworkJobStatus.SUCCEEDED) {
+                    return Async.completed(job);
+                }
+                return configurationTransaction.prepare(plan, instances).thenApply(verified -> {
+                    List<NetworkJobDocument> remaining = configurationTransaction.describe(verified, current, instances).stream().filter(NetworkJobDocument::changed).toList();
+                    if (!remaining.isEmpty()) {
+                        String paths = remaining.stream().map(change -> change.key().path()).limit(3).collect(Collectors.joining(", "));
+                        throw new IllegalStateException("Network Configuration Still Differs After Apply: " + paths);
+                    }
+                    return job;
+                });
+            });
+        });
+    }
+
     public synchronized Async<NetworkLifecycleJob> runMemberLifecycle(NetworkDefinition network, NetworkMember member, Collection<Instance> instances, NetworkLifecycleOperation operation, String initiator) {
+        Objects.requireNonNull(network, "Network is required");
+        Objects.requireNonNull(member, "Network member is required");
+        Objects.requireNonNull(operation, "Lifecycle operation is required");
+        NetworkDefinition current = networks.get(network.networkId());
+        if (current == null || current.revision() != network.revision()) {
+            return Async.failed(new IllegalArgumentException("Network changed before the server action started"));
+        }
+        if (current.members().stream().noneMatch(candidate -> candidate.nodeId().equals(member.nodeId()) && candidate.instanceId().equals(member.instanceId()))
+                || !indexInstances(instances).containsKey(member.instanceId())) {
+            return Async.failed(new IllegalArgumentException("Server is unavailable"));
+        }
+        if (operation != NetworkLifecycleOperation.START) return runMemberLifecycleReady(current, member, instances, operation, initiator);
+        if (current.forwarding().needsRepair()) {
+            return runJob(current, instances, List.of(), NetworkJobType.RECONCILE, initiator + " Repair").thenCompose(job -> {
+                if (job.status() != NetworkJobStatus.SUCCEEDED) return Async.failed(new IllegalStateException(job.message()));
+                NetworkDefinition repaired = getNetwork(current.networkId()).orElseThrow(() -> new IllegalStateException("Network Is Unavailable"));
+                if (repaired.revision() != current.revision() + 1 || repaired.forwarding().mode() != ForwardingMode.MODERN) {
+                    return Async.failed(new IllegalStateException("Network Changed During Startup Repair. Try Again"));
+                }
+                return runMemberLifecycleReady(repaired, member, instances, operation, initiator);
+            });
+        }
+        return ensureForwardingSecret(current, instances).thenCompose(unused -> runMemberLifecycleReady(current, member, instances, operation, initiator));
+    }
+
+    private synchronized Async<NetworkLifecycleJob> runMemberLifecycleReady(NetworkDefinition network, NetworkMember member, Collection<Instance> instances, NetworkLifecycleOperation operation, String initiator) {
         Objects.requireNonNull(network, "Network is required");
         Objects.requireNonNull(member, "Network member is required");
         Objects.requireNonNull(operation, "Lifecycle operation is required");
@@ -1065,7 +1126,13 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
         if (currentMember == null || instance == null) {
             return Async.failed(new IllegalArgumentException("Server is unavailable"));
         }
-        return withMutationLock(current.networkId(), () -> lifecycleJobManager.executeMember(current, currentMember, instance, operation, initiator));
+        return withMutationLock(current.networkId(), () -> {
+            Async<NetworkJob> preflight = operation == NetworkLifecycleOperation.START ? prepareStartup(current, instances, initiator) : Async.completed(null);
+            return preflight.thenCompose(job -> {
+                if (job != null && job.status() != NetworkJobStatus.SUCCEEDED) return Async.failed(new IllegalStateException(job.message()));
+                return lifecycleJobManager.executeMember(current, currentMember, instance, operation, initiator);
+            });
+        });
     }
 
     public synchronized Async<NetworkLifecycleJob> resumeLifecycle(String jobId, Collection<Instance> instances) {
@@ -1103,10 +1170,23 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
         if (current == null || current.revision() != network.revision()) {
             return Async.failed(new IllegalArgumentException("Network changed before the job started"));
         }
-        return withMutationLock(current.networkId(), () -> {
+        if (type == NetworkJobType.RECONCILE && current.forwarding().needsRepair()) {
+            return prepareSecretRotation(current, instances).thenCompose(prepared -> runPreparedSecretRotation(prepared, instances, initiator)
+                    .whenComplete((job, failure) -> {
+                        if (failure != null) discardPreparedSecretRotation(prepared);
+                    }));
+        }
+        Async<Void> secretReady = type == NetworkJobType.RECONCILE ? ensureForwardingSecret(current, instances) : Async.completed(null);
+        return secretReady.thenCompose(unused -> withMutationLock(current.networkId(), () -> {
+            synchronized (this) {
+                NetworkDefinition latest = networks.get(current.networkId());
+                if (latest == null || latest.revision() != current.revision()) {
+                    return Async.failed(new IllegalArgumentException("Network changed before the job started"));
+                }
+            }
             NetworkReconciliationPlan plan = desiredStatePlanner.plan(DesktopNetworkPlanInput.from(discoverObserved(current, instances, externalReservations)), secretStore);
             return jobManager.execute(current, plan, instances, type, initiator);
-        });
+        }));
     }
 
     public synchronized Async<NetworkJob> resumeJob(String jobId, Collection<Instance> instances, Collection<PortReservation> externalReservations) {
@@ -1271,6 +1351,15 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
 
     private Async<Void> recoverCompletedJob(NetworkJob job, Collection<Instance> instances) {
         NetworkDefinition network = getNetwork(job.networkId()).orElse(null);
+        if (job.type() == NetworkJobType.QUICK_CREATE && "true".equals(job.context().get("creationMetadataPending"))) {
+            boolean dissolved = jobManager.getJobs(job.networkId()).stream().anyMatch(value -> value.type() == NetworkJobType.DELETE
+                    && value.status() == NetworkJobStatus.SUCCEEDED && "dissolve".equals(value.context().get("operation")));
+            if (dissolved || network != null && network.revision() > job.networkRevision()) {
+                jobManager.completeCreationMetadata(job.jobId());
+                return Async.completed(null);
+            }
+            return withMutationLock(job.networkId(), () -> finalizeCreation(job, instances));
+        }
         if (job.type() == NetworkJobType.DELETE && "dissolve".equals(job.context().get("operation"))) {
             if (network != null) {
                 return network.revision() == job.networkRevision() ? finalizeDissolve(job, instances) : Async.completed(null);
@@ -1710,10 +1799,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
             if (current.revision() != job.networkRevision()) {
                 return Async.failed(new IllegalStateException("Network changed before detach membership was committed"));
             }
-            List<NetworkMember> members = current.members().stream().filter(candidate -> !candidate.nodeId().equals(member.nodeId())).toList();
-            List<RoutingGroup> groups = current.routingGroups().stream().map(group -> new RoutingGroup(group.id(), group.name(), group.strategy(), group.nodeIds().stream().filter(nodeId -> !nodeId.equals(member.nodeId())).toList(), withoutKey(group.weights(), member.nodeId()), group.fallbackGroupId(), group.forcedHosts(), group.permission())).toList();
-            List<SyncRealm> realms = current.syncRealms().stream().map(realm -> new SyncRealm(realm.id(), realm.name(), realm.nodeIds().stream().filter(nodeId -> !nodeId.equals(member.nodeId())).collect(Collectors.toCollection(LinkedHashSet::new)), realm.dataFamilies(), realm.locationPolicy(), realm.persistentDataNamespaces(), realm.retainedSnapshots(), realm.retentionDays())).toList();
-            updated = current.nextRevision(members, groups, realms, current.desiredState());
+            updated = current.withoutMember(member.instanceId());
             saveInternal(updated, true);
             secretStore.deleteEnrollmentToken(current.networkId(), member.nodeId());
         }
@@ -1915,7 +2001,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
 
     private Async<Void> finalizeSecretRotation(NetworkJob job, Collection<Instance> instances) {
         NetworkDefinition candidate = secretRotationCandidateFromContext(job.context());
-        String oldSecretReference = requiredContext(job.context(), "oldSecretReference");
+        String oldSecretReference = job.context().getOrDefault("oldSecretReference", "");
         NetworkDefinition committed;
         synchronized (this) {
             NetworkDefinition current = networks.get(job.networkId());
@@ -1973,7 +2059,8 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
                 metadataUpdates.add(save(instance));
             }
             return Async.allOf(metadataUpdates.toArray(Async[]::new)).thenRun(() -> commitCreationMetadata(candidate))
-                .exceptionallyCompose(failure -> rollbackFinalizedCreation(job, candidate, previousBindings, instances, failure));
+                .exceptionallyCompose(failure -> rollbackFinalizedCreation(job, candidate, previousBindings, instances, failure))
+                .thenRun(() -> jobManager.completeCreationMetadata(job.jobId()));
         } catch (RuntimeException failure) {
             return rollbackFinalizedCreation(job, candidate, previousBindings, instances, failure);
         }
@@ -1992,7 +2079,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
 
     private List<CreationBinding> captureCreationBindings(NetworkDefinition network, Collection<Instance> instances) {
         Map<String, Instance> instancesById = indexInstances(instances);
-        return network.members().stream().filter(NetworkMember::isManaged).map(NetworkMember::instanceId).map(instancesById::get).filter(Objects::nonNull)
+        return network.members().stream().map(NetworkMember::instanceId).map(instancesById::get).filter(Objects::nonNull)
             .map(instance -> new CreationBinding(instance.getInstanceId(), instance.getNetworkId(), instance.getNetworkNodeId(), instance.getNetworkRevision())).toList();
     }
 
@@ -2012,7 +2099,6 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
         }
         List<InstanceBinding> bindings = new ArrayList<>();
         for (NetworkMember member : network.members()) {
-            if (!member.isManaged()) continue;
             Instance instance = instancesById.get(member.instanceId());
             if (instance == null) continue;
             CreationBinding value = stored.get(member.instanceId());

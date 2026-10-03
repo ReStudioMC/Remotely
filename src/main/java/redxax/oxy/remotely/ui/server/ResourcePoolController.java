@@ -9,6 +9,7 @@ import restudio.rescreen.platform.Async;
 import restudio.rescreen.platform.TaskScheduler;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -22,6 +23,7 @@ import java.util.function.Supplier;
 public final class ResourcePoolController {
     private static final int PAGE_SIZE = 25;
     private static final int MAX_POLLS = 120;
+    private static final Duration AVAILABILITY_REFRESH = Duration.ofSeconds(7);
 
     public record PageState(int nextPage, boolean hasMore, boolean loading, String message) {
         public PageState {
@@ -122,12 +124,16 @@ public final class ResourcePoolController {
         }
     }
 
-    public record PurchaseIntent(UUID purchaseRequestId, String offerId) {
+    public record PurchaseIntent(UUID purchaseRequestId, String offerId, UUID quoteId) {
         public PurchaseIntent {
             Objects.requireNonNull(purchaseRequestId, "purchaseRequestId");
             if (offerId == null || offerId.isBlank()) {
                 throw new IllegalArgumentException("Offer Identity Is Required");
             }
+        }
+
+        public PurchaseIntent(UUID purchaseRequestId, String offerId) {
+            this(purchaseRequestId, offerId, null);
         }
     }
 
@@ -198,6 +204,8 @@ public final class ResourcePoolController {
     private static final class LoadedRefresh {
         private List<PoolView> pools;
         private List<ResourcePoolModels.Offer> offers;
+        private List<ResourcePoolModels.Rate> rates;
+        private List<ResourcePoolModels.Availability> availability;
         private ResourcePoolModels.Page<ResourcePoolModels.PurchaseStatus> purchases;
         private PageState poolPages;
         private PageState purchasePages;
@@ -234,7 +242,10 @@ public final class ResourcePoolController {
     private final Map<String, PendingMutation> mutations = new LinkedHashMap<>();
     private final Map<UUID, UUID> activationIds = new LinkedHashMap<>();
     private final Map<UUID, ResourcePoolModels.Offer> purchaseOffers = new LinkedHashMap<>();
+    private final Map<UUID, PurchaseIntent> purchaseIntents = new LinkedHashMap<>();
     private final Map<UUID, PendingPurchase> purchaseRequests = new LinkedHashMap<>();
+    private volatile List<ResourcePoolModels.Rate> rates = List.of();
+    private volatile List<ResourcePoolModels.Availability> availability = List.of();
     private long generation;
     private int polls;
     private boolean refreshQueued;
@@ -257,6 +268,15 @@ public final class ResourcePoolController {
 
     public Snapshot snapshot() {
         return snapshot;
+    }
+
+    public List<ResourcePoolModels.Rate> rates() {
+        return snapshot.accountId().equals(currentAccount()) ? rates : List.of();
+    }
+
+    public List<ResourcePoolModels.Availability> availability() {
+        if (!snapshot.accountId().equals(currentAccount())) return List.of();
+        return availability;
     }
 
     public Creation begin(UUID poolId) {
@@ -307,6 +327,9 @@ public final class ResourcePoolController {
             mutations.values().removeIf(request -> !request.accountId.equals(accountId));
             activationIds.clear();
             purchaseOffers.clear();
+            purchaseIntents.clear();
+            rates = List.of();
+            availability = List.of();
             purchaseRequests.values().forEach(ResourcePoolController::cancelPurchase);
             purchaseRequests.clear();
         }
@@ -332,12 +355,16 @@ public final class ResourcePoolController {
                     }));
             Async<List<ResourcePoolModels.Offer>> offers = timed(api.getPurchaseOffers())
                     .thenApply(value -> loaded.offers = List.copyOf(value));
+            Async<List<ResourcePoolModels.Rate>> prices = timed(api.getRates())
+                    .thenApply(value -> loaded.rates = List.copyOf(value));
+            Async<List<ResourcePoolModels.Availability>> capacity = timed(api.getAvailability())
+                    .thenApply(value -> loaded.availability = List.copyOf(value));
             Async<ResourcePoolModels.Page<ResourcePoolModels.PurchaseStatus>> purchases = timed(api.listPurchases(0, PAGE_SIZE))
                     .thenApply(value -> {
                         loaded.purchasePages = PageState.first(value.hasMore());
                         return loaded.purchases = value;
                     });
-            request = Async.allOf(pools.thenApply(value -> loaded.pools = value), offers, purchases)
+            request = Async.allOf(pools.thenApply(value -> loaded.pools = value), offers, prices, capacity, purchases)
                     .thenApply(ignored -> loaded);
         } catch (RuntimeException failure) {
             finishRefresh(null, ticket, accountId, null, failure, resetPages);
@@ -411,31 +438,33 @@ public final class ResourcePoolController {
             return;
         }
         if (failure != null) {
+            availability = List.of();
             publish(new Snapshot(accountId, snapshot.pools(), snapshot.offers(), snapshot.purchases(), snapshot.poolPages(),
                     snapshot.purchasePages(), false, message(failure), ticket));
-            refreshQueued();
+            if (!refreshQueued()) schedulePoll();
             return;
         }
         Snapshot next;
         try {
             next = refreshSnapshot(accountId, loaded, resetPages, ticket);
         } catch (RuntimeException validationFailure) {
+            availability = List.of();
             publish(new Snapshot(accountId, snapshot.pools(), snapshot.offers(), snapshot.purchases(), snapshot.poolPages(),
                     snapshot.purchasePages(), false, message(validationFailure), ticket));
-            refreshQueued();
+            if (!refreshQueued()) schedulePoll();
             return;
         }
         if (!current(ticket, accountId)) {
             return;
         }
+        rates = loaded.rates;
+        availability = loaded.availability;
         publish(next);
         clearSettledMutations(next);
         if (refreshQueued()) {
             return;
         }
-        if (next.pending()) {
-            schedulePoll();
-        }
+        schedulePoll();
     }
 
     private Snapshot refreshSnapshot(String accountId, LoadedRefresh loaded, boolean resetPages, long ticket) {
@@ -674,14 +703,8 @@ public final class ResourcePoolController {
     }
 
     private void schedulePoll() {
-        if (disposed || pollTask != null || polls >= MAX_POLLS) {
-            if (polls >= MAX_POLLS) {
-                publish(new Snapshot(snapshot.accountId(), snapshot.pools(), snapshot.offers(), snapshot.purchases(),
-                        snapshot.poolPages(), snapshot.purchasePages(), false,
-                        "Automatic Refresh Paused. Refresh To Check Progress", snapshot.generation()));
-            }
-            return;
-        }
+        if (disposed || pollTask != null || snapshot.accountId().isBlank()) return;
+        boolean pending = snapshot.pending() && polls < MAX_POLLS;
         try {
             boolean[] scheduling = {true};
             TaskScheduler.ScheduledTask scheduled = scheduler.schedule(() -> {
@@ -689,9 +712,9 @@ public final class ResourcePoolController {
                     return;
                 }
                 pollTask = null;
-                polls++;
+                if (pending) polls++;
                 refresh(false);
-            }, Duration.ofSeconds(3));
+            }, pending ? Duration.ofSeconds(3) : AVAILABILITY_REFRESH);
             scheduling[0] = false;
             pollTask = scheduled;
         } catch (RuntimeException failure) {
@@ -968,6 +991,10 @@ public final class ResourcePoolController {
     }
 
     public PurchaseIntent beginPurchase(ResourcePoolModels.Offer offer) {
+        return beginPurchase(offer, null);
+    }
+
+    public PurchaseIntent beginPurchase(ResourcePoolModels.Offer offer, ResourcePoolModels.Quote quote) {
         Objects.requireNonNull(offer, "offer");
         String accountId = currentAccount();
         if (accountId.isBlank() || !accountId.equals(snapshot.accountId())) {
@@ -979,6 +1006,17 @@ public final class ResourcePoolController {
         if (!authoritative.equals(offer)) {
             throw new IllegalArgumentException("Offer Changed. Review The Current Offer");
         }
+        if (quote != null) {
+            if (!quote.offerId().equals(offer.id()) || !quote.domain().equals(new ResourcePoolModels.Domain(offer.location(), offer.cpuClass()))
+                    || !quote.planId().toString().equals(offer.planId())
+                    || (quote.poolId() != null && snapshot.pools().stream().noneMatch(view -> view.pool().id().equals(quote.poolId())
+                    && view.pool().domain().equals(quote.domain())))) {
+                throw new IllegalArgumentException("Quote Does Not Match This Purchase");
+            }
+            if (!Instant.parse(quote.expiresAt()).isAfter(Instant.now())) {
+                throw new IllegalArgumentException("Quote Expired. Review The Price Again");
+            }
+        }
         boolean unresolved = snapshot.purchases().stream().anyMatch(purchase -> purchase.offerId().equals(offer.id())
                 && (purchase.status() == ResourcePoolModels.PurchaseState.PENDING
                 || purchase.status() == ResourcePoolModels.PurchaseState.NEEDS_REVIEW));
@@ -987,9 +1025,46 @@ public final class ResourcePoolController {
         if (unresolved || localUnresolved) {
             throw new IllegalStateException("This Offer Already Has A Purchase Awaiting Payment Or Review");
         }
-        PurchaseIntent intent = new PurchaseIntent(UUID.randomUUID(), offer.id());
+        PurchaseIntent intent = new PurchaseIntent(UUID.randomUUID(), offer.id(), quote == null ? null : quote.id());
         purchaseOffers.put(intent.purchaseRequestId(), offer);
+        purchaseIntents.put(intent.purchaseRequestId(), intent);
         return intent;
+    }
+
+    public Async<ResourcePoolModels.Quote> quote(ResourcePoolModels.QuoteRequest request) {
+        Objects.requireNonNull(request, "request");
+        String accountId = currentAccount();
+        long ticket = generation;
+        if (disposed || accountId.isBlank() || !accountId.equals(snapshot.accountId())) {
+            return Async.failed(new IllegalStateException("Refresh Resources Before Requesting A Quote"));
+        }
+        if (read != null && !read.isDone()) {
+            return Async.failed(new IllegalStateException("Wait For Resource Refresh Before Requesting A Quote"));
+        }
+        ResourcePoolModels.Offer offer = snapshot.offers().stream()
+                .filter(candidate -> candidate.id().equals(request.offerId())).findFirst().orElse(null);
+        if (offer == null) return Async.failed(new IllegalArgumentException("Offer Is No Longer Available"));
+        if (request.poolId() != null && snapshot.pools().stream().noneMatch(view -> view.pool().id().equals(request.poolId())
+                && view.pool().domain().equals(new ResourcePoolModels.Domain(offer.location(), offer.cpuClass())))) {
+            return Async.failed(new IllegalArgumentException("Choose A Pool In The Offer Location"));
+        }
+        Async<ResourcePoolModels.Quote> operation;
+        try {
+            operation = timed(api.quote(request));
+        } catch (RuntimeException failure) {
+            return Async.failed(failure);
+        }
+        return operation.thenApply(value -> {
+            if (disposed || generation != ticket || !accountId.equals(currentAccount())
+                    || !accountId.equals(snapshot.accountId())) {
+                throw new IllegalStateException("Account Changed During Resource Quote");
+            }
+            if (!value.domain().equals(new ResourcePoolModels.Domain(offer.location(), offer.cpuClass()))
+                    || !value.planId().toString().equals(offer.planId())) {
+                throw new IllegalStateException("Quote Does Not Match The Reviewed Offer");
+            }
+            return value;
+        });
     }
 
     public Async<PurchaseResult> checkout(PurchaseIntent intent) {
@@ -1006,6 +1081,9 @@ public final class ResourcePoolController {
                 .filter(offer -> offer.id().equals(intent.offerId())).findFirst().orElse(null);
         if (reviewed == null || !reviewed.id().equals(intent.offerId())) {
             return Async.failed(new IllegalArgumentException("Checkout Intent Is Unavailable"));
+        }
+        if (!intent.equals(purchaseIntents.get(intent.purchaseRequestId()))) {
+            return Async.failed(new IllegalArgumentException("Checkout Quote Identity Does Not Match"));
         }
         if (!reviewed.equals(currentOffer)) {
             return Async.failed(new IllegalArgumentException("Offer Is No Longer Available"));
@@ -1025,7 +1103,7 @@ public final class ResourcePoolController {
         Async<ResourcePoolModels.Checkout> operation;
         try {
             operation = timed(api.checkout(new ResourcePoolModels.CheckoutRequest(
-                    intent.purchaseRequestId(), intent.offerId())));
+                    intent.purchaseRequestId(), intent.offerId(), intent.quoteId())));
         } catch (RuntimeException failure) {
             discoverPurchase(request, failure);
             return request.result;
@@ -1050,6 +1128,7 @@ public final class ResourcePoolController {
     public void discardPurchase(PurchaseIntent intent) {
         if (intent != null && !purchaseRequests.containsKey(intent.purchaseRequestId())) {
             purchaseOffers.remove(intent.purchaseRequestId());
+            purchaseIntents.remove(intent.purchaseRequestId());
         }
     }
 
@@ -1090,6 +1169,7 @@ public final class ResourcePoolController {
                 && purchaseRequests.get(pending.intent.purchaseRequestId()) == pending) {
             purchaseRequests.remove(pending.intent.purchaseRequestId());
             purchaseOffers.remove(pending.intent.purchaseRequestId());
+            purchaseIntents.remove(pending.intent.purchaseRequestId());
         }
     }
 
@@ -1110,11 +1190,19 @@ public final class ResourcePoolController {
                                                        ServerScreenHost.PoolResources resources,
                                                        Map<String, String> settings,
                                                        Map<String, String> initialFiles) {
+        return createDraft(creation, name, resources, settings, initialFiles, null);
+    }
+
+    public Async<ResourcePoolModels.Draft> createDraft(Creation creation, String name,
+                                                       ServerScreenHost.PoolResources resources,
+                                                       Map<String, String> settings,
+                                                       Map<String, String> initialFiles,
+                                                       ResourcePoolModels.DraftModpack modpack) {
         Objects.requireNonNull(creation, "creation");
         validate(resources);
         ResourcePoolModels.CreateDraftRequest request = new ResourcePoolModels.CreateDraftRequest(
                 creation.createRequestId(), creation.draftId(), name, resources.gameId(), resources.profileId(),
-                settings == null ? Map.of() : settings, initialFiles == null ? Map.of() : initialFiles);
+                settings == null ? Map.of() : settings, initialFiles == null ? Map.of() : initialFiles, modpack);
         Async<ResourcePoolModels.Draft> result = Async.pending();
         String accountId = currentAccount();
         timed(api.createDraft(creation.poolId(), request)).whenComplete((admission, failure) -> {
@@ -1136,9 +1224,8 @@ public final class ResourcePoolController {
                     result.fail(unknown("Server Draft Creation", failure));
                     return;
                 }
-                if (!draft.metadata().equals(new ResourcePoolModels.DraftMetadata(name, resources.gameId(),
-                        resources.profileId(), settings == null ? Map.of() : settings,
-                        initialFiles == null ? Map.of() : initialFiles))) {
+                if (!draft.metadata().equals(new ResourcePoolModels.DraftMetadata(request.name(), request.gameId(),
+                        request.profileId(), request.settings(), request.initialFiles(), request.modpack()))) {
                     result.fail(new IllegalStateException("Server Draft Identity Does Not Match"));
                     return;
                 }

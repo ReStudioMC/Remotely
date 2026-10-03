@@ -1,5 +1,6 @@
 package redxax.oxy.remotely.ui.server;
 
+import redxax.oxy.remotely.network.ForwardingMode;
 import redxax.oxy.remotely.util.TextLines;
 import redxax.oxy.remotely.network.NetworkDefinition;
 import redxax.oxy.remotely.network.NetworkDiscoveryResult;
@@ -19,7 +20,9 @@ import redxax.oxy.remotely.network.NetworkRuntimeSnapshot;
 import redxax.oxy.remotely.network.NetworkRuntimeNodePresence;
 import redxax.oxy.remotely.network.NetworkRuntimeNodeStatus;
 import redxax.oxy.remotely.network.NetworkSharedDataPolicy;
+import redxax.oxy.remotely.network.NetworkPreflightCheckStatus;
 import redxax.oxy.remotely.network.NetworkPreflightStatus;
+import redxax.oxy.remotely.network.NetworkPreflightReport;
 import redxax.oxy.remotely.network.NetworkValidationIssue;
 import redxax.oxy.remotely.network.RoutingGroup;
 import redxax.oxy.remotely.network.RoutingStrategy;
@@ -348,7 +351,7 @@ public class NetworkOverviewScreen extends ReScreen {
             description = "This server has not finished connecting to the shared network.";
         } else {
             title = "Network Setup";
-            description = "A saved network setting cannot currently be applied as configured.";
+            description = rawMessage == null || rawMessage.isBlank() ? "A saved network setting cannot currently be applied as configured." : rawMessage;
         }
         String label = member == null ? title : displayName(member) + " • " + title;
         return new AttentionItem(id, label, description, detail == null || detail.isBlank() ? rawMessage : detail, blocking, member);
@@ -451,15 +454,17 @@ public class NetworkOverviewScreen extends ReScreen {
         container.addWidget(identity.build());
 
         Setting.Builder maintenance = new Setting.Builder("Maintenance");
-        MountableButtonWidget reapply = actionRow("Reapply Network Settings", "Restore the saved proxy, server, and ReSync settings when files were changed outside Remotely.", "reload.png", this::reconcile);
+        MountableButtonWidget reapply = actionRow("Reapply Network Settings", "Repair forwarding, proxy routes, server settings, and ReSync settings. Stop network servers before applying key changes.", "reload.png", this::reconcile);
         reapply.setActive(networkSupports("reconcile"));
         maintenance.addRow("reapply", "", reapply);
         MountableButtonWidget entry = actionRow("Test Player Entry", "Verify that the proxy can send players to the configured servers.", "checkmark.png", this::runPreflight);
         entry.setActive(networkSupports("preflight"));
         maintenance.addRow("entry", "", entry);
-        MountableButtonWidget key = actionRow("Replace Connection Key", "Create a new private key shared by the proxy and managed servers. Use this if the current key may have been exposed.", "shades.png", this::prepareSecretRotation);
-        key.setActive(networkSupports("secretRotation"));
-        maintenance.addRow("key", "", key);
+        if (network.forwarding().mode() == ForwardingMode.MODERN) {
+            MountableButtonWidget key = actionRow("Replace Connection Key", "Create a new private key shared by the proxy and managed servers. Stop network servers before applying.", "shades.png", this::prepareSecretRotation);
+            key.setActive(networkSupports("secretRotation"));
+            maintenance.addRow("key", "", key);
+        }
         container.addWidget(maintenance.build());
 
         Setting.Builder runtime = new Setting.Builder("Network Commands");
@@ -1055,14 +1060,14 @@ public class NetworkOverviewScreen extends ReScreen {
 
     private Identifier memberIcon(NetworkMember member) {
         NetworkOverviewProvider.ServerView instance = instancesById.get(member.instanceId());
-        String icon = instance == null ? "" : instance.icon();
-        return iconIdentifier(icon.isBlank() ? member.isProxy() ? "network.png" : "server.png" : icon);
+        Identifier icon = instance == null ? null : instance.icon();
+        return icon == null ? Identifier.icon(member.isProxy() ? "network.png" : "server.png") : icon;
     }
 
     private void loadMemberIcon(NetworkMember member, MountableButtonWidget row) {
         NetworkOverviewProvider.ServerView instance = instancesById.get(member.instanceId());
-        if (instance != null && !instance.icon().isBlank()) {
-            Identifier icon = iconIdentifier(instance.icon());
+        if (instance != null && instance.icon() != null) {
+            Identifier icon = instance.icon();
             row.setIcon(icon);
             if (topologyWidget != null) {
                 topologyWidget.setMemberIcon(member.nodeId(), icon);
@@ -1072,10 +1077,6 @@ public class NetworkOverviewScreen extends ReScreen {
 
     private String serverSearchText(NetworkMember member) {
         return (displayName(member) + " " + member.routeName() + " " + member.address()).toLowerCase(Locale.ROOT);
-    }
-
-    private Identifier iconIdentifier(String value) {
-        return value != null && value.contains(":") ? Identifier.of(value) : Identifier.icon(value == null || value.isBlank() ? "unknown.png" : value);
     }
 
     private void syncServerRows() {
@@ -1709,9 +1710,24 @@ public class NetworkOverviewScreen extends ReScreen {
                 return;
             }
             boolean passed = report.status() == NetworkPreflightStatus.SUCCEEDED;
-            notification.update().message(passed ? "Join Path Ready" : "Join Path Needs Attention").description(report.summary()).type(passed ? Notification.Type.SUCCESS : Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
+            String summary = report.summary();
+            if (!passed) {
+                summary = report.checks().stream().filter(check -> check.status() == NetworkPreflightCheckStatus.FAILED).findFirst()
+                        .map(check -> report.summary() + ": " + check.label() + ". " + check.detail()).orElse(summary);
+            }
+            notification.update().message(passed ? "Join Path Ready" : "Join Path Needs Attention").description(summary).type(passed ? Notification.Type.SUCCESS : Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
+            openPreflightReport(report);
             refresh();
         }));
+    }
+
+    private void openPreflightReport(NetworkPreflightReport report) {
+        PopupWidget[] popup = new PopupWidget[1];
+        PopupWidget.Builder builder = new PopupWidget.Builder("Join Path Checks").width(440).setResizable(true).onClose(() -> popup[0].hide());
+        for (var check : report.checks()) {
+            builder.addMarkdown(check.label() + " · " + check.status().name(), check.detail());
+        }
+        popup[0] = showPopup(builder.build());
     }
 
     private void prepareSecretRotation() {
@@ -1898,10 +1914,11 @@ public class NetworkOverviewScreen extends ReScreen {
         }
         if (!requireNetworkCapability("reconcile")) return;
         applyingNetworkChange = true;
-        Notification notification = operationNotification("Healing Network", network.name());
+        boolean enableForwarding = network.forwarding().mode() == ForwardingMode.NONE;
+        Notification notification = operationNotification("Reapplying Network Settings", network.name());
         provider.reconcile(networkId).whenComplete((job, throwable) -> ScreenManager.getInstance().execute(() -> {
             applyingNetworkChange = false;
-            finishOperation(notification, job, throwable);
+            finishOperation(notification, job, throwable, enableForwarding ? "Modern Forwarding Enabled" : "Network Settings Reapplied");
         }));
     }
 

@@ -3,6 +3,7 @@ package redxax.oxy.remotely.ui.server;
 import redxax.oxy.remotely.RemotelyClient;
 import redxax.oxy.remotely.network.DesktopNetworkAccess;
 import redxax.oxy.remotely.network.NetworkConfigMutation;
+import redxax.oxy.remotely.network.ForwardingMode;
 import redxax.oxy.remotely.network.NetworkAttachPreparedPlan;
 import redxax.oxy.remotely.network.NetworkCreationPreparedPlan;
 import redxax.oxy.remotely.network.NetworkJob;
@@ -208,7 +209,8 @@ public class NetworkPlanReviewScreen extends ReScreen {
             startCreatedNetwork(notification);
             return;
         }
-        notification.update().message(rotationPrepared == null ? "Network Ready" : "Forwarding Secret Rotated").description(job.restartRequired() ? "Restart Affected Servers To Apply Changes" : job.message()).type(Notification.Type.SUCCESS).loading(false).autoSlideOut(true).commit();
+        String success = rotationPrepared == null ? "Network Ready" : rotationPrepared.baseNetwork().forwarding().mode() == ForwardingMode.NONE ? "Modern Forwarding Enabled" : "Forwarding Secret Rotated";
+        notification.update().message(success).description(job.restartRequired() ? "Restart Affected Servers To Apply Changes" : job.message()).type(Notification.Type.SUCCESS).loading(false).autoSlideOut(true).commit();
         openNetworkManager(job.networkId());
     }
 

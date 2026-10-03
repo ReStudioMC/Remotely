@@ -33,6 +33,17 @@ public final class NetworkDetachPlanner {
             issues.add(error("detach.last-backend", instanceId, "The last backend cannot be detached while the network exists"));
             return empty(network, issues);
         }
+        NetworkDefinition remaining = network.withoutMember(instanceId);
+        for (SyncRealm realm : remaining.syncRealms()) {
+            if (realm.dataFamilies().stream().anyMatch(family -> family != SyncDataFamily.PRESENCE) && realm.nodeIds().size() < 2) {
+                issues.add(error("detach.realm.insufficient", realm.id(), "Remove The Player Group " + realm.name() + " Before Detaching This Server"));
+            }
+        }
+        for (NetworkPathSync sync : remaining.sharedDataPolicy().pathSyncs()) {
+            if (sync.enabled() && sync.nodeIds().size() < 2) {
+                issues.add(error("detach.path-sync.insufficient", sync.id(), "Disable The File Sync " + sync.name() + " Before Detaching This Server"));
+            }
+        }
         Map<String, NetworkServerDescriptor> servers = input.servers();
         NetworkServerDescriptor proxy = servers.get(network.proxyInstanceId());
         NetworkServerDescriptor backend = servers.get(instanceId);
@@ -47,9 +58,7 @@ public final class NetworkDetachPlanner {
         }
         List<NetworkConfigMutation> mutations = new ArrayList<>();
         remove(mutations, proxy, "velocity.toml", ConfigurationFormat.TOML, "servers." + member.routeName(), false, true, "Remove Backend Route");
-        List<String> fallbackRoutes = network.routingGroups().stream().filter(group -> group.id().equals("fallback"))
-                .flatMap(group -> group.nodeIds().stream()).filter(nodeId -> !nodeId.equals(member.nodeId()))
-                .map(nodeId -> routeForNode(network, nodeId)).filter(route -> !route.isBlank()).toList();
+        List<String> fallbackRoutes = NetworkDesiredStatePlanner.fallbackRoutes(remaining);
         set(mutations, proxy, "velocity.toml", ConfigurationFormat.TOML, "servers.try", "", tomlArray(fallbackRoutes), false, true, "Update Fallback Order");
         for (RoutingGroup group : network.routingGroups()) {
             List<String> routes = group.nodeIds().stream().filter(nodeId -> !nodeId.equals(member.nodeId()))
@@ -68,6 +77,7 @@ public final class NetworkDetachPlanner {
             String maintenanceRoute = fallbackRoutes.isEmpty() ? runtimeRoutes.getFirst() : fallbackRoutes.getFirst();
             set(mutations, proxy, "plugins/resyncvelocity/network.properties", ConfigurationFormat.PROPERTIES, "maintenance-route", "", maintenanceRoute, false, true, "Update ReSync Maintenance Route");
             removeRuntimeRoute(mutations, proxy, member.routeName());
+            NetworkDesiredStatePlanner.planRoutingGroups(remaining.routingGroups(), proxy, mutations);
         }
         if (member.resyncEnabled()) {
             List<String> nodes = new ArrayList<>();
@@ -117,6 +127,7 @@ public final class NetworkDetachPlanner {
             set(mutations, proxy, "plugins/resyncvelocity/network.properties", ConfigurationFormat.PROPERTIES, "network.enabled", "", "false", false, true, "Disable ReSync Network Hub");
             set(mutations, proxy, "plugins/resyncvelocity/network.properties", ConfigurationFormat.PROPERTIES, "nodes", "", "", false, true, "Clear ReSync Network Nodes");
             set(mutations, proxy, "plugins/resyncvelocity/network.properties", ConfigurationFormat.PROPERTIES, "routes", "", "", false, true, "Clear ReSync Runtime Routes");
+            NetworkDesiredStatePlanner.planRoutingGroups(List.of(), proxy, mutations);
             set(mutations, proxy, "plugins/resyncvelocity/network.properties", ConfigurationFormat.PROPERTIES, "maintenance-route", "", "", false, true, "Clear ReSync Maintenance Route");
             set(mutations, proxy, "velocity.toml", ConfigurationFormat.TOML, "servers.try", "", "[]", false, true, "Clear Fallback Order");
             for (RoutingGroup group : network.routingGroups()) {
@@ -140,11 +151,29 @@ public final class NetworkDetachPlanner {
             issues.add(error("detach.restore-point.invalid", member.nodeId(), "Original server configuration belongs to another network member"));
             return;
         }
+        boolean managedSettings = restorePoint.entries().stream().anyMatch(entry -> entry.path().equals("plugins/.resync-network.properties"));
+        if (!managedSettings) {
+            set(mutations, member.instanceId(), "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES,
+                    "network.config-version", "1", false, "Set ReSync Settings Version");
+            set(mutations, member.instanceId(), "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES,
+                    "network.enabled", "false", false, "Disable ReSync Network Runtime");
+            remove(mutations, member.instanceId(), "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES,
+                    "network.enrollment-token", true, true, "Remove ReSync Enrollment Token");
+        }
         for (NetworkRestoreEntry entry : restorePoint.entries()) {
             if (entry.present()) {
                 set(mutations, member.instanceId(), entry.path(), entry.format(), entry.key(), restoreValues.resolve(entry), entry.sensitive(), "Restore " + entry.key());
             } else {
                 remove(mutations, member.instanceId(), entry.path(), entry.format(), entry.key(), entry.sensitive(), true, "Remove Network-Owned " + entry.key());
+            }
+            if (!managedSettings && entry.path().equals("plugins/ReSync/resync.properties") && entry.key().startsWith("network.")) {
+                if (entry.present()) {
+                    set(mutations, member.instanceId(), "plugins/.resync-network.properties", entry.format(), entry.key(),
+                            restoreValues.resolve(entry), entry.sensitive(), "Restore " + entry.key());
+                } else {
+                    remove(mutations, member.instanceId(), "plugins/.resync-network.properties", entry.format(), entry.key(),
+                            entry.sensitive(), true, "Remove Network-Owned " + entry.key());
+                }
             }
         }
     }
@@ -171,11 +200,12 @@ public final class NetworkDetachPlanner {
                     ? warning("dissolve.forwarding.adapter.unavailable", subject, "Proxy forwarding cleanup requires manual review for this server type")
                     : error("detach.forwarding.adapter.unavailable", subject, "Backend forwarding cannot be disabled safely because its configuration adapter is unavailable"));
         }
-        set(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.enabled", "", "false", false, true, "Disable ReSync Network Runtime");
-        remove(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.id", false, true, "Remove ReSync Network");
-        remove(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.node-id", false, true, "Remove ReSync Node");
-        remove(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.hub-url", false, true, "Remove ReSync Hub");
-        remove(mutations, backend, "plugins/ReSync/resync.properties", ConfigurationFormat.PROPERTIES, "network.enrollment-token", true, true, "Remove ReSync Enrollment Token");
+        set(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.config-version", "", "1", false, true, "Set ReSync Settings Version");
+        set(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.enabled", "", "false", false, true, "Disable ReSync Network Runtime");
+        remove(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.id", false, true, "Remove ReSync Network");
+        remove(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.node-id", false, true, "Remove ReSync Node");
+        remove(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.hub-url", false, true, "Remove ReSync Hub");
+        remove(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.enrollment-token", true, true, "Remove ReSync Enrollment Token");
         set(mutations, backend, "plugins/ReSync/network/node.credential", ConfigurationFormat.SECRET, "content", "", "", true, true, "Erase ReSync Node Credential");
     }
 

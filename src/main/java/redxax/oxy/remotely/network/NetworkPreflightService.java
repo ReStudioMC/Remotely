@@ -12,6 +12,7 @@ import restudio.rebase.instance.Instance;
 import restudio.rebase.instance.InstanceState;
 
 import java.io.ByteArrayOutputStream;
+import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -177,12 +178,11 @@ public class NetworkPreflightService {
     }
 
     private NetworkPreflightCheck routingCheck(NetworkDefinition network) {
-        RoutingGroup fallback = network.routingGroups().stream().filter(group -> group.id().equals("fallback")).findFirst().orElse(null);
-        if (fallback == null || fallback.nodeIds().isEmpty()) {
+        List<String> routes = NetworkDesiredStatePlanner.fallbackRoutes(network);
+        if (routes.isEmpty()) {
             return NetworkPreflightCheck.failed("routing", network.networkId(), "Fallback Route Published", "Fallback Order Is Empty");
         }
-        long missing = fallback.nodeIds().stream().filter(nodeId -> network.members().stream().noneMatch(member -> member.nodeId().equals(nodeId) && !member.isProxy())).count();
-        return missing == 0 ? NetworkPreflightCheck.passed("routing", network.networkId(), "Fallback Route Published", fallback.nodeIds().size() + " Fallback Servers") : NetworkPreflightCheck.failed("routing", network.networkId(), "Fallback Route Published", missing + " Fallback Servers Are Missing");
+        return NetworkPreflightCheck.passed("routing", network.networkId(), "Fallback Route Published", routes.size() + " Fallback Servers");
     }
 
     private NetworkPreflightCheck securityCheck(NetworkDefinition network) {
@@ -190,8 +190,11 @@ public class NetworkPreflightService {
         if (proxy == null) {
             return NetworkPreflightCheck.failed("security", network.networkId(), "Forwarding And Exposure", "Proxy Member Is Missing");
         }
-        if (network.forwarding().mode() != ForwardingMode.MODERN || secretStore.resolveForwardingSecret(network.forwarding().secretReference()).isBlank()) {
-            return NetworkPreflightCheck.failed("security", network.networkId(), "Forwarding And Exposure", "Modern Forwarding Is Not Ready");
+        if (network.forwarding().mode() != ForwardingMode.MODERN) {
+            return NetworkPreflightCheck.failed("security", network.networkId(), "Forwarding And Exposure", "Saved Forwarding Mode Is " + network.forwarding().mode().name() + ". Reapply Network Settings To Enable Modern Forwarding");
+        }
+        if (secretStore.resolveForwardingSecret(network.forwarding().secretReference()).isBlank()) {
+            return NetworkPreflightCheck.failed("security", network.networkId(), "Forwarding And Exposure", "Forwarding Key Is Unavailable In The Credential Store");
         }
         boolean crossHost = network.members().stream().anyMatch(member -> !member.isProxy() && !member.hostScope().equals(proxy.hostScope()));
         if (crossHost && !network.forwarding().firewallVerified()) {
@@ -223,14 +226,18 @@ public class NetworkPreflightService {
             writePacket(output, handshakeBytes.toByteArray());
             writePacket(output, new byte[]{0});
             int packetLength = readVarInt(input);
-            if (packetLength < 1 || packetLength > MAX_STATUS_PACKET || readVarInt(input) != 0) {
+            if (packetLength < 1 || packetLength > MAX_STATUS_PACKET) {
                 throw new IOException("Proxy Returned An Invalid Status Packet");
             }
-            int jsonLength = readVarInt(input);
-            if (jsonLength < 2 || jsonLength > MAX_STATUS_PACKET) {
+            byte[] packetBytes = input.readNBytes(packetLength);
+            if (packetBytes.length != packetLength) throw new IOException("Proxy Status Response Ended Early");
+            DataInputStream packet = new DataInputStream(new ByteArrayInputStream(packetBytes));
+            if (readVarInt(packet) != 0) throw new IOException("Proxy Returned An Invalid Status Packet");
+            int jsonLength = readVarInt(packet);
+            if (jsonLength < 2 || jsonLength != packet.available()) {
                 throw new IOException("Proxy Returned An Invalid Status Payload");
             }
-            byte[] jsonBytes = input.readNBytes(jsonLength);
+            byte[] jsonBytes = packet.readNBytes(jsonLength);
             if (jsonBytes.length != jsonLength) {
                 throw new IOException("Proxy Status Response Ended Early");
             }

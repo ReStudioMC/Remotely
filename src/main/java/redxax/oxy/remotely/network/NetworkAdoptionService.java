@@ -4,6 +4,7 @@ import redxax.oxy.remotely.libs.snakeyaml.LoaderOptions;
 import redxax.oxy.remotely.libs.snakeyaml.Yaml;
 import redxax.oxy.remotely.libs.snakeyaml.constructor.SafeConstructor;
 import restudio.rebase.api.unified.InstanceApi;
+import restudio.rebase.backend.ServerBackend;
 import restudio.rebase.instance.Instance;
 import restudio.rebase.instance.loaders.ModLoader;
 
@@ -70,6 +71,9 @@ public class NetworkAdoptionService {
         NetworkAdoptionRoute route = report.routes().stream().filter(candidate -> candidate.routeName().equals(routeName)).findFirst().orElseThrow(() -> new IllegalArgumentException("Velocity route is unavailable: " + routeName));
         if (instance.getInstanceId().equals(report.proxyInstanceId()) || instance.isProxyServer()) {
             throw new IllegalArgumentException("A proxy cannot be assigned to a backend route");
+        }
+        if (!atomicConfiguration(instance)) {
+            throw new IllegalArgumentException("This Backend Cannot Be Managed Safely. Mark Its Route As External And Verify Forwarding Manually");
         }
         boolean available = instances != null && instances.stream().filter(candidate -> candidate != null).anyMatch(candidate -> candidate.getInstanceId().equals(instance.getInstanceId()));
         if (!available) {
@@ -290,13 +294,24 @@ public class NetworkAdoptionService {
             return List.of();
         }
         String proxyScope = NetworkHostScope.resolve(proxy);
-        return instances.stream().filter(instance -> instance != null && !instance.getInstanceId().equals(proxy.getInstanceId()) && !instance.isProxyServer() && !managedInstances.contains(instance.getInstanceId())).filter(instance -> observedPort(instance) == route.port()).filter(instance -> {
+        return instances.stream().filter(instance -> instance != null && !instance.getInstanceId().equals(proxy.getInstanceId())
+            && !instance.isProxyServer() && !managedInstances.contains(instance.getInstanceId()) && atomicConfiguration(instance))
+            .filter(instance -> observedPort(instance) == route.port()).filter(instance -> {
             if (loopback(route.host())) {
                 return NetworkHostScope.resolve(instance).equals(proxyScope);
             }
             String host = instance.getBackendConfig() == null ? "" : instance.getBackendConfig().credentials.getOrDefault("host", "");
             return route.host().equalsIgnoreCase(host);
         }).toList();
+    }
+
+    private boolean atomicConfiguration(Instance instance) {
+        try {
+            ServerBackend backend = instance.getBackend();
+            return backend != null && backend.getFileSystem() != null && backend.getFileSystem().supportsAtomicWrites();
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
     }
 
     private int observedPort(Instance instance) {

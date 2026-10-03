@@ -82,7 +82,10 @@ public final class ResourcePoolScreen extends ReScreen {
     private String highlightedServerId;
     private Accent highlightedOriginal;
     private ResourcePoolController.Snapshot displayed;
+    private List<ResourcePoolModels.Rate> displayedRates = List.of();
+    private boolean createRequested;
     private String layoutStamp;
+    private ResourcePurchaseFlow purchaseFlow;
 
     private static final class PendingChange {
         private final UUID poolId;
@@ -111,6 +114,7 @@ public final class ResourcePoolScreen extends ReScreen {
         this.parent = parent;
         this.remotelyClient = remotelyClient;
         this.modpack = modpack;
+        createRequested = modpack != null;
         enableNavigation(parent);
         TaskScheduler scheduler = remotelyClient != null && remotelyClient.getComposition() != null
                 ? remotelyClient.getComposition().scheduler() : TaskScheduler.unavailable();
@@ -120,19 +124,44 @@ public final class ResourcePoolScreen extends ReScreen {
 
     public static void openCreate(Screen parent, RemotelyClient remotelyClient) {
         ResourcePoolScreen resources = new ResourcePoolScreen(parent, remotelyClient);
-        boolean[] opened = {false};
-        resources.controller.listen(snapshot -> resources.host().application().execute(() -> {
-            if (opened[0] || snapshot.loading() || snapshot.generation() == 0) return;
-            opened[0] = true;
-            if (snapshot.pools().size() == 1 && !snapshot.poolPages().hasMore()) {
-                ResourcePoolModels.Pool pool = snapshot.pools().getFirst().pool();
-                resources.handoff = true;
-                ScreenManager.getInstance().navigate(resources, new ServerConfigurationScreen(resources, remotelyClient,
-                        resources.controller.begin(pool.id())));
-            }
-        }));
+        resources.createRequested = true;
         ScreenManager.getInstance().replaceScreen(parent, resources);
-        resources.controller.refresh();
+    }
+
+    private void continueCreation(ResourcePoolController.Snapshot snapshot) {
+        if (!createRequested || closed || snapshot.loading() || snapshot.poolPages().loading() || snapshot.generation() == 0 || !snapshot.message().isBlank()) return;
+        if (snapshot.pools().isEmpty()) return;
+        createRequested = false;
+        if (snapshot.pools().size() == 1 && !snapshot.poolPages().hasMore()) {
+            create(snapshot.pools().getFirst().pool().id());
+            return;
+        }
+        PopupWidget[] popup = new PopupWidget[1];
+        PopupWidget.Builder builder = new PopupWidget.Builder(modpack == null ? "Choose A Resource Pool" : "Choose A Modpack Pool")
+                .width(430).virtualizeRows(true)
+                .onClose(() -> popup[0].hide());
+        for (ResourcePoolController.PoolView view : snapshot.pools()) {
+            ResourcePoolModels.Pool pool = view.pool();
+            ResourcePoolModels.Resources available = pool.balance().available();
+            MountableButtonWidget choice = new MountableButtonWidget.Builder(pool.domain().location() + " • " + pool.domain().cpuClass())
+                    .description("Available: " + specs(available)).iconPath("pool.png").onClick(() -> {
+                        popup[0].hide();
+                        if (poolView(pool.id()) != null && snapshot.accountId().equals(controller.snapshot().accountId())) {
+                            create(pool.id());
+                        } else {
+                            new Notification("Resource Pool Changed", "Refresh Resources And Choose A Pool Again", Notification.Type.WARN);
+                        }
+                    }).build();
+            builder.addRow(new PopupWidget.PopupRow.Builder("", choice).minHeight(30).build());
+        }
+        if (snapshot.poolPages().hasMore()) {
+            builder.addTitleAction("Load More", () -> {
+                popup[0].hide();
+                createRequested = true;
+                controller.loadMorePools();
+            }, PopupWidget.TitleActionRole.SECONDARY);
+        }
+        popup[0] = show(builder.build());
     }
 
     private ServerScreenHost host() {
@@ -253,17 +282,20 @@ public final class ResourcePoolScreen extends ReScreen {
             display(snapshot);
             if (!pendingChanges.isEmpty()) advanceChanges();
             updateChangeActions();
+            continueCreation(snapshot);
         }));
         controller.refresh();
     }
 
     @Override
     public void tick() {
+        if (purchaseFlow != null) purchaseFlow.tick();
         super.tick();
         if (closed) return;
         display(controller.snapshot());
         ServerScreenHost.AccountIdentity identity = host().accountIdentity();
         if (observedAuthenticated != identity.authenticated() || !observedAccount.equals(identity.subjectId())) {
+            if (purchaseFlow != null) purchaseFlow.close();
             observedAccount = identity.subjectId();
             observedAuthenticated = identity.authenticated();
             controller.refresh();
@@ -280,9 +312,11 @@ public final class ResourcePoolScreen extends ReScreen {
 
     private void display(ResourcePoolController.Snapshot snapshot) {
         if (closed || content == null) return;
-        if (displayed == snapshot) return;
-        if (!sameContent(displayed, snapshot)) render(snapshot);
+        List<ResourcePoolModels.Rate> rates = controller.rates();
+        if (displayed == snapshot && displayedRates.equals(rates)) return;
+        if (!sameContent(displayed, snapshot) || !displayedRates.equals(rates)) render(snapshot);
         displayed = snapshot;
+        displayedRates = rates;
     }
 
     private record PoolWatch(UUID poolId, String accountId, Consumer<ResourcePoolController.PoolView> listener) {}
@@ -339,10 +373,10 @@ public final class ResourcePoolScreen extends ReScreen {
                 return;
             }
         }
-        if (!snapshot.loading() && !snapshot.offers().isEmpty()) {
-            content.addWidget(new IconButton.Builder().size(rowWidth(), 28).label("Add Resources")
-                    .hint("Review Available Resource Offers").imagePath("Reactor.png")
-                    .onClick(() -> showOffers(snapshot.offers())).build());
+        if (!snapshot.loading() && !snapshot.offers().isEmpty() && !controller.rates().isEmpty()) {
+            content.addWidget(new IconButton.Builder().size(rowWidth(), 18).label("Buy Resources").imagePath("Reactor.png")
+                    .accentType(ThemeManager.getAccent("danger")).enableGradient(true)
+                    .onClick(() -> showOffers(snapshot.offers(), null)).build());
         }
         renderPurchases(snapshot);
         if (snapshot.pools().isEmpty()) {
@@ -360,8 +394,10 @@ public final class ResourcePoolScreen extends ReScreen {
 
     private String layoutStamp(ResourcePoolController.Snapshot snapshot) {
         StringBuilder stamp = new StringBuilder(snapshot.accountId()).append('|').append(snapshot.message())
-                .append('|').append(snapshot.pools().isEmpty() && (snapshot.generation() == 0 || snapshot.loading()));
-        snapshot.offers().forEach(offer -> stamp.append('|').append(offer.id()));
+                .append('|').append(snapshot.loading()).append('|')
+                .append(snapshot.pools().isEmpty() && snapshot.generation() == 0);
+        snapshot.offers().forEach(offer -> stamp.append('|').append(offer));
+        controller.rates().forEach(rate -> stamp.append('|').append(rate));
         snapshot.purchases().forEach(purchase -> stamp.append('|').append(purchase.purchaseId()).append(purchase.status()));
         stamp.append('|').append(snapshot.poolPages().hasMore()).append(snapshot.poolPages().loading())
                 .append(snapshot.purchasePages().hasMore()).append(snapshot.purchasePages().loading());
@@ -453,6 +489,17 @@ public final class ResourcePoolScreen extends ReScreen {
         PoolAllocationEditor editor = editors.computeIfAbsent(pool.id(), ignored -> new PoolAllocationEditor());
         editor.accept(view);
         renderPoolBoard(editor);
+        List<ResourcePoolModels.Offer> matching = controller.snapshot().offers().stream()
+                .filter(offer -> offer.location().equals(pool.domain().location())
+                        && offer.cpuClass().equals(pool.domain().cpuClass()))
+                .toList();
+        if (!controller.snapshot().loading() && !matching.isEmpty() && !controller.rates().isEmpty()) {
+            MountableButtonWidget expand = ResourcePurchaseFlow.information("Expand Pool", "Choose Your New Resource Capacity", "Reactor.png");
+            expand.setSize(rowWidth(), 30);
+            expand.setCursorHoverReactive(true);
+            expand.setOnClick(() -> showOffers(matching, pool.id()));
+            content.addWidget(expand);
+        }
         List<ResourcePoolModels.Draft> pendingDrafts = view.drafts().stream()
                 .filter(draft -> draft.state() != ResourcePoolModels.DraftState.ACTIVE).toList();
         if (!pendingDrafts.isEmpty()) {
@@ -870,8 +917,7 @@ public final class ResourcePoolScreen extends ReScreen {
     }
 
     private static String specs(ResourcePoolModels.Resources resources) {
-        return resources.ramMiB() + " MiB RAM • " + resources.cpuQuotaPercent() + "% CPU • "
-                + resources.diskMiB() + " MiB Disk";
+        return ResourcePurchaseFlow.specs(resources);
     }
 
     private void loadServerNames(String accountId) {
@@ -958,62 +1004,42 @@ public final class ResourcePoolScreen extends ReScreen {
         return "Ready To Review And Activate";
     }
 
-    private void showOffers(List<ResourcePoolModels.Offer> offers) {
-        PopupWidget[] popup = new PopupWidget[1];
-        PopupWidget.Builder builder = new PopupWidget.Builder("Add Resources").width(430).virtualizeRows(true)
-                .onClose(() -> popup[0].hide());
-        for (ResourcePoolModels.Offer offer : offers) {
-            IconButton card = new IconButton.Builder().size(380, 30)
-                    .label(offer.label() + " • " + price(offer))
-                    .hint(offer.locationLabel() + " • " + offer.cpuClassLabel() + " • " + offerSpecs(offer))
-                    .imagePath("Reactor.png").onClick(() -> {
-                popup[0].hide();
-                showOfferReview(offer);
-            }).build();
-            builder.addRow(new PopupWidget.PopupRow.Builder("", card).minHeight(30).build());
-        }
-        popup[0] = show(builder.build());
-    }
-
-    private void showOfferReview(ResourcePoolModels.Offer offer) {
-        ResourcePoolController.PurchaseIntent intent;
+    private void showOffers(List<ResourcePoolModels.Offer> offers, UUID poolId) {
+        if (purchaseFlow != null) purchaseFlow.close();
         try {
-            intent = controller.beginPurchase(offer);
+            purchaseFlow = new ResourcePurchaseFlow(controller, offers, poolId, width, height,
+                    action -> host().application().execute(action), () -> closed, this::submitCheckout);
+            show(purchaseFlow.popup());
         } catch (RuntimeException failure) {
-            new Notification("Purchase Needs Attention", ResourcePoolController.message(failure), Notification.Type.ERROR);
-            return;
+            new Notification("Resource Store Unavailable", ResourcePoolController.message(failure), Notification.Type.WARN);
         }
-        PopupWidget[] popup = new PopupWidget[1];
-        PopupWidget.Builder builder = new PopupWidget.Builder("Review Resource Purchase").width(400)
-                .addTitleAction("Continue", () -> {
-                    popup[0].hide();
-                    submitCheckout(intent, offer);
-                }, "Create Checkout", PopupWidget.TitleActionRole.PRIMARY)
-                .onClose(() -> {
-                    controller.discardPurchase(intent);
-                    popup[0].hide();
-                });
-        builder.addRow(detail("Offer", offer.label()));
-        builder.addRow(detail("Plan", offer.planName()));
-        builder.addRow(detail("Domain", offer.locationLabel() + " • " + offer.cpuClassLabel()));
-        builder.addRow(detail("Compute", offer.ramMiB() + " MiB RAM • " + offer.cpuQuotaPercent() + "% CPU"));
-        builder.addRow(detail("Disk", offer.diskMiB() + " MiB"));
-        builder.addRow(detail("Price", price(offer)));
-        builder.addRow(detail("Availability", "Capacity Is Granted Only After Payment And Review"));
-        popup[0] = show(builder.build());
     }
 
-    private void submitCheckout(ResourcePoolController.PurchaseIntent intent, ResourcePoolModels.Offer offer) {
+    private static String money(String currency, String cents) {
+        return ("USD".equals(currency) ? "$" : currency + " ") + new BigDecimal(cents).movePointLeft(2).setScale(2).toPlainString();
+    }
+
+    private void submitCheckout(ResourcePoolController.PurchaseIntent intent, ResourcePoolModels.Offer offer,
+                                ResourcePoolModels.Quote quote) {
+        String checkoutAccount = accountId();
         Notification notice = operationNotice("Creating Checkout", offer.label());
         controller.checkout(intent).whenComplete((purchase, failure) -> host().application().execute(() -> {
-            if (!closed) {
-                finishCheckout(notice, purchase, failure, offer);
+            if (!closed && checkoutAccount.equals(accountId()) && checkoutAccount.equals(controller.snapshot().accountId())) {
+                finishCheckout(notice, purchase, failure, offer, quote);
+            } else if (!closed) {
+                notice.update().message("Account Changed").description("Open Resources In The Original Account To View Checkout")
+                        .type(Notification.Type.INFO).loading(false).autoSlideOut(true).commit();
+            } else {
+                notice.update().message(failure == null ? "Checkout Updated" : "Checkout Needs Attention")
+                        .description(failure == null ? "Open Resources To View Your Purchase" : ResourcePoolController.message(failure))
+                        .type(failure == null ? Notification.Type.INFO : Notification.Type.ERROR)
+                        .loading(false).autoSlideOut(true).commit();
             }
         }));
     }
 
     private void finishCheckout(Notification notice, ResourcePoolController.PurchaseResult purchase, Throwable failure,
-                                ResourcePoolModels.Offer offer) {
+                                ResourcePoolModels.Offer offer, ResourcePoolModels.Quote quote) {
         if (failure != null) {
             notice.update().message("Checkout Needs Attention").description(ResourcePoolController.message(failure))
                     .type(Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
@@ -1046,32 +1072,30 @@ public final class ResourcePoolScreen extends ReScreen {
         if (purchase.checkoutUrl() != null && !purchase.checkoutUrl().isBlank()
                 && (purchase.state() == ResourcePoolModels.PurchaseState.PENDING
                 || purchase.state() == ResourcePoolModels.PurchaseState.NEEDS_REVIEW)) {
-            showCheckoutLink(purchase.checkoutUrl(), offer, title(purchase.state().name()));
+            showCheckoutLink(purchase.checkoutUrl(), offer, title(purchase.state().name()), quote);
         }
         controller.refresh();
     }
 
     private void showPurchase(ResourcePoolModels.PurchaseStatus purchase, ResourcePoolModels.Offer offer) {
         String label = offer == null ? "Resource Purchase" : offer.label();
-        showCheckoutLink(purchase.checkoutUrl(), offer, label + " • " + title(purchase.status().name()));
+        showCheckoutLink(purchase.checkoutUrl(), offer, label + " • " + title(purchase.status().name()), null);
     }
 
-    private void showCheckoutLink(String url, ResourcePoolModels.Offer offer, String state) {
+    private void showCheckoutLink(String url, ResourcePoolModels.Offer offer, String state, ResourcePoolModels.Quote quote) {
         PopupWidget[] popup = new PopupWidget[1];
-        PopupWidget.Builder builder = new PopupWidget.Builder("Resource Checkout").width(400)
-                .addTitleAction("Open Checkout", () -> {
+        PopupWidget.Builder builder = new PopupWidget.Builder("Reactor • Secure Checkout").width(480).padding(10).rowGap(8)
+                .onClose(() -> popup[0].hide());
+        String value = quote == null ? "Continue Your Purchase" : money(quote.price().currency(), quote.dueCents());
+        builder.addRow(new PopupWidget.PopupRow.Builder("", ResourcePurchaseFlow.information(
+                "Whop Checkout • " + value, state, "Reactor.png")).build());
+        if (quote != null) builder.addRow(new PopupWidget.PopupRow.Builder("", ResourcePurchaseFlow.information(
+                "Resources", ResourcePurchaseFlow.specs(quote.price().resources()), "pool.png")).build());
+        builder.addRow(new PopupWidget.PopupRow.Builder("", new AnimatedButton.Builder().size(300, 18)
+                .label("Open Secure Checkout").onClick(() -> {
                     popup[0].hide();
                     host().openExternal(url);
-                }, "Open Secure Checkout", PopupWidget.TitleActionRole.PRIMARY)
-                .onClose(() -> popup[0].hide());
-        builder.addRow(detail("Status", state));
-        if (offer != null) {
-            builder.addRow(detail("Offer", offer.label()));
-            builder.addRow(detail("Resources", offerSpecs(offer)));
-            builder.addRow(detail("Domain", offer.locationLabel() + " • " + offer.cpuClassLabel()));
-            builder.addRow(detail("Price", price(offer)));
-        }
-        builder.addRow(detail("Availability", "Payment And Review Must Finish Before Capacity Is Granted"));
+                }).build()).build());
         popup[0] = show(builder.build());
     }
 
@@ -1350,7 +1374,7 @@ public final class ResourcePoolScreen extends ReScreen {
         if (!resources.canActivate() && !controller.snapshot().offers().isEmpty()) {
             builder.addTitleAction("Add Resources", () -> {
                 popup[0].hide();
-                showOffers(controller.snapshot().offers());
+                showOffers(controller.snapshot().offers(), null);
             }, "Review Available Resource Offers", PopupWidget.TitleActionRole.SECONDARY);
         }
         builder.addRow(new PopupWidget.PopupRow.Builder("Setup RAM", resources.control(0))
@@ -1499,20 +1523,6 @@ public final class ResourcePoolScreen extends ReScreen {
         return offers.stream().filter(offer -> offer.id().equals(offerId)).findFirst().orElse(null);
     }
 
-    private static String offerSpecs(ResourcePoolModels.Offer offer) {
-        return offer.ramMiB() + " MiB RAM • " + offer.cpuQuotaPercent() + "% CPU • " + offer.diskMiB() + " MiB Disk";
-    }
-
-    private static String price(ResourcePoolModels.Offer offer) {
-        if (offer.priceCurrency() == null || offer.billingPeriodLabel() == null) {
-            return "See Checkout For Price And Billing Period";
-        }
-        String cents = offer.priceCents();
-        String padded = cents.length() < 3 ? "0".repeat(3 - cents.length()) + cents : cents;
-        return offer.priceCurrency() + " " + padded.substring(0, padded.length() - 2) + "."
-                + padded.substring(padded.length() - 2) + " • " + offer.billingPeriodLabel();
-    }
-
     private static String text(String value, String fallback) {
         return value == null || value.isBlank() ? fallback : value;
     }
@@ -1549,6 +1559,7 @@ public final class ResourcePoolScreen extends ReScreen {
             return;
         }
         closed = true;
+        if (purchaseFlow != null) purchaseFlow.close();
         ScreenManager.getInstance().goBack(this, parent);
     }
 
@@ -1562,6 +1573,7 @@ public final class ResourcePoolScreen extends ReScreen {
     @Override
     public void removed() {
         closed = true;
+        if (purchaseFlow != null) purchaseFlow.close();
         setLoading(false);
         if (!handoff) {
             if (applyingChanges()) finishChanges("Submitted Changes May Still Finish. Refresh Resources Before Retrying", Notification.Type.WARN);

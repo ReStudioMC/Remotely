@@ -58,6 +58,19 @@ public class NetworkJobManager {
         return Optional.ofNullable(jobs.get(jobId));
     }
 
+    public synchronized void completeCreationMetadata(String jobId) {
+        NetworkJob current = requireJob(jobId);
+        if (current.type() != NetworkJobType.QUICK_CREATE || current.status() != NetworkJobStatus.SUCCEEDED) {
+            throw new IllegalStateException("Network Creation Has Not Succeeded");
+        }
+        if (!"true".equals(current.context().get("creationMetadataPending"))) return;
+        Map<String, String> context = new LinkedHashMap<>(current.context());
+        context.put("creationMetadataPending", "false");
+        persist(new NetworkJob(current.schemaVersion(), current.jobId(), current.networkId(), current.networkRevision(),
+                current.type(), current.status(), current.initiator(), current.createdAt(), current.updatedAt(), current.attempt(),
+                current.message(), context, current.documents(), current.issues()));
+    }
+
     public Async<NetworkJob> execute(NetworkDefinition network, NetworkReconciliationPlan plan, Collection<Instance> instances, NetworkJobType type, String initiator) {
         return execute(network, plan, instances, type, initiator, Map.of());
     }

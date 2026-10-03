@@ -286,9 +286,14 @@ public class NetworkRuntimeMonitor implements AutoCloseable {
             }
             NetworkMember proxy = network.proxyMember();
             Instance proxyInstance = proxy == null ? null : instancesById.get(proxy.instanceId());
+            Target previous = targets.get(network.networkId());
+            if (previous != null && previous.revision() == network.revision() && previous.proxyInstance() == proxyInstance && previous.runtime().equals(runtime)) {
+                nextTargets.put(network.networkId(), previous);
+                continue;
+            }
             List<NetworkRoute> routes = network.members().stream().filter(member -> !member.isProxy()).map(member -> new NetworkRoute(member.nodeId(), member.routeName(), member.address(), member.port())).toList();
             List<NetworkRoutingGroup> routingGroups = network.routingGroups().stream().map(group -> new NetworkRoutingGroup(group.id(), group.name(), NetworkRoutingStrategy.valueOf(group.strategy().name()), group.nodeIds(), group.weights(), group.fallbackGroupId(), group.forcedHosts(), group.permission())).toList();
-            String maintenanceRoute = network.routingGroups().stream().filter(group -> group.id().equals("fallback")).flatMap(group -> group.nodeIds().stream()).map(nodeId -> routes.stream().filter(route -> route.nodeId().equals(nodeId)).map(NetworkRoute::routeName).findFirst().orElse("")).filter(route -> !route.isBlank()).findFirst().orElse(routes.isEmpty() ? "" : routes.getFirst().routeName());
+            String maintenanceRoute = NetworkDesiredStatePlanner.fallbackRoutes(network).stream().findFirst().orElse("");
             Target target = new Target(network.networkId(), network.revision(), proxy == null ? "" : proxy.nodeId(), NetworkRuntimeIdentity.operatorNodeId(network.networkId()), runtime, proxyInstance, maintenanceRoute, routes, routingGroups);
             nextTargets.put(network.networkId(), target);
         }
@@ -633,7 +638,7 @@ public class NetworkRuntimeMonitor implements AutoCloseable {
         private void reconcileRoutes() {
             String requestId = "routes-" + target.revision();
             NetworkRequestContext context = new NetworkRequestContext(PROTOCOL_VERSION, target.networkId(), target.operatorNodeId(), requestId, deadline(10), Set.of("routes.write"));
-            byte[] payload = NetworkRouteSetCodec.encode(new NetworkRouteSet(target.revision(), target.maintenanceRoute(), target.routes(), target.routingGroups()));
+            byte[] payload = target.routePayload();
             send(codec.encode(new NetworkFrame(context, NetworkChannels.ROUTING, NetworkFrameType.ROUTE_RECONCILE, payload)));
         }
 
@@ -760,11 +765,22 @@ public class NetworkRuntimeMonitor implements AutoCloseable {
         }
     }
 
-    private record Target(String networkId, long revision, String hubNodeId, String operatorNodeId, NetworkRuntimePolicy runtime, Instance proxyInstance, String maintenanceRoute, List<NetworkRoute> routes, List<NetworkRoutingGroup> routingGroups) {
+    private record Target(String networkId, long revision, String hubNodeId, String operatorNodeId, NetworkRuntimePolicy runtime, Instance proxyInstance, String maintenanceRoute, List<NetworkRoute> routes, List<NetworkRoutingGroup> routingGroups, byte[] routePayload) {
+        private Target(String networkId, long revision, String hubNodeId, String operatorNodeId, NetworkRuntimePolicy runtime, Instance proxyInstance, String maintenanceRoute, List<NetworkRoute> routes, List<NetworkRoutingGroup> routingGroups) {
+            this(networkId, revision, hubNodeId, operatorNodeId, runtime, proxyInstance, maintenanceRoute, routes, routingGroups,
+                    NetworkRouteSetCodec.encode(new NetworkRouteSet(revision, maintenanceRoute, routes, routingGroups)));
+        }
+
         private Target {
             maintenanceRoute = maintenanceRoute == null ? "" : maintenanceRoute;
             routes = List.copyOf(routes);
             routingGroups = List.copyOf(routingGroups);
+            routePayload = routePayload.clone();
+        }
+
+        @Override
+        public byte[] routePayload() {
+            return routePayload.clone();
         }
     }
 
