@@ -1,5 +1,7 @@
 package redxax.oxy.remotely.network;
 
+import java.util.Locale;
+
 public record NetworkRuntimePolicy(boolean enabled, String hubAddress, int hubPort, NetworkTransportSecurity security, boolean transportReady) {
     public NetworkRuntimePolicy {
         hubAddress = hubAddress == null ? "" : hubAddress.trim();
@@ -13,6 +15,12 @@ public record NetworkRuntimePolicy(boolean enabled, String hubAddress, int hubPo
 
     public static NetworkRuntimePolicy disabled() {
         return new NetworkRuntimePolicy(false, "", 0, NetworkTransportSecurity.LOOPBACK, false);
+    }
+
+    public static boolean sharesLoopback(NetworkMember proxy, NetworkMember backend) {
+        if (proxy == null || backend == null || !proxy.hostScope().equals(backend.hostScope())) return false;
+        String scope = proxy.hostScope().toLowerCase(Locale.ROOT);
+        return scope.equals("local") || scope.startsWith("ssh:") && scope.length() > 4;
     }
 
     public String hubUrl() {

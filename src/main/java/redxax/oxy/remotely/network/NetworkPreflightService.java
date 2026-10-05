@@ -38,8 +38,16 @@ public class NetworkPreflightService {
     private final NetworkSecretStore secretStore;
     private final NetworkConfigurationTransaction configurationTransaction;
     private final NetworkProviderAllocationService providerAllocationService;
+    private final NetworkRuntimeMonitor runtimeMonitor;
 
     public NetworkPreflightService(NetworkDiscoveryService discoveryService, NetworkDesiredStatePlanner desiredStatePlanner, NetworkSecretStore secretStore, NetworkConfigurationTransaction configurationTransaction) {
+        this(discoveryService, desiredStatePlanner, secretStore, configurationTransaction, null);
+    }
+
+    public NetworkPreflightService(NetworkDiscoveryService discoveryService, NetworkDesiredStatePlanner desiredStatePlanner,
+                                   NetworkSecretStore secretStore, NetworkConfigurationTransaction configurationTransaction,
+                                   NetworkRuntimeMonitor runtimeMonitor) {
+        this.runtimeMonitor = runtimeMonitor;
         this.discoveryService = discoveryService;
         this.desiredStatePlanner = desiredStatePlanner;
         this.secretStore = secretStore;
@@ -58,6 +66,7 @@ public class NetworkPreflightService {
         immediate.addAll(findingChecks(discovery.issues()));
         immediate.add(routingCheck(network));
         immediate.add(securityCheck(network));
+        immediate.addAll(runtimeChecks(network));
         Async<NetworkPreflightCheck> configuration = configurationCheck(network, plan, instances);
         NetworkMember proxyMember = network.proxyMember();
         Instance proxy = proxyMember == null ? null : instancesById.get(proxyMember.instanceId());
@@ -72,6 +81,30 @@ public class NetworkPreflightService {
             asynchronous.forEach(future -> checks.add(future.join()));
             return List.copyOf(checks);
         });
+    }
+
+    private List<NetworkPreflightCheck> runtimeChecks(NetworkDefinition network) {
+        if (!network.runtime().enabled()) return List.of();
+        NetworkRuntimeSnapshot snapshot = runtimeMonitor == null ? null : runtimeMonitor.snapshot(network);
+        List<NetworkPreflightCheck> checks = new ArrayList<>();
+        String endpoint = network.runtime().hubUrl();
+        if (snapshot == null || !snapshot.connected()) {
+            String detail = snapshot == null ? "Network Runtime Monitor Is Unavailable" : snapshot.message();
+            checks.add(NetworkPreflightCheck.failed("runtime-hub", network.networkId(), "ReSync Hub Connected", endpoint + ": " + detail));
+            return List.copyOf(checks);
+        }
+        checks.add(NetworkPreflightCheck.passed("runtime-hub", network.networkId(), "ReSync Hub Connected", endpoint));
+        long now = System.currentTimeMillis();
+        for (NetworkMember member : network.members()) {
+            if (member.isProxy() || !member.isManaged() || !member.resyncEnabled()) continue;
+            NetworkRuntimeNodePresence presence = snapshot.node(member.nodeId()).orElse(null);
+            boolean healthy = presence != null && presence.fresh(now)
+                && (presence.status() == NetworkRuntimeNodeStatus.ONLINE || presence.status() == NetworkRuntimeNodeStatus.MAINTENANCE);
+            checks.add(healthy
+                ? NetworkPreflightCheck.passed("runtime-" + member.nodeId(), member.nodeId(), member.routeName() + " Connected", "Fresh ReSync Heartbeat Received")
+                : NetworkPreflightCheck.failed("runtime-" + member.nodeId(), member.nodeId(), member.routeName() + " Connected", "No Fresh ReSync Heartbeat. Check The Backend Log And Managed Network Settings"));
+        }
+        return List.copyOf(checks);
     }
 
     private List<NetworkPreflightCheck> findingChecks(List<NetworkValidationIssue> issues) {

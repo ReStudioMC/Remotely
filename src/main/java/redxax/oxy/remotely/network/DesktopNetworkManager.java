@@ -6,6 +6,7 @@ import redxax.oxy.remotely.util.AsyncTools;
 
 import redxax.oxy.remotely.util.BrowserSafeState;
 import redxax.oxy.remotely.DesktopRemotelyPaths;
+import redxax.oxy.remotely.flow.ui.ReSyncProvisioningService;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
@@ -41,6 +42,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.TimeUnit;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -115,7 +117,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
         this.configurationTransaction = new NetworkConfigurationTransaction();
         this.jobManager = new NetworkJobManager(dataDirectory, configurationTransaction);
         this.lifecycleJobManager = new NetworkLifecycleJobManager(dataDirectory, runtimeMonitor);
-        this.preflightManager = new NetworkPreflightManager(dataDirectory, new NetworkPreflightService(discoveryService, desiredStatePlanner, secretStore, configurationTransaction));
+        this.preflightManager = new NetworkPreflightManager(dataDirectory, new NetworkPreflightService(discoveryService, desiredStatePlanner, secretStore, configurationTransaction, runtimeMonitor));
         reload();
     }
 
@@ -1044,6 +1046,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
                 if (configurationJob != null && configurationJob.status() != NetworkJobStatus.SUCCEEDED) {
                     return Async.failed(new IllegalStateException(configurationJob.message()));
                 }
+                runtimeMonitor.refresh(getNetworks(), instances);
                 return lifecycleJobManager.execute(current, instances, operation, initiator);
             }).thenCompose(job -> {
                 if (job.status() != NetworkLifecycleStatus.SUCCEEDED) {
@@ -1061,7 +1064,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
             return Async.failed(new IllegalStateException(blocking.getFirst().message()));
         }
         Map<String, Instance> instancesById = indexInstances(instances);
-        return configurationTransaction.prepare(plan, instances).thenCompose(prepared -> {
+        return ensureRuntimePlugins(current, instancesById).thenCompose(unused -> configurationTransaction.prepare(plan, instances)).thenCompose(prepared -> {
             List<NetworkJobDocument> changes = configurationTransaction.describe(prepared, current, instances).stream().filter(NetworkJobDocument::changed).toList();
             if (changes.isEmpty()) {
                 return Async.completed(null);
@@ -1084,6 +1087,29 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
                     return job;
                 });
             });
+        });
+    }
+
+    private Async<Void> ensureRuntimePlugins(NetworkDefinition network, Map<String, Instance> instances) {
+        if (!network.runtime().enabled()) return Async.completed(null);
+        return AsyncTools.run(TaskSchedulers.current(), () -> {
+            ReSyncProvisioningService provisioning = new ReSyncProvisioningService();
+            for (NetworkMember member : network.members()) {
+                if (!member.isManaged() || !member.isProxy() && !member.resyncEnabled()) continue;
+                Instance instance = instances.get(member.instanceId());
+                if (instance == null) throw new IllegalStateException("Network Server Is Unavailable: " + member.routeName());
+                if (provisioning.isInstalled(instance)) continue;
+                try {
+                    var observed = InstanceApi.of(instance).console().getStatus().get(10, TimeUnit.SECONDS);
+                    if (observed.state() != InstanceState.STOPPED && observed.state() != InstanceState.CRASHED) {
+                        throw new IllegalStateException("Stop " + instance.getName() + " Before Installing Its ReSync Plugin");
+                    }
+                } catch (Exception failure) {
+                    throw new IllegalStateException("Cannot Prepare " + instance.getName() + ": " + failure.getMessage(), failure);
+                }
+                ReSyncProvisioningService.OperationResult result = provisioning.installLatest(instance);
+                if (!result.success()) throw new IllegalStateException("Cannot Install ReSync On " + instance.getName() + ": " + result.failureMessage());
+            }
         });
     }
 
@@ -1130,6 +1156,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
             Async<NetworkJob> preflight = operation == NetworkLifecycleOperation.START ? prepareStartup(current, instances, initiator) : Async.completed(null);
             return preflight.thenCompose(job -> {
                 if (job != null && job.status() != NetworkJobStatus.SUCCEEDED) return Async.failed(new IllegalStateException(job.message()));
+                runtimeMonitor.refresh(getNetworks(), instances);
                 return lifecycleJobManager.executeMember(current, currentMember, instance, operation, initiator);
             });
         });
@@ -1141,12 +1168,21 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
         if (current == null) {
             return Async.failed(new IllegalArgumentException("Network no longer exists"));
         }
-        return withMutationLock(current.networkId(), () -> lifecycleJobManager.resume(jobId, current, instances).thenCompose(updated -> {
+        return withMutationLock(current.networkId(), () -> {
+            boolean starting = job.operation() == NetworkLifecycleOperation.START || job.operation() == NetworkLifecycleOperation.RESTART
+                || job.operation() == NetworkLifecycleOperation.ROLLING_RESTART;
+            Async<NetworkJob> preparation = starting ? prepareStartup(current, instances, "Network Recovery") : Async.completed(null);
+            return preparation.thenCompose(prepared -> {
+                if (prepared != null && prepared.status() != NetworkJobStatus.SUCCEEDED) return Async.failed(new IllegalStateException(prepared.message()));
+                runtimeMonitor.refresh(getNetworks(), instances);
+                return lifecycleJobManager.resume(jobId, current, instances);
+            }).thenCompose(updated -> {
             if (updated.status() != NetworkLifecycleStatus.SUCCEEDED) {
                 return Async.completed(updated);
             }
-            return finalizeLifecycle(updated, instances).thenApply(unused -> updated);
-        }));
+                return finalizeLifecycle(updated, instances).thenApply(unused -> updated);
+            });
+        });
     }
 
     public synchronized NetworkDiscoveryResult discover(NetworkDefinition network, Collection<Instance> instances, Collection<PortReservation> externalReservations) {
@@ -1428,7 +1464,8 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
     }
 
     public NetworkRuntimeSnapshot getRuntimeSnapshot(String networkId) {
-        return runtimeMonitor.snapshot(networkId);
+        NetworkDefinition network = networks.get(networkId);
+        return network == null ? NetworkRuntimeSnapshot.disabled(networkId) : runtimeMonitor.snapshot(network);
     }
 
     public List<NetworkIncident> getIncidents(String networkId) {
@@ -2317,7 +2354,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
         NetworkRuntimePolicy runtime = NetworkRuntimePolicy.disabled();
         if (!runtimeMembers.isEmpty()) {
             int hubPort = portAllocator.allocate(proxyScope, 12442, 12000, 12999, reservations);
-            boolean loopbackRuntime = runtimeMembers.stream().allMatch(member -> member.hostScope().equals(proxyScope));
+            boolean loopbackRuntime = runtimeMembers.stream().allMatch(member -> NetworkRuntimePolicy.sharesLoopback(proxyMember, member));
             String hubAddress = loopbackRuntime ? "127.0.0.1" : providerManagedProxy ? proxyAllocation.address() : reachableHost(proxy);
             runtime = new NetworkRuntimePolicy(true, hubAddress, hubPort, loopbackRuntime ? NetworkTransportSecurity.LOOPBACK : NetworkTransportSecurity.WSS, loopbackRuntime);
         }
@@ -2529,7 +2566,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
             proxyMember = candidate.proxyMember();
         }
         NetworkMember resolvedProxyMember = proxyMember;
-        boolean loopback = runtimeMembers.stream().allMatch(member -> member.hostScope().equals(resolvedProxyMember.hostScope()));
+        boolean loopback = runtimeMembers.stream().allMatch(member -> NetworkRuntimePolicy.sharesLoopback(resolvedProxyMember, member));
         NetworkRuntimePolicy currentRuntime = candidate.runtime();
         int hubPort = currentRuntime.enabled() ? currentRuntime.hubPort() : allocateRuntimePort(candidate, resolvedProxyMember, reservations);
         NetworkRuntimePolicy runtime;

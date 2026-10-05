@@ -750,9 +750,7 @@ final class ServerDevelopmentPanel {
         GitChangesTreeWidget.RepositoryChanges repository = gitRepository();
         if (repository != null && gitCapabilities.allows(Capability.PULL)) menu.addIconItem("Pull", "download.png", () -> runGitOperation(repository.api().pull(), "Pulled", "Pull Failed"), "Pull Changes");
         if (repository != null && gitCapabilities.allows(Capability.PUSH)) menu.addIconItem("Push", "upload.png", () -> runGitOperation(repository.api().push(), "Pushed", "Push Failed"), "Push Changes");
-        ContextMenuWidget widget = menu.build();
-        host.addDrawableChild(widget);
-        widget.show(gitActions.getX(), gitActions.getY() + gitActions.getHeight() + 2);
+        host.screen().showContextMenu(gitActions.getX(), gitActions.getY() + gitActions.getHeight() + 2, menu);
     }
 
     private void showGitCommit(List<GitChangesTreeWidget.Selection> selection) {

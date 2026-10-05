@@ -2,6 +2,7 @@ package redxax.oxy.remotely.host;
 
 import restudio.rebase.backend.ServerBackend;
 import redxax.oxy.remotely.network.NetworkBootstrap;
+import redxax.oxy.remotely.flow.ui.ReSyncProvisioningService;
 import redxax.oxy.remotely.network.HostedNetworkClient;
 import redxax.oxy.remotely.network.HostedNetworkPendingStore;
 import redxax.oxy.remotely.network.protocol.NetworkOperationStatus;
@@ -1954,7 +1955,7 @@ public final class DesktopServerHost implements ServerScreenHost {
         }
         NetworkCreationRequest request = new NetworkCreationRequest(name, proxy.getInstanceId(), entryPort, backends, firewallVerified);
         List<Instance> reSyncTargets = new ArrayList<>();
-        if (installReSync) reSyncTargets.add(proxy);
+        if (installReSync || backends.stream().anyMatch(NetworkCreationMember::resyncEnabled)) reSyncTargets.add(proxy);
         backends.stream().filter(NetworkCreationMember::resyncEnabled).map(member -> instancesById.get(member.instanceId())).filter(Objects::nonNull).forEach(reSyncTargets::add);
         return manager.prepareCreation(request, instances, List.of())
                 .thenCompose(prepared -> manager.runPreparedCreation(prepared, instances, "Server Manager")
@@ -2104,12 +2105,17 @@ public final class DesktopServerHost implements ServerScreenHost {
     }
 
     private Async<Void> installReSync(List<Instance> targets) {
+        ReSyncProvisioningService provisioning = new ReSyncProvisioningService();
         Async<Void> setup = Async.completed(null);
         for (Instance target : targets == null ? List.<Instance>of() : targets) {
             if (target == null) {
                 continue;
             }
-            setup = setup.thenCompose(ignored -> DesktopServerUiCapabilities.desktop(target).provisionReSync(target).thenApply(result -> null));
+            setup = setup.thenCompose(ignored -> Async.supplyAsync(() -> {
+                ReSyncProvisioningService.OperationResult result = provisioning.installLatest(target);
+                if (!result.success()) throw new IllegalStateException(target.getName() + ": " + result.failureMessage());
+                return null;
+            }));
         }
         return setup;
     }

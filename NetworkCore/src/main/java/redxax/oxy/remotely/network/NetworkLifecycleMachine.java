@@ -19,7 +19,21 @@ public final class NetworkLifecycleMachine {
         if (job.status() != NetworkLifecycleStatus.READY && !job.canResume()) {
             throw new IllegalStateException("Network lifecycle job cannot start from " + job.status());
         }
-        return job.startingAttempt(clock);
+        NetworkLifecycleJob ready = job;
+        if (job.canResume() && (job.operation() == NetworkLifecycleOperation.START || job.operation() == NetworkLifecycleOperation.RESTART)) {
+            int pending = -1;
+            for (int index = 0; index < job.steps().size(); index++) {
+                NetworkLifecycleStep step = job.steps().get(index);
+                if (step.action() == NetworkLifecycleAction.START && !step.complete()) { pending = index; break; }
+            }
+            for (int index = 0; index < pending; index++) {
+                NetworkLifecycleStep step = job.steps().get(index);
+                if (step.action() == NetworkLifecycleAction.HEALTH_GATE && step.complete()) {
+                    ready = ready.withStep(new NetworkLifecycleStep(step.stepId(), step.instanceId(), step.nodeId(), step.routeName(), step.action(), NetworkLifecycleStepStatus.PENDING, 0, 0, "Check Current Health"), clock);
+                }
+            }
+        }
+        return ready.startingAttempt(clock);
     }
 
     public List<NetworkLifecycleStep> next(NetworkLifecycleJob job) {
@@ -30,7 +44,7 @@ public final class NetworkLifecycleMachine {
         }
         if ((job.operation() == NetworkLifecycleOperation.START || job.operation() == NetworkLifecycleOperation.RESTART)
                 && first.action() == NetworkLifecycleAction.START) {
-            return job.steps().stream().filter(step -> !step.complete() && step.action() == NetworkLifecycleAction.START).toList();
+            return job.steps().stream().dropWhile(NetworkLifecycleStep::complete).takeWhile(step -> step.action() == NetworkLifecycleAction.START).filter(step -> !step.complete()).toList();
         }
         return List.of(first);
     }

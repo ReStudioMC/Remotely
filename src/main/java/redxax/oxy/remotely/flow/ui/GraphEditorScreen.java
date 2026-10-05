@@ -18123,9 +18123,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                     ThemeManager.getAccent("danger"));
             }
         }
-        ContextMenuWidget menu = builder.build();
-        addDrawableChild(menu);
-        menu.show(screenX, screenY);
+        showContextMenu(screenX, screenY, builder);
     }
 
     void showAddCoreFunctionParameterPopup(FlowNodeWidget widget) {
@@ -18677,9 +18675,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             coreOperationUnavailable("Repeatable Pins");
             return true;
         }
-        ContextMenuWidget menu = builder.build();
-        addDrawableChild(menu);
-        menu.show(screenX, screenY);
+        showContextMenu(screenX, screenY, builder);
         return true;
     }
 

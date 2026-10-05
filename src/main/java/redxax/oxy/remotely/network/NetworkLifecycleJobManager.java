@@ -153,9 +153,7 @@ public class NetworkLifecycleJobManager {
         persist(job);
         List<NetworkLifecycleStep> next = machine.next(job);
         if (next.isEmpty()) {
-            NetworkLifecycleJob completed = machine.finish(job);
-            persist(completed);
-            return Async.completed(completed);
+            return finishJob(job, network);
         }
         if (next.size() > 1) {
             return continueParallelStarts(job, network, instancesById, next);
@@ -175,6 +173,21 @@ public class NetworkLifecycleJobManager {
             persist(checkpoint);
             return continueJob(checkpoint, network, instancesById);
         }).thenCompose(future -> future);
+    }
+
+    private Async<NetworkLifecycleJob> finishJob(NetworkLifecycleJob job, NetworkDefinition network) {
+        List<Async<StepOutcome>> checks = network.runtime().enabled()
+            ? job.steps().stream().filter(step -> step.action() == NetworkLifecycleAction.START)
+                .filter(step -> {
+                    NetworkMember member = member(network, step.nodeId());
+                    return member != null && (member.isProxy() || member.resyncEnabled());
+                }).map(step -> healthGate(network, step)).toList()
+            : List.of();
+        return Async.allOf(checks.toArray(Async[]::new)).handle((unused, failure) -> {
+            NetworkLifecycleJob completed = failure == null ? machine.finish(job) : machine.failJob(job, rootMessage(failure));
+            persist(completed);
+            return completed;
+        });
     }
 
     private Async<NetworkLifecycleJob> continueParallelStarts(NetworkLifecycleJob job, NetworkDefinition network,
@@ -239,8 +252,11 @@ public class NetworkLifecycleJobManager {
 
     private Async<StepOutcome> start(NetworkDefinition network, Instance instance, NetworkLifecycleStep step) {
         NetworkMember member = member(network, step.nodeId());
+        NetworkMember proxy = network.proxyMember();
+        Async<Void> hub = network.runtime().enabled() && member != null && !member.isProxy() && proxy != null
+            ? awaitRuntimeHealth(network, proxy, System.currentTimeMillis() + HEALTH_TIMEOUT.toMillis()) : Async.completed(null);
         Async<Void> eula = member != null && member.isManaged() && !member.isProxy() ? acceptEula(instance) : Async.completed(null);
-        return eula.thenCompose(unused -> status(instance)).thenCompose(observed -> {
+        return hub.thenCompose(ignored -> eula).thenCompose(unused -> status(instance)).thenCompose(observed -> {
             if (observed.ready()) {
                 return Async.completed(new StepOutcome(true, instance.getName() + " is already ready"));
             }
@@ -301,7 +317,7 @@ public class NetworkLifecycleJobManager {
     private Async<StepOutcome> drain(NetworkDefinition network, Instance instance, NetworkLifecycleStep step, boolean awaitRuntime) {
         NetworkMember member = member(network, step.nodeId());
         if (awaitRuntime && member != null && member.resyncEnabled() && network.runtime().enabled()) {
-            return awaitRuntimePlayers(network.networkId(), step.nodeId(), System.currentTimeMillis() + DRAIN_TIMEOUT.toMillis()).thenApply(unused -> new StepOutcome(false, instance.getName() + " has no active players"));
+            return awaitRuntimePlayers(network, step.nodeId(), System.currentTimeMillis() + DRAIN_TIMEOUT.toMillis()).thenApply(unused -> new StepOutcome(false, instance.getName() + " has no active players"));
         }
         return status(instance).thenCompose(observed -> {
             if (stopped(observed.state())) {
@@ -320,7 +336,7 @@ public class NetworkLifecycleJobManager {
         if (runtimeMonitor == null) {
             return Async.failed(new IllegalStateException("ReSync runtime is unavailable"));
         }
-        NetworkRuntimeSnapshot snapshot = runtimeMonitor.snapshot(network.networkId());
+        NetworkRuntimeSnapshot snapshot = runtimeMonitor.snapshot(network);
         if (!snapshot.connected()) {
             return Async.failed(new IllegalStateException("ReSync runtime is required for a rolling restart"));
         }
@@ -353,44 +369,48 @@ public class NetworkLifecycleJobManager {
 
     private Async<StepOutcome> healthGate(NetworkDefinition network, NetworkLifecycleStep step) {
         NetworkMember member = member(network, step.nodeId());
-        if (member == null || !member.resyncEnabled() || !network.runtime().enabled()) {
+        if (member == null || !network.runtime().enabled() || !member.isProxy() && !member.resyncEnabled()) {
             return Async.completed(new StepOutcome(true, step.routeName() + " passed server readiness"));
         }
         if (runtimeMonitor == null) {
             return Async.failed(new IllegalStateException("ReSync runtime is unavailable"));
         }
-        return awaitRuntimeHealth(network.networkId(), step.nodeId(), System.currentTimeMillis() + HEALTH_TIMEOUT.toMillis()).thenApply(unused -> new StepOutcome(false, step.routeName() + " is healthy"));
+        return awaitRuntimeHealth(network, member, System.currentTimeMillis() + HEALTH_TIMEOUT.toMillis()).thenApply(unused -> new StepOutcome(false, step.routeName() + " is healthy"));
     }
 
-    private Async<Void> awaitRuntimePlayers(String networkId, String nodeId, long deadline) {
+    private Async<Void> awaitRuntimePlayers(NetworkDefinition network, String nodeId, long deadline) {
         if (runtimeMonitor == null) {
             return Async.failed(new IllegalStateException("ReSync runtime is unavailable"));
         }
-        NetworkRuntimeSnapshot snapshot = runtimeMonitor.snapshot(networkId);
+        NetworkRuntimeSnapshot snapshot = runtimeMonitor.snapshot(network);
         NetworkRuntimeNodePresence presence = snapshot.connected() ? snapshot.node(nodeId).orElse(null) : null;
-        if (presence != null && presence.players() == 0) {
+        if (presence != null && presence.fresh(System.currentTimeMillis()) && presence.players() == 0
+                && (presence.status() == NetworkRuntimeNodeStatus.ONLINE || presence.status() == NetworkRuntimeNodeStatus.MAINTENANCE)) {
             return Async.completed(null);
         }
         if (System.currentTimeMillis() >= deadline) {
             int players = presence == null ? -1 : presence.players();
             return Async.failed(new IllegalStateException(players < 0 ? "ReSync runtime did not report drain completion" : players + " players remain after the drain timeout"));
         }
-        return AsyncTools.delay(TaskSchedulers.current(), Duration.ofSeconds(1)).thenCompose(unused -> awaitRuntimePlayers(networkId, nodeId, deadline));
+        return AsyncTools.delay(TaskSchedulers.current(), Duration.ofSeconds(1)).thenCompose(unused -> awaitRuntimePlayers(network, nodeId, deadline));
     }
 
-    private Async<Void> awaitRuntimeHealth(String networkId, String nodeId, long deadline) {
+    private Async<Void> awaitRuntimeHealth(NetworkDefinition network, NetworkMember member, long deadline) {
         if (runtimeMonitor == null) {
             return Async.failed(new IllegalStateException("ReSync runtime is unavailable"));
         }
-        NetworkRuntimeSnapshot snapshot = runtimeMonitor.snapshot(networkId);
-        NetworkRuntimeNodePresence presence = snapshot.connected() ? snapshot.node(nodeId).orElse(null) : null;
-        if (presence != null && (presence.status() == NetworkRuntimeNodeStatus.ONLINE || presence.status() == NetworkRuntimeNodeStatus.MAINTENANCE) && System.currentTimeMillis() - presence.observedAt() <= 20_000) {
+        NetworkRuntimeSnapshot snapshot = runtimeMonitor.snapshot(network);
+        NetworkRuntimeNodePresence presence = snapshot.connected() ? snapshot.node(member.nodeId()).orElse(null) : null;
+        if (snapshot.connected() && member.isProxy() || presence != null
+                && (presence.status() == NetworkRuntimeNodeStatus.ONLINE || presence.status() == NetworkRuntimeNodeStatus.MAINTENANCE)
+                && presence.fresh(System.currentTimeMillis())) {
             return Async.completed(null);
         }
         if (System.currentTimeMillis() >= deadline) {
-            return Async.failed(new IllegalStateException("Backend did not return to live ReSync health before the timeout"));
+            String detail = snapshot.connected() ? "The Backend Has Not Enrolled. Check Its ReSync Log And Managed Network Settings" : snapshot.message();
+            return Async.failed(new IllegalStateException(member.routeName() + " Did Not Connect To " + network.runtime().hubUrl() + ": " + detail));
         }
-        return AsyncTools.delay(TaskSchedulers.current(), Duration.ofSeconds(1)).thenCompose(unused -> awaitRuntimeHealth(networkId, nodeId, deadline));
+        return AsyncTools.delay(TaskSchedulers.current(), Duration.ofSeconds(1)).thenCompose(unused -> awaitRuntimeHealth(network, member, deadline));
     }
 
     private NetworkMember member(NetworkDefinition network, String nodeId) {

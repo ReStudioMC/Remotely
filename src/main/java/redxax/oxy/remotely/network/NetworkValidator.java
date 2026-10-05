@@ -141,8 +141,8 @@ public final class NetworkValidator {
             if (!runtime.transportReady()) {
                 issues.add(error("runtime.loopback.unavailable", network.networkId(), "Loopback runtime transport must be ready"));
             }
-            if (runtimeMembers.stream().anyMatch(member -> !member.hostScope().equals(proxy.hostScope()))) {
-                issues.add(error("runtime.loopback.cross-host", network.networkId(), "Cross-host ReSync servers require WSS transport"));
+            if (runtimeMembers.stream().anyMatch(member -> !NetworkRuntimePolicy.sharesLoopback(proxy, member))) {
+                issues.add(error("runtime.loopback.cross-host", network.networkId(), "ReSync Servers In Separate Machines Or Containers Require WSS Transport"));
             }
         } else if (!runtime.transportReady()) {
             issues.add(new NetworkValidationIssue(NetworkValidationIssue.Severity.WARNING, "runtime.wss.pending", network.networkId(), "Cross-host ReSync transport is waiting for certificate provisioning"));

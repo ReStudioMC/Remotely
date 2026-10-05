@@ -10,8 +10,19 @@ import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 class NetworkValidatorTest {
+    @Test
+    void providerContainersCannotShareLoopbackEvenOnTheSameHost() {
+        for (String scope : List.of("ptero:host", "calagopus:host", "restudio:host")) {
+            NetworkMember proxy = new NetworkMember("proxy", "proxy", "proxy", NetworkMemberRole.PROXY, scope, "127.0.0.1", 25565, 0, true);
+            NetworkMember backend = new NetworkMember("backend", "backend", "lobby", NetworkMemberRole.LOBBY, scope, "127.0.0.1", 25566, 0, true);
+            assertFalse(NetworkRuntimePolicy.sharesLoopback(proxy, backend));
+        }
+        assertTrue(NetworkRuntimePolicy.sharesLoopback(NetworkMember.proxy("proxy", 25565), NetworkMember.backend("backend", "lobby", NetworkMemberRole.LOBBY, 25566)));
+    }
+
     @Test
     void acceptsValidVelocityNetwork() {
         NetworkDefinition network = validNetwork();

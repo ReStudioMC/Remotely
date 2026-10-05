@@ -18,6 +18,20 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class NetworkForwardingPlannerTest {
     @Test
+    void repairsLoopbackBindingsOnBackendsInSeparateNamespaces() {
+        Instance proxy = instance("Proxy", ModLoader.VELOCITY);
+        Instance backend = instance("Lobby", ModLoader.PAPER);
+        backend.getServerProperties().put("server-ip", "127.0.0.1");
+        NetworkDefinition local = network(proxy, backend);
+        NetworkMember current = local.members().get(1);
+        NetworkMember isolated = new NetworkMember(current.instanceId(), current.nodeId(), current.routeName(), current.role(), "ptero:host", "10.0.0.20", current.port(), current.capacity(), true);
+        NetworkRuntimePolicy runtime = new NetworkRuntimePolicy(true, "10.0.0.10", local.runtime().hubPort(), NetworkTransportSecurity.WSS, true);
+        NetworkDefinition network = new NetworkDefinition(local.schemaVersion(), local.networkId(), local.name(), local.revision(), local.proxyInstanceId(), local.desiredState(), local.forwarding(), local.entryPoints(), List.of(local.members().getFirst(), isolated), local.routingGroups(), local.syncRealms(), runtime, local.features(), local.createdAt(), local.updatedAt());
+        NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(DesktopNetworkPlanInput.from(discovery(network, proxy, backend)), secrets());
+        assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.key().equals("server-ip") && mutation.currentValue().equals("127.0.0.1") && mutation.desiredValue().isEmpty()));
+    }
+
+    @Test
     void sharedChatRetainsItsTransportPermissionWhenSharedResourcesAreDisabled() {
         Instance proxy = instance("Proxy", ModLoader.VELOCITY);
         Instance backend = instance("Lobby", ModLoader.PAPER);

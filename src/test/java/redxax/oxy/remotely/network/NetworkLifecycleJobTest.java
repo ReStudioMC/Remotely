@@ -33,15 +33,17 @@ class NetworkLifecycleJobTest {
     }
 
     @Test
-    void ordersFallbackBackendsBeforeProxyForStartAndProxyFirstForStop() {
+    void gatesTheHubBeforeBackendsForStartAndStopsProxyFirst() {
         NetworkDefinition network = network();
         NetworkLifecyclePlanner planner = new NetworkLifecyclePlanner();
 
         List<NetworkLifecycleStep> start = planner.plan(network, NetworkLifecycleOperation.START);
         List<NetworkLifecycleStep> stop = planner.plan(network, NetworkLifecycleOperation.STOP);
 
-        assertEquals("lobby", start.getFirst().routeName());
-        assertEquals("proxy", start.getLast().routeName());
+        assertEquals("proxy", start.getFirst().routeName());
+        assertEquals(NetworkLifecycleAction.HEALTH_GATE, start.get(1).action());
+        assertEquals("proxy", start.get(1).routeName());
+        assertEquals("lobby", start.get(2).routeName());
         assertEquals("proxy", stop.getFirst().routeName());
         assertEquals("lobby", stop.getLast().routeName());
     }
@@ -53,9 +55,10 @@ class NetworkLifecycleJobTest {
 
         List<NetworkLifecycleStep> steps = planner.plan(network, NetworkLifecycleOperation.RESTART);
 
-        assertEquals(network.members().size() * 2, steps.size());
+        assertEquals(network.members().size() * 3, steps.size());
         assertTrue(steps.subList(0, network.members().size()).stream().allMatch(step -> step.action() == NetworkLifecycleAction.STOP));
-        assertTrue(steps.subList(network.members().size(), steps.size()).stream().allMatch(step -> step.action() == NetworkLifecycleAction.START));
+        assertEquals(NetworkLifecycleAction.START, steps.get(network.members().size()).action());
+        assertEquals(NetworkLifecycleAction.HEALTH_GATE, steps.get(network.members().size() + 1).action());
     }
 
     @Test
@@ -106,6 +109,24 @@ class NetworkLifecycleJobTest {
         assertEquals(NetworkLifecycleStepStatus.RUNNING, begun.steps().getFirst().status());
         assertEquals(NetworkLifecycleStepStatus.SUCCEEDED, succeeded.steps().getFirst().status());
         assertEquals(NetworkLifecycleStatus.SUCCEEDED, complete.status());
+    }
+
+    @Test
+    void interruptedStartsCannotBatchBackendsAcrossTheHubGate() {
+        NetworkDefinition network = network();
+        NetworkLifecycleMachine machine = new NetworkLifecycleMachine();
+        NetworkLifecycleJob job = machine.start(NetworkLifecycleJob.create(network, NetworkLifecycleOperation.START, "Test", new NetworkLifecyclePlanner().plan(network, NetworkLifecycleOperation.START)));
+        List<NetworkLifecycleStep> first = machine.next(job);
+        assertEquals(1, first.size());
+        assertEquals("proxy", first.getFirst().routeName());
+        job = machine.succeed(machine.begin(job, first), first.getFirst(), false, "Started");
+        job = machine.start(job.withStatus(NetworkLifecycleStatus.INTERRUPTED, "Interrupted"));
+        assertEquals(List.of(NetworkLifecycleAction.HEALTH_GATE), machine.next(job).stream().map(NetworkLifecycleStep::action).toList());
+        List<NetworkLifecycleStep> gate = machine.next(job);
+        job = machine.succeed(machine.begin(job, gate), gate.getFirst(), false, "Healthy");
+        assertEquals(List.of("lobby", "survival"), machine.next(job).stream().map(NetworkLifecycleStep::routeName).toList());
+        job = machine.start(job.withStatus(NetworkLifecycleStatus.INTERRUPTED, "Interrupted After Hub Readiness"));
+        assertEquals(List.of(NetworkLifecycleAction.HEALTH_GATE), machine.next(job).stream().map(NetworkLifecycleStep::action).toList());
     }
 
     private NetworkDefinition network() {

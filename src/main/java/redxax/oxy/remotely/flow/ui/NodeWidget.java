@@ -54,6 +54,7 @@ import restudio.rescreen.platform.input.ReTextInputEvent;
 import restudio.rescreen.theme.ThemeColor;
 import restudio.rescreen.theme.ThemeManager;
 import restudio.rescreen.ui.core.Screen;
+import restudio.rescreen.ui.rescreen.ReScreen;
 import restudio.rescreen.ui.core.Widget;
 import restudio.rescreen.ui.core.WidgetComposite;
 import restudio.rescreen.ui.core.WidgetCleanup;
@@ -3311,8 +3312,7 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
     }
 
     public void showParamContextMenu() {
-        var currentScreen = ScreenManager.getInstance().getCurrentScreen();
-        if (currentScreen == null) return;
+        if (!(ScreenManager.getInstance().getCurrentScreen() instanceof ReScreen currentScreen)) return;
 
         List<FlowGraph.FunctionParameter> params = getFunctionParameterList();
         if (params == null) return;
@@ -3327,9 +3327,7 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
                 builder.addItem("Remove: " + name, () -> removeFunctionParameter(parameterId), name, ThemeManager.getAccent("danger"));
             }
         }
-        ContextMenuWidget menu = builder.build();
-        currentScreen.addDrawableChild(menu);
-        menu.show(lastScreenX, lastScreenY);
+        currentScreen.showContextMenu(lastScreenX, lastScreenY, builder);
     }
 
     public void showAddFunctionParameterPopup() {
@@ -4274,8 +4272,7 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
         if (kind.isBlank() || id.isBlank()) {
             return false;
         }
-        var screen = ScreenManager.getInstance().getCurrentScreen();
-        if (screen == null) {
+        if (!(ScreenManager.getInstance().getCurrentScreen() instanceof ReScreen screen)) {
             return false;
         }
         String resourceKind = kind;
@@ -4304,9 +4301,7 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
             builder.addIconItem("Delete " + label, "delete.png", () -> confirmManagedResourceDelete(input, resourceKind, id, label),
                 "Permanently delete this " + resourceName(resourceKind), ThemeManager.getAccent("danger"));
         }
-        ContextMenuWidget menu = builder.build();
-        screen.addDrawableChild(menu);
-        menu.show(x, y);
+        screen.showContextMenu(x, y, builder);
         return true;
     }
 

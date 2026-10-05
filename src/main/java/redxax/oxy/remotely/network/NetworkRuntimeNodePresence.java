@@ -13,6 +13,10 @@ public record NetworkRuntimeNodePresence(String networkId, String nodeId, Networ
         heapMaximum = Math.max(0, heapMaximum);
     }
 
+    public boolean fresh(long now) {
+        return observedAt > 0 && observedAt >= now - 20_000 && observedAt <= now + 20_000;
+    }
+
     private static String required(String value, String name) {
         String normalized = value == null ? "" : value.trim();
         if (normalized.isBlank()) {

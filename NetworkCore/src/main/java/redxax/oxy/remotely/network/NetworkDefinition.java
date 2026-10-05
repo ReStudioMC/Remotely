@@ -173,7 +173,7 @@ public record NetworkDefinition(int schemaVersion, String networkId, String name
         if (occupied.contains(port)) {
             return NetworkRuntimePolicy.disabled();
         }
-        boolean loopback = runtimeMembers.stream().allMatch(member -> member.hostScope().equals(proxy.hostScope()));
+        boolean loopback = runtimeMembers.stream().allMatch(member -> NetworkRuntimePolicy.sharesLoopback(proxy, member));
         return new NetworkRuntimePolicy(true, loopback ? "127.0.0.1" : proxy.address(), port, loopback ? NetworkTransportSecurity.LOOPBACK : NetworkTransportSecurity.WSS, loopback);
     }
 

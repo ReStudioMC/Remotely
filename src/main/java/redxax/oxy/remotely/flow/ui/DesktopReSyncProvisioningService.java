@@ -3,6 +3,7 @@ package redxax.oxy.remotely.flow.ui;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import redxax.oxy.remotely.data.flow.FlowManager;
+import redxax.oxy.remotely.network.NetworkHostScope;
 import restudio.rebase.Rebase;
 import restudio.rebase.backend.BackendConfig;
 import restudio.rebase.backend.FileSystemProvider;
@@ -16,6 +17,9 @@ import restudio.rebase.util.VersionUtil;
 import restudio.resync.contract.install.ReSyncInstallationStatus;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.StringReader;
+import java.io.StringWriter;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -29,19 +33,34 @@ import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Properties;
+import java.util.jar.JarFile;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.TimeUnit;
 
 public final class DesktopReSyncProvisioningService {
     public static final int RESYNC_PORT = 12441;
     private static final String RESYNC_RELEASE_METADATA_URL = "https://restudiomc.net/api/releases/resync/latest?channel=stable&platform=universal";
-    private static final String RESYNC_RELEASE_URL = "https://restudiomc.net/api/releases/resync/latest/download";
     private static final VersionUtil.VersionComparator RESYNC_VERSION_COMPARATOR = new VersionUtil.VersionComparator();
     private static final HttpClient RESYNC_HTTP_CLIENT = HttpClient.newHttpClient();
+    private static final Map<String, Installation> installations = new ConcurrentHashMap<>();
+    private final Duration publicationTimeout;
     private final SecureRandom secureRandom = new SecureRandom();
     private ReSyncRelease latestReSyncRelease;
+
+    public DesktopReSyncProvisioningService() { this(Duration.ofSeconds(30)); }
+
+    DesktopReSyncProvisioningService(Duration publicationTimeout) { this.publicationTimeout = publicationTimeout; }
+
+    private static final class Installation {
+        private CompletableFuture<Void> pending;
+    }
 
     enum StartupStatus {
         LOADING,
@@ -71,7 +90,7 @@ public final class DesktopReSyncProvisioningService {
         }
     }
 
-    private record ReSyncRelease(String id, String version, String fileName, String checksum, String changelog) {
+    record ReSyncRelease(String id, String version, String fileName, String checksum, String changelog) {
     }
 
     StartupProbeResult computeStartupState(String serverId, ClientServerView startupServer, String loaderHint) {
@@ -301,7 +320,7 @@ public final class DesktopReSyncProvisioningService {
                     continue;
                 }
                 String name = safeText(resource.getName()).toLowerCase(Locale.ROOT);
-                if ("resync".equals(name)) {
+                if ("resync".equals(name) || "resyncvelocity".equals(name)) {
                     return resource;
                 }
             }
@@ -433,9 +452,7 @@ public final class DesktopReSyncProvisioningService {
         Path pluginsPath = serverPath.resolve(resolvePluginsDirectory(instance));
         Path reSyncJarPath = pluginsPath.resolve("ReSync.jar");
         ensureDirectory(fileSystem, pluginsPath);
-        deleteOldReSyncJars(instance, fileSystem, reSyncJarPath);
-        transfer.downloadFile(RESYNC_RELEASE_URL, reSyncJarPath, null).get(90, TimeUnit.SECONDS);
-        verifyLocalReSyncChecksum(instance, reSyncJarPath, release);
+        installVerified(instance, fileSystem, transfer, pluginsPath, release);
         registerReSyncResource(instance, reSyncJarPath);
         return OperationResult.successful();
     }
@@ -466,7 +483,9 @@ public final class DesktopReSyncProvisioningService {
         Path pluginsPath = serverPath.resolve(resolvePluginsDirectory(instance));
         Path reSyncJarPath = pluginsPath.resolve("ReSync.jar");
         ensureDirectory(fileSystem, pluginsPath);
-        transfer.downloadFile(RESYNC_RELEASE_URL, reSyncJarPath, null).get(90, TimeUnit.SECONDS);
+        ReSyncRelease release = fetchLatestReSyncRelease();
+        if (release == null) return OperationResult.failed("Release Not Found");
+        installVerified(instance, fileSystem, transfer, pluginsPath, release);
         registerReSyncResource(instance, reSyncJarPath);
 
         Path configDir = pluginsPath.resolve("ReSync");
@@ -479,7 +498,10 @@ public final class DesktopReSyncProvisioningService {
             + "api-key=" + apiKey + "\n"
             + "bind-host=" + bindHost + "\n"
             + "public-bind-enabled=" + publicBindEnabled + "\n";
-        fileSystem.write(configDir.resolve("config.properties"), configText).get(30, TimeUnit.SECONDS);
+        Path configuration = configDir.resolve("config.properties");
+        if (!Boolean.TRUE.equals(fileSystem.exists(configuration).get(10, TimeUnit.SECONDS))) {
+            fileSystem.write(configuration, configText).get(30, TimeUnit.SECONDS);
+        }
 
         BackendConfig backendConfig = instance.getBackendConfig();
         if (backendConfig != null) {
@@ -490,6 +512,10 @@ public final class DesktopReSyncProvisioningService {
             instance.save();
         }
         return OperationResult.successful();
+    }
+
+    private void invalidateReSyncResource(Instance instance) {
+        if (Rebase.get() != null) Rebase.get().getResourceManager().invalidateCache(instance);
     }
 
     private void registerReSyncResource(Instance instance, Path reSyncJarPath) {
@@ -526,36 +552,134 @@ public final class DesktopReSyncProvisioningService {
         return "plugins";
     }
 
-    private void deleteOldReSyncJars(Instance instance, FileSystemProvider fileSystem, Path targetPath) throws Exception {
-        InstanceResource resource = findReSyncResource(instance);
-        if (resource == null || resource.getPath() == null || resource.getPath().equals(targetPath)) {
-            return;
+    void installVerified(Instance instance, FileSystemProvider files, NetworkTransferFeature transfer, Path plugins, ReSyncRelease release) throws Exception {
+        String key = NetworkHostScope.resolve(instance) + ":" + plugins.toAbsolutePath().normalize();
+        Installation installation = installations.computeIfAbsent(key, unused -> new Installation());
+        synchronized (installation) {
+            if (installation.pending != null && !installation.pending.isDone()) {
+                throw new IOException("ReSync Installation Is Still Completing. Retry When It Finishes");
+            }
+            installation.pending = null;
+            recoverInstallation(instance, files, plugins, installation);
+            String checksum = safeText(release.checksum()).toLowerCase(Locale.ROOT);
+            if (!checksum.matches("[a-f0-9]{64}") || !safeText(release.id()).matches("[A-Za-z0-9-]+")) {
+                throw new IOException("Release Identity Or Checksum Is Missing");
+            }
+            Path stage = plugins.resolve(".resync-install-" + UUID.randomUUID());
+            ensureDirectory(files, stage);
+            Path candidate = stage.resolve("ReSync.jar");
+            transfer.downloadFile("https://restudiomc.net/api/releases/" + release.id() + "/file", candidate, null).get(90, TimeUnit.SECONDS);
+            verifyReSyncJar(instance, files, candidate, checksum);
+            Path target = plugins.resolve("ReSync.jar");
+            InstanceResource installed = findReSyncResource(instance);
+            Path original = installed == null || installed.getPath() == null ? target : installed.getPath();
+            if (!Boolean.TRUE.equals(files.exists(original).get(10, TimeUnit.SECONDS))) original = target;
+            Path previousPath = original;
+            if (!original.toAbsolutePath().normalize().getParent().equals(plugins.toAbsolutePath().normalize())) {
+                throw new IOException("Installed ReSync Plugin Is Outside The Plugins Directory");
+            }
+            if (!original.equals(target) && Boolean.TRUE.equals(files.exists(target).get(10, TimeUnit.SECONDS))) {
+                throw new IOException("Multiple ReSync Jars Found. Keep One Plugin Before Updating");
+            }
+            boolean previous = Boolean.TRUE.equals(files.exists(original).get(10, TimeUnit.SECONDS));
+            Properties journal = new Properties();
+            journal.setProperty("stage", stage.getFileName().toString());
+            journal.setProperty("original", original.getFileName().toString());
+            journal.setProperty("checksum", checksum);
+            StringWriter encoded = new StringWriter();
+            journal.store(encoded, null);
+            Path marker = plugins.resolve(".resync-install.properties");
+            CompletableFuture<Void> publication = files.write(marker, encoded.toString())
+                .thenCompose(unused -> previous ? files.rename(previousPath, stage.resolve("previous.jar")) : CompletableFuture.completedFuture(null))
+                .thenCompose(unused -> files.rename(candidate, target))
+                .thenCompose(unused -> files.delete(List.of(marker)))
+                .thenRun(() -> invalidateReSyncResource(instance));
+            try {
+                awaitPublication(installation, publication);
+            } catch (ExecutionException failure) {
+                try { recoverInstallation(instance, files, plugins, installation); }
+                catch (Exception recovery) { failure.addSuppressed(recovery); }
+                throw failure;
+            }
         }
-        fileSystem.delete(List.of(resource.getPath())).get(30, TimeUnit.SECONDS);
     }
 
-    private void verifyLocalReSyncChecksum(Instance instance, Path reSyncJarPath, ReSyncRelease release) throws Exception {
-        if (instance == null || instance.getBackendConfig() == null || !"LOCAL".equalsIgnoreCase(instance.getBackendConfig().type)) {
-            return;
-        }
-        String expected = safeText(release.checksum()).trim().toLowerCase(Locale.ROOT);
-        if (expected.isBlank() || expected.length() != 64 || !Files.exists(reSyncJarPath)) {
-            return;
-        }
-        String actual = sha256(reSyncJarPath);
-        if (!expected.equals(actual)) {
-            throw new IOException("Checksum Verification Failed");
+    private void awaitPublication(Installation installation, CompletableFuture<Void> operation) throws Exception {
+        installation.pending = operation;
+        try {
+            operation.get(publicationTimeout.toMillis(), TimeUnit.MILLISECONDS);
+            installation.pending = null;
+        } catch (TimeoutException failure) {
+            throw new IOException("ReSync Installation Is Still Completing. Retry When It Finishes", failure);
+        } catch (InterruptedException failure) {
+            Thread.currentThread().interrupt();
+            throw failure;
         }
     }
 
-    private String sha256(Path path) throws Exception {
-        MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        byte[] hash = digest.digest(Files.readAllBytes(path));
-        StringBuilder builder = new StringBuilder(hash.length * 2);
-        for (byte value : hash) {
-            builder.append(String.format(Locale.ROOT, "%02x", value));
+    private void recoverInstallation(Instance instance, FileSystemProvider files, Path plugins, Installation installation) throws Exception {
+        Path marker = plugins.resolve(".resync-install.properties");
+        if (!Boolean.TRUE.equals(files.exists(marker).get(10, TimeUnit.SECONDS))) return;
+        Properties journal = new Properties();
+        journal.load(new StringReader(files.read(marker).get(10, TimeUnit.SECONDS)));
+        String stageName = journal.getProperty("stage", "");
+        String originalName = journal.getProperty("original", "");
+        if (!stageName.matches("\\.resync-install-[a-f0-9-]{36}") || originalName.isBlank() || !originalName.toLowerCase(Locale.ROOT).endsWith(".jar")
+                || !Path.of(originalName).getFileName().toString().equals(originalName) || originalName.contains("\\") || originalName.contains("/")) {
+            throw new IOException("ReSync Installation Recovery Record Is Invalid");
         }
-        return builder.toString();
+        Path stage = plugins.resolve(stageName);
+        Path target = plugins.resolve("ReSync.jar");
+        boolean targetExists = Boolean.TRUE.equals(files.exists(target).get(10, TimeUnit.SECONDS));
+        boolean backupExists = Boolean.TRUE.equals(files.exists(stage.resolve("previous.jar")).get(10, TimeUnit.SECONDS));
+        boolean admitted = false;
+        if (targetExists) {
+            try {
+                verifyReSyncJar(instance, files, target, journal.getProperty("checksum", ""));
+                admitted = true;
+            } catch (Exception failure) {
+                if (!backupExists && !Boolean.TRUE.equals(files.exists(stage.resolve("ReSync.jar")).get(10, TimeUnit.SECONDS))) throw failure;
+            }
+        }
+        CompletableFuture<Void> recovery = CompletableFuture.completedFuture(null);
+        if (!admitted && backupExists) {
+            if (targetExists) recovery = files.rename(target, stage.resolve("rejected.jar"));
+            recovery = recovery.thenCompose(unused -> files.rename(stage.resolve("previous.jar"), plugins.resolve(originalName)));
+        }
+        awaitPublication(installation, recovery.thenCompose(unused -> files.delete(List.of(marker))));
+    }
+
+    private void verifyReSyncJar(Instance instance, FileSystemProvider files, Path path, String expected) throws Exception {
+        if (!expected.matches("[a-f0-9]{64}")) throw new IOException("Release Checksum Is Missing");
+        Path temporary = null;
+        try {
+            Path local = path;
+            if (instance.getBackendConfig() == null || !"LOCAL".equalsIgnoreCase(instance.getBackendConfig().type)) {
+                temporary = Files.createTempDirectory("resync-verify-");
+                files.download(List.of(path), temporary).get(90, TimeUnit.SECONDS);
+                local = temporary.resolve(path.getFileName());
+            }
+            if (Files.size(local) < 1 || Files.size(local) > 256L * 1024 * 1024) throw new IOException("ReSync Jar Size Is Invalid");
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            try (InputStream input = Files.newInputStream(local)) {
+                byte[] buffer = new byte[64 * 1024];
+                int count;
+                while ((count = input.read(buffer)) != -1) digest.update(buffer, 0, count);
+            }
+            StringBuilder actual = new StringBuilder(64);
+            for (byte value : digest.digest()) actual.append(String.format(Locale.ROOT, "%02x", value));
+            if (!expected.contentEquals(actual)) throw new IOException("ReSync Checksum Verification Failed");
+            try (JarFile jar = new JarFile(local.toFile())) {
+                if (jar.getJarEntry("plugin.yml") == null || jar.getJarEntry("velocity-plugin.json") == null) {
+                    throw new IOException("ReSync Universal Jar Is Required");
+                }
+            }
+        } finally {
+            if (temporary != null) {
+                Files.deleteIfExists(temporary.resolve(path.getFileName()));
+                Files.deleteIfExists(temporary);
+            }
+        }
     }
 
     private void ensureDirectory(FileSystemProvider fileSystem, Path path) throws Exception {

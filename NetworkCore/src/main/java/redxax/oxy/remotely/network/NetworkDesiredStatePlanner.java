@@ -45,6 +45,11 @@ public class NetworkDesiredStatePlanner {
         if (network.syncRealms().stream().filter(realm -> realm.dataFamilies().stream().anyMatch(family -> family != SyncDataFamily.PRESENCE)).count() > 1) {
             issues.add(new NetworkValidationIssue(NetworkValidationIssue.Severity.ERROR, "realm.runtime.multiple.unsupported", network.networkId(), "The installed ReSync runtime currently supports one player state realm per network"));
         }
+        if (network.runtime().enabled() && network.runtime().security() == NetworkTransportSecurity.LOOPBACK
+                && network.members().stream().anyMatch(member -> !member.isProxy() && member.isManaged() && member.resyncEnabled()
+                    && !NetworkRuntimePolicy.sharesLoopback(network.proxyMember(), member))) {
+            issues.add(new NetworkValidationIssue(NetworkValidationIssue.Severity.ERROR, "resync.loopback.isolated", network.networkId(), "ReSync Servers In Separate Machines Or Containers Require A Reachable Secure Hub Address"));
+        }
         Map<String, NetworkEnrollment> enrollments = new LinkedHashMap<>();
         NetworkMember proxyMember = network.proxyMember();
         if (proxyMember != null) {
@@ -113,7 +118,7 @@ public class NetworkDesiredStatePlanner {
         add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, "network.id", "", network.networkId(), false, true, "Set ReSync Hub Network");
         add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, "network.node-id", "", network.proxyMember().nodeId(), false, true, "Set ReSync Hub Node");
         add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, "network.display-name", "", network.name() + " Proxy", false, true, "Set ReSync Hub Name");
-        add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, "hub.bind-host", "", runtime.security() == NetworkTransportSecurity.LOOPBACK ? runtime.hubAddress() : "0.0.0.0", false, true, "Set ReSync Hub Bind");
+        add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, "hub.bind-host", "", runtime.security() == NetworkTransportSecurity.LOOPBACK ? runtime.hubAddress() : runtime.hubAddress().contains(":") ? "::" : "0.0.0.0", false, true, "Set ReSync Hub Bind");
         add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, "hub.port", "", String.valueOf(runtime.hubPort()), false, true, "Set ReSync Hub Port");
         add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, "hub.database", "", "network/network.db", false, true, "Set ReSync Hub Database");
         add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, "hub.maximum-frame-bytes", "", "1048576", false, true, "Set ReSync Frame Limit");
@@ -196,8 +201,11 @@ public class NetworkDesiredStatePlanner {
         boolean runtimeEnabled = network.runtime().enabled() && member.resyncEnabled();
         add(mutations, backend, "server.properties", ConfigurationFormat.PROPERTIES, "server-port", backend.property("server-port", "25565"), String.valueOf(member.port()), false, true, "Set Backend Port");
         add(mutations, backend, "server.properties", ConfigurationFormat.PROPERTIES, "online-mode", backend.property("online-mode", "true"), "false", false, true, "Delegate Authentication To Proxy");
-        if (proxyMember != null && proxyMember.hostScope().equals(member.hostScope())) {
-            add(mutations, backend, "server.properties", ConfigurationFormat.PROPERTIES, "server-ip", backend.property("server-ip", ""), "127.0.0.1", false, true, "Restrict Backend To Loopback");
+        String bind = backend.property("server-ip", "");
+        if (NetworkRuntimePolicy.sharesLoopback(proxyMember, member)) {
+            add(mutations, backend, "server.properties", ConfigurationFormat.PROPERTIES, "server-ip", bind, "127.0.0.1", false, true, "Restrict Backend To Loopback");
+        } else if (bind.equals("127.0.0.1") || bind.equals("::1") || bind.equalsIgnoreCase("localhost")) {
+            add(mutations, backend, "server.properties", ConfigurationFormat.PROPERTIES, "server-ip", bind, "", false, true, "Repair Backend Address For Proxy Access");
         }
         if (network.forwarding().mode() == ForwardingMode.MODERN) {
             planModernForwarding(network, backend, forwardingSecret, mutations, issues);
@@ -245,6 +253,9 @@ public class NetworkDesiredStatePlanner {
             if (network.runtime().security() == NetworkTransportSecurity.WSS) {
                 add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.tls.trust-store", "", "network/ca.p12", false, true, "Set ReSync Network Trust");
                 add(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.tls.trust-store-password-env", "", "RESYNC_NETWORK_TRUSTSTORE_PASSWORD", false, true, "Set ReSync Trust Password Source");
+            } else {
+                remove(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.tls.trust-store", false, true, "Remove Unused Network Trust Store");
+                remove(mutations, backend, "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES, "network.tls.trust-store-password-env", false, true, "Remove Unused Network Trust Password Source");
             }
         }
     }

@@ -20,11 +20,11 @@ public final class NetworkLifecyclePlanner {
         stopOrder.addFirst(network.proxyMember());
         List<NetworkLifecycleStep> steps = new ArrayList<>();
         switch (operation) {
-            case START -> addSteps(steps, startOrder, NetworkLifecycleAction.START);
+            case START -> start(network, startOrder, steps);
             case STOP -> addSteps(steps, stopOrder, NetworkLifecycleAction.STOP);
             case RESTART -> {
                 addSteps(steps, stopOrder, NetworkLifecycleAction.STOP);
-                addSteps(steps, startOrder, NetworkLifecycleAction.START);
+                start(network, startOrder, steps);
             }
             case ROLLING_RESTART -> rolling(network, startOrder, steps);
             case DRAIN -> addSteps(steps, startOrder.stream().filter(member -> !member.isProxy()).toList(),
@@ -45,7 +45,25 @@ public final class NetworkLifecyclePlanner {
             case STOP -> NetworkLifecycleAction.STOP;
             default -> throw new IllegalArgumentException("Individual servers can only be started or stopped");
         };
-        return List.of(NetworkLifecycleStep.pending(member, action, 0));
+        List<NetworkLifecycleStep> steps = new ArrayList<>();
+        addSteps(steps, List.of(member), action);
+        if (action == NetworkLifecycleAction.START && network.runtime().enabled() && (member.isProxy() || member.resyncEnabled())) {
+            addSteps(steps, List.of(member), NetworkLifecycleAction.HEALTH_GATE);
+        }
+        return List.copyOf(steps);
+    }
+
+    private void start(NetworkDefinition network, List<NetworkMember> startOrder, List<NetworkLifecycleStep> steps) {
+        if (!network.runtime().enabled()) {
+            addSteps(steps, startOrder, NetworkLifecycleAction.START);
+            return;
+        }
+        NetworkMember proxy = Objects.requireNonNull(network.proxyMember(), "Network Proxy Is Required");
+        addSteps(steps, List.of(proxy), NetworkLifecycleAction.START);
+        addSteps(steps, List.of(proxy), NetworkLifecycleAction.HEALTH_GATE);
+        List<NetworkMember> backends = startOrder.stream().filter(member -> !member.isProxy()).toList();
+        addSteps(steps, backends, NetworkLifecycleAction.START);
+        addSteps(steps, backends.stream().filter(NetworkMember::resyncEnabled).toList(), NetworkLifecycleAction.HEALTH_GATE);
     }
 
     private void rolling(NetworkDefinition network, List<NetworkMember> startOrder, List<NetworkLifecycleStep> steps) {
