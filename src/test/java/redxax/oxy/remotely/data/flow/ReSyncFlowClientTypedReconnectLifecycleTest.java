@@ -1,11 +1,24 @@
 package redxax.oxy.remotely.data.flow;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterEach;
+import restudio.rebase.platform.jvm.JvmTaskScheduler;
+import restudio.rescreen.platform.TaskScheduler;
+import restudio.rescreen.platform.Async;
 import org.junit.jupiter.api.io.TempDir;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import redxax.oxy.remotely.RemotelyClient;
+import redxax.oxy.remotely.RemotelyComposition;
+import redxax.oxy.remotely.host.ApplicationHost;
+import redxax.oxy.remotely.host.ApplicationHostRegistry;
+import redxax.oxy.remotely.util.TaskSchedulers;
+import restudio.rescreen.game.MinecraftGameAssets;
+import restudio.rescreen.ui.core.Screen;
+import restudio.resync.diagnostics.DiagnosticEvent;
+import restudio.resync.diagnostics.DiagnosticSink;
 import redxax.oxy.remotely.flow.data.GuiDefinition;
 import restudio.resync.contract.cache.CatalogProjectionVersion;
 import restudio.resync.flow.cache.CatalogCacheKey;
@@ -41,6 +54,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -54,6 +69,29 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ReSyncFlowClientTypedReconnectLifecycleTest {
+    private TaskScheduler previousScheduler;
+    private JvmTaskScheduler scheduler;
+    private Async.Snapshot previousAsync;
+    private ExecutorService asyncPool;
+
+    @BeforeEach
+    void installScheduler() {
+        previousScheduler = TaskSchedulers.current();
+        scheduler = new JvmTaskScheduler();
+        TaskSchedulers.configure(scheduler);
+        previousAsync = Async.snapshot();
+        asyncPool = Executors.newVirtualThreadPerTaskExecutor();
+        Async.installExecutor(asyncPool::execute, ignored -> Thread.currentThread().interrupt());
+    }
+
+    @AfterEach
+    void restoreScheduler() {
+        TaskSchedulers.configure(previousScheduler);
+        scheduler.close();
+        Async.restore(previousAsync);
+        asyncPool.shutdownNow();
+    }
+
     @Test
     void nonCanonicalServerDoesNotUseLegacyCompatibilityBeforeHandshake(@TempDir Path tempDirectory) {
         ReSyncFlowClient client = new ReSyncFlowClient("live:proxy:test", new NoopTransport(), null,
@@ -178,8 +216,9 @@ class ReSyncFlowClientTypedReconnectLifecycleTest {
     void malformedTypedPublicationAfterConfirmationReturnsToReadOnlyReconciliation(@TempDir Path tempDirectory) throws Exception {
         ServerId server = new ServerId(UUID.fromString("66666666-6666-4666-8666-666666666666"));
         CapturingTransport transport = new CapturingTransport();
-        ReSyncFlowClient client = new ReSyncFlowClient(server.canonicalText(), transport, null,
-            isolatedCache(tempDirectory, "malformed-after-confirmation"));
+        CountDownLatch conversions = new CountDownLatch(2);
+        ReSyncFlowClient client = new BlockingCatalogClient(server.canonicalText(), transport,
+            isolatedCache(tempDirectory, "malformed-after-confirmation"), conversions, new CountDownLatch(0));
         CatalogCachePublication publication = publication(server);
         CatalogCachePublicationCodec codec = new CatalogCachePublicationCodec();
         try {
@@ -188,10 +227,26 @@ class ReSyncFlowClientTypedReconnectLifecycleTest {
             transport.receiveCatalogPublication(codec.encodeBytes(publication));
             assertEquals(ReSyncFlowClient.CatalogAuthority.TYPED_PUBLICATION, client.catalogAuthority());
 
-            transport.receiveCatalogPublication("[]".getBytes(StandardCharsets.UTF_8));
+            transport.receiveCatalogPublication(codec.encodeBytes(publication));
+            assertTrue(client.typedInteractionProjection().isPresent());
+            assertEquals(1L, conversions.getCount());
 
+            transport.receiveCatalogPublication("[]".getBytes(StandardCharsets.UTF_8));
             assertEquals(ReSyncFlowClient.CatalogAuthority.TYPED_RECONCILIATION, client.catalogAuthority());
+            assertTrue(client.typedInteractionProjection().isEmpty());
             assertFalse(ReSyncTypedCatalogConsumer.editable(client, "resync.reconnect", "stable-node"));
+
+            CatalogCachePublication changed = publication(publication.key(), publication.revision(),
+                "changed-node", CatalogCacheState.UNAVAILABLE);
+            transport.receiveCatalogPublication(codec.encodeBytes(changed));
+            assertEquals(ReSyncFlowClient.CatalogAuthority.TYPED_RECONCILIATION, client.catalogAuthority());
+            assertTrue(client.typedInteractionProjection().isEmpty());
+
+            transport.receiveCatalogPublication(codec.encodeBytes(publication));
+            assertEquals(ReSyncFlowClient.CatalogAuthority.TYPED_PUBLICATION, client.catalogAuthority());
+            assertEquals(publication, client.catalogPublicationProjection().active().orElseThrow().publication());
+            assertTrue(client.typedInteractionProjection().isPresent());
+            assertEquals(1L, conversions.getCount());
         } finally {
             client.shutdown();
         }
@@ -292,7 +347,9 @@ class ReSyncFlowClientTypedReconnectLifecycleTest {
             }
 
             assertTrue(client.catalogPublicationProjection().active().isEmpty());
-            assertFalse(transport.sentFrames.stream().anyMatch(frame -> frame.payload().length > 0
+            assertFalse(transport.sentFrames.stream().anyMatch(frame ->
+                frame.messageType() == ReSyncProtocolContract.MESSAGE_DATA
+                    && frame.channel() == ReSyncProtocolContract.CHANNEL_FLOW_ID && frame.payload().length > 0
                 && (frame.payload()[0] == ReSyncProtocolContract.FLOW_PACKET_CATALOG_PUBLICATION_CLIENT_RECEIVED
                     || frame.payload()[0] == ReSyncProtocolContract.FLOW_PACKET_CATALOG_PUBLICATION_CACHE_APPLIED
                     || frame.payload()[0] == ReSyncProtocolContract.FLOW_PACKET_CATALOG_PUBLICATION_CACHE_REJECTED)));
@@ -1016,7 +1073,7 @@ class ReSyncFlowClientTypedReconnectLifecycleTest {
         private final FlowManager manager;
 
         private Probe() {
-            super(null);
+            super(RemotelyComposition.browser(new TestHost()).scheduler(TaskSchedulers.current()).build());
             manager = new FlowManager(this, null);
         }
 
@@ -1026,8 +1083,32 @@ class ReSyncFlowClientTypedReconnectLifecycleTest {
         }
 
         private void close() {
-            manager.shutdown();
+            try {
+                manager.shutdown();
+            } finally {
+                getComposition().serverSettingsRegistryStorageSnapshot().restore();
+                TestHost host = (TestHost) getHost();
+                ApplicationHostRegistry.install(host.previousHost);
+                RemotelyClient.INSTANCE = host.previousClient;
+            }
         }
+    }
+
+    private static final class TestHost implements ApplicationHost {
+        private final ApplicationHost previousHost = ApplicationHostRegistry.current();
+        private final RemotelyClient previousClient = RemotelyClient.INSTANCE;
+
+        @Override public void setScreen(Screen screen) { }
+        @Override public Screen getCurrentScreen() { return null; }
+        @Override public void ensureTextRenderer() { }
+        @Override public MinecraftGameAssets getGameAssets() { return null; }
+        @Override public Object getFontIdentifier(String namespace, String path) { return null; }
+        @Override public void openParentScreen(Screen currentScreen, Object parent) { }
+        @Override public void setClipboard(String text) { }
+        @Override public boolean shouldCloseRootScreen() { return false; }
+        @Override public String getGameVersion() { return ""; }
+        @Override public String getGameUserName() { return ""; }
+        @Override public String getGameUUID() { return ""; }
     }
 
     private static final class CapturingTransport implements ReSyncFrameTransport {
@@ -1035,6 +1116,7 @@ class ReSyncFlowClientTypedReconnectLifecycleTest {
         private final ServerId peerServerId;
         private Consumer<byte[]> frameHandler;
         private Runnable closeHandler;
+        private volatile boolean open = true;
 
         private CapturingTransport() {
             this(null);
@@ -1061,6 +1143,7 @@ class ReSyncFlowClientTypedReconnectLifecycleTest {
 
         @Override
         public void close() {
+            open = false;
             if (closeHandler != null) {
                 closeHandler.run();
             }
@@ -1068,7 +1151,12 @@ class ReSyncFlowClientTypedReconnectLifecycleTest {
 
         @Override
         public boolean isOpen() {
-            return true;
+            return open;
+        }
+
+        @Override
+        public boolean reusableAfterDisconnect() {
+            return false;
         }
 
         @Override
@@ -1130,33 +1218,48 @@ class ReSyncFlowClientTypedReconnectLifecycleTest {
     }
 
     private static final class BlockingCatalogClient extends ReSyncFlowClient {
-        private final CountDownLatch entered;
-        private final CountDownLatch release;
+        private final DiagnosticSink previousSink;
 
         private BlockingCatalogClient(String serverId, ReSyncFrameTransport transport,
                                       ReSyncCatalogPublicationCache cache, CountDownLatch entered,
                                       CountDownLatch release) {
             super(serverId, transport, null, cache);
-            this.entered = entered;
-            this.release = release;
+            previousSink = ReSyncLifecycleDiagnostics.install(new DiagnosticSink() {
+                @Override
+                public Status status() {
+                    return Status.ready(Mode.VERBOSE);
+                }
+
+                @Override
+                public Offer offer(DiagnosticEvent event) {
+                    if ("typed_catalog_conversion_started".equals(event.stage())) {
+                        entered.countDown();
+                        try {
+                            if (!release.await(5, TimeUnit.SECONDS)) {
+                                throw new IllegalStateException("Catalog preparation was not released");
+                            }
+                        } catch (InterruptedException exception) {
+                            Thread.currentThread().interrupt();
+                            throw new IllegalStateException(exception);
+                        }
+                    }
+                    return Offer.ACCEPTED;
+                }
+
+                @Override public Status pause() { return status(); }
+                @Override public Status resume() { return status(); }
+                @Override public Flush flush() { return Flush.EMPTY; }
+                @Override public void close() { }
+            });
         }
 
         @Override
-        CatalogCachePublication decodeCatalogPublication(byte[] canonicalBytes) {
-            entered.countDown();
-            boolean interrupted = false;
-            while (true) {
-                try {
-                    release.await();
-                    break;
-                } catch (InterruptedException exception) {
-                    interrupted = true;
-                }
+        public void shutdown() {
+            try {
+                super.shutdown();
+            } finally {
+                ReSyncLifecycleDiagnostics.install(previousSink);
             }
-            if (interrupted) {
-                Thread.currentThread().interrupt();
-            }
-            return super.decodeCatalogPublication(canonicalBytes);
         }
     }
 }

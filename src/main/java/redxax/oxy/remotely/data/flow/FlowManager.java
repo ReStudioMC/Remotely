@@ -2,6 +2,7 @@ package redxax.oxy.remotely.data.flow;
 
 import java.time.Duration;
 import redxax.oxy.remotely.util.BrowserWork;
+import redxax.oxy.remotely.util.TaskSchedulers;
 import redxax.oxy.remotely.util.BrowserSafeState;
 import redxax.oxy.remotely.util.TaskIdentities;
 import com.google.gson.Gson;
@@ -1724,6 +1725,111 @@ public class FlowManager {
         }
         FlowEditorScreen screen = new FlowEditorScreen(new FlowGraph(), actualServerId, ScreenManager.getInstance().getCurrentScreen(), server, loaderHint, serverTitle).enableStudioMode();
         client.getHost().setScreen(screen);
+    }
+
+    public boolean resetNetworkReSyncSession(ReSyncFrameTransport transport) {
+        ReSyncFlowClient current = connectionManager.getNetworkClient(transport);
+        if (current == null) return false;
+        connectionManager.cancelNetworkSession(current.getServerId(), transport);
+        return true;
+    }
+
+    public Async<Void> openNetworkReSyncStudio(String serverHint, String displayName, ReSyncFrameTransport transport, BooleanSupplier admission) {
+        if (closed || transport == null || admission == null || !admission.getAsBoolean()) {
+            connectionManager.cancelNetworkSession(null, transport);
+            return Async.failed(new IllegalStateException("Resource Opening Was Cancelled"));
+        }
+        return Async.supplyAsync(() -> connectionManager.getNetworkClient(transport)).thenCompose(existing -> {
+            if (existing != null) return openNetworkStudio(existing.getServerId(), displayName, null, transport, admission, existing);
+            return connectionManager.resolveAndStoreProfile(serverHint, null).thenCompose(resolution -> {
+                ReSyncConnectionManager.ReSyncConnectionProfile profile = resolution == null ? null : resolution.profile();
+                if (resolution == null || !resolution.available() || profile == null || profile.serverId() == null || profile.serverId().isBlank()
+                        || profile.apiKey() == null || profile.apiKey().isBlank()) {
+                    connectionManager.cancelNetworkSession(null, transport);
+                    return Async.failed(new IllegalStateException("This Server Needs Its ReSync Server ID And API Key"));
+                }
+                return openNetworkReSyncStudio(profile.serverId(), displayName, profile.apiKey(), transport, admission);
+            }).whenComplete((ignored, failure) -> {
+                if (failure != null) connectionManager.cancelNetworkSession(null, transport);
+            });
+        });
+    }
+
+    public Async<Void> openNetworkReSyncStudio(String serverId, String displayName, String apiKey, ReSyncFrameTransport transport, BooleanSupplier admission) {
+        return openNetworkStudio(serverId, displayName, apiKey, transport, admission, null);
+    }
+
+    private Async<Void> openNetworkStudio(String serverId, String displayName, String apiKey, ReSyncFrameTransport transport,
+                                          BooleanSupplier admission, ReSyncFlowClient existing) {
+        Async<Void> result = Async.pending();
+        String canonicalId;
+        try {
+            canonicalId = UUID.fromString(serverId).toString();
+            if (existing == null && (apiKey == null || apiKey.isBlank())) throw new IllegalArgumentException("ReSync API Key Is Required");
+            if (transport == null || admission == null) throw new IllegalArgumentException("Resource Connection Is Unavailable");
+            if (closed || !admission.getAsBoolean()) throw new IllegalStateException("Resource Opening Was Cancelled");
+        } catch (RuntimeException failure) {
+            if (existing == null) connectionManager.cancelNetworkSession(null, transport);
+            return Async.failed(failure);
+        }
+        long generation = studioOpenGeneration.incrementAndGet();
+        BooleanSupplier current = () -> !closed && !result.isCancelled() && studioOpenGeneration.get() == generation && admission.getAsBoolean();
+        long deadline = Clock.system().millis() + 15_000L;
+        boolean cancelOnFailure = existing == null;
+        result.whenComplete((ignored, failure) -> {
+            if (failure != null && cancelOnFailure) connectionManager.cancelNetworkSession(canonicalId, transport);
+        });
+        activateNetworkStudio(canonicalId, displayName, apiKey, transport, current, result, deadline, existing);
+        return result;
+    }
+
+    private void activateNetworkStudio(String serverId, String displayName, String apiKey, ReSyncFrameTransport transport,
+                                       BooleanSupplier admission, Async<Void> result, long deadline, ReSyncFlowClient expected) {
+        Async.supplyAsync(() -> {
+            if (result.isDone()) return null;
+            if (!admission.getAsBoolean()) throw new IllegalStateException("Resource Opening Was Cancelled");
+            if (Clock.system().millis() >= deadline) throw new IllegalStateException("Resource Connection Timed Out");
+            ReSyncFlowClient flowClient = expected == null ? connectionManager.activateNetworkSession(serverId, apiKey, transport) : expected;
+            if (flowClient != null && connectionManager.getFlowClient(serverId) != flowClient) throw new IllegalStateException("Resource Connection Changed");
+            if (flowClient != null && flowClient.connectionFailure() != ReSyncFlowClient.ConnectionFailure.NONE) {
+                throw new IllegalStateException(switch (flowClient.connectionFailure()) {
+                    case ACCESS_DENIED -> "ReSync Access Denied. Check This Server's API Key";
+                    case PROTOCOL_MISMATCH, RUNTIME_VERSION_MISMATCH -> "Update ReSync And Remotely To Use This Server";
+                    case HANDSHAKE_REJECTED -> "This Server Rejected The Resource Connection";
+                    default -> "Resource Connection Is Unavailable";
+                });
+            }
+            return flowClient;
+        }).whenComplete((flowClient, failure) -> {
+            if (result.isDone()) return;
+            if (failure != null) {
+                result.fail(failure);
+                return;
+            }
+            if (flowClient == null || !flowClient.isConnectedState()) {
+                try {
+                    TaskSchedulers.current().schedule(() -> activateNetworkStudio(serverId, displayName, apiKey, transport, admission, result, deadline, flowClient), Duration.ofMillis(100L));
+                } catch (RuntimeException rejected) {
+                    result.fail(rejected);
+                }
+                return;
+            }
+            ScreenManager.getInstance().execute(() -> {
+                if (result.isDone()) return;
+                if (!admission.getAsBoolean() || connectionManager.getFlowClient(serverId) != flowClient || !flowClient.isConnectedState()) {
+                    result.fail(new IllegalStateException("Resource Opening Was Cancelled"));
+                    return;
+                }
+                if (!attachCoreGraphListener(flowClient)) {
+                    result.fail(new IllegalStateException("Resource Connection Changed"));
+                    return;
+                }
+                openResolvedReSyncStudio(serverId, null, "", displayName);
+                FlowEditorScreen screen = FlowEditorScreen.getStudioScreen(serverId);
+                if (screen != null) screen.prepareLiveStudioWorkspace();
+                result.complete(null);
+            });
+        });
     }
 
     public void openLiveReSyncStudio(ReSyncLiveServerSession session) {

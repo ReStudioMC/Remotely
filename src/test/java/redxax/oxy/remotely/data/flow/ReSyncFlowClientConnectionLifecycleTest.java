@@ -192,6 +192,7 @@ class ReSyncFlowClientConnectionLifecycleTest {
 
         try {
             client.connect().join();
+            assertTrue(transport.awaitHandshakeRequests(1, 2, TimeUnit.SECONDS));
             transport.receive(handshakeFrame());
             assertTrue(firstConnected.await(2, TimeUnit.SECONDS));
             int firstListRequests = resourceListRequestCount(transport, 0);
@@ -223,6 +224,7 @@ class ReSyncFlowClientConnectionLifecycleTest {
 
     @Test
     void browserShutdownDoesNotWaitForCallbackExecutorTermination() throws Exception {
+        TaskScheduler previousTasks = TaskSchedulers.current();
         ApplicationHost previousHost = ApplicationHostRegistry.current();
         RemotelyClient previousClient = RemotelyClient.INSTANCE;
         RemotelyClient browserClient = new RemotelyClient(RemotelyComposition.browser(new BrowserHost()).build());
@@ -246,6 +248,7 @@ class ReSyncFlowClientConnectionLifecycleTest {
             release.countDown();
             ApplicationHostRegistry.install(previousHost);
             RemotelyClient.INSTANCE = previousClient;
+            TaskSchedulers.configure(previousTasks);
         }
     }
 
@@ -457,6 +460,7 @@ class ReSyncFlowClientConnectionLifecycleTest {
             for (int connection = 1; connection <= 2; connection++) {
                 int offset = transport.sentFrames().size();
                 client.connect().join();
+                assertTrue(transport.awaitHandshakeRequests(connection, 2, TimeUnit.SECONDS));
                 transport.receive(handshakeFrame());
                 long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2L);
                 while (connections.get() < connection && System.nanoTime() < deadline) {
@@ -522,6 +526,7 @@ class ReSyncFlowClientConnectionLifecycleTest {
         try {
             client.sendWorldAction(new HashMap<>(Map.of("action", "list")));
             client.connect().join();
+            assertTrue(transport.awaitHandshakeRequests(1, 2, TimeUnit.SECONDS));
             transport.receive(handshakeFrame());
 
             assertTrue(firstConnected.await(2, TimeUnit.SECONDS));
@@ -533,6 +538,7 @@ class ReSyncFlowClientConnectionLifecycleTest {
 
             client.sendWorldAction(new HashMap<>(Map.of("action", "list")));
             client.connect().join();
+            assertTrue(transport.awaitHandshakeRequests(2, 2, TimeUnit.SECONDS));
             transport.receive(handshakeFrame());
 
             assertTrue(secondConnected.await(2, TimeUnit.SECONDS));
@@ -561,6 +567,7 @@ class ReSyncFlowClientConnectionLifecycleTest {
 
         try {
             client.connect().join();
+            assertTrue(transport.awaitHandshakeRequests(1, 2, TimeUnit.SECONDS));
             transport.receive(handshakeFrame());
             assertTrue(firstConnected.await(2, TimeUnit.SECONDS));
             int firstListRequests = resourceListRequestCount(transport, 0);
@@ -569,6 +576,7 @@ class ReSyncFlowClientConnectionLifecycleTest {
             transport.disconnect();
             assertTrue(disconnected.await(2, TimeUnit.SECONDS));
             client.connect().join();
+            assertTrue(transport.awaitHandshakeRequests(2, 2, TimeUnit.SECONDS));
             transport.receive(handshakeFrame());
             assertTrue(secondConnected.await(2, TimeUnit.SECONDS));
             assertTrue(resourceListRequestCount(transport, 0) > firstListRequests);
@@ -951,6 +959,11 @@ class ReSyncFlowClientConnectionLifecycleTest {
         @Override
         public boolean isOpen() {
             return true;
+        }
+
+        @Override
+        public boolean reconnectable() {
+            return false;
         }
 
         @Override

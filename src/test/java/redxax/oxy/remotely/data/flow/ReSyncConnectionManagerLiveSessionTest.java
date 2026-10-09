@@ -2,6 +2,7 @@ package redxax.oxy.remotely.data.flow;
 
 import org.junit.jupiter.api.Test;
 import restudio.rescreen.platform.Async;
+import redxax.oxy.remotely.util.BrowserSafeState;
 import restudio.resync.flow.identity.ServerId;
 
 import java.lang.reflect.Field;
@@ -438,7 +439,7 @@ class ReSyncConnectionManagerLiveSessionTest {
             serverId, "Server", new TestTransport()));
         Field authenticated = ReSyncFlowClient.class.getDeclaredField("authenticated");
         authenticated.setAccessible(true);
-        ((AtomicBoolean) authenticated.get(first)).set(true);
+        ((BrowserSafeState.BooleanValue) authenticated.get(first)).set(true);
 
         assertNull(ensureWithoutConnecting(manager, serverId,
             new ReSyncConnectionManager.ReSyncConnectionProfile("ws://127.0.0.1:8765", "replacement-key")));
@@ -568,7 +569,11 @@ class ReSyncConnectionManagerLiveSessionTest {
 
             stuckTransport.allowClose.countDown();
             assertTrue(stuckTransport.closeExited.await(2, TimeUnit.SECONDS));
-            assertTrue(connectionLifecycleExecutor(manager).awaitTermination(2, TimeUnit.SECONDS));
+            assertTimeoutPreemptively(Duration.ofSeconds(2), () -> {
+                while (!pendingRetirements(manager).isEmpty()) {
+                    Thread.onSpinWait();
+                }
+            });
             assertNull(manager.getFlowClient(stuckServerId));
             assertNull(manager.getFlowClient(healthyServerId));
             assertTrue(flowProfiles(manager).isEmpty());
@@ -865,7 +870,7 @@ class ReSyncConnectionManagerLiveSessionTest {
         TestTransport firstTransport = new TestTransport();
         ReSyncLiveServerSession firstSession = new ReSyncLiveServerSession("live:server:player", "Server", firstTransport);
         manager.activateLiveSession(firstSession);
-        TestTransport secondTransport = new TestTransport();
+        TestTransport secondTransport = new TestTransport(false);
 
         manager.activateLiveSession(new ReSyncLiveServerSession(firstSession.serverId(), "Server", secondTransport));
         assertEquals(0, disconnects.get());
@@ -1019,13 +1024,6 @@ class ReSyncConnectionManagerLiveSessionTest {
         return (Map<?, ?>) retirements.get(manager);
     }
 
-    private static ExecutorService connectionLifecycleExecutor(ReSyncConnectionManager manager)
-        throws ReflectiveOperationException {
-        Field executor = ReSyncConnectionManager.class.getDeclaredField("connectionLifecycleExecutor");
-        executor.setAccessible(true);
-        return (ExecutorService) executor.get(manager);
-    }
-
     private Map<?, ?> ownershipLocks(ReSyncConnectionManager manager) {
         try {
             Field locks = ReSyncConnectionManager.class.getDeclaredField("connectionOwnershipLocks");
@@ -1085,7 +1083,7 @@ class ReSyncConnectionManagerLiveSessionTest {
                 Field completedGeneration = ReSyncFlowClient.class.getDeclaredField("completedStartupGeneration");
                 completedGeneration.setAccessible(true);
                 synchronized (outboundLock.get(client)) {
-                    ((AtomicBoolean) authenticated.get(client)).set(true);
+                    ((BrowserSafeState.BooleanValue) authenticated.get(client)).set(true);
                     completedGeneration.setInt(client, activeGeneration.getInt(client));
                 }
                 Field listener = ReSyncFlowClient.class.getDeclaredField("connectionListener");

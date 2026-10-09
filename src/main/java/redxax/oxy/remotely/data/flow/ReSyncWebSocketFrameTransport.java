@@ -247,18 +247,40 @@ public final class ReSyncWebSocketFrameTransport implements ReSyncFrameTransport
 
     @Override
     public void send(byte[] frame) {
+        if (!trySend(frame, null)) throw new IllegalStateException("ReSync WebSocket is not open");
+    }
+
+    @Override
+    public boolean trySend(byte[] frame) {
+        return trySend(frame, null);
+    }
+
+    @Override
+    public boolean trySend(byte[] frame, Consumer<SendResult> resultHandler) {
         Consumer<Throwable> handler = errorHandler;
         BinaryWebSocket current = socket;
         int generation = connectionGeneration.get();
-        if (state.get() != State.OPEN || current == null || !current.isOpen()) {
-            throw new IllegalStateException("ReSync WebSocket is not open");
+        if (frame == null || state.get() != State.OPEN || current == null || !current.isOpen()) return false;
+        SendTracker tracker = new SendTracker(System.nanoTime(), 1, frame.length, 0, 0L, resultHandler);
+        Async<Void> send;
+        try {
+            send = Objects.requireNonNull(current.sendBinary(frame), "ReSync socket returned no send completion");
+        } catch (RuntimeException failure) {
+            tracker.fail(failure.getMessage() == null ? "ReSync Socket Send Failed" : failure.getMessage());
+            throw failure;
         }
-        current.sendBinary(frame).exceptionally(error -> {
-            if (connectionGeneration.get() == generation && socket == current && state.get() == State.OPEN) {
-                handler.accept(error);
+        send.whenComplete((ignored, failure) -> {
+            if (failure == null) {
+                tracker.sentFrame();
+                return;
             }
-            return null;
+            String reason = failure.getMessage();
+            tracker.fail(reason == null || reason.isBlank() ? "ReSync Socket Send Failed" : reason);
+            if (connectionGeneration.get() == generation && socket == current && state.get() == State.OPEN) {
+                handler.accept(failure);
+            }
         });
+        return true;
     }
 
     @Override

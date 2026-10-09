@@ -4,9 +4,19 @@ import restudio.resync.flow.identity.ServerId;
 
 import java.util.Optional;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 
 public interface ReSyncFrameTransport {
     default void renewSession(String ticket) {
+    }
+
+    enum SendAdmission {
+        ACCEPTED,
+        QUEUE_FULL,
+        CLOSED,
+        INVALID,
+        FAILED,
+        REJECTED
     }
 
     enum CallbackPublication {
@@ -189,9 +199,16 @@ public interface ReSyncFrameTransport {
 
     void setFrameHandler(Consumer<byte[]> handler);
 
+    default void setFrameAdmissionHandler(Predicate<byte[]> handler) {
+        setFrameHandler(frame -> handler.test(frame));
+    }
+
     void setCloseHandler(Runnable handler);
 
     default void setOpenHandler(Runnable handler) {
+    }
+
+    default void setSendReadyHandler(Runnable handler) {
     }
 
     default void setCloseReasonHandler(Consumer<String> handler) {
@@ -222,6 +239,18 @@ public interface ReSyncFrameTransport {
             }
         }
         return true;
+    }
+
+    default SendAdmission admitSend(byte[] frame, Consumer<SendResult> resultHandler) {
+        return trySend(frame, resultHandler) ? SendAdmission.ACCEPTED : SendAdmission.REJECTED;
+    }
+
+    default void retireSession() {
+        close();
+    }
+
+    default String closeReason() {
+        return "";
     }
 
     void close();

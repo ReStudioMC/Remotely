@@ -151,7 +151,7 @@ public final class ReSyncCatalogPublicationProjection {
             }
             if (nodePublication.revision() == previous.publication().revision()) {
                 return nodePublication.equals(previous.publication())
-                    && Arrays.equals(nodeCanonicalBytes, previous.canonicalBytes())
+                    && previous.canonicalBytesEqual(nodeCanonicalBytes)
                     ? Optional.of(new Prepared(previous, previous)) : Optional.empty();
             }
         }
@@ -210,7 +210,8 @@ public final class ReSyncCatalogPublicationProjection {
             throw new IllegalArgumentException("Catalog publication snapshot is invalid");
         }
         CatalogCachePublication nodePublication = nodePublication(publication);
-        byte[] nodeCanonicalBytes = PUBLICATION_CODEC.encodeBytes(nodePublication);
+        byte[] nodeCanonicalBytes = nodePublication == publication
+            ? canonicalBytes : PUBLICATION_CODEC.encodeBytes(nodePublication);
         Map<ContractRef<NodeId>, CatalogCachePublication.Entry> entries = validatedEntries(nodePublication, snapshot.entries());
         if (entries == null) {
             throw new IllegalArgumentException("Catalog publication snapshot entries are invalid");
@@ -257,7 +258,8 @@ public final class ReSyncCatalogPublicationProjection {
         }
         CatalogCachePublication nodePublication = nodePublication(cached.publication());
         CatalogCachePublication nodeHydrationProjection = nodePublication(cached.hydrationProjection());
-        byte[] nodeCanonicalBytes = PUBLICATION_CODEC.encodeBytes(nodePublication);
+        byte[] nodeCanonicalBytes = nodePublication == cached.publication()
+            ? canonicalBytes : PUBLICATION_CODEC.encodeBytes(nodePublication);
         if (!sameHydrationMetadata(nodePublication, nodeHydrationProjection)) {
             return Optional.empty();
         }

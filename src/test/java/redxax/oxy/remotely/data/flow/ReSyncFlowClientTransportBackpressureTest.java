@@ -3,6 +3,8 @@ package redxax.oxy.remotely.data.flow;
 import com.google.gson.JsonObject;
 import org.junit.jupiter.api.Test;
 import restudio.resync.protocol.ReSyncProtocolContract;
+import restudio.rescreen.platform.Async;
+import redxax.oxy.remotely.util.BrowserSafeState;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
@@ -14,9 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Callable;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -385,7 +385,9 @@ class ReSyncFlowClientTransportBackpressureTest {
         ReSyncFlowClient client = new ReSyncFlowClient("transport-terminal:" + UUID.randomUUID(),
             new ClosedTransport(), null, new ReSyncCatalogPublicationCache());
         String requestId = "terminal-" + UUID.randomUUID();
-        CompletableFuture<JsonObject> future = new CompletableFuture<>();
+        Async<JsonObject> future = Async.pending();
+        CountDownLatch settled = new CountDownLatch(1);
+        future.whenComplete((result, failure) -> settled.countDown());
         try {
             pendingPlayerControls(client).put(requestId, future);
             inboundFrameBytes(client).set(17 * 1024 * 1024);
@@ -395,7 +397,9 @@ class ReSyncFlowClientTransportBackpressureTest {
                 + requestId + "\"}").getBytes(StandardCharsets.UTF_8));
             inboundFrameBytes(client).remove();
 
-            assertThrows(ExecutionException.class, () -> future.get(2, TimeUnit.SECONDS));
+            assertTrue(settled.await(2, TimeUnit.SECONDS));
+            assertTrue(future.failure() instanceof IllegalStateException);
+            assertEquals("The ReSync player response was too large to deliver.", future.failure().getMessage());
             assertFalse(pendingPlayerControls(client).containsKey(requestId));
         } finally {
             inboundFrameBytes(client).remove();
@@ -467,10 +471,10 @@ class ReSyncFlowClientTransportBackpressureTest {
         return method;
     }
 
-    private static AtomicBoolean authenticated(ReSyncFlowClient client) throws Exception {
+    private static BrowserSafeState.BooleanValue authenticated(ReSyncFlowClient client) throws Exception {
         Field field = ReSyncFlowClient.class.getDeclaredField("authenticated");
         field.setAccessible(true);
-        return (AtomicBoolean) field.get(client);
+        return (BrowserSafeState.BooleanValue) field.get(client);
     }
 
     private static boolean awaitPendingSendRelease(ReSyncFlowClient client, String requestId) throws Exception {
@@ -492,11 +496,11 @@ class ReSyncFlowClientTransportBackpressureTest {
     }
 
     @SuppressWarnings("unchecked")
-    private static Map<String, CompletableFuture<JsonObject>> pendingPlayerControls(ReSyncFlowClient client)
+    private static Map<String, Async<JsonObject>> pendingPlayerControls(ReSyncFlowClient client)
         throws Exception {
         Field field = ReSyncFlowClient.class.getDeclaredField("pendingPlayerControlRequests");
         field.setAccessible(true);
-        return (Map<String, CompletableFuture<JsonObject>>) field.get(client);
+        return (Map<String, Async<JsonObject>>) field.get(client);
     }
 
     @SuppressWarnings("unchecked")

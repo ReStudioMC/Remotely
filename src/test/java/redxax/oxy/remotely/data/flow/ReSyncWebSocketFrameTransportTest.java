@@ -29,6 +29,12 @@ class ReSyncWebSocketFrameTransportTest {
         sockets.connecting.complete(sockets.latest());
         assertTrue(transport.isOpen());
         assertEquals(0, errors.get());
+        List<ReSyncFrameTransport.SendResult> receipts = new ArrayList<>();
+        assertTrue(transport.trySend(new byte[] {1}, receipts::add));
+        assertTrue(receipts.isEmpty());
+        sockets.latest().send.complete(null);
+        assertEquals(1, receipts.size());
+        assertTrue(receipts.getFirst().delivered());
     }
 
     @Test
@@ -42,13 +48,17 @@ class ReSyncWebSocketFrameTransportTest {
         transport.connect();
         Socket old = sockets.latest();
         sockets.connecting.complete(old);
-        transport.send(new byte[] {1});
+        List<ReSyncFrameTransport.SendResult> receipts = new ArrayList<>();
+        assertTrue(transport.trySend(new byte[] {1}, receipts::add));
+        assertTrue(receipts.isEmpty());
         old.listener.onClose(1006, "Lost");
         old.listener.onClose(1006, "Lost");
         assertEquals(1, closes.get());
         transport.connect();
         sockets.connecting.complete(sockets.latest());
         old.send.fail(new IllegalStateException("Late Send Failure"));
+        assertEquals(1, receipts.size());
+        assertFalse(receipts.getFirst().delivered());
         old.listener.onClose(1006, "Late Close");
         old.listener.onError(new IllegalStateException("Late Error"));
 

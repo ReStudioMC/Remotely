@@ -9,6 +9,8 @@ import restudio.rescreen.platform.Clock;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
@@ -18,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ReSyncWebSocketCompositionTest {
     private JvmTaskScheduler scheduler;
@@ -44,7 +47,7 @@ class ReSyncWebSocketCompositionTest {
     }
 
     @Test
-    void suppliedBrowserTransportUsesAnEmptyHandshakeCredential() {
+    void suppliedBrowserTransportUsesAnEmptyHandshakeCredential() throws Exception {
         OpeningTransport transport = new OpeningTransport();
         ReSyncFlowClient client = new ReSyncFlowClient("123e4567-e89b-42d3-a456-426614174000", transport,
             "browser-ticket", ReSyncFlowClientContext.defaults(), scheduler, Clock.system(),
@@ -114,6 +117,7 @@ class ReSyncWebSocketCompositionTest {
         private volatile Runnable closeHandler = () -> {};
         private volatile State state = State.NEW;
         private volatile byte[] handshake;
+        private final CountDownLatch handshakeSent = new CountDownLatch(1);
 
         @Override
         public void setFrameHandler(Consumer<byte[]> handler) {
@@ -139,7 +143,11 @@ class ReSyncWebSocketCompositionTest {
 
         @Override
         public void send(byte[] frame) {
-            handshake = frame.clone();
+            ReSyncDecodedFrame decoded = new ReSyncFrameCodec().decode(frame, null);
+            if (decoded.messageType() == ReSyncProtocolContract.MESSAGE_HANDSHAKE_REQUEST) {
+                handshake = decoded.payload();
+                handshakeSent.countDown();
+            }
         }
 
         @Override
@@ -158,9 +166,9 @@ class ReSyncWebSocketCompositionTest {
             return state;
         }
 
-        private String handshakeCredential() {
-            ReSyncDecodedFrame frame = new ReSyncFrameCodec().decode(handshake, null);
-            ByteBuffer payload = ByteBuffer.wrap(frame.payload());
+        private String handshakeCredential() throws InterruptedException {
+            assertTrue(handshakeSent.await(2, TimeUnit.SECONDS));
+            ByteBuffer payload = ByteBuffer.wrap(handshake);
             byte[] credential = new byte[payload.getInt()];
             payload.get(credential);
             return new String(credential, StandardCharsets.UTF_8);

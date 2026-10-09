@@ -37,6 +37,13 @@ public interface ReSyncFlowClientFactory {
         return create(serverId, null, null, null, transport, state);
     }
 
+    default ReSyncFlowClient createNetwork(String serverId, String apiKey, ReSyncFrameTransport transport, Object state) {
+        if (apiKey == null || apiKey.isBlank()) {
+            throw new IllegalArgumentException("ReSync API Key Is Required");
+        }
+        return create(serverId, null, null, apiKey, Objects.requireNonNull(transport, "transport"), state);
+    }
+
     static void installDesktop(ReSyncFlowClientFactory factory) {
         ProviderState.value = Objects.requireNonNull(factory, "factory");
     }

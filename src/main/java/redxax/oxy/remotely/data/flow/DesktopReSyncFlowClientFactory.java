@@ -19,11 +19,11 @@ public final class DesktopReSyncFlowClientFactory {
             ReSyncFlowClientContext context = state instanceof ReSyncFlowClientContext resolved
                 ? resolved : ReSyncFlowClientContext.defaults();
             if (suppliedTransport != null) {
-                return new ReSyncFlowClient(serverId, suppliedTransport, "bridge", context, scheduler, clock,
+                return new ReSyncFlowClient(serverId, suppliedTransport, directApiKey == null || directApiKey.isBlank() ? "bridge" : directApiKey, context, scheduler, clock,
                     identityProvider, ReSyncCredentialProvider.apiKey(), true);
             }
             ReSyncFrameTransportFactory transportFactory = endpoint ->
-                new ReSyncWebSocketFrameTransport(endpoint, new JvmWebSocketTransport());
+                new ReSyncWebSocketFrameTransport(endpoint, new JvmWebSocketTransport(ReSyncProtocolContract.MAX_ENCODED_FRAME_BYTES));
             return new ReSyncFlowClient(serverId, apiClient, directWsUrl, directApiKey, context, scheduler, clock,
                 transportFactory, identityProvider, ReSyncCredentialProvider.apiKey(), true);
         };

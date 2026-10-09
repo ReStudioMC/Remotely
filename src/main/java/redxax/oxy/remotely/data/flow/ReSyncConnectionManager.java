@@ -54,6 +54,7 @@ public class ReSyncConnectionManager {
     private final ReSyncFlowClientContext flowClientContext;
     private final Map<String, OwnershipLock> connectionOwnershipLocks = BrowserSafeState.map();
     private final Map<String, OwnedFlowClient> flowClients = BrowserSafeState.map();
+    private final Map<ReSyncFrameTransport, OwnedFlowClient> networkClients = BrowserSafeState.map();
     private final Map<String, ReSyncConnectionProfile> flowProfiles = BrowserSafeState.map();
     private final Map<String, String> profileConnectionKeys = BrowserSafeState.map();
     private final Set<String> staleProfileAliases = BrowserSafeState.set();
@@ -237,7 +238,7 @@ public class ReSyncConnectionManager {
     private record ProfileReplacement(String serverId, OwnedFlowClient expectedOwner,
                                       ReSyncConnectionProfile profile, ReSyncLiveServerSession liveSession,
                                       ErrorMode errorMode, boolean connectIfNeeded, String resolutionFenceKey,
-                                      long resolutionGeneration, long generation) {
+                                      long resolutionGeneration, long generation, String apiKey) {
     }
 
     public ReSyncConnectionManager(RemotelyClient client, RemotelyServerApi apiClient) {
@@ -668,7 +669,48 @@ public class ReSyncConnectionManager {
         });
     }
 
+    public ReSyncFlowClient getNetworkClient(ReSyncFrameTransport transport) {
+        if (transport == null || !transport.reconnectable()) return null;
+        OwnedFlowClient owner = networkClients.get(transport);
+        if (owner == null) return null;
+        String serverId = owner.client.getServerId();
+        if (!isOwner(serverId, owner) || owner.callbacksSuppressed || pendingProfileReplacements.containsKey(serverId)) return null;
+        return owner.client;
+    }
+
+    public void cancelNetworkSession(String serverId, ReSyncFrameTransport transport) {
+        if (transport == null) return;
+        String canonicalId = serverId == null ? null : UUID.fromString(serverId).toString();
+        synchronized (connectionLifecycleAdmission) {
+            ProfileReplacement replacement = canonicalId == null ? null : pendingProfileReplacements.get(canonicalId);
+            if (replacement != null && replacement.apiKey() != null && replacement.liveSession() != null
+                && replacement.liveSession().transport() == transport && pendingProfileReplacements.remove(canonicalId, replacement)) {
+                profileReplacementRetryAt.remove(replacement);
+                if (!dispatchedProfileReplacements.contains(replacement)) replacement.expectedOwner().callbacksSuppressed = false;
+            }
+            OwnedFlowClient owner = networkClients.get(transport);
+            if (owner != null && (canonicalId == null || owner.client.getServerId().equals(canonicalId))) {
+                networkClients.remove(transport, owner);
+            }
+        }
+        transport.close();
+    }
+
+    public ReSyncFlowClient activateNetworkSession(String serverId, String apiKey, ReSyncFrameTransport transport) {
+        String canonicalId = UUID.fromString(Objects.requireNonNull(serverId, "serverId")).toString();
+        if (apiKey == null || apiKey.isBlank()) {
+            throw new IllegalArgumentException("ReSync API Key Is Required");
+        }
+        Objects.requireNonNull(transport, "transport");
+        if (!transport.reconnectable() && transport.state() != ReSyncFrameTransport.State.NEW) return null;
+        return activateLiveSession(new ReSyncLiveServerSession(canonicalId, canonicalId, transport), apiKey);
+    }
+
     public ReSyncFlowClient activateLiveSession(ReSyncLiveServerSession session) {
+        return activateLiveSession(session, null);
+    }
+
+    private ReSyncFlowClient activateLiveSession(ReSyncLiveServerSession session, String apiKey) {
         if (session == null || session.serverId() == null || session.serverId().isBlank() || session.transport() == null
             || connectionLifecycleClosed) {
             return null;
@@ -696,15 +738,19 @@ public class ReSyncConnectionManager {
                 return null;
             }
             owner = flowClients.get(serverId);
+            if (owner != null && owner.client.usesFrameTransport(session.transport())
+                && apiKey != null && !owner.client.matchesDirectProfile(null, apiKey)) {
+                throw new IllegalArgumentException("Close The Current Resource Connection Before Changing Its API Key");
+            }
             if (owner == null || !owner.client.usesFrameTransport(session.transport())) {
                 requireNoCurrentThreadLease();
                 displaced = owner;
                 ReSyncConnectionProfile displacedProfile = flowProfiles.get(serverId);
                 if (displaced != null) {
-                    scheduleLiveReplacement(serverId, displaced, session);
+                    scheduleLiveReplacement(serverId, displaced, session, apiKey);
                     return null;
                 }
-                ReSyncFlowClient flowClient = createLiveFlowClient(serverId, session.transport());
+                ReSyncFlowClient flowClient = createLiveFlowClient(serverId, session.transport(), apiKey);
                 unpublished = flowClient;
                 OwnedFlowClient replacement = prepareOwner(serverId, flowClient, ErrorMode.LIVE_SESSION,
                     session.transport());
@@ -716,8 +762,10 @@ public class ReSyncConnectionManager {
                     throw new IllegalStateException("ReSync connection ownership changed during replacement.");
                 }
                 synchronized (connectionLifecycleAdmission) {
-                    if (!connectionLifecycleClosed) {
+                    if (!connectionLifecycleClosed && (apiKey == null || session.transport().reconnectable()
+                        || session.transport().state() == ReSyncFrameTransport.State.NEW)) {
                         flowClients.put(serverId, replacement);
+                        if (apiKey != null) networkClients.put(session.transport(), replacement);
                         owner = replacement;
                         unpublished = null;
                         removeProfileIfSame(serverId, displacedProfile);
@@ -839,11 +887,15 @@ public class ReSyncConnectionManager {
             : new ReSyncFlowClient(serverId, apiClient, client);
     }
 
-    private ReSyncFlowClient createLiveFlowClient(String serverId, ReSyncFrameTransport transport) {
+    private ReSyncFlowClient createLiveFlowClient(String serverId, ReSyncFrameTransport transport, String apiKey) {
         if (flowClientFactory.available()) {
             Object state = flowClientContext == null ? client : flowClientContext;
-            return Objects.requireNonNull(flowClientFactory.createLive(serverId, transport, state),
+            return Objects.requireNonNull((apiKey == null ? flowClientFactory.createLive(serverId, transport, state)
+                    : flowClientFactory.createNetwork(serverId, apiKey, transport, state)),
                 "ReSync flow client factory returned no live client");
+        }
+        if (apiKey != null) {
+            throw new IllegalStateException("ReSync Network Client Factory Is Unavailable");
         }
         ReSyncCatalogPublicationCache publicationCache = catalogPublicationCacheFactory.apply(serverId);
         return publicationCache == null ? new ReSyncFlowClient(serverId, transport, client)
@@ -882,16 +934,16 @@ public class ReSyncConnectionManager {
             return;
         }
         ProfileReplacement replacement = new ProfileReplacement(serverId, owner, profile, null, errorMode,
-            connectIfNeeded, null, 0L, nextProfileReplacementGeneration.incrementAndGet());
+            connectIfNeeded, null, 0L, nextProfileReplacementGeneration.incrementAndGet(), null);
         scheduleReplacement(replacement);
     }
 
-    private void scheduleLiveReplacement(String serverId, OwnedFlowClient owner, ReSyncLiveServerSession session) {
+    private void scheduleLiveReplacement(String serverId, OwnedFlowClient owner, ReSyncLiveServerSession session, String apiKey) {
         if (connectionLifecycleClosed) {
             return;
         }
         ProfileReplacement replacement = new ProfileReplacement(serverId, owner, null, session,
-            ErrorMode.LIVE_SESSION, true, null, 0L, nextProfileReplacementGeneration.incrementAndGet());
+            ErrorMode.LIVE_SESSION, true, null, 0L, nextProfileReplacementGeneration.incrementAndGet(), apiKey);
         scheduleReplacement(replacement);
     }
 
@@ -901,7 +953,7 @@ public class ReSyncConnectionManager {
             return;
         }
         ProfileReplacement replacement = new ProfileReplacement(serverId, owner, null, null, ErrorMode.SILENT,
-            false, resolutionFenceKey, resolutionGeneration, nextProfileReplacementGeneration.incrementAndGet());
+            false, resolutionFenceKey, resolutionGeneration, nextProfileReplacementGeneration.incrementAndGet(), null);
         scheduleReplacement(replacement);
     }
 
@@ -940,7 +992,7 @@ public class ReSyncConnectionManager {
                     profileTimeoutExecutor.schedule(() -> {
                         profileReplacementRetryAt.remove(replacement);
                         dispatchProfileReplacement(replacement);
-                    }, java.time.Duration.ofSeconds(1L));
+                    }, Duration.ofSeconds(1L));
                 } catch (IllegalStateException retryError) {
                     pendingProfileReplacements.remove(replacement.serverId(), replacement);
                     profileReplacementRetryAt.remove(replacement);
@@ -985,7 +1037,7 @@ public class ReSyncConnectionManager {
             ReSyncFlowClient flowClient;
             ReSyncFrameTransport callbackTransport;
             if (replacement.liveSession() != null) {
-                flowClient = createLiveFlowClient(replacement.serverId(), replacement.liveSession().transport());
+                flowClient = createLiveFlowClient(replacement.serverId(), replacement.liveSession().transport(), replacement.apiKey());
                 callbackTransport = replacement.liveSession().transport();
                 flowProfiles.remove(replacement.serverId());
             } else {
@@ -994,11 +1046,12 @@ public class ReSyncConnectionManager {
             }
             published = prepareOwner(replacement.serverId(), flowClient, replacement.errorMode(), callbackTransport);
             synchronized (connectionLifecycleAdmission) {
-                if (connectionLifecycleClosed) {
+                if (connectionLifecycleClosed || !isCurrentProfileReplacement(replacement) || !isReplacementSourceCurrent(replacement)) {
                     unpublished = flowClient;
                     published = null;
                 } else {
                     flowClients.put(replacement.serverId(), published);
+                    if (replacement.apiKey() != null) networkClients.put(callbackTransport, published);
                     profileOwnerRefreshRequired.remove(replacement.serverId());
                     traceOwnerLifecycle(replacement.serverId(), "connection_owner_published", published,
                         replacement.liveSession() == null ? "profile_replacement_current" : "live_replacement_current");
@@ -1071,7 +1124,8 @@ public class ReSyncConnectionManager {
             return flowProfiles.get(replacement.serverId()) == replacement.profile();
         }
         if (replacement.liveSession() != null) {
-            return true;
+            return replacement.apiKey() == null || replacement.liveSession().transport().reconnectable()
+                || replacement.liveSession().transport().state() == ReSyncFrameTransport.State.NEW;
         }
         CachedProfileResolution current = profileResolutionCache.get(replacement.resolutionFenceKey());
         return current != null && current.resolution().generation() == replacement.resolutionGeneration();
@@ -1184,6 +1238,7 @@ public class ReSyncConnectionManager {
         }
         try {
             displaced.client.shutdown();
+            if (displaced.callbackTransport != null) networkClients.remove(displaced.callbackTransport, displaced);
             return null;
         } catch (RuntimeException error) {
             return error;
@@ -1616,6 +1671,7 @@ public class ReSyncConnectionManager {
                 keepRetiring = true;
                 throw new IllegalStateException("ReSync connection ownership changed during close.");
             }
+            if (owner != null && owner.callbackTransport != null) networkClients.remove(owner.callbackTransport, owner);
             pendingRetirements.remove(serverId, progress);
             return owner != null;
         } finally {
@@ -1868,6 +1924,7 @@ public class ReSyncConnectionManager {
             }
         }
         flowClients.clear();
+        networkClients.clear();
         pendingRetirements.clear();
         flowProfiles.clear();
         profileOwnerRefreshRequired.clear();

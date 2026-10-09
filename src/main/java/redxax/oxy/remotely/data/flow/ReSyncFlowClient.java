@@ -567,6 +567,7 @@ public class ReSyncFlowClient {
     private long pendingSendBytes;
     private boolean drainingPendingSends;
     private final BrowserSafeState.BooleanValue pendingFlushScheduled = new BrowserSafeState.BooleanValue();
+    private boolean pendingFlushRequested;
     private final BrowserSafeState.BooleanValue transportFailureScheduled = new BrowserSafeState.BooleanValue();
     private final BrowserSafeState.IntegerValue transportFailureGeneration = new BrowserSafeState.IntegerValue(-1);
     private final BrowserSafeState.IntegerValue playerControlSequence = new BrowserSafeState.IntegerValue();
@@ -625,6 +626,7 @@ public class ReSyncFlowClient {
     private final ReSyncCatalogPublicationProjection catalogPublicationProjection;
     private final ReSyncCatalogAuthoringProjection catalogAuthoringProjection;
     private final BrowserSafeState.ReferenceValue<TypedInteractionState> typedInteractionState = new BrowserSafeState.ReferenceValue<>();
+    private TypedInteractionState residentTypedInteraction;
     private volatile String typedInteractionDiagnostic = "";
     private final ReSyncCatalogPublicationReceiptHandler catalogPublicationReceiptHandler;
     private final ReSyncCatalogPublicationReceiptOutbox catalogPublicationReceiptOutbox =
@@ -1001,9 +1003,11 @@ public class ReSyncFlowClient {
                     TypedInteractionState interaction;
                     try {
                         ReSyncCatalogPublicationProjection.Snapshot candidate = prepared.candidate();
-                        interaction = new TypedInteractionState(candidate.publication().key(),
-                            ReSyncTypedInteractionProjection.from(candidate,
-                                preparedAuthoring != null ? preparedAuthoring.candidate().publication() : null));
+                        ReSyncCatalogAuthoringProjection.Snapshot authoring = preparedAuthoring != null
+                            ? preparedAuthoring.candidate() : null;
+                        interaction = new TypedInteractionState(TypedInteractionStamp.of(candidate, authoring),
+                            expectedGeneration, handshakeAuthorityEpoch, ReSyncTypedInteractionProjection.from(candidate,
+                                authoring != null ? authoring.publication() : null));
                     } catch (RuntimeException exception) {
                         logger().operation("Catalog Publication").with("reason", exception.getMessage())
                             .warn("Could not prepare typed interaction catalog");
@@ -1041,6 +1045,7 @@ public class ReSyncFlowClient {
                                 }
                             }
                         }
+                        residentTypedInteraction = interaction;
                         typedInteractionState.set(interaction);
                         refreshCatalogAuthority();
                     }
@@ -1308,7 +1313,8 @@ public class ReSyncFlowClient {
         Optional<ReSyncCatalogPublicationProjection.Snapshot> active = catalogPublicationProjection.active();
         Optional<CatalogCacheKey> acknowledged = catalogPublicationProjection.acknowledgedKey();
         if (active.isEmpty() || acknowledged.isEmpty() || !state.key().equals(acknowledged.orElseThrow())
-            || !state.key().equals(active.orElseThrow().publication().key()) || typedInteractionState.get() != state
+            || !state.stamp().matches(active.orElseThrow(), catalogAuthoringProjection.active().orElse(null))
+            || typedInteractionState.get() != state
             || catalogAuthority != CatalogAuthority.TYPED_PUBLICATION) {
             return Optional.empty();
         }
@@ -1814,7 +1820,12 @@ public class ReSyncFlowClient {
             catalogPublicationReceiptHandler.setAuthoringRequired(advertised);
         }
         if (!advertised) {
-            catalogAuthoringProjection.clear();
+            synchronized (catalogLifecycleLock) {
+                if (catalogAuthoringProjection.active().isPresent()) {
+                    retireTypedInteractionProjection();
+                }
+                catalogAuthoringProjection.clear();
+            }
             failPendingAuthoringTemplateRequests("Catalog authoring is not negotiated");
             failPendingCoreOptionRequests("Catalog authoring is not negotiated");
         }
@@ -1828,7 +1839,7 @@ public class ReSyncFlowClient {
             catalogPublicationConfirmed = false;
             boolean accepted = catalogPublicationProjection.acknowledgeActiveKey(key);
             if (!accepted) {
-                clearTypedInteractionProjection();
+                retireTypedInteractionProjection();
                 catalogPublicationProjection.clear();
                 catalogAuthoringProjection.clear();
                 beginTypedReconciliation("CATALOG_PUBLICATION_KEY_MISMATCH_RECONCILIATION");
@@ -1926,7 +1937,7 @@ public class ReSyncFlowClient {
             synchronized (catalogLifecycleLock) {
                 catalogAuthoringProjection.expectedServerId()
                     .ifPresent(OptionCatalogCache.getInstance()::markCoreServerStale);
-                clearTypedInteractionProjection();
+                retireTypedInteractionProjection();
                 catalogPublicationProjection.clear();
                 catalogAuthoringProjection.clear();
                 ReSyncResourceDropCapabilities.clearCatalog(serverId);
@@ -2359,6 +2370,13 @@ public class ReSyncFlowClient {
             notifyError("ReSyncUnavailable");
             return Async.completed(null);
         }
+        Async<Void> cleanup = connectionCleanupCompletion;
+        if (!Boolean.TRUE.equals(inConnectionEvent.get()) && !cleanup.isDone()) {
+            return deferFrameTransportConnect(cleanup);
+        }
+        if (!isRetryableConnectionFailure() && terminalFrameDisconnectPublished.get() && !frameTransport.reusableAfterDisconnect()) {
+            return Async.completed(null);
+        }
         if (!frameTransport.isOpen()) {
             ReSyncFrameTransport.State state = frameTransport.state();
             if (state == ReSyncFrameTransport.State.CONNECTING) {
@@ -2380,10 +2398,6 @@ public class ReSyncFlowClient {
                 handleFrameTransportOpeningFailure();
             }
             return Async.completed(null);
-        }
-        Async<Void> cleanup = connectionCleanupCompletion;
-        if (!Boolean.TRUE.equals(inConnectionEvent.get()) && !cleanup.isDone()) {
-            return deferFrameTransportConnect(cleanup);
         }
         return startFrameTransportConnection();
     }
@@ -2452,7 +2466,8 @@ public class ReSyncFlowClient {
 
     private void observeFrameTransportCloseReason(String reason) {
         String text = reason == null ? "" : reason;
-        if (text.contains("Ticket Expired") || text.contains("Access Denied") || text.contains("Unauthorized")) {
+        if (text.contains("Ticket Expired") || text.contains("Access Denied") || text.contains("Unauthorized")
+            || text.contains("Invalid API key") || text.contains("Invalid client id") || text.contains("No Permission")) {
             connectionFailure.set(ConnectionFailure.ACCESS_DENIED);
         } else if (text.contains("Protocol") || text.contains("Invalid ReSync Frame")
             || text.contains("Binary Protocol Required")) {
@@ -2510,7 +2525,7 @@ public class ReSyncFlowClient {
         }
         Async<Void> started;
         try {
-            started = startFrameTransportConnection();
+            started = connectFrameTransport();
         } catch (RuntimeException | Error error) {
             deferredFrameConnect.compareAndSet(deferred, null);
             deferred.fail(error);
@@ -2557,10 +2572,16 @@ public class ReSyncFlowClient {
         nodeRegistrySynced = false;
         lastFullNodeRegistryRequestAt = 0L;
         scheduleConnectTimeout(generation);
-        frameTransport.setFrameHandler(data -> handleBinaryMessage(data, generation));
+        frameTransport.setFrameAdmissionHandler(data -> data != null && admitBinaryMessage(ByteBuffer.wrap(data), generation));
         frameTransport.setOpenHandler(() -> {});
-        frameTransport.setCloseReasonHandler(this::observeFrameTransportCloseReason);
-        frameTransport.setErrorHandler(error -> failConnectionAttempt("ReSync Endpoint Unreachable", generation));
+        frameTransport.setSendReadyHandler(() -> resumePendingSends(generation));
+        frameTransport.setCloseReasonHandler(reason -> {
+            synchronized (connectionCleanupLock) {
+                if (isActiveGeneration(generation)) observeFrameTransportCloseReason(reason);
+            }
+        });
+        frameTransport.setErrorHandler(error -> failConnectionAttempt(isRetryableConnectionFailure()
+            ? "ReSync Endpoint Unreachable" : frameConnectionFailureMessage(), generation));
         frameTransport.setCloseHandler(() -> {
             synchronized (connectionCleanupLock) {
                 ConnectionRetirement retirement = retireConnectionGeneration(generation, "frame_transport_closed");
@@ -2619,7 +2640,7 @@ public class ReSyncFlowClient {
         buffer.put(channelBytes);
         buffer.putInt(dataBytes.length);
         buffer.put(dataBytes);
-        return sendFrame(ReSyncProtocolContract.MESSAGE_SUBSCRIBE, buffer.array(), CONTROL_CHANNEL_ID, false, generation, true);
+        return sendFrame(ReSyncProtocolContract.MESSAGE_SUBSCRIBE, buffer.array(), CONTROL_CHANNEL_ID, true, generation, true);
     }
 
     private boolean sendFrame(int messageType, byte[] payload, short channel) {
@@ -2661,10 +2682,10 @@ public class ReSyncFlowClient {
                 return failPendingSend();
             }
             boolean startupOrdering = startupSubscriptionGeneration == generation;
-            if (messageType != 0 && !startupSubscription && pendingSendThread != TaskIdentities.access.current()
-                && (startupOrdering || !pendingSends.isEmpty())) {
+            if (messageType != 0 && pendingSendThread != TaskIdentities.access.current()
+                && ((startupOrdering && !startupSubscription) || !pendingSends.isEmpty())) {
                 if (retainWhenOrdered) {
-                    if (!enqueueOrderedFrame(messageType, outboundPayload, channel, expectedGeneration, generation)) {
+                    if (!enqueueOrderedFrame(messageType, outboundPayload, channel, expectedGeneration, generation, resultHandler)) {
                         if (outboundPriority(messageType, outboundPayload, channel) != PendingSendPriority.REPLACEABLE) {
                             scheduleTransportFailure(generation, "ordered_send_admission");
                         }
@@ -2688,7 +2709,22 @@ public class ReSyncFlowClient {
                         scheduleTransportFailure(generation, "frame_transport_closed");
                         return failPendingSend();
                     }
-                    if (!frameTransport.trySend(frame, resultHandler)) {
+                    ReSyncFrameTransport.SendAdmission admission = frameTransport.admitSend(frame, resultHandler);
+                    if (admission == ReSyncFrameTransport.SendAdmission.QUEUE_FULL) {
+                        if (retainWhenOrdered && messageType != 0 && pendingSendThread != TaskIdentities.access.current()) {
+                            if (!enqueueOrderedFrame(messageType, outboundPayload, channel, expectedGeneration, generation,
+                                resultHandler)) {
+                                if (outboundPriority(messageType, outboundPayload, channel) != PendingSendPriority.REPLACEABLE) {
+                                    scheduleTransportFailure(generation, "ordered_send_admission");
+                                }
+                                return failPendingSend();
+                            }
+                            if (!startupOrdering) schedulePendingFlush();
+                            return true;
+                        }
+                        return failPendingSend();
+                    }
+                    if (admission != ReSyncFrameTransport.SendAdmission.ACCEPTED) {
                         scheduleTransportFailure(generation, "frame_transport_rejected");
                         return failPendingSend();
                     }
@@ -2751,20 +2787,31 @@ public class ReSyncFlowClient {
         }
     }
 
+    private void resumePendingSends(int generation) {
+        synchronized (outboundLock) {
+            if (!isConnectionReadyGeneration(generation) || pendingSends.isEmpty()) return;
+            schedulePendingFlush();
+        }
+    }
+
     private void schedulePendingFlush() {
-        if (shutdownRequested) return;
-        if (!pendingFlushScheduled.compareAndSet(false, true)) return;
+        synchronized (outboundLock) {
+            if (shutdownRequested) return;
+            pendingFlushRequested = true;
+            if (!pendingFlushScheduled.compareAndSet(false, true)) return;
+        }
         try {
             heartbeatScheduler.execute(() -> {
                 boolean retryBlocked = false;
                 try {
                     retryBlocked = flushPendingSends();
                 } finally {
-                    pendingFlushScheduled.set(false);
                     boolean reschedule;
                     synchronized (outboundLock) {
-                        reschedule = !retryBlocked && !shutdownRequested && isConnected()
+                        pendingFlushScheduled.set(false);
+                        reschedule = (!retryBlocked || pendingFlushRequested) && !shutdownRequested && isConnected()
                             && startupSubscriptionGeneration < 0 && !drainingPendingSends && !pendingSends.isEmpty();
+                        if (!drainingPendingSends) pendingFlushRequested = false;
                     }
                     if (reschedule) {
                         schedulePendingFlush();
@@ -2772,7 +2819,10 @@ public class ReSyncFlowClient {
                 }
             });
         } catch (RuntimeException ignored) {
-            pendingFlushScheduled.set(false);
+            synchronized (outboundLock) {
+                pendingFlushScheduled.set(false);
+                pendingFlushRequested = false;
+            }
         }
     }
 
@@ -2832,6 +2882,9 @@ public class ReSyncFlowClient {
         Runnable task = () -> {
             terminalConnectionCallback.set(true);
             try {
+                if (source != null) source.awaitLeases();
+                failPendingTriggerUpdates("ReSync Connection Changed");
+                clearCatalogPublication("CATALOG_PUBLICATION_GENERATION_RETIRED");
                 cleanup.run();
                 completion.complete(null);
             } catch (RuntimeException | Error error) {
@@ -3039,10 +3092,10 @@ public class ReSyncFlowClient {
         }
     }
 
-    private void admitBinaryMessage(ByteBuffer data, int generation) {
+    private boolean admitBinaryMessage(ByteBuffer data, int generation) {
         ConnectionSource source = connectionSource(generation);
         if (source == null) {
-            return;
+            return false;
         }
         ByteBuffer frame = data.slice();
         int retainedBytes = frame.remaining();
@@ -3065,6 +3118,7 @@ public class ReSyncFlowClient {
         if (!admitted && priority != BoundedTransportExecutor.Priority.REPLACEABLE) {
             scheduleTransportFailure(generation, "inbound_admission");
         }
+        return admitted;
     }
 
     private void processAdmittedBinaryMessage(byte[] data, int generation, ConnectionSource source) {
@@ -7581,7 +7635,7 @@ public class ReSyncFlowClient {
             typedCatalogAuthorityAdvertised = false;
             setCatalogAuthoringAdvertised(false);
             legacyCompatibilityProven = true;
-            clearTypedInteractionProjection();
+            retireTypedInteractionProjection();
             catalogPublicationProjection.clear();
             catalogAuthoringProjection.clear();
             resourceRevisionReconciler.clearServer(serverId);
@@ -8447,13 +8501,6 @@ public class ReSyncFlowClient {
         if (retirement.retired()) {
             retireResourceSavesWithoutDispatch();
         }
-        if (retirement.source() != null) {
-            retirement.source().awaitLeases();
-        }
-        if (retirement.retired()) {
-            failPendingTriggerUpdates("ReSync Connection Changed");
-            clearCatalogPublication("CATALOG_PUBLICATION_GENERATION_RETIRED");
-        }
         return retirement;
     }
 
@@ -8468,6 +8515,7 @@ public class ReSyncFlowClient {
                 ReSyncDirectSockets.connector.close(retirement.socket());
             }
             failPendingTriggerUpdates("ReSync Connection Failed");
+            clearCatalogPublication("CATALOG_PUBLICATION_GENERATION_RETIRED");
             connecting.set(false);
             return true;
         }
@@ -8486,11 +8534,14 @@ public class ReSyncFlowClient {
                 logger().operation("Connect").warn("ReSync bridge handshake timed out");
             }
             synchronized (connectionCleanupLock) {
+                if (frameTransport != null && isActiveGeneration(generation)) {
+                    observeFrameTransportCloseReason(frameTransport.closeReason());
+                }
                 ConnectionRetirement retirement = retireConnectionGeneration(generation, "handshake_timeout");
                 if (!retirement.retired()) {
                     return;
                 }
-                connectionFailure.set(ConnectionFailure.ENDPOINT_UNREACHABLE);
+                connectionFailure.compareAndSet(ConnectionFailure.NONE, ConnectionFailure.ENDPOINT_UNREACHABLE);
                 boolean recovering = frameTransport != null && beginFrameRecovery(generation + 1);
                 submitConnectionCleanup(retirement.source(), () -> {
                 try {
@@ -8499,7 +8550,11 @@ public class ReSyncFlowClient {
                     }
                     if (frameTransport != null) {
                         try {
-                            frameTransport.close();
+                            if (recovering) {
+                                frameTransport.retireSession();
+                            } else {
+                                frameTransport.close();
+                            }
                         } catch (RuntimeException error) {
                             logger().operation("Connect").error("Could not close timed out ReSync transport", error);
                         }
@@ -8512,7 +8567,7 @@ public class ReSyncFlowClient {
                         scheduleReconnect(generation + 1);
                      }
                     if (!recovering && frameTransport != null) {
-                        publishTerminalFrameDisconnect("ReSync Connection Timed Out",
+                        publishTerminalFrameDisconnect(isRetryableConnectionFailure() ? "ReSync Connection Timed Out" : frameConnectionFailureMessage(),
                             !failures.saveMutations() && !failures.resourceDeletes());
                     }
                      if (failures.saveMutations() || failures.resourceDeletes()) {
@@ -8977,11 +9032,12 @@ public class ReSyncFlowClient {
             ReSyncTypedInteractionProjection interaction = null;
             if (application.ready()) {
                 try {
-                    CatalogAuthoringPublication authoring = application.authoring() != null
-                        ? application.authoring().candidate().publication()
-                        : application.previousAuthoring() != null
-                            ? application.previousAuthoring().publication() : null;
-                    interaction = ReSyncTypedInteractionProjection.from(application.node().candidate(), authoring);
+                    ReSyncCatalogAuthoringProjection.Snapshot authoring = preparedInteractionAuthoring(application);
+                    interaction = residentTypedInteractionProjection(admission, application.node().candidate(), authoring);
+                    if (interaction == null) {
+                        interaction = ReSyncTypedInteractionProjection.from(application.node().candidate(),
+                            authoring != null ? authoring.publication() : null);
+                    }
                 } catch (ReSyncTypedInteractionProjection.ValidationException exception) {
                     application = ReSyncCatalogPublicationReceiptHandler.PreparedApplication.rejected(
                         publication.key(), publication.revision(), exception.diagnostic());
@@ -9485,12 +9541,15 @@ public class ReSyncFlowClient {
                 publish(new PreparedCatalogPublication(publication, application, null, identity));
                 return;
             }
-            CatalogAuthoringPublication authoring = application.authoring() != null
-                ? application.authoring().candidate().publication()
-                : application.previousAuthoring() != null
-                    ? application.previousAuthoring().publication() : null;
-            ReSyncTypedInteractionProjection.Builder builder = ReSyncTypedInteractionProjection.begin(
+            ReSyncCatalogAuthoringProjection.Snapshot authoring = preparedInteractionAuthoring(application);
+            ReSyncTypedInteractionProjection resident = residentTypedInteractionProjection(admission,
                 application.node().candidate(), authoring);
+            if (resident != null) {
+                publish(new PreparedCatalogPublication(publication, application, resident, identity));
+                return;
+            }
+            ReSyncTypedInteractionProjection.Builder builder = ReSyncTypedInteractionProjection.begin(
+                application.node().candidate(), authoring != null ? authoring.publication() : null);
             BrowserWork.execute(() -> project(publication, application, identity, builder));
         }
 
@@ -9646,7 +9705,10 @@ public class ReSyncFlowClient {
             || !key.equals(currentAcknowledged.orElseThrow()) || !key.equals(prepared.key())) {
             return false;
         }
-        typedInteractionState.set(new TypedInteractionState(key, prepared));
+        TypedInteractionState state = new TypedInteractionState(TypedInteractionStamp.of(exactNode,
+            catalogAuthoringProjection.active().orElse(null)), connectionGeneration.get(), handshakeAuthorityEpoch, prepared);
+        residentTypedInteraction = state;
+        typedInteractionState.set(state);
         typedInteractionDiagnostic = "";
         return true;
     }
@@ -9659,12 +9721,35 @@ public class ReSyncFlowClient {
         Optional<ReSyncCatalogPublicationProjection.Snapshot> active = catalogPublicationProjection.active();
         Optional<CatalogCacheKey> acknowledged = catalogPublicationProjection.acknowledgedKey();
         return active.isPresent() && acknowledged.isPresent() && state.key().equals(acknowledged.orElseThrow())
-            && state.key().equals(active.orElseThrow().publication().key()) && typedInteractionState.get() == state;
+            && state.stamp().matches(active.orElseThrow(), catalogAuthoringProjection.active().orElse(null))
+            && typedInteractionState.get() == state;
+    }
+
+    private static ReSyncCatalogAuthoringProjection.Snapshot preparedInteractionAuthoring(
+        ReSyncCatalogPublicationReceiptHandler.PreparedApplication application) {
+        return application.authoring() != null ? application.authoring().candidate() : application.previousAuthoring();
+    }
+
+    private ReSyncTypedInteractionProjection residentTypedInteractionProjection(CatalogPublicationAdmission admission,
+        ReSyncCatalogPublicationProjection.Snapshot node, ReSyncCatalogAuthoringProjection.Snapshot authoring) {
+        synchronized (catalogLifecycleLock) {
+            TypedInteractionState state = residentTypedInteraction;
+            return currentCatalogPublicationAdmissionLocked(admission) && state != null
+                && state.generation() == admission.generation() && state.authorityEpoch() == admission.authorityEpoch()
+                && state.stamp().matches(node, authoring) ? state.projection() : null;
+        }
     }
 
     private void clearTypedInteractionProjection() {
         typedInteractionState.set(null);
         typedInteractionDiagnostic = "";
+    }
+
+    private void retireTypedInteractionProjection() {
+        clearTypedInteractionProjection();
+        synchronized (catalogLifecycleLock) {
+            residentTypedInteraction = null;
+        }
     }
 
     private void drainCatalogPublicationReceiptOutbox(int generation) {
@@ -19498,14 +19583,18 @@ public class ReSyncFlowClient {
     }
 
     private void failConnectionAttempt(String message, int generation) {
-        if (!isActiveGeneration(generation)) {
-            return;
-        }
-        if (frameTransport != null) {
-            logger().operation("Connect").with("reason", message).warn("ReSync bridge connection failed");
-        }
-        connectionFailure.set(classifyConnectionFailure(message));
         synchronized (connectionCleanupLock) {
+            if (!isActiveGeneration(generation)) {
+                return;
+            }
+            if (frameTransport != null) observeFrameTransportCloseReason(frameTransport.closeReason());
+            ConnectionFailure failure = classifyConnectionFailure(message);
+            String failureMessage = failure == ConnectionFailure.ENDPOINT_UNREACHABLE && !isRetryableConnectionFailure()
+                ? frameConnectionFailureMessage() : message;
+            connectionFailure.set(classifyConnectionFailure(failureMessage));
+            if (frameTransport != null) {
+                logger().operation("Connect").with("reason", failureMessage).warn("ReSync bridge connection failed");
+            }
             ConnectionRetirement retirement = retireConnectionGeneration(generation,
                 "connection_failure:" + lastTransportFailureDiagnostic);
             if (!retirement.retired()) {
@@ -19521,15 +19610,19 @@ public class ReSyncFlowClient {
             stopHeartbeat();
             nodeRegistrySynced = false;
             cancelNodeRegistryTimeout();
-             failPendingConnectionRequests(message, true);
+             failPendingConnectionRequests(failureMessage, true);
             if (frameTransport != null) {
                 try {
-                    frameTransport.close();
+                    if (recovering) {
+                        frameTransport.retireSession();
+                    } else {
+                        frameTransport.close();
+                    }
                 } catch (RuntimeException error) {
                     logger().operation("Connect").error("Could not close failed ReSync transport", error);
                 }
                 if (!recovering) {
-                    publishTerminalFrameDisconnect(message, true);
+                    publishTerminalFrameDisconnect(failureMessage, true);
                 }
                 connecting.set(false);
                 return;
@@ -19538,7 +19631,7 @@ public class ReSyncFlowClient {
                 ReSyncDirectSockets.connector.close(retirement.socket());
             }
             scheduleReconnect(generation + 1);
-            notifyConnectionErrorUnlessRetrying(message);
+            notifyConnectionErrorUnlessRetrying(failureMessage);
             connecting.set(false);
             });
         }
@@ -19623,6 +19716,13 @@ public class ReSyncFlowClient {
             } catch (RuntimeException | Error exception) {
                 failure = appendShutdownFailure(failure, exception);
             }
+        }
+        if (retirement.source() != null) {
+            retirement.source().awaitLeases();
+        }
+        if (retirement.retired()) {
+            failPendingTriggerUpdates("ReSync Connection Changed");
+            clearCatalogPublication("CATALOG_PUBLICATION_GENERATION_RETIRED");
         }
         try {
             failure = appendShutdownFailure(failure, completeShutdown(retirement, callbackInitiated));
@@ -19781,6 +19881,7 @@ public class ReSyncFlowClient {
             pendingSendBytes = 0L;
             drainingPendingSends = false;
             pendingFlushScheduled.set(false);
+            pendingFlushRequested = false;
             pendingSendThread = null;
             pendingSendCommitted = false;
             pendingSendFailed = false;
@@ -20075,16 +20176,16 @@ public class ReSyncFlowClient {
     }
 
     private boolean enqueueOrderedFrame(int messageType, byte[] payload, short channel, int expectedGeneration,
-                                        int generation) {
+                                        int generation, Consumer<ReSyncFrameTransport.SendResult> resultHandler) {
         PendingSendPriority priority = outboundPriority(messageType, payload, channel);
         String coalesceKey = priority == PendingSendPriority.REPLACEABLE
             ? outboundCoalesceKey(messageType, payload, channel, generation) : null;
         int fence = expectedGeneration >= 0 ? expectedGeneration : generation;
         return admitPendingSendPlanLocked(null, Math.max(1, payload.length), priority, coalesceKey, fence, () -> {
             byte[] retainedPayload = payload.clone();
-            return new PendingSendPlan(() -> sendFrame(messageType, retainedPayload, channel, false, fence, false),
+            return new PendingSendPlan(() -> sendFrame(messageType, retainedPayload, channel, false, fence, false, resultHandler),
                 replayGeneration -> () -> sendFrame(messageType, retainedPayload, channel, false, replayGeneration,
-                    false));
+                    false, resultHandler));
         });
     }
 
@@ -20441,6 +20542,7 @@ public class ReSyncFlowClient {
                 return false;
             }
             drainingPendingSends = true;
+            pendingFlushRequested = false;
             pendingSendThread = TaskIdentities.access.current();
         }
         boolean retryBlocked = false;
@@ -20557,7 +20659,7 @@ public class ReSyncFlowClient {
             synchronized (outboundLock) {
                 pendingSendThread = null;
                 drainingPendingSends = false;
-                repeat = !retryBlocked && isConnected() && !pendingSends.isEmpty();
+                repeat = (!retryBlocked || pendingFlushRequested) && isConnected() && !pendingSends.isEmpty();
                 reconnect = !pendingSends.isEmpty() && !isConnected();
                 completeStartupGeneration = !retryBlocked && !repeat && isConnected() && pendingSends.isEmpty()
                     ? pendingStartupCompletionGeneration : -1;
@@ -20921,13 +21023,36 @@ public class ReSyncFlowClient {
         }
     }
 
-    private record TypedInteractionState(CatalogCacheKey key, ReSyncTypedInteractionProjection projection) {
+    private record TypedInteractionStamp(CatalogCacheKey key, long revision, CatalogCacheKey authoringKey,
+                                         long authoringRevision, ContentHash authoringChecksum) {
+        private static TypedInteractionStamp of(ReSyncCatalogPublicationProjection.Snapshot node,
+                                                ReSyncCatalogAuthoringProjection.Snapshot authoring) {
+            return new TypedInteractionStamp(node.publication().key(), node.publication().revision(),
+                authoring != null ? authoring.key() : null, authoring != null ? authoring.revision() : -1L,
+                authoring != null ? authoring.checksum() : null);
+        }
+
+        private boolean matches(ReSyncCatalogPublicationProjection.Snapshot node,
+                                ReSyncCatalogAuthoringProjection.Snapshot authoring) {
+            return key.equals(node.publication().key()) && revision == node.publication().revision()
+                && Objects.equals(authoringKey, authoring != null ? authoring.key() : null)
+                && authoringRevision == (authoring != null ? authoring.revision() : -1L)
+                && Objects.equals(authoringChecksum, authoring != null ? authoring.checksum() : null);
+        }
+    }
+
+    private record TypedInteractionState(TypedInteractionStamp stamp, int generation, long authorityEpoch,
+                                         ReSyncTypedInteractionProjection projection) {
         private TypedInteractionState {
-            key = Objects.requireNonNull(key, "Catalog cache key is required");
+            stamp = Objects.requireNonNull(stamp, "Catalog interaction stamp is required");
             projection = Objects.requireNonNull(projection, "Typed interaction projection is required");
-            if (!key.equals(projection.key())) {
-                throw new IllegalArgumentException("Typed interaction projection key does not match");
+            if (!stamp.key().equals(projection.key()) || stamp.revision() != projection.revision()) {
+                throw new IllegalArgumentException("Typed interaction projection stamp does not match");
             }
+        }
+
+        private CatalogCacheKey key() {
+            return stamp.key();
         }
     }
 

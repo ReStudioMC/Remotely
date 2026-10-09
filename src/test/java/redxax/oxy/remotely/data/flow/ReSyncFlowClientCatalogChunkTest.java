@@ -7,6 +7,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import redxax.oxy.remotely.util.BrowserSafeState;
+import redxax.oxy.remotely.util.TaskSchedulers;
+import restudio.rebase.platform.jvm.JvmTaskScheduler;
+import restudio.rescreen.platform.TaskScheduler;
 import restudio.rescreen.platform.Async;
 import restudio.resync.diagnostics.DiagnosticEvent;
 import restudio.resync.diagnostics.DiagnosticSink;
@@ -48,11 +51,16 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ReSyncFlowClientCatalogChunkTest {
+    private TaskScheduler previousScheduler;
+    private JvmTaskScheduler scheduler;
     private Async.Snapshot previousAsync;
     private ExecutorService asyncPool;
 
     @BeforeEach
     void installAsyncExecutor() {
+        previousScheduler = TaskSchedulers.current();
+        scheduler = new JvmTaskScheduler();
+        TaskSchedulers.configure(scheduler);
         previousAsync = Async.snapshot();
         asyncPool = Executors.newVirtualThreadPerTaskExecutor();
         Async.installExecutor(asyncPool::execute, ignored -> Thread.currentThread().interrupt());
@@ -62,6 +70,8 @@ class ReSyncFlowClientCatalogChunkTest {
     void restoreAsyncExecutor() {
         Async.restore(previousAsync);
         asyncPool.shutdownNow();
+        TaskSchedulers.configure(previousScheduler);
+        scheduler.close();
     }
 
     @Test
