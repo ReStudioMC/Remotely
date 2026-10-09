@@ -19,6 +19,66 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PoolCreationPreviewTest {
     @Test
+    void networkMembersShareCapacityAndKeepTheirValuesAcrossSourceChanges() {
+        NetworkPoolBudget budget = new NetworkPoolBudget(preview("4096", "400", "1024", "100", "20480", "1000").view(),
+                new ResourcePoolModels.DraftOptions(List.of(), 256, 50));
+        PoolCreationPreview proxy = budget.create("proxy", 2);
+        PoolCreationPreview backend = budget.create("backend", 2);
+        assertTrue(proxy.set(PoolAllocationEditor.Resource.RAM, BigInteger.valueOf(1024)));
+        assertEquals(BigInteger.valueOf(3072), backend.available(PoolAllocationEditor.Resource.RAM));
+        assertTrue(backend.set(PoolAllocationEditor.Resource.RAM, BigInteger.valueOf(3072)));
+        assertFalse(proxy.set(PoolAllocationEditor.Resource.RAM, BigInteger.valueOf(2048)));
+        assertEquals(BigInteger.ZERO, budget.free(PoolAllocationEditor.Resource.RAM));
+        assertTrue(proxy.set(PoolAllocationEditor.Resource.DISK, BigInteger.valueOf(6000)));
+        assertFalse(backend.set(PoolAllocationEditor.Resource.DISK, BigInteger.valueOf(15000)));
+        assertTrue(backend.set(PoolAllocationEditor.Resource.DISK, BigInteger.valueOf(14000)));
+
+        ThemeManager.initBrowserDefaults();
+        ResourceAllocationBarWidget bar = new ResourceAllocationBarWidget(PoolAllocationEditor.Resource.RAM, id -> id);
+        bar.setNetwork(budget);
+        bar.setPosition(0, 0);
+        bar.setWidth(300);
+        bar.setHeight(20);
+        int divider = bar.boundaryAt(1);
+        assertTrue(bar.mouseClicked(mouse(bar, ReMouseEvent.Action.PRESSED, divider)));
+        assertTrue(bar.mouseDragged(mouse(bar, ReMouseEvent.Action.DRAGGED, divider - 20)));
+        bar.mouseReleased(mouse(bar, ReMouseEvent.Action.RELEASED, divider - 20));
+        assertTrue(proxy.value(PoolAllocationEditor.Resource.RAM).compareTo(BigInteger.valueOf(1024)) < 0);
+        assertEquals(BigInteger.valueOf(3072), backend.value(PoolAllocationEditor.Resource.RAM));
+        assertTrue(budget.free(PoolAllocationEditor.Resource.RAM).signum() > 0);
+        ResourceAllocationBarWidget standard = new ResourceAllocationBarWidget(proxy, PoolAllocationEditor.Resource.RAM, id -> id);
+        assertEquals(standard.segments().stream().filter(segment -> segment.key().equals("free")).findFirst().orElseThrow().style(),
+                bar.segments().stream().filter(segment -> segment.key().equals("free")).findFirst().orElseThrow().style());
+        bar.editable(() -> false);
+        BigInteger locked = proxy.value(PoolAllocationEditor.Resource.RAM);
+        bar.mouseClicked(mouse(bar, ReMouseEvent.Action.PRESSED, bar.boundaryAt(1)));
+        assertFalse(bar.mouseDragged(mouse(bar, ReMouseEvent.Action.DRAGGED, 299)));
+        assertEquals(locked, proxy.value(PoolAllocationEditor.Resource.RAM));
+        assertTrue(proxy.set(PoolAllocationEditor.Resource.RAM, BigInteger.valueOf(1024)));
+
+        budget.setActive("backend", false);
+        assertTrue(proxy.set(PoolAllocationEditor.Resource.RAM, BigInteger.valueOf(3500)));
+        budget.setActive("backend", true);
+        assertFalse(budget.possible());
+        assertEquals(BigInteger.valueOf(3500), proxy.value(PoolAllocationEditor.Resource.RAM));
+        assertEquals(BigInteger.valueOf(3072), backend.value(PoolAllocationEditor.Resource.RAM));
+        assertTrue(proxy.set(PoolAllocationEditor.Resource.RAM, BigInteger.valueOf(1024)));
+        assertTrue(budget.possible());
+        ResourcePoolModels.Pool pool = budget.view().pool();
+        ResourcePoolModels.Resources smaller = new ResourcePoolModels.Resources("512", "400", "20480", "1000");
+        budget.accept(new ResourcePoolController.PoolView(new ResourcePoolModels.Pool(pool.id(), pool.domain(),
+                new ResourcePoolModels.Balance(pool.balance().entitled(), pool.balance().committed(), smaller, pool.balance().deficit())),
+                List.of(), List.of(), Map.of()));
+        assertFalse(budget.possible());
+        assertEquals(BigInteger.valueOf(3072), backend.value(PoolAllocationEditor.Resource.RAM));
+        assertTrue(proxy.set(PoolAllocationEditor.Resource.RAM, BigInteger.valueOf(256)));
+        assertTrue(backend.set(PoolAllocationEditor.Resource.RAM, BigInteger.valueOf(256)));
+        assertTrue(budget.possible());
+        budget.remove("backend");
+        assertEquals(BigInteger.valueOf(256), budget.free(PoolAllocationEditor.Resource.RAM));
+    }
+
+    @Test
     void draggingAProposedServerReallocatesOnlyCurrentFreeCapacity() {
         PoolCreationPreview preview = preview("4096", "300", "2048", "100", "8192", "2048");
         assertTrue(preview.possible());

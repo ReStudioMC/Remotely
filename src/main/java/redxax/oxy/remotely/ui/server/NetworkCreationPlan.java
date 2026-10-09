@@ -5,13 +5,15 @@ import redxax.oxy.remotely.network.NetworkMemberRole;
 import redxax.oxy.remotely.network.protocol.NetworkCommand;
 import redxax.oxy.remotely.network.protocol.NetworkMemberSource;
 import redxax.oxy.remotely.ui.settings.data.ServerSettingsDataController;
+import restudio.rebase.reproxy.ReProxyModels.AddressSpec;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 
-public record NetworkCreationPlan(String name, int entryPort, List<Server> servers, boolean firewallVerified, UUID requestId) {
+public record NetworkCreationPlan(String name, int entryPort, List<Server> servers, boolean firewallVerified, UUID requestId, String subdomain, AddressSpec reProxyAddress) {
     public NetworkCreationPlan(String name, int entryPort, List<Server> servers) {
         this(name, entryPort, servers, false);
     }
@@ -20,10 +22,28 @@ public record NetworkCreationPlan(String name, int entryPort, List<Server> serve
         this(name, entryPort, servers, firewallVerified, UUID.randomUUID());
     }
 
+    public NetworkCreationPlan(String name, int entryPort, List<Server> servers, boolean firewallVerified, UUID requestId) {
+        this(name, entryPort, servers, firewallVerified, requestId, "");
+    }
+
+    public NetworkCreationPlan(String name, int entryPort, List<Server> servers, boolean firewallVerified, UUID requestId, String subdomain) {
+        this(name, entryPort, servers, firewallVerified, requestId, subdomain, null);
+    }
+
     public NetworkCreationPlan {
         name = name == null ? "" : name.trim();
         servers = servers == null ? List.of() : List.copyOf(servers);
+        subdomain = subdomain == null ? "" : subdomain.strip().toLowerCase(Locale.ROOT);
+        if (!subdomain.isBlank() && (!subdomain.matches("[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])") || subdomain.contains("--"))) {
+            throw new IllegalArgumentException("Subdomain Must Use 3 To 63 Letters, Numbers, Or Hyphens");
+        }
         Objects.requireNonNull(requestId, "Network Request Identity Is Required");
+        if (!subdomain.isBlank() && servers.stream().anyMatch(server -> server.hostedSource() == null)) {
+            throw new IllegalArgumentException("A ReStudio Subdomain Requires A Reactor Network");
+        }
+        if (reProxyAddress != null && (!subdomain.isBlank() || servers.stream().anyMatch(server -> server.hostedSource() != null))) {
+            throw new IllegalArgumentException("Choose One Address Provider For This Network");
+        }
     }
 
     public boolean hosted() {
@@ -37,7 +57,8 @@ public record NetworkCreationPlan(String name, int entryPort, List<Server> serve
         List<NetworkCommand.Member> members = servers.stream().map(server -> new NetworkCommand.Member(server.hostedSource(),
                 server.proxy() ? "proxy" : server.route(), server.role(), server.preferredPort(), server.capacity(), server.reSync())).toList();
         return new NetworkCommand.Create(NetworkCommand.CURRENT_SCHEMA_VERSION, requestId.toString(), "network-" + requestId,
-                name, entryPort, members, Map.of("firewallVerified", firewallVerified));
+                name, entryPort, members, subdomain.isBlank() ? Map.of("firewallVerified", firewallVerified)
+                        : Map.of("firewallVerified", firewallVerified, "subdomain", subdomain));
     }
 
     public record Server(String existingId, Object template, ServerScreenHost.HostView host, String location,
