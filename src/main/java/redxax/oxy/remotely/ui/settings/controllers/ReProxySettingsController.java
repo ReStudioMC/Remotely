@@ -37,6 +37,7 @@ public class ReProxySettingsController {
     private static final long LOAD_TIMEOUT_MS = 30000L;
 
     private final ReProxySettingsCapability capability;
+    private final ReProxyAccountSettings accountSettings;
     private final List<ServerModels.ReProxyDomain> domainCache = new ArrayList<>();
     private ServerModels.ReProxySummary summary;
     private volatile boolean dataLoaded;
@@ -62,9 +63,11 @@ public class ReProxySettingsController {
 
     public ReProxySettingsController(ReProxySettingsCapability capability) {
         this.capability = capability == null ? ReProxySettingsCapability.unavailable(false, "ReProxy Is Unavailable") : capability;
+        accountSettings = this.capability.client() == null ? null : new ReProxyAccountSettings(this.capability, this::refreshReProxyTab);
     }
 
     public void cleanup() {
+        if (accountSettings != null) accountSettings.cleanup();
         closed = true;
         generation++;
         loadRequestId++;
@@ -73,6 +76,11 @@ public class ReProxySettingsController {
     }
 
     public void activate() {
+        if (accountSettings != null) {
+            closed = false;
+            accountSettings.activate();
+            return;
+        }
         generation++;
         loadRequestId++;
         loadingData = false;
@@ -82,6 +90,7 @@ public class ReProxySettingsController {
     }
 
     public List<Setting> getSettings() {
+        if (accountSettings != null) return accountSettings.settings();
         if (closed) return statusSetting == null ? List.of() : domainsSetting == null ? List.of(statusSetting) : List.of(statusSetting, domainsSetting);
         if (!capability.authenticated()) {
             if (statusSetting == null) statusSetting = new Setting.Builder("ReProxy").build();
@@ -164,9 +173,7 @@ public class ReProxySettingsController {
             empty.setHiddenText(domainLimitText());
             rows.add(emptyDomainsRow);
         } else {
-            List<ServerModels.ReProxyDomain> domains = new ArrayList<>(domainCache);
-            domains.sort(Comparator.comparing((ServerModels.ReProxyDomain domain) -> !"ACTIVE".equalsIgnoreCase(safe(domain.status)))
-                    .thenComparing(domain -> safe(domain.subdomain).toLowerCase(Locale.ROOT)));
+            List<ServerModels.ReProxyDomain> domains = domainCache;
             Map<String, PopupRow> next = new LinkedHashMap<>();
             for (ServerModels.ReProxyDomain domain : domains) {
                 if (safe(domain.id).isBlank()) continue;
@@ -259,6 +266,7 @@ public class ReProxySettingsController {
                         domainCache.clear();
                         if (value.domains != null) {
                             domainCache.addAll(value.domains);
+                            sortDomains();
                         }
                         dataLoaded = true;
                         loadError = null;
@@ -546,6 +554,12 @@ public class ReProxySettingsController {
         }
         domainCache.removeIf(existing -> domain.id.equals(existing.id));
         domainCache.add(domain);
+        sortDomains();
+    }
+
+    private void sortDomains() {
+        domainCache.sort(Comparator.comparing((ServerModels.ReProxyDomain domain) -> !"ACTIVE".equalsIgnoreCase(safe(domain.status)))
+                .thenComparing(domain -> safe(domain.subdomain).toLowerCase(Locale.ROOT)));
     }
 
     private boolean canCreateDomain() {

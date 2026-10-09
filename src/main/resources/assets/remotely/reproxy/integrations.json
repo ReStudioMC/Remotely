@@ -1,0 +1,345 @@
+{
+  "version": 1,
+  "integrations": [
+    {
+      "id": "voicechat",
+      "name": "Simple Voice Chat",
+      "protocol": "UDP",
+      "defaultPort": 24454,
+      "requiresStopped": true,
+      "paths": [
+        "plugins/voicechat/voicechat-server.properties",
+        "config/voicechat/voicechat-server.properties",
+        "plugins/voicechat/voicechat-proxy.properties"
+      ],
+      "aliases": [
+        "simplevoicechat",
+        "voicechat",
+        "voicechatbukkit",
+        "voicechatfabric",
+        "voicechatforge",
+        "voicechatneoforge",
+        "voicechatvelocity",
+        "voicechatbungee",
+        "voicechatbungeecord",
+        "voicechatwaterfall",
+        "simplevoicechatvelocity",
+        "simplevoicechatbungeecord"
+      ],
+      "projects": {
+        "modrinth": [
+          "9egkb6k1"
+        ]
+      },
+      "projectAliases": [
+        "modrinth"
+      ],
+      "format": "PROPERTIES",
+      "portKey": "port",
+      "publicAddress": "${address}",
+      "edits": [
+        {
+          "key": "port",
+          "value": "${targetPort}"
+        },
+        {
+          "key": "voice_host",
+          "value": "${address}"
+        }
+      ],
+      "serverPortValues": [
+        -1
+      ],
+      "reloadCommands": []
+    },
+    {
+      "id": "geyser",
+      "name": "Geyser",
+      "protocol": "UDP",
+      "defaultPort": 19132,
+      "requiresStopped": false,
+      "paths": [
+        "plugins/Geyser-Spigot/config.yml",
+        "plugins/Geyser-Velocity/config.yml",
+        "plugins/Geyser-BungeeCord/config.yml",
+        "plugins/Geyser-Bungee/config.yml",
+        "plugins/Geyser/config.yml",
+        "config/Geyser-Fabric/config.yml",
+        "config/Geyser-NeoForge/config.yml",
+        "config/Geyser-Forge/config.yml"
+      ],
+      "aliases": [
+        "geyser",
+        "geyserspigot",
+        "geyservelocity",
+        "geyserbungee",
+        "geyserbungeecord",
+        "geyserfabric",
+        "geyserforge",
+        "geyserneoforge"
+      ],
+      "projects": {
+        "modrinth": [
+          "wkkoqhrh"
+        ]
+      },
+      "projectAliases": [
+        "modrinth"
+      ],
+      "format": "YAML",
+      "portKey": "bedrock.port",
+      "publicAddress": "${address}",
+      "edits": [
+        {
+          "key": "bedrock.port",
+          "value": "${targetPort}"
+        },
+        {
+          "key": "bedrock.clone-remote-port",
+          "value": "false"
+        },
+        {
+          "key": "bedrock.broadcast-port",
+          "value": "${publicPort}",
+          "when": {
+            "absent": [
+              "advanced.bedrock.broadcast-port"
+            ],
+            "anyPresent": [
+              "bedrock.broadcast-port",
+              "bedrock.enable-proxy-protocol",
+              "remote"
+            ]
+          }
+        },
+        {
+          "key": "bedrock.enable-proxy-protocol",
+          "value": "false",
+          "when": {
+            "absent": [
+              "advanced.bedrock.broadcast-port"
+            ],
+            "anyPresent": [
+              "bedrock.broadcast-port",
+              "bedrock.enable-proxy-protocol",
+              "remote"
+            ]
+          }
+        },
+        {
+          "key": "advanced.bedrock.broadcast-port",
+          "value": "${publicPort}",
+          "when": {
+            "absent": [
+              "advanced.bedrock.broadcast-port"
+            ],
+            "anyPresent": [
+              "bedrock.broadcast-port",
+              "bedrock.enable-proxy-protocol",
+              "remote"
+            ],
+            "negate": true
+          }
+        },
+        {
+          "key": "advanced.bedrock.use-haproxy-protocol",
+          "value": "false",
+          "when": {
+            "absent": [
+              "advanced.bedrock.broadcast-port"
+            ],
+            "anyPresent": [
+              "bedrock.broadcast-port",
+              "bedrock.enable-proxy-protocol",
+              "remote"
+            ],
+            "negate": true
+          }
+        }
+      ],
+      "clonePortKey": "bedrock.clone-remote-port",
+      "reloadCommands": [
+        "geyser reload"
+      ]
+    },
+    {
+      "id": "dynmap",
+      "name": "Dynmap",
+      "protocol": "TCP",
+      "defaultPort": 8123,
+      "requiresStopped": false,
+      "paths": [
+        "plugins/dynmap/configuration.txt",
+        "dynmap/configuration.txt",
+        "config/dynmap/configuration.txt"
+      ],
+      "aliases": [
+        "dynmap"
+      ],
+      "projects": {
+        "modrinth": [
+          "frqregac"
+        ]
+      },
+      "projectAliases": [
+        "modrinth"
+      ],
+      "format": "YAML",
+      "portKey": "webserver-port",
+      "publicAddress": "${url}",
+      "edits": [
+        {
+          "key": "webserver-port",
+          "value": "${targetPort}"
+        },
+        {
+          "key": "disable-webserver",
+          "value": "false"
+        },
+        {
+          "key": "publicURL",
+          "value": "${url}"
+        }
+      ],
+      "reloadCommands": []
+    },
+    {
+      "id": "squaremap",
+      "name": "squaremap",
+      "protocol": "TCP",
+      "defaultPort": 8080,
+      "requiresStopped": false,
+      "paths": [
+        "plugins/squaremap/config.yml",
+        "config/squaremap/config.yml"
+      ],
+      "aliases": [
+        "squaremap",
+        "squaremappaper",
+        "squaremapfabric"
+      ],
+      "projects": {
+        "modrinth": [
+          "pfb7zqk6"
+        ]
+      },
+      "projectAliases": [
+        "modrinth"
+      ],
+      "format": "YAML",
+      "portKey": "settings.internal-webserver.port",
+      "publicAddress": "${url}",
+      "edits": [
+        {
+          "key": "settings.internal-webserver.port",
+          "value": "${targetPort}"
+        },
+        {
+          "key": "settings.internal-webserver.enabled",
+          "value": "true"
+        },
+        {
+          "key": "settings.web-address",
+          "value": "${url}"
+        }
+      ],
+      "reloadCommands": [
+        "map reload"
+      ]
+    },
+    {
+      "id": "bluemap",
+      "name": "BlueMap",
+      "protocol": "TCP",
+      "defaultPort": 8100,
+      "requiresStopped": false,
+      "paths": [
+        "plugins/BlueMap/webserver.conf",
+        "config/bluemap/webserver.conf"
+      ],
+      "aliases": [
+        "bluemap"
+      ],
+      "projects": {
+        "modrinth": [
+          "swbuv1cr"
+        ]
+      },
+      "projectAliases": [
+        "modrinth"
+      ],
+      "format": "HOCON",
+      "portKey": "port",
+      "publicAddress": "${url}",
+      "edits": [
+        {
+          "key": "port",
+          "value": "${targetPort}"
+        },
+        {
+          "key": "enabled",
+          "value": "true"
+        }
+      ],
+      "reloadCommands": [
+        "bluemap reload"
+      ]
+    },
+    {
+      "id": "plasmovoice",
+      "name": "Plasmo Voice",
+      "protocol": "UDP",
+      "defaultPort": 0,
+      "requiresStopped": false,
+      "paths": [
+        "plugins/PlasmoVoice/config.toml",
+        "plugins/plasmovoice/config.toml",
+        "config/plasmovoice/server/config.toml",
+        "config/plasmovoice/config.toml",
+        "config/plasmovoice/server.toml"
+      ],
+      "aliases": [
+        "plasmovoice",
+        "plasmovoicepaper",
+        "plasmovoicefabric",
+        "plasmovoiceforge",
+        "plasmovoiceneoforge",
+        "plasmovoicevelocity",
+        "plasmovoicebungee",
+        "plasmovoicebungeecord"
+      ],
+      "projects": {
+        "modrinth": [
+          "1bzhdhsh"
+        ]
+      },
+      "projectAliases": [
+        "modrinth"
+      ],
+      "format": "TOML",
+      "portKey": "host.port",
+      "publicAddress": "${address}",
+      "edits": [
+        {
+          "key": "host.port",
+          "value": "${targetPort}"
+        },
+        {
+          "key": "host.public.ip",
+          "value": "${host}",
+          "quote": true
+        },
+        {
+          "key": "host.public.port",
+          "value": "${publicPort}"
+        }
+      ],
+      "serverPortValues": [
+        0
+      ],
+      "reloadCommands": [
+        "vreload"
+      ]
+    }
+  ]
+}
