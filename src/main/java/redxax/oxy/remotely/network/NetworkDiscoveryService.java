@@ -43,7 +43,7 @@ public class NetworkDiscoveryService {
             }
             boolean providerManaged = providerManaged(instance);
             String hostScope = providerManaged ? member.hostScope() : NetworkHostScope.resolve(instance);
-            int observedPort = providerManaged ? member.port() : observedPort(instance);
+            int observedPort = providerManaged ? member.port() : member.isProxy() ? 0 : observedPort(instance);
             String software = instance.getServerSoftwareType().toLowerCase(Locale.ROOT);
             NetworkObservationState state = NetworkObservationState.HEALTHY;
             if (providerManaged) {
@@ -91,7 +91,8 @@ public class NetworkDiscoveryService {
         for (PortReservation conflict : portAllocator.conflicts(reservations).stream().filter(reservation -> desiredEndpoints.contains(reservation.hostScope() + ":" + reservation.port())).collect(Collectors.toMap(reservation -> reservation.hostScope() + ":" + reservation.port(), reservation -> reservation, (first, second) -> first, LinkedHashMap::new)).values()) {
             List<PortReservation> colliders = reservations.stream().filter(reservation -> reservation.hostScope().equals(conflict.hostScope()) && reservation.port() == conflict.port()).toList();
             if (colliders.stream().map(PortReservation::ownerId).distinct().count() > 1) {
-                issues.add(error("port.conflict", conflict.ownerId(), "Port " + conflict.port() + " conflicts on " + conflict.hostScope() + " for " + conflict.label()));
+                String owners = colliders.stream().map(PortReservation::label).collect(Collectors.joining(" and "));
+                issues.add(error("port.conflict", conflict.ownerId(), "Port " + conflict.port() + " on " + conflict.hostScope() + " is reserved by " + owners));
             }
         }
         return new NetworkDiscoveryResult(network, byId, observations, reservations, issues);
@@ -104,7 +105,7 @@ public class NetworkDiscoveryService {
         return instance.getServerSoftwareCompatibility().stream().anyMatch(value -> "velocity".equalsIgnoreCase(value));
     }
 
-    private boolean supportsModernForwarding(Instance instance) {
+    public static boolean supportsModernForwarding(Instance instance) {
         return DesktopNetworkPlanInput.forwardingAdapter(instance) != NetworkBackendForwardingAdapter.UNSUPPORTED;
     }
 

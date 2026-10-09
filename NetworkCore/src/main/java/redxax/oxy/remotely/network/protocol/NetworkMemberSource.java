@@ -3,6 +3,7 @@ package redxax.oxy.remotely.network.protocol;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.Map;
+import java.util.Locale;
 import java.util.TreeMap;
 import java.util.UUID;
 
@@ -58,7 +59,10 @@ public sealed interface NetworkMemberSource permits NetworkMemberSource.Existing
     }
 
     record DraftMetadata(String name, String gameId, String profileId, Map<String, String> settings,
-                         Map<String, String> initialFiles) {
+                         Map<String, String> initialFiles, String subdomain) {
+        public DraftMetadata(String name, String gameId, String profileId, Map<String, String> settings, Map<String, String> initialFiles) {
+            this(name, gameId, profileId, settings, initialFiles, null);
+        }
         public DraftMetadata {
             name = text(name, 80, "name");
             gameId = text(gameId, 128, "gameId");
@@ -69,6 +73,10 @@ public sealed interface NetworkMemberSource permits NetworkMemberSource.Existing
             }
             settings = NetworkMemberSource.settings(settings);
             initialFiles = NetworkMemberSource.initialFiles(initialFiles);
+            subdomain = subdomain == null || subdomain.isBlank() ? null : subdomain.strip().toLowerCase(Locale.ROOT);
+            if (subdomain != null && (!subdomain.matches("[a-z0-9][a-z0-9-]{1,61}[a-z0-9]") || subdomain.contains("--"))) {
+                throw new IllegalArgumentException("Draft Subdomain Is Invalid");
+            }
         }
     }
 

@@ -544,7 +544,8 @@ public class TomlConfigurationAdapter implements NetworkConfigurationAdapter {
     }
 
     private String join(List<String> lines, String ending) {
-        return String.join(ending, lines);
+        String content = String.join(ending, lines);
+        return !lines.isEmpty() && SECTION.matcher(lines.getLast()).matches() ? content + ending : content;
     }
 
     private void trimTrailingEmpty(List<String> lines) {

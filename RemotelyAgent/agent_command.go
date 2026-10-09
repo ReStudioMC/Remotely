@@ -46,6 +46,7 @@ func cmdServe(args []string) {
 	var lifecycles agentStringList
 	var workflows agentStringList
 	var lsp agentStringList
+	var reproxy agentStringList
 	fs.Var(&roots, "root", "Allowed root as id=path")
 	fs.Var(&writeRoots, "write-root", "Grant write capability to a root id")
 	fs.Var(&executeRoots, "execute-root", "Grant execute capability to a root id")
@@ -53,6 +54,7 @@ func cmdServe(args []string) {
 	fs.Var(&origins, "origin", "Allowed browser origin")
 	fs.Var(&lifecycles, "lifecycle", "Lifecycle as id|root|directory|startup-command")
 	fs.Var(&workflows, "workflow", "Workflow as id|root|directory|tool|JSON-args")
+	fs.Var(&reproxy, "reproxy", "Explicit socket grant as lifecycle|TCP-or-UDP|port|wss-origin")
 	fs.Var(&lsp, "lsp", "LSP as id|root|directory|program|JSON-args")
 	maxFile := fs.Int64("max-file-bytes", 128*1024*1024, "Maximum file transfer size")
 	maxArchive := fs.Int64("max-archive-bytes", 512*1024*1024, "Maximum extracted archive size")
@@ -73,6 +75,11 @@ func cmdServe(args []string) {
 		fmt.Fprintln(os.Stderr, "serve:", err)
 		os.Exit(2)
 	}
+	configuredReProxy, err := parseAgentReProxyGrants(reproxy)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "reproxy:", err)
+		os.Exit(2)
+	}
 	configuredLSP, err := parseAgentLSP(lsp)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "serve:", err)
@@ -83,7 +90,7 @@ func cmdServe(args []string) {
 		fmt.Fprintln(os.Stderr, "serve:", err)
 		os.Exit(2)
 	}
-	service, err := NewAgentService(AgentServiceConfig{TokenFile: tokenPath, AllowedOrigins: origins, Roots: configuredRoots, Lifecycles: configuredLifecycles, Workflows: configuredWorkflows, LSP: configuredLSP, MaxFileBytes: *maxFile, MaxArchiveBytes: *maxArchive, MaxProcessBytes: *maxProcess})
+	service, err := NewAgentService(AgentServiceConfig{TokenFile: tokenPath, AllowedOrigins: origins, Roots: configuredRoots, Lifecycles: configuredLifecycles, Workflows: configuredWorkflows, LSP: configuredLSP, ReProxy: configuredReProxy, MaxFileBytes: *maxFile, MaxArchiveBytes: *maxArchive, MaxProcessBytes: *maxProcess})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

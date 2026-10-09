@@ -184,13 +184,15 @@ public final class NetworkProtocolCodec {
     }
 
     private Map<String, Object> draftMetadata(NetworkMemberSource.DraftMetadata metadata) {
-        return Map.of("name", metadata.name(), "gameId", metadata.gameId(), "profileId", metadata.profileId(),
-                "settings", metadata.settings(), "initialFiles", metadata.initialFiles());
+        Map<String, Object> value = new LinkedHashMap<>(Map.of("name", metadata.name(), "gameId", metadata.gameId(), "profileId", metadata.profileId(),
+                "settings", metadata.settings(), "initialFiles", metadata.initialFiles()));
+        if (metadata.subdomain() != null) value.put("subdomain", metadata.subdomain());
+        return value;
     }
 
     private NetworkMemberSource.DraftMetadata decodeDraftMetadata(Map<String, ?> value) {
         return new NetworkMemberSource.DraftMetadata(string(value, "name"), string(value, "gameId"), string(value, "profileId"),
-                stringMap(value.get("settings")), stringMap(value.get("initialFiles")));
+                stringMap(value.get("settings")), stringMap(value.get("initialFiles")), value.containsKey("subdomain") ? string(value, "subdomain") : null);
     }
 
     private Map<String, Object> compute(NetworkMemberSource.Compute compute) {

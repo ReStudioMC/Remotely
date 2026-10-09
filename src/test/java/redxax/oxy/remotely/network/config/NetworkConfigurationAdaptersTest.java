@@ -227,7 +227,10 @@ class NetworkConfigurationAdaptersTest {
 
         assertTrue(updated.contains("[forced-hosts]"));
         assertFalse(adapter.contains(updated, "forced-hosts.*"));
+        assertTrue(updated.endsWith("[forced-hosts]\n"));
         assertEquals(updated, adapter.remove(updated, "forced-hosts.*"));
+        assertEquals(updated, adapter.apply(source, "forced-hosts.*", "{}"));
+        assertEquals(updated, adapter.apply(updated.stripTrailing(), "forced-hosts.*", "{}"));
     }
 
     @Test

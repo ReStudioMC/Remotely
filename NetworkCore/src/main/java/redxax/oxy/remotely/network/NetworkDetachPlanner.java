@@ -19,7 +19,10 @@ public final class NetworkDetachPlanner {
                                            NetworkRestoreValueResolver restoreValues) {
         Objects.requireNonNull(input, "input");
         NetworkDefinition network = input.network();
-        List<NetworkValidationIssue> issues = new ArrayList<>(input.issues());
+        List<NetworkValidationIssue> issues = input.issues().stream()
+                .map(issue -> issue.code().equals("port.conflict")
+                        ? new NetworkValidationIssue(NetworkValidationIssue.Severity.WARNING, issue.code(), issue.subject(), issue.message()) : issue)
+                .collect(Collectors.toCollection(ArrayList::new));
         NetworkMember member = network.members().stream().filter(candidate -> candidate.instanceId().equals(instanceId)).findFirst().orElse(null);
         if (member == null) {
             issues.add(error("detach.member.missing", instanceId, "Server is not a member of this network"));

@@ -19,6 +19,7 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -122,6 +123,42 @@ class NetworkAdoptionServiceTest {
         assertTrue(report.fallbackRoutes().isEmpty());
         assertTrue(report.issues().stream().anyMatch(issue -> issue.code().equals("adoption.stock-config")));
         assertFalse(report.issues().stream().anyMatch(issue -> issue.code().equals("adoption.route.unknown")));
+    }
+
+    @Test
+    void scansADissolvedProxyAtItsRemoteRoot() {
+        String velocity = "bind = \"0.0.0.0:25072\"\nplayer-info-forwarding-mode = \"none\"\n[servers]\ntry = []\n";
+        BackendFactory.register("ADOPTION_VIRTUAL_ROOT", (config, owner) -> new LocalBackend(config, owner) {
+            private final FileSystemProvider delegate = super.getFileSystem();
+            private final FileSystemProvider fileSystem = (FileSystemProvider) Proxy.newProxyInstance(FileSystemProvider.class.getClassLoader(),
+                new Class<?>[]{FileSystemProvider.class}, (provider, method, arguments) -> {
+                    if (method.getName().equals("read")) {
+                        Path path = (Path) arguments[0];
+                        return path.equals(Path.of("velocity.toml")) ? CompletableFuture.completedFuture(velocity)
+                            : CompletableFuture.failedFuture(new NoSuchFileException(path.toString()));
+                    }
+                    try {
+                        return method.invoke(delegate, arguments);
+                    } catch (InvocationTargetException exception) {
+                        throw exception.getCause();
+                    }
+                });
+
+            @Override
+            public FileSystemProvider getFileSystem() {
+                return fileSystem;
+            }
+        });
+        Instance proxy = instance("Proxy", ModLoader.VELOCITY, 25072);
+        proxy.setPath("");
+        proxy.setBackendConfig(new BackendConfig("ADOPTION_VIRTUAL_ROOT", Map.of()));
+
+        NetworkAdoptionReport report = JvmAsyncBridge.toFuture(new NetworkAdoptionService().scan(proxy, List.of(proxy), List.of())).join();
+
+        assertEquals(25072, report.entryPort());
+        assertTrue(report.routes().isEmpty());
+        assertTrue(report.canAdopt());
+        assertTrue(report.issues().stream().anyMatch(issue -> issue.code().equals("adoption.routes.empty")));
     }
 
     @Test

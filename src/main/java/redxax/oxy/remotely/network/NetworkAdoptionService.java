@@ -8,6 +8,7 @@ import restudio.rebase.backend.ServerBackend;
 import restudio.rebase.instance.Instance;
 import restudio.rebase.instance.loaders.ModLoader;
 
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -18,6 +19,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
 import restudio.rescreen.platform.Async;
 import restudio.rebase.platform.jvm.JvmAsyncBridge;
 
@@ -30,9 +33,7 @@ public class NetworkAdoptionService {
             return Async.failed(new IllegalArgumentException("Import Network Requires Velocity"));
         }
         Path config = resolve(proxy, Path.of("velocity.toml"));
-        return JvmAsyncBridge.fromFuture(InstanceApi.of(proxy).files().exists(config)).thenCompose(exists -> exists
-            ? JvmAsyncBridge.fromFuture(InstanceApi.of(proxy).files().read(config)).thenApply(content -> parse(proxy, content, instances, networks))
-            : Async.failed(new IllegalStateException("Velocity Config Is Missing From " + proxy.getName())));
+        return readConfiguration(proxy, config, "Velocity Config").thenApply(content -> parse(proxy, content, instances, networks));
     }
 
     public Async<NetworkAdoptionReport> scanLegacyMigration(Instance proxy, Collection<Instance> instances, Collection<NetworkDefinition> networks) {
@@ -43,9 +44,17 @@ public class NetworkAdoptionService {
             return Async.failed(new IllegalArgumentException("Velocity Migration Requires Waterfall Or BungeeCord"));
         }
         Path config = resolve(proxy, Path.of("config.yml"));
-        return JvmAsyncBridge.fromFuture(InstanceApi.of(proxy).files().exists(config)).thenCompose(exists -> exists
-            ? JvmAsyncBridge.fromFuture(InstanceApi.of(proxy).files().read(config)).thenApply(content -> parseLegacy(proxy, content, instances, networks))
-            : Async.failed(new IllegalStateException("Proxy Config Is Missing From " + proxy.getName())));
+        return readConfiguration(proxy, config, "Proxy Config").thenApply(content -> parseLegacy(proxy, content, instances, networks));
+    }
+
+    private Async<String> readConfiguration(Instance proxy, Path path, String name) {
+        return JvmAsyncBridge.fromFuture(InstanceApi.of(proxy).files().read(path)).handle((content, failure) -> {
+            if (failure == null) return content;
+            Throwable cause = failure;
+            while ((cause instanceof CompletionException || cause instanceof ExecutionException) && cause.getCause() != null) cause = cause.getCause();
+            if (cause instanceof NoSuchFileException) throw new IllegalStateException(name + " Is Missing From " + proxy.getName());
+            throw cause instanceof RuntimeException runtime ? runtime : new CompletionException(cause);
+        });
     }
 
     public Async<String> readForwardingSecret(Instance proxy, NetworkAdoptionReport report) {
@@ -110,9 +119,9 @@ public class NetworkAdoptionService {
         boolean stockConfig = isStockVelocityConfig(source);
         ParsedVelocity parsed = stockConfig ? new ParsedVelocity(source.bindAddress(), source.entryPort(), source.proxyOnlineMode(), source.forwardingMode(), source.secretFile(), Map.of(), List.of(), Map.of()) : source;
         if (stockConfig) {
-            issues.add(warning("adoption.stock-config", proxy.getInstanceId(), "Velocity only contains example routes; Remotely will replace them when the network is created"));
+            issues.add(warning("adoption.stock-config", proxy.getInstanceId(), "Velocity Only Contains Example Routes. Choose Backend Servers To Set Up The Network"));
         } else if (parsed.routes().isEmpty()) {
-            issues.add(error("adoption.routes.empty", proxy.getInstanceId(), "Velocity does not define any backend routes"));
+            issues.add(warning("adoption.routes.empty", proxy.getInstanceId(), "This Proxy Has No Backend Routes. Choose Existing Servers To Set Up The Network"));
         }
         if (parsed.entryPort() == 0) {
             issues.add(error("adoption.bind.invalid", proxy.getInstanceId(), "Velocity bind address is invalid"));
@@ -479,20 +488,16 @@ public class NetworkAdoptionService {
     }
 
     private Path safeRelativePath(String value) {
-        Path path = Path.of(value).normalize();
-        if (path.isAbsolute() || path.startsWith("..")) {
+        Path path = Path.of(value.replace('\\', '/')).normalize();
+        if (path.getRoot() != null || path.startsWith("..")) {
             throw new IllegalArgumentException("Unsafe Velocity secret path");
         }
         return path;
     }
 
     private Path resolve(Instance instance, Path relativePath) {
-        Path root = Path.of(instance.getPath()).toAbsolutePath().normalize();
-        Path target = root.resolve(relativePath).normalize();
-        if (!target.startsWith(root)) {
-            throw new IllegalArgumentException("Velocity path escapes the selected server");
-        }
-        return target;
+        Path relative = safeRelativePath(relativePath.toString());
+        return Path.of(instance.getPath()).resolve(relative).normalize();
     }
 
     private NetworkValidationIssue error(String code, String subject, String message) {

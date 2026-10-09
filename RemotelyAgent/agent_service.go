@@ -64,6 +64,7 @@ type AgentServiceConfig struct {
 	Roots           []AgentRoot
 	Lifecycles      []AgentLifecycleBinding
 	Workflows       []AgentWorkflowBinding
+	ReProxy         []AgentReProxyGrant
 	LSP             []AgentLSPBinding
 	MaxFileBytes    int64
 	MaxArchiveBytes int64
@@ -85,6 +86,7 @@ type AgentService struct {
 	jobs       *agentJobManager
 	processes  *agentProcessManager
 	developer  *agentDeveloperService
+	reproxy    *agentReProxyService
 }
 
 type agentCapabilities struct {
@@ -94,6 +96,7 @@ type agentCapabilities struct {
 	Roots      []AgentRoot                `json:"roots"`
 	Lifecycles []AgentLifecycleBinding    `json:"lifecycles"`
 	Features   map[string]bool            `json:"features"`
+	ReProxy    agentReProxyCapabilities   `json:"reproxy"`
 	Developer  agentDeveloperCapabilities `json:"developer"`
 }
 
@@ -274,6 +277,11 @@ func NewAgentService(config AgentServiceConfig) (*AgentService, error) {
 		return nil, err
 	}
 	service.developer = developer
+	service.reproxy, err = newAgentReProxyService(service, config.ReProxy)
+	if err != nil {
+		_ = service.Close()
+		return nil, err
+	}
 	return service, nil
 }
 
@@ -321,6 +329,9 @@ func (s *AgentService) Close() error {
 		return nil
 	}
 	var result error
+	if s.reproxy != nil {
+		s.reproxy.close()
+	}
 	if s.developer != nil {
 		s.developer.close()
 	}
@@ -398,6 +409,10 @@ func (s *AgentService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/v1/capabilities" && r.Method == http.MethodGet {
 		s.handleCapabilities(w)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/v1/reproxy/") && s.reproxy != nil {
+		s.reproxy.handle(w, r)
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/v1/roots/") {
@@ -482,6 +497,7 @@ func (s *AgentService) handleCapabilities(w http.ResponseWriter) {
 		Roots:      roots,
 		Lifecycles: lifecycles,
 		Developer:  s.developer.capabilities(),
+		ReProxy:    s.reproxy.capabilities(),
 		Features: map[string]bool{
 			"filesystem": true,
 			"archives":   true,
@@ -489,6 +505,7 @@ func (s *AgentService) handleCapabilities(w http.ResponseWriter) {
 			"processes":  true,
 			"terminal":   agentTerminalSupported(),
 			"lifecycle":  len(lifecycles) > 0,
+			"reproxy":    len(s.config.ReProxy) > 0,
 		},
 	})
 }
@@ -1509,6 +1526,9 @@ func (s *AgentService) handleLifecycle(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
+		}
+		if s.reproxy != nil {
+			s.reproxy.stopLifecycle(binding.ID)
 		}
 		if err := lifecycleStop(binding.Directory, 180*time.Second); err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)

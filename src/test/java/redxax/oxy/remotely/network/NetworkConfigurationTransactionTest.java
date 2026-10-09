@@ -27,6 +27,61 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class NetworkConfigurationTransactionTest {
     @Test
+    void refreshesStalePortsBeforePlanningAndAfterUnchangedApply(@TempDir Path directory) throws Exception {
+        BackendFactory.register("LOCAL", LocalBackend::new);
+        Instance proxy = instance("Proxy", Files.createDirectories(directory.resolve("proxy")), ModLoader.VELOCITY);
+        Instance lobby = instance("Lobby", Files.createDirectories(directory.resolve("lobby")), ModLoader.PAPER);
+        Instance bedwars = instance("Bedwars", Files.createDirectories(directory.resolve("bedwars")), ModLoader.PAPER);
+        Files.writeString(Path.of(lobby.getPath(), "server.properties"), "server-port=25566\nonline-mode=false\n");
+        String settings = "server-port=25567\nonline-mode=false\nmotd=Keep Me\n";
+        Path target = Path.of(bedwars.getPath(), "server.properties");
+        Files.writeString(target, settings);
+        proxy.getServerProperties().setProperty("server-port", "25567");
+        bedwars.getServerProperties().setProperty("server-port", "25565");
+        NetworkDefinition network = NetworkDefinition.create("ShipMC", proxy.getInstanceId(), NetworkForwardingPolicy.secureDefault("secret"),
+                List.of(NetworkEntryPoint.primary(25565)), List.of(NetworkMember.proxy(proxy.getInstanceId(), 25565),
+                        NetworkMember.backend(lobby.getInstanceId(), "lobby", NetworkMemberRole.LOBBY, 25566),
+                        NetworkMember.backend(bedwars.getInstanceId(), "bedwars", NetworkMemberRole.GAMEPLAY, 25567)));
+        List<Instance> instances = List.of(proxy, lobby, bedwars);
+        NetworkConfigurationTransaction transaction = new NetworkConfigurationTransaction();
+        NetworkDiscoveryService discovery = new NetworkDiscoveryService(new NetworkPortAllocator());
+        NetworkSecrets secrets = new NetworkSecrets() {
+            @Override
+            public String forwardingSecret(String reference) { return "shared-secret"; }
+
+            @Override
+            public NetworkEnrollment enrollment(String networkId, String nodeId) { return new NetworkEnrollment("token", "hash"); }
+        };
+
+        transaction.observeServerProperties(network, instances).join();
+        NetworkPlanInput input = DesktopNetworkPlanInput.from(discovery.discover(network, instances, List.of(network), List.of()));
+        assertEquals("25567", bedwars.getServerProperties().getProperty("server-port"));
+        assertTrue(new NetworkDesiredStatePlanner().plan(input, secrets).canApply());
+
+        NetworkConfigMutation port = new NetworkConfigMutation(bedwars.getInstanceId(), "server.properties", ConfigurationFormat.PROPERTIES,
+                "server-port", "25567", "25567", false, true, "Set Backend Port");
+        NetworkReconciliationPlan plan = new NetworkReconciliationPlan("", network.networkId(), network.revision(), 0, List.of(port), List.of());
+        NetworkPreparedPlan prepared = transaction.prepare(plan, instances).join();
+        bedwars.getServerProperties().setProperty("server-port", "25565");
+        NetworkApplyResult result = transaction.apply(prepared, network, instances).join();
+        assertTrue(result.applied());
+        assertTrue(result.changedDocuments().isEmpty());
+        assertEquals(settings, Files.readString(target));
+        assertEquals("25567", bedwars.getServerProperties().getProperty("server-port"));
+        assertEquals("Keep Me", bedwars.getServerProperties().getProperty("motd"));
+
+        PortReservation occupied = new PortReservation("local", 25567, "external", "other", "Other Server");
+        NetworkPlanInput conflict = DesktopNetworkPlanInput.from(discovery.discover(network, instances, List.of(network), List.of(occupied)));
+        assertFalse(new NetworkDesiredStatePlanner().plan(conflict, secrets).canApply());
+        assertTrue(new NetworkDetachPlanner().plan(conflict, bedwars.getInstanceId()).canApply());
+
+        NetworkPreparedPlan reviewed = transaction.prepare(plan, instances).join();
+        Files.writeString(target, "server-port=25568\n");
+        assertFalse(transaction.apply(reviewed, network, instances).join().applied());
+        assertEquals("server-port=25568\n", Files.readString(target));
+    }
+
+    @Test
     void freshApplyDoesNotCreateAnAbsentDocumentForAnUnchangedMutation(@TempDir Path directory) {
         BackendFactory.register("LOCAL", LocalBackend::new);
         Path proxyDirectory = directory.resolve("proxy");

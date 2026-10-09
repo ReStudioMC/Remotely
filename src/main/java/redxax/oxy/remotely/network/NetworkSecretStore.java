@@ -87,6 +87,26 @@ public class NetworkSecretStore implements NetworkSecrets {
         return value == null ? "" : value;
     }
 
+    public NetworkEnrollment createEnrollment() {
+        byte[] value = new byte[32];
+        RANDOM.nextBytes(value);
+        String token = Base64.getUrlEncoder().withoutPadding().encodeToString(value);
+        return enrollmentValue(token);
+    }
+
+    public NetworkEnrollment enrollmentValue(String token) {
+        String hash = Base64.getUrlEncoder().withoutPadding().encodeToString(Sha256.digest(token.getBytes(StandardCharsets.UTF_8)));
+        return new NetworkEnrollment(token, hash);
+    }
+
+    public synchronized void replaceEnrollmentToken(String networkId, String nodeId, String expected, String replacement) {
+        String current = resolveEnrollmentToken(networkId, nodeId);
+        if (current.equals(replacement)) return;
+        if (!current.equals(expected)) throw new IllegalStateException("Server Enrollment Changed During Renewal");
+        if (replacement == null || replacement.isBlank()) throw new IllegalArgumentException("Server Enrollment Token Is Required");
+        CredentialsManager.setPassword(ENROLLMENT_SERVICE, enrollmentAccount(networkId, nodeId), replacement);
+    }
+
     public void deleteEnrollmentToken(String networkId, String nodeId) {
         CredentialsManager.deletePassword(ENROLLMENT_SERVICE, enrollmentAccount(networkId, nodeId));
     }

@@ -40,11 +40,13 @@ type agentWebSocket struct {
 }
 
 type agentWebSocketConfig struct {
-	TLSConfig   *tls.Config
-	PinnedSPKI  []string
-	PairingCode string
-	Credential  string
-	MaxFrame    int64
+	TLSConfig     *tls.Config
+	PinnedSPKI    []string
+	PairingCode   string
+	Credential    string
+	MaxFrame      int64
+	Subprotocol   string
+	NoSubprotocol bool
 }
 
 type agentRelayAuthError struct {
@@ -121,13 +123,19 @@ func dialAgentWebSocket(ctx context.Context, endpoint string, config agentWebSoc
 	if parsed.RawQuery != "" {
 		path += "?" + parsed.RawQuery
 	}
+	subprotocol := config.Subprotocol
+	if subprotocol == "" && !config.NoSubprotocol {
+		subprotocol = agentRelaySubprotocol
+	}
 	request := "GET " + path + " HTTP/1.1\r\n" +
 		"Host: " + parsed.Host + "\r\n" +
 		"Upgrade: websocket\r\n" +
 		"Connection: Upgrade\r\n" +
 		"Sec-WebSocket-Key: " + key + "\r\n" +
-		"Sec-WebSocket-Version: 13\r\n" +
-		"Sec-WebSocket-Protocol: " + agentRelaySubprotocol + "\r\n"
+		"Sec-WebSocket-Version: 13\r\n"
+	if subprotocol != "" {
+		request += "Sec-WebSocket-Protocol: " + subprotocol + "\r\n"
+	}
 	if config.Credential != "" {
 		if len(config.Credential) > 4096 || strings.ContainsAny(config.Credential, "\r\n") {
 			secure.Close()
@@ -172,7 +180,7 @@ func dialAgentWebSocket(ctx context.Context, endpoint string, config agentWebSoc
 		secure.Close()
 		return nil, errors.New("relay handshake has an invalid accept key")
 	}
-	if response.Header.Get("Sec-WebSocket-Protocol") != agentRelaySubprotocol {
+	if response.Header.Get("Sec-WebSocket-Protocol") != subprotocol {
 		secure.Close()
 		return nil, errors.New("relay handshake selected an invalid protocol")
 	}
@@ -260,13 +268,13 @@ func (w *agentWebSocket) readMessage() (byte, []byte, error) {
 	var message []byte
 	var messageOpcode byte
 	frames := 0
+	if w.readTimeout > 0 {
+		_ = w.conn.SetReadDeadline(time.Now().Add(w.readTimeout))
+	}
 	for {
 		frames++
 		if frames > 1024 {
 			return 0, nil, errors.New("relay websocket message uses too many frames")
-		}
-		if w.readTimeout > 0 {
-			_ = w.conn.SetReadDeadline(time.Now().Add(w.readTimeout))
 		}
 		first, err := w.reader.ReadByte()
 		if err != nil {
@@ -361,7 +369,7 @@ func (w *agentWebSocket) readMessage() (byte, []byte, error) {
 		default:
 			return 0, nil, errors.New("relay websocket opcode is invalid")
 		}
-		if int64(len(message))+length > agentRelayMaxMessage {
+		if int64(len(message))+length > w.maxFrame {
 			return 0, nil, errors.New("relay websocket message exceeds limit")
 		}
 		message = append(message, payload...)

@@ -8,6 +8,8 @@ import restudio.rebase.instance.Instance;
 import restudio.rebase.platform.jvm.JvmAsyncBridge;
 import restudio.rescreen.platform.Async;
 
+import java.io.IOException;
+import java.io.StringReader;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -17,6 +19,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Properties;
+import java.util.concurrent.TimeUnit;
 
 public class NetworkConfigurationTransaction {
     private final NetworkConfigurationAdapters adapters;
@@ -25,6 +29,42 @@ public class NetworkConfigurationTransaction {
     public NetworkConfigurationTransaction() {
         this.adapters = new NetworkConfigurationAdapters(new DesktopStructuredDocumentParser());
         this.executionPlan = new NetworkExecutionPlan(new NetworkMutationEngine(adapters));
+    }
+
+    public Async<Void> observeServerProperties(NetworkDefinition network, Collection<Instance> instances) {
+        Map<String, Instance> instancesById = indexInstances(instances);
+        Map<Instance, Properties> observed = Collections.synchronizedMap(new LinkedHashMap<>());
+        List<Async<Void>> reads = new ArrayList<>();
+        for (NetworkMember member : network.members()) {
+            if (!member.isManaged() || member.isProxy()) continue;
+            Instance instance = instancesById.get(member.instanceId());
+            if (instance == null) continue;
+            FileSystemProvider fileSystem = requireFileSystem(instance);
+            Path target = resolve(instance, "server.properties");
+            reads.add(exists(fileSystem, target).thenCompose(exists -> exists ? read(fileSystem, target) : Async.completed(""))
+                    .thenAccept(content -> observed.put(instance, properties(content, instance))));
+        }
+        Async<Void> ready = JvmAsyncBridge.fromFuture(JvmAsyncBridge.toFuture(Async.allOf(reads.toArray(Async[]::new)))
+                .orTimeout(30, TimeUnit.SECONDS));
+        return ready.thenRun(() -> observed.forEach((instance, properties) -> replaceProperties(instance, properties)));
+    }
+
+    private Properties properties(String content, Instance instance) {
+        Properties properties = new Properties();
+        try {
+            properties.load(new StringReader(content));
+        } catch (IOException | IllegalArgumentException exception) {
+            throw new IllegalStateException("Could Not Read Server Settings For " + instance.getName(), exception);
+        }
+        return properties;
+    }
+
+    private void replaceProperties(Instance instance, Properties properties) {
+        Properties resident = instance.getServerProperties();
+        synchronized (resident) {
+            resident.clear();
+            resident.putAll(properties);
+        }
     }
 
     public Async<NetworkPreparedPlan> prepare(NetworkReconciliationPlan plan, Collection<Instance> instances) {
@@ -100,15 +140,17 @@ public class NetworkConfigurationTransaction {
         Map<String, Instance> instancesById = indexInstances(instances);
         List<DocumentOperation> operations = executionPlan.compile(prepared, currentNetwork).stream()
                 .map(change -> operation(change, instancesById)).toList();
-        List<DocumentOperation> changedOperations = operations.stream().filter(operation -> operation.change().changed()).toList();
         Map<NetworkConfigDocumentKey, NetworkJobDocument> recoveryByKey = indexRecoveryDocuments(recoveryDocuments);
         List<DocumentOperation> applied = Collections.synchronizedList(new ArrayList<>());
         List<DocumentOperation> attempted = Collections.synchronizedList(new ArrayList<>());
         Async<Void> execution = Async.completed(null);
-        for (DocumentOperation operation : changedOperations) {
+        for (DocumentOperation operation : operations) {
             NetworkJobDocument recovery = recoveryByKey.get(operation.change().key());
-            if (recovery != null && (recovery.state() == NetworkJobDocumentState.APPLIED
+            if (!operation.change().changed() || recovery != null && (recovery.state() == NetworkJobDocumentState.APPLIED
                     || recovery.state() == NetworkJobDocumentState.UNCHANGED)) {
+                if (operation.change().key().path().equals("server.properties")) {
+                    execution = execution.thenCompose(unused -> verifyOperation(operation));
+                }
                 continue;
             }
             execution = execution.thenCompose(unused -> {
@@ -121,7 +163,7 @@ public class NetworkConfigurationTransaction {
         }
         return execution.handle((unused, throwable) -> {
             if (throwable == null) {
-                synchronizeInstanceState(changedOperations);
+                synchronizeInstanceState(operations);
                 return Async.completed(new NetworkApplyResult(plan.planId(), true, false,
                         applied.stream().map(operation -> operation.change().key()).toList(), "Network configuration applied"));
             }
@@ -165,27 +207,27 @@ public class NetworkConfigurationTransaction {
             if (!operation.change().key().path().equals("server.properties")) {
                 continue;
             }
-            for (NetworkConfigMutation mutation : operation.change().mutations()) {
-                if (mutation.action() == NetworkMutationAction.REMOVE) {
-                    operation.instance().getServerProperties().remove(mutation.key());
-                } else {
-                    operation.instance().getServerProperties().setProperty(mutation.key(), mutation.desiredValue());
-                }
-            }
+            replaceProperties(operation.instance(), properties(operation.change().desired(), operation.instance()));
         }
     }
 
     private Async<Void> applyOperation(String planId, DocumentOperation operation, NetworkJobDocument recovery) {
+        return verifyOperation(operation).thenCompose(unused -> {
+            Path backup = backupPath(operation.instance(), planId, operation.change().key().path());
+            Async<Void> backupWrite = recovery == null ? writeBackup(operation, backup) : writeRecoveryBackup(operation, backup, recovery);
+            return backupWrite.thenCompose(ignored -> createParent(operation.fileSystem(), operation.target()))
+                    .thenCompose(ignored -> writeAtomic(operation.fileSystem(), operation.target(), operation.change().desired()));
+        });
+    }
+
+    private Async<Void> verifyOperation(DocumentOperation operation) {
         return exists(operation.fileSystem(), operation.target()).thenCompose(exists -> {
             Async<String> current = exists ? read(operation.fileSystem(), operation.target()) : Async.completed("");
             return current.thenCompose(content -> {
                 if (exists != operation.change().original().exists() || !content.equals(operation.change().original().content())) {
                     return Async.failed(new IllegalStateException("Configuration changed after plan review: " + operation.change().key().path()));
                 }
-                Path backup = backupPath(operation.instance(), planId, operation.change().key().path());
-                Async<Void> backupWrite = recovery == null ? writeBackup(operation, backup) : writeRecoveryBackup(operation, backup, recovery);
-                return backupWrite.thenCompose(unused -> createParent(operation.fileSystem(), operation.target()))
-                        .thenCompose(unused -> writeAtomic(operation.fileSystem(), operation.target(), operation.change().desired()));
+                return Async.completed(null);
             });
         });
     }

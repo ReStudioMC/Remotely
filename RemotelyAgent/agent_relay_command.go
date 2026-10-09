@@ -23,6 +23,7 @@ func cmdRelay(args []string) {
 	var lifecycles agentStringList
 	var workflows agentStringList
 	var lsp agentStringList
+	var reproxy agentStringList
 	var tlsPins agentStringList
 	fs.Var(&roots, "root", "Allowed root as id=path")
 	fs.Var(&writeRoots, "write-root", "Grant write capability to a root id")
@@ -30,6 +31,7 @@ func cmdRelay(args []string) {
 	fs.Var(&archiveRoots, "archive-root", "Grant archive capability to a root id")
 	fs.Var(&lifecycles, "lifecycle", "Lifecycle as id|root|directory|startup-command")
 	fs.Var(&workflows, "workflow", "Workflow as id|root|directory|tool|JSON-args")
+	fs.Var(&reproxy, "reproxy", "Explicit socket grant as lifecycle|TCP-or-UDP|port|wss-origin")
 	fs.Var(&lsp, "lsp", "LSP as id|root|directory|program|JSON-args")
 	fs.Var(&tlsPins, "tls-pin", "Allowed relay TLS SPKI pin")
 	maxFile := fs.Int64("max-file-bytes", 128*1024*1024, "Maximum file transfer size")
@@ -55,12 +57,17 @@ func cmdRelay(args []string) {
 		fmt.Fprintln(os.Stderr, "relay:", err)
 		os.Exit(2)
 	}
+	configuredReProxy, err := parseAgentReProxyGrants(reproxy)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "reproxy:", err)
+		os.Exit(2)
+	}
 	configuredLSP, err := parseAgentLSP(lsp)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "relay:", err)
 		os.Exit(2)
 	}
-	service, err := NewAgentService(AgentServiceConfig{Roots: configuredRoots, Lifecycles: configuredLifecycles, Workflows: configuredWorkflows, LSP: configuredLSP, MaxFileBytes: *maxFile, MaxArchiveBytes: *maxArchive, MaxProcessBytes: *maxProcess, Token: []byte(agentRandomID("relay-service"))})
+	service, err := NewAgentService(AgentServiceConfig{Roots: configuredRoots, Lifecycles: configuredLifecycles, Workflows: configuredWorkflows, LSP: configuredLSP, ReProxy: configuredReProxy, MaxFileBytes: *maxFile, MaxArchiveBytes: *maxArchive, MaxProcessBytes: *maxProcess, Token: []byte(agentRandomID("relay-service"))})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

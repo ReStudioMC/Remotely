@@ -318,3 +318,37 @@ func TestModpackDownloadDestinationsStayWithinTarget(t *testing.T) {
 		t.Fatalf("expected destination escape rejection, got %v", err)
 	}
 }
+
+func TestReProxyRequiresExplicitSocketGrant(t *testing.T) {
+	service, err := NewAgentService(AgentServiceConfig{
+		Token:      []byte("01234567890123456789012345678901"),
+		Roots:      []AgentRoot{{ID: "workspace", Path: t.TempDir(), Read: true, Execute: true}},
+		Lifecycles: []AgentLifecycleBinding{{ID: "server", Root: "workspace", Command: "java -jar server.jar"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	command := agentReProxyCommand{OperationID: "operation", ConnectionID: "connection", SessionID: "session", Generation: "1", RouteRevision: "1", LifecycleID: "server"}
+	command.Ticket.ConnectionID = command.ConnectionID
+	command.Ticket.SessionID = command.SessionID
+	command.Ticket.Generation = command.Generation
+	command.Ticket.RouteRevision = command.RouteRevision
+	command.Ticket.Token = "fresh-ticket"
+	command.Ticket.ExpiresAt = time.Now().Add(time.Minute).UTC().Format(time.RFC3339)
+	command.Ticket.Node.TunnelHost = "relay.example"
+	command.Ticket.Node.TunnelScheme = "wss"
+	command.Ticket.Node.TunnelPort = 443
+	command.Ticket.Endpoints = []agentReProxyEndpoint{{ID: "12345678-1234-1234-1234-123456789abc", Protocol: "TCP", TargetHost: "127.0.0.1", TargetPort: 25565, Enabled: true}}
+	body, err := json.Marshal(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/reproxy/start", strings.NewReader(string(body)))
+	request.Header.Set("Authorization", "Bearer 01234567890123456789012345678901")
+	response := httptest.NewRecorder()
+	service.ServeHTTP(response, request)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "Socket Grant Is Required") {
+		t.Fatalf("execute permission admitted an ungranted socket: %d %s", response.Code, response.Body.String())
+	}
+}

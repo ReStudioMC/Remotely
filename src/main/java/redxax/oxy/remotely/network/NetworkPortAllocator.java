@@ -80,12 +80,14 @@ public class NetworkPortAllocator {
         List<PortReservation> reservations = new ArrayList<>();
         String hostScope = NetworkHostScope.resolve(instance);
         Properties properties = instance.getServerProperties();
-        addPropertyPort(reservations, hostScope, instance, properties, "server-port", "Minecraft");
-        if (Boolean.parseBoolean(properties.getProperty("enable-query", "false"))) {
-            addPropertyPort(reservations, hostScope, instance, properties, "query.port", "Query");
-        }
-        if (Boolean.parseBoolean(properties.getProperty("enable-rcon", "false"))) {
-            addPropertyPort(reservations, hostScope, instance, properties, "rcon.port", "RCON");
+        if (!instance.isProxyServer()) {
+            addPropertyPort(reservations, hostScope, instance, properties, "server-port", "Minecraft");
+            if (Boolean.parseBoolean(properties.getProperty("enable-query", "false"))) {
+                addPropertyPort(reservations, hostScope, instance, properties, "query.port", "Query");
+            }
+            if (Boolean.parseBoolean(properties.getProperty("enable-rcon", "false"))) {
+                addPropertyPort(reservations, hostScope, instance, properties, "rcon.port", "RCON");
+            }
         }
         addSettingPort(reservations, hostScope, instance, "management-server-port", "Management");
         addPropertyPort(reservations, hostScope, instance, properties, "management-server-port", "Management");

@@ -146,14 +146,14 @@ public class NetworkDesiredStatePlanner {
         String operatorPrefix = "node." + operatorNodeId + ".";
         add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, operatorPrefix + "display-name", "", "Remotely", false, true, "Set ReSync Operator Name");
         add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, operatorPrefix + "role", "", "OPERATOR", false, true, "Set ReSync Operator Role");
-        add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, operatorPrefix + "capabilities", "", "observe,routing,operate,command,broadcast,state-admin,events", false, true, "Set ReSync Operator Capabilities");
+        add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, operatorPrefix + "capabilities", "", "observe,routing,operate,command,broadcast,state-admin,events,editors", false, true, "Set ReSync Operator Capabilities");
         add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, operatorPrefix + "enrollment-token-hash", "", operatorEnrollment.hash(), true, true, "Set ReSync Operator Enrollment Hash");
         add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, operatorPrefix + "enrollment-expires-at", "", "0", false, true, "Set ReSync Operator Enrollment Expiry");
         for (NetworkMember member : nodes) {
             NetworkEnrollment enrollment = enrollment(network, member.nodeId(), secrets, enrollments, issues);
             String prefix = "node." + member.nodeId() + ".";
             add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, prefix + "display-name", "", member.routeName(), false, true, "Set ReSync Node Name");
-            add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, prefix + "role", "", member.role().name(), false, true, "Set ReSync Node Role");
+            add(mutations, proxy, path, ConfigurationFormat.PROPERTIES, prefix + "role", "", "BACKEND", false, true, "Set ReSync Node Role");
             SyncRealm transferRealm = stateRealm(network, member);
             List<String> capabilities = new ArrayList<>(List.of("presence", "observe", "variables", "events", "transfer", "operate", "command", "broadcast"));
             if (transferRealm != null) {
