@@ -10,8 +10,11 @@ import restudio.rebase.resource.marketplace.ResourceMarketplaceProviderAdapter;
 import restudio.rebase.resource.provider.OnlineResourceVersion;
 import restudio.rebase.restudio.api.models.ServerModels;
 import restudio.rebase.ui.screens.resources.ResourceContainerProvider;
+import restudio.rebase.ui.screens.resources.ResourceDependencies;
+import restudio.rebase.ui.screens.resources.ResourceForwarding;
 import restudio.rebase.ui.screens.resources.ResourceContainerItem;
 import restudio.rebase.ui.screens.resources.ResourceContainerUpdate;
+import restudio.rescreen.ui.core.ScreenManager;
 import restudio.rescreen.ui.rescreen.ReScreen;
 import restudio.rescreen.util.Identifier;
 import restudio.rescreen.util.Notification;
@@ -30,6 +33,8 @@ final class HostedResourceContainerProvider implements ResourceContainerProvider
     private final ServerModels.ClientServerView server;
     private final ResourceMarketplaceProviderAdapter marketplace;
     private final HostedResourceContext resourceContext;
+    private final ResourceForwarding forwarding;
+    private final ResourceDependencies dependencies;
     private final Map<String, ResourceMarketplaceProvider.Card> cards = new LinkedHashMap<>();
     private final Map<String, String> icons = new LinkedHashMap<>();
     private final Map<String, Identifier> iconIds = new LinkedHashMap<>();
@@ -39,10 +44,24 @@ final class HostedResourceContainerProvider implements ResourceContainerProvider
 
     HostedResourceContainerProvider(BrowserServerScreenHost screenHost, ServerModels.ClientServerView server,
                                      ResourceMarketplaceProviderAdapter marketplace, HostedResourceContext resourceContext) {
+        this(screenHost, server, marketplace, resourceContext, ResourceForwarding.none());
+    }
+
+    HostedResourceContainerProvider(BrowserServerScreenHost screenHost, ServerModels.ClientServerView server,
+                                     ResourceMarketplaceProviderAdapter marketplace, HostedResourceContext resourceContext,
+                                     ResourceForwarding forwarding) {
         this.screenHost = screenHost;
         this.server = server;
         this.marketplace = marketplace;
+        this.dependencies = ResourceDependencies.persisted(resource ->
+                marketplace.source(resource.getProviderName()).getResourceVersionAsync(resource.getVersionId()));
         this.resourceContext = resourceContext;
+        this.forwarding = forwarding == null ? ResourceForwarding.none() : forwarding;
+    }
+
+    @Override
+    public ResourceForwarding forwarding() {
+        return forwarding;
     }
 
     @Override
@@ -53,6 +72,11 @@ final class HostedResourceContainerProvider implements ResourceContainerProvider
     @Override
     public Async<List<ResourceContainerItem>> load(boolean force) {
         return resourceContext.canonicalResourceInventory(force).thenApply(this::resourceSnapshot);
+    }
+
+    @Override
+    public long pollIntervalMillis() {
+        return 5000;
     }
 
     @Override
@@ -75,6 +99,7 @@ final class HostedResourceContainerProvider implements ResourceContainerProvider
         icons.clear();
         if (inventory == null) {
             releaseIcons();
+            forwarding.admit(List.of());
             return List.of();
         }
         String warning = inventory.warning();
@@ -101,6 +126,7 @@ final class HostedResourceContainerProvider implements ResourceContainerProvider
             return !(Objects.equals(previous, current) && current != null && !current.isBlank());
         }).toList();
         staleIcons.forEach(entry -> releaseIcon(entry.getKey(), entry.getValue()));
+        forwarding.admit(nested);
         return nested;
     }
 
@@ -173,6 +199,11 @@ final class HostedResourceContainerProvider implements ResourceContainerProvider
     }
 
     @Override
+    public Async<ResourceDependencies.Plan> dependencies(ResourceContainerItem resource, List<ResourceContainerItem> inventory) {
+        return dependencies.plan(resource, inventory);
+    }
+
+    @Override
     public Async<Void> toggle(ResourceContainerItem resource, boolean enabled) {
         if (resource == null || !fileCapability("resources.toggle").available()) return failed("Resource Toggle Is Unavailable");
         String source = key(resource);
@@ -183,9 +214,11 @@ final class HostedResourceContainerProvider implements ResourceContainerProvider
             resource.setEnabled(enabled);
             return Async.completed(null);
         }
+        Object operation = resourceContext.captureOperation();
         return screenHost.serverApi().toggleResource(server.identifier, source, enabled)
                 .handle((ignored, failure) -> failure)
                 .thenCompose(failure -> {
+                    if (!resourceContext.isOperationCurrent(operation, null)) return Async.failed(new Async.Cancellation());
                     if (failure == null) {
                         applyToggle(resource, source, target, enabled);
                         return Async.completed(null);
@@ -198,6 +231,7 @@ final class HostedResourceContainerProvider implements ResourceContainerProvider
                                     && files.stream().anyMatch(file -> file != null && targetName.equals(file.name))
                                     && files.stream().noneMatch(file -> file != null && sourceName.equals(file.name)))
                             .thenCompose(confirmed -> {
+                                if (!resourceContext.isOperationCurrent(operation, null)) return Async.failed(new Async.Cancellation());
                                 if (!confirmed) return Async.failed(failure);
                                 applyToggle(resource, source, target, enabled);
                                 return Async.completed(null);
@@ -214,7 +248,7 @@ final class HostedResourceContainerProvider implements ResourceContainerProvider
         if (icon != null) icons.put(target, icon);
         Identifier iconId = iconIds.remove(source);
         if (iconId != null) iconIds.put(target, iconId);
-        resourceContext.invalidateFileCache();
+        resourceContext.resourceToggled(source, target, resource);
     }
 
     @Override
@@ -237,6 +271,10 @@ final class HostedResourceContainerProvider implements ResourceContainerProvider
     @Override
     public void openResource(ReScreen parent, ResourceContainerItem resource, Runnable refreshed) {
         ResourceMarketplaceProvider.Card card = card(resource);
+        if (card == null && resource != null && resource.getPageUrl() != null && !resource.getPageUrl().isBlank()) {
+            ScreenManager.getInstance().runtime().hostActions().openBrowser(resource.getPageUrl());
+            return;
+        }
         if (card != null && card.provider() != null) {
             resourceContext.openResource(parent, marketplace, card, resource.getType(), true, screenHost, false, false, refreshed);
         }
@@ -255,10 +293,6 @@ final class HostedResourceContainerProvider implements ResourceContainerProvider
             resolved.accept(missingIcon());
             return;
         }
-        if (current != null) {
-            releaseIcon(resourceKey, current);
-            current = null;
-        }
         if (current == null && screenHost != null && screenHost.application() != null) {
             current = screenHost.application().registerRemoteImage(icon);
             if (current != null) iconIds.put(resourceKey, current);
@@ -273,6 +307,7 @@ final class HostedResourceContainerProvider implements ResourceContainerProvider
 
     @Override
     public void stopWatching() {
+        dependencies.clear();
         releaseIcons();
         resourceContext.invalidate();
     }
@@ -312,11 +347,14 @@ final class HostedResourceContainerProvider implements ResourceContainerProvider
         if (metadata != null) {
             resource.setName(metadata.name() == null || metadata.name().isBlank() ? filename : metadata.name());
             resource.setDescription(metadata.description());
-            resource.setVersion(metadata.version());
+            if (metadata.version() != null && !metadata.version().isBlank()) resource.setVersion(metadata.version());
             resource.setAuthors(metadata.authors());
             resource.setProviderName(metadata.provider());
             resource.setProjectId(metadata.projectId());
             resource.setVersionId(metadata.versionId());
+            resource.setIconUrl(metadata.iconUrl());
+            resource.setPageUrl(metadata.pageUrl());
+            resource.setMetadataStatus(metadata.status());
             resource.availableUpdate(metadata.availableUpdate());
         }
         if (metadata != null && metadata.provider() != null && !metadata.provider().isBlank()

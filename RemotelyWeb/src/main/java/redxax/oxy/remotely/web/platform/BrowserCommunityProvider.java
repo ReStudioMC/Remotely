@@ -3,6 +3,7 @@ package redxax.oxy.remotely.web.platform;
 import redxax.oxy.remotely.host.ApplicationHost;
 import restudio.rebase.restudio.ReStudioAccount;
 import restudio.rebase.restudio.ReStudioMembership;
+import restudio.rebase.restudio.membership.ReStudioMembershipCodec;
 import restudio.rebase.restudio.SessionState;
 import restudio.rebase.restudio.api.models.FeedbackModels;
 import restudio.rebase.restudio.community.ReStudioAccountManagementProvider;
@@ -284,6 +285,16 @@ public final class BrowserCommunityProvider implements ReStudioCommunityProvider
     @Override
     public Async<List<ReStudioMembership>> getMemberships() {
         return client.getMemberships();
+    }
+
+    @Override
+    public long membershipGeneration() {
+        return client.membershipGeneration();
+    }
+
+    @Override
+    public Async<ReStudioMembershipCodec.MembershipPage> getMembershipPage(int page, boolean history) {
+        return client.getMembershipPage(page, history);
     }
 
     @Override

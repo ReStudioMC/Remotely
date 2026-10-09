@@ -8,7 +8,6 @@ import redxax.oxy.remotely.config.GlobalSettingsProviders;
 import redxax.oxy.remotely.config.SettingsScreenRuntime;
 import redxax.oxy.remotely.ui.settings.controllers.CollaborationSettingsProvider;
 import redxax.oxy.remotely.ui.settings.controllers.PackContentSettingsProvider;
-import redxax.oxy.remotely.ui.settings.controllers.ReProxySettingsCapability;
 import redxax.oxy.remotely.ui.settings.controllers.ServerClientSettingsProvider;
 import redxax.oxy.remotely.ui.server.ServerManagerScreen;
 import redxax.oxy.remotely.ui.server.ServerScreenHost;
@@ -66,8 +65,7 @@ final class BrowserGlobalSettingsProviders {
                 browserServerSettings(config, runtime),
                 InstanceStorageSettingsProvider.unavailable("Browser Storage", "Browser Storage", storageReason),
                 false,
-                ReProxySettingsCapability.unavailable(BrowserLaunchSession.authenticated(),
-                        "ReProxy Account Operations Are Not Exposed By The Browser Session."),
+                api.reProxy().settings(),
                 null,
                 SettingsActionCapability.unavailable("settings.discord-rpc", "Discord Activity Is Unavailable In Browser."),
                 PackContentSettingsProvider.unavailable("Pack Content Refreshes Automatically For Open Server Workspaces."),

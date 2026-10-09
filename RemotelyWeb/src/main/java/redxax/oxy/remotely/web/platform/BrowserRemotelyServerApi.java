@@ -110,6 +110,7 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
     private static final int MAX_BROWSER_READ_VALUES = 128;
     private static final int MAX_GLYPH_IMAGE_BYTES = 16 * 1024 * 1024;
     private static final long JOB_TIMEOUT_MILLIS = 30_000;
+    private static final long ARCHIVE_TIMEOUT_MILLIS = Duration.ofMinutes(15).toMillis();
     private static final long RESOURCE_TOGGLE_FOLLOW_UP_MILLIS = 90_000;
     private final HttpTransport transport;
     private final Supplier<BrowserLaunchSession.Metadata> sessionSource;
@@ -141,6 +142,7 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
     private final Map<Object, Set<Consumer<ManagerSnapshot>>> managerNetworkListeners = new IdentityHashMap<>();
     private final Map<Object, Set<Consumer<ManagerSnapshot>>> managerRuntimeListeners = new IdentityHashMap<>();
     private final String baseUrl;
+    private final BrowserReProxyAccess reProxy;
     private TaskScheduler.ScheduledTask managerPollingTask;
     private Async<ManagerSnapshot> managerPollRequest;
     private ManagerSnapshot managerSnapshot;
@@ -173,6 +175,7 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         resourcePools = new ResourcePoolClient(this::resourcePoolRequest);
         networks = new HostedNetworkClient(this::resourcePoolRequest);
         this.apiBaseUrl = Objects.requireNonNull(apiBaseUrl, "apiBaseUrl");
+        reProxy = new BrowserReProxyAccess(transport, clock, scheduler);
         BrowserLaunchSession.addAuthStateListener(browserReadAuthListener);
         BrowserLaunchSession.addTicketListener(browserReadTicketListener);
         BrowserLaunchSession.addSessionExpiryListener(browserReadExpiryListener);
@@ -190,7 +193,10 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         return networks;
     }
 
+    public BrowserReProxyAccess reProxy() { return reProxy; }
+
     public void close() {
+        reProxy.close();
         BrowserLaunchSession.removeAuthStateListener(browserReadAuthListener);
         BrowserLaunchSession.removeTicketListener(browserReadTicketListener);
         BrowserLaunchSession.removeSessionExpiryListener(browserReadExpiryListener);
@@ -359,7 +365,10 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
     }
 
     public Async<List<ServerScreenHost.NetworkView>> getNetworks() {
-        return networkValueRequest("GET", "/networks", null).thenApply(HostedNetworkOverviewProvider::views);
+        return networkValueRequest("GET", "/networks", null).thenApply(value -> {
+            if (!value.isJsonArray()) throw new IllegalStateException("Hosted Network List Is Invalid");
+            return HostedNetworkOverviewProvider.views(value);
+        });
     }
 
     void addInstanceChangeListener(Object owner, Consumer<ManagerSnapshot> listener) {
@@ -1017,9 +1026,9 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         long deadline = clock.millis() + RESOURCE_TOGGLE_FOLLOW_UP_MILLIS;
         return get("/jobs/" + path(jobId), BrowserRemotelyServerApi::capabilityJob).thenCompose(job -> {
             if (job == null || !jobId.equals(job.id)) return Async.failed(new IllegalStateException("Resource Toggle Job Response Is Invalid"));
-            Async<Void> result = Async.pending();
+            Async<ServerModels.CapabilityJob> result = Async.pending();
             poll(job, deadline, result, current -> new ResourceTogglePendingException(current.id));
-            return result;
+            return result.thenApply(ignored -> null);
         });
     }
 
@@ -1037,6 +1046,16 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
     public Async<Void> pullFile(String serverId, String url, String directory, String filename) {
         return job("/servers/" + path(serverId) + "/files/pull", Map.of("sourceUrl", url == null ? "" : url,
                 "directory", directory == null ? "/" : directory, "filename", filename == null ? "" : filename));
+    }
+
+    @Override
+    public Async<String> createFileArchive(String serverId, String root, List<String> files) {
+        return post("/servers/" + path(serverId) + "/files/compress", Map.of("root", root == null ? "/" : root,
+                "files", files == null ? List.of() : files), BrowserRemotelyServerApi::capabilityJob)
+                .thenCompose(job -> awaitResult(job, ARCHIVE_TIMEOUT_MILLIS)).thenApply(job -> {
+                    if (job.archiveName == null || job.archiveName.isBlank()) throw new IllegalStateException("Created Archive Name Is Unavailable");
+                    return job.archiveName;
+                });
     }
 
     @Override
@@ -1448,6 +1467,35 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
     }
 
     @Override
+    public Async<ServerSubdomain> serverSubdomain(String serverId) {
+        if (blank(serverId)) return Async.failed(new IllegalArgumentException("Server Is Required"));
+        return get("/servers/" + path(serverId) + "/subdomain", value -> serverSubdomain(serverId, value));
+    }
+
+    @Override
+    public Async<List<ServerScreenHost.NetworkView>> hostedNetworkViews() {
+        return getNetworks();
+    }
+
+    @Override
+    public Async<ServerSubdomain> updateServerSubdomain(String serverId, String subdomain, String expectedNetworkId, String expectedNetworkRevision) {
+        if (blank(serverId) || blank(subdomain)) return Async.failed(new IllegalArgumentException("Server And Subdomain Are Required"));
+        if (expectedNetworkId == null || expectedNetworkRevision == null || !expectedNetworkRevision.matches("0|[1-9][0-9]*")) {
+            return Async.failed(new IllegalArgumentException("Subdomain Authority Is Required"));
+        }
+        return put("/servers/" + path(serverId) + "/subdomain", Map.of("subdomain", subdomain,
+                "expectedNetworkId", expectedNetworkId, "expectedNetworkRevision", expectedNetworkRevision), value -> serverSubdomain(serverId, value));
+    }
+
+    private static ServerSubdomain serverSubdomain(String serverId, JsonObject value) {
+        ServerSubdomain result = new ServerSubdomain(BrowserJson.string(value, "serverId"), BrowserJson.string(value, "subdomain"),
+                BrowserJson.string(value, "fullDomain"), BrowserJson.string(value, "networkId"), BrowserJson.string(value, "networkRevision"),
+                BrowserJson.bool(value, "editable", false), BrowserJson.string(value, "reason"));
+        if (result.serverId().isBlank()) throw new IllegalStateException("Server Subdomain Response Is Invalid");
+        return result;
+    }
+
+    @Override
     public Async<ServerModels.ReProxyDomain> createReProxyDomain(String serverId, String subdomain) {
         if (blank(serverId)) return Async.failed(new IllegalArgumentException("Server Identifier Is Required"));
         return post(reProxyPath(serverId) + "/domains", new ReProxyDomainRequest(subdomain),
@@ -1733,10 +1781,14 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
     }
 
     Async<Void> downloadFiles(String serverId, List<String> paths) {
+        return downloadFiles(serverId, paths, null, () -> false);
+    }
+
+    Async<Void> downloadFiles(String serverId, List<String> paths, BiConsumer<Long, Long> progress, BooleanSupplier cancelled) {
         BrowserHostActionHandler actions = host == null ? null : host.hostActionHandler();
         if (actions == null) return Async.failed(new UnsupportedOperationException("Browser File Download Is Unavailable"));
         return downloadFiles(paths, name -> BrowserTransferBridge.downloadSink(actions, name, "application/octet-stream"),
-                (path, sink) -> downloadFileData(serverId, path, sink, null, () -> false));
+                (path, sink) -> downloadFileData(serverId, path, sink, progress, cancelled));
     }
 
     static Async<Void> downloadFiles(List<String> paths, Function<String, TransferSink> destinations,
@@ -1947,8 +1999,12 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
     }
 
     private Async<Void> await(ServerModels.CapabilityJob job) {
-        Async<Void> result = Async.pending();
-        poll(job, clock.millis() + JOB_TIMEOUT_MILLIS, result,
+        return awaitResult(job, JOB_TIMEOUT_MILLIS).thenApply(ignored -> null);
+    }
+
+    private Async<ServerModels.CapabilityJob> awaitResult(ServerModels.CapabilityJob job, long timeoutMillis) {
+        Async<ServerModels.CapabilityJob> result = Async.pending();
+        poll(job, clock.millis() + timeoutMillis, result,
                 current -> new IllegalStateException("Capability job timed out"));
         return result;
     }
@@ -1957,10 +2013,10 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         if (job == null || job.id == null || job.id.isBlank()) {
             return Async.failed(new IllegalStateException("Resource Toggle Job Response Is Invalid"));
         }
-        Async<Void> result = Async.pending();
+        Async<ServerModels.CapabilityJob> result = Async.pending();
         poll(job, clock.millis() + JOB_TIMEOUT_MILLIS, result,
                 current -> new ResourceTogglePendingException(current.id));
-        return result.exceptionallyCompose(failure -> failure instanceof ResourceTogglePendingException pending
+        return result.thenApply(ignored -> (Void) null).exceptionallyCompose(failure -> failure instanceof ResourceTogglePendingException pending
                 ? resumeResourceToggle(pending.jobId()) : Async.failed(failure));
     }
 
@@ -1998,7 +2054,7 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
                 });
     }
 
-    private void poll(ServerModels.CapabilityJob job, long deadline, Async<Void> result,
+    private void poll(ServerModels.CapabilityJob job, long deadline, Async<ServerModels.CapabilityJob> result,
                       Function<ServerModels.CapabilityJob, Throwable> pending) {
         if (result.isDone()) return;
         if (job == null || job.status == null) {
@@ -2006,7 +2062,7 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
             return;
         }
         if ("COMPLETED".equals(job.status)) {
-            result.complete(null);
+            result.complete(job);
             return;
         }
         if ("FAILED".equals(job.status)) {
@@ -3358,6 +3414,7 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         result.status = nullableString(value, "status");
         result.progress = nullableInteger(value, "progress");
         JsonObject proof = child(value, "result");
+        result.archiveName = nullableString(proof, "name");
         if (proof != null && !proof.entrySet().isEmpty()) {
             result.result = new ServerModels.BackupRestoreResult();
             result.result.outcome = nullableString(proof, "outcome");

@@ -1,10 +1,22 @@
 package redxax.oxy.remotely.web.platform;
 
+import restudio.rebase.platform.ExternalOpenResult;
+
+import com.google.gson.JsonObject;
+
 import redxax.oxy.remotely.ui.server.NetworkCreationPlan;
 import restudio.rebase.resource.ResourcePoolClient;
 import redxax.oxy.remotely.RemotelyServerApi;
 import redxax.oxy.remotely.RemotelyCapabilityException;
 import redxax.oxy.remotely.RemotelyClient;
+import redxax.oxy.remotely.servers.ReProxyManager;
+import redxax.oxy.remotely.servers.reproxy.PluginForwarding;
+import redxax.oxy.remotely.servers.reproxy.PluginConfigDecoration;
+import redxax.oxy.remotely.servers.reproxy.HostedPluginAccess;
+import redxax.oxy.remotely.servers.reproxy.NetworkPluginForwarding;
+import redxax.oxy.remotely.network.NetworkDefinition;
+import restudio.rebase.ui.screens.resources.ResourceForwarding;
+import restudio.rebase.reproxy.ReProxyModels.Connection;
 import redxax.oxy.remotely.RemotelyComposition;
 import redxax.oxy.remotely.data.flow.FlowManager;
 import redxax.oxy.remotely.data.flow.ReSyncNotificationLevel;
@@ -167,15 +179,18 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     private final Map<String, Long> powerTransitions = new LinkedHashMap<>();
     private final Map<String, List<Consumer<ServerState>>> stateListeners = new LinkedHashMap<>();
     private final Map<String, InitialStateRequest> stateRequests = new LinkedHashMap<>();
-    private final Map<String, ServerModels.ReProxySummary> reProxyStates = new LinkedHashMap<>();
-    private final Map<String, List<Runnable>> reProxyRefreshListeners = new LinkedHashMap<>();
-    private final Set<String> reProxyStateRequests = new HashSet<>();
     private final Map<String, PlayerMetrics> playerMetrics = new LinkedHashMap<>();
     private final Map<String, Long> playerMetricRefreshes = new LinkedHashMap<>();
     private final Set<String> playerMetricRequests = new HashSet<>();
     private final Set<Runnable> instanceChangeListeners = Collections.newSetFromMap(new IdentityHashMap<>());
     private final Set<Runnable> networkChangeListeners = Collections.newSetFromMap(new IdentityHashMap<>());
     private final Set<Runnable> runtimeChangeListeners = Collections.newSetFromMap(new IdentityHashMap<>());
+    private final Map<String, PluginForwarding> pluginForwarding = new LinkedHashMap<>();
+    private final Map<String, NetworkPluginForwarding> networkPluginForwarding = new LinkedHashMap<>();
+    private NetworkPluginForwarding.Coordinator pluginChanges = new NetworkPluginForwarding.Coordinator();
+    private String pluginAuthority = "";
+    private final Runnable pluginNetworkChanged = () -> networkPluginForwarding.values().forEach(NetworkPluginForwarding::invalidate);
+    private boolean pluginNetworkListening;
     private final Set<HostedResourceContext> resourceContexts = Collections.newSetFromMap(new IdentityHashMap<>());
     private final Consumer<BrowserRemotelyServerApi.ManagerSnapshot> browserInstanceChangeListener = this::handleBrowserInstanceChange;
     private final Consumer<BrowserRemotelyServerApi.ManagerSnapshot> browserNetworkChangeListener = this::handleBrowserNetworkChange;
@@ -286,10 +301,8 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     }
 
     @Override
-    public void openExternal(String url) {
-        if (url != null && !url.isBlank()) {
-            application.hostActionHandler().openBrowser(url);
-        }
+    public Async<ExternalOpenResult> openExternal(String url) {
+        return ExternalOpenResult.open(() -> application.hostActionHandler().openBrowserAsync(url));
     }
 
     @Override
@@ -332,59 +345,46 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
 
     @Override
     public boolean supportsReProxy(Object target) {
-        if (demo()) return false;
-        ServerModels.ClientServerView server = serverView(target);
-        if (server == null || !BrowserLaunchSession.authenticated() || !isLocalBackend(server)) return false;
-        ServerUiCapabilityProvider provider = capabilities(server);
-        ServerUiCapabilityProvider.Availability start = provider.availability(server, "reproxy.start");
-        ServerUiCapabilityProvider.Availability stop = provider.availability(server, "reproxy.stop");
-        return start.available() || stop.available() || capabilityLoading(start) || capabilityLoading(stop);
+        return false;
     }
 
     @Override
     public boolean isReProxyForwarded(Object target) {
-        ServerModels.ClientServerView server = serverView(target);
-        if (!isLocalBackend(server)) return false;
-        String id = serverId(server);
-        if (id.isBlank()) return false;
-        ServerModels.ReProxySummary summary = reProxyStates.get(id);
-        ServerModels.ReProxyTunnel tunnel = summary == null ? null : summary.activeTunnel;
-        return tunnel != null && activeReProxyStatus(tunnel.status);
+        if (!supportsReProxy(target)) return false;
+        try {
+            Connection connection = ReProxyManager.connectionForServer(serverId(serverView(target)));
+            return connection != null && ReProxyManager.isForwarded(connection.id());
+        } catch (IllegalStateException ignored) {
+            return false;
+        }
     }
 
     @Override
     public void refreshReProxy(Object target, Runnable onComplete) {
-        ServerModels.ClientServerView server = serverView(target);
-        BrowserRemotelyServerApi api = browserApi();
-        String id = serverId(server);
+        if (!supportsReProxy(target)) return;
         HostContext context = captureContext();
-        if (!isLocalBackend(server)) {
+        if (!isCurrent(context)) return;
+        if (ReProxyManager.accountSummary() != null) {
             if (onComplete != null) onComplete.run();
             return;
         }
-        if (api == null || id.isBlank() || !isCurrent(context) || reProxyStates.containsKey(id)) return;
-        if (onComplete != null) reProxyRefreshListeners.computeIfAbsent(id, ignored -> new ArrayList<>()).add(onComplete);
-        if (!reProxyStateRequests.add(id)) return;
-        api.getReProxySummary(id).whenComplete((summary, failure) -> execute(() -> {
-            reProxyStateRequests.remove(id);
-            if (!isCurrent(context)) {
-                reProxyRefreshListeners.remove(id);
-                return;
-            }
-            reProxyStates.put(id, summary == null ? emptyReProxySummary() : summary);
-            List<Runnable> listeners = reProxyRefreshListeners.remove(id);
-            if (listeners != null) listeners.forEach(Runnable::run);
+        ReProxyManager.refreshSummary().whenComplete((summary, failure) -> execute(() -> {
+            if (isCurrent(context) && onComplete != null) onComplete.run();
         }));
     }
 
     @Override
     public void startReProxy(Object target, Runnable onComplete) {
+        if (!supportsReProxy(target)) {
+            if (onComplete != null) onComplete.run();
+            return;
+        }
         ServerModels.ClientServerView server = serverView(target);
         if (server == null) {
             unavailable(Action.NETWORK_LIFECYCLE);
             return;
         }
-        capabilityOperation(server, "reproxy.start", () -> startReProxyOperation(server))
+        startReProxyOperation(server)
                 .whenComplete((ignored, failure) -> execute(() -> {
                     if (failure != null) {
                         application.notify("ReProxy Start Failed", failureMessage(failure), ReSyncNotificationLevel.ERROR);
@@ -396,12 +396,16 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
 
     @Override
     public void stopReProxy(Object target, Runnable onComplete) {
+        if (!supportsReProxy(target)) {
+            if (onComplete != null) onComplete.run();
+            return;
+        }
         ServerModels.ClientServerView server = serverView(target);
         if (server == null) {
             unavailable(Action.NETWORK_LIFECYCLE);
             return;
         }
-        capabilityOperation(server, "reproxy.stop", () -> stopReProxyOperation(server))
+        stopReProxyOperation(server)
                 .whenComplete((ignored, failure) -> execute(() -> {
                     if (failure != null) {
                         application.notify("ReProxy Stop Failed", failureMessage(failure), ReSyncNotificationLevel.ERROR);
@@ -868,12 +872,17 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
 
     @Override
     public Async<String> createHostedNetwork(NetworkCreationPlan plan) {
+        return createHostedNetwork(plan, null);
+    }
+
+    @Override
+    public Async<String> createHostedNetwork(NetworkCreationPlan plan, Consumer<NetworkOperationStatus> progress) {
         if (!authenticated() || serverApi == null || scheduler == null) {
             return Async.failed(new IllegalStateException("Sign In To Create A Reactor Network"));
         }
         try {
             String account = hostedAccount();
-            return runHostedNetwork(pendingHostedNetworks().admit(account, plan.hostedCommand()), account);
+            return runHostedNetwork(pendingHostedNetworks().admit(account, plan.hostedCommand()), account, progress);
         } catch (RuntimeException error) {
             return Async.failed(error);
         }
@@ -887,14 +896,39 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     }
 
     @Override
+    public HostedNetworkPendingStore hostedNetworkPendingStore() {
+        return pendingHostedNetworks();
+    }
+
+    @Override
+    public String hostedNetworkAccount() {
+        return hostedAccount();
+    }
+
+    @Override
+    public String authenticationSession() {
+        return BrowserLaunchSession.authenticated() ? BrowserLaunchSession.metadata().grantId() : "";
+    }
+
+    @Override
     public Async<String> resumeHostedNetwork() {
+        return resumeHostedNetwork(null);
+    }
+
+    @Override
+    public Async<String> resumeHostedNetwork(Consumer<NetworkOperationStatus> progress) {
         try {
             String account = hostedAccount();
             HostedNetworkPendingStore.Pending pending = pendingHostedNetwork();
-            return pending == null ? Async.failed(new IllegalStateException("No Pending Network Request")) : runHostedNetwork(pending, account);
+            return pending == null ? Async.failed(new IllegalStateException("No Pending Network Request")) : runHostedNetwork(pending, account, progress);
         } catch (RuntimeException error) {
             return Async.failed(error);
         }
+    }
+
+    @Override
+    public void discardHostedNetwork(String requestId, String networkId) {
+        pendingHostedNetworks().discard(hostedAccount(), requestId, networkId);
     }
 
     @Override
@@ -913,13 +947,14 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         return identity.authenticated() ? "true:" + BrowserLaunchSession.apiBaseUrl() + ":" + identity.subjectId() : "";
     }
 
-    private Async<String> runHostedNetwork(HostedNetworkPendingStore.Pending pending, String account) {
+    private Async<String> runHostedNetwork(HostedNetworkPendingStore.Pending pending, String account,
+                                          Consumer<NetworkOperationStatus> progress) {
         HostContext context = captureContext();
         if (!isCurrent(context) || !account.equals(hostedAccount())) {
             return Async.failed(new IllegalStateException("Sign In To Create A Reactor Network"));
         }
         Async<NetworkOperationStatus> request = serverApi.hostedNetworks().execute(pending.command(), pending.body(), scheduler,
-                () -> isCurrent(context));
+                () -> isCurrent(context), progress);
         request.whenComplete((status, error) -> {
             if (status != null) {
                 pendingHostedNetworks().clearTerminal(account, pending.command().requestId(), pending.command().networkId());
@@ -1180,9 +1215,64 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         ResourceMarketplaceProviderAdapter marketplace = resourceMarketplace();
         HostedResourceContext context = new HostedResourceContext(marketplace, browserApi, id,
                 server == null ? null : server.version, server == null ? null : server.loader, this, configStore(), capabilities(server), server);
-        HostedResourceContainerProvider provider = new HostedResourceContainerProvider(this, server, marketplace, context);
+        ResourceForwarding forwarding = networkForwarding(server);
+        HostedResourceContainerProvider provider = new HostedResourceContainerProvider(this, server, marketplace, context, forwarding);
         ResourceContainer container = new ResourceContainer(host, provider, x, y, width, height, InstanceResourceWidget::new, true);
         return new CanonicalResourceContainerAdapter(container);
+    }
+
+    private PluginForwarding forwarding(ServerModels.ClientServerView server) {
+        String id = serverId(server);
+        return forwarding(id, serverName(server), server == null ? 0 : server.port);
+    }
+
+    private PluginForwarding forwarding(String id, String name, int port) {
+        BrowserRemotelyServerApi browserApi = browserApi();
+        if (browserApi == null || id.isBlank()) return null;
+        String authority = BrowserLaunchSession.authorityKey();
+        if (!authority.equals(pluginAuthority)) {
+            networkPluginForwarding.values().forEach(NetworkPluginForwarding::close);
+            networkPluginForwarding.clear();
+            pluginChanges = new NetworkPluginForwarding.Coordinator();
+            pluginForwarding.values().forEach(PluginForwarding::close);
+            pluginForwarding.clear();
+            pluginAuthority = authority;
+        }
+        return pluginForwarding.computeIfAbsent(id, ignored -> new PluginForwarding(new HostedPluginAccess(id, name, port,
+                (method, path, body) -> browserApi.networkRequest(method, path, body == null ? null : BrowserJson.parse(body)).thenApply(JsonObject::toString),
+                () -> !closed && BrowserLaunchSession.authenticated() && authority.equals(BrowserLaunchSession.authorityKey()))));
+    }
+
+    private ResourceForwarding networkForwarding(ServerModels.ClientServerView server) {
+        PluginForwarding forwarding = forwarding(server);
+        if (forwarding == null) return ResourceForwarding.none();
+        if (!pluginNetworkListening) {
+            addNetworkChangeListener(pluginNetworkChanged);
+            pluginNetworkListening = true;
+        }
+        String id = serverId(server);
+        return networkPluginForwarding.computeIfAbsent(id, ignored -> new NetworkPluginForwarding(forwarding,
+                () -> serverApi.networkOverviewProvider(remotelyClient).loadForServer(id).thenApply(state -> pluginNetwork(state, id))
+                        .exceptionallyCompose(failure -> "Network Is Unavailable".equals(failure.getMessage()) ? Async.completed(null) : Async.failed(failure)), pluginChanges));
+    }
+
+    private NetworkPluginForwarding.Network pluginNetwork(NetworkOverviewProvider.OverviewState state, String id) {
+        NetworkDefinition network = state.network();
+        if (network == null) return null;
+        Map<String, NetworkOverviewProvider.ServerView> servers = new LinkedHashMap<>();
+        state.servers().forEach(server -> servers.put(server.id(), server));
+        List<NetworkPluginForwarding.Member> members = network.members().stream().map(member -> {
+            NetworkOverviewProvider.ServerView server = servers.get(member.instanceId());
+            String serverId = server == null ? "" : server.serverId();
+            return new NetworkPluginForwarding.Member(serverId.isBlank() ? member.instanceId() : serverId, member.routeName(), member.hostScope(), member.address(), member.port(), member.isProxy(),
+                    !member.isManaged() || serverId.isBlank() ? null : forwarding(serverId, server.name(), server.port()));
+        }).toList();
+        return new NetworkPluginForwarding.Network(network.networkId(), network.revision(), id, members, true);
+    }
+
+    @Override
+    public ResourceForwarding serverResourceForwarding(Object value) {
+        return networkForwarding(serverView(value));
     }
 
     @Override
@@ -1642,6 +1732,28 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
                 ScreenManager.getInstance()::execute);
     }
 
+    @Override
+    public ServerSettingsDataController createNewServerSettingsController(Object value, ServerSettingsSnapshot snapshot) {
+        if (!(value instanceof BrowserServerConfigurationTarget target)) return ServerSettingsDataController.unavailable();
+        ServerSettingsRegistry registry = ServerSettingsRegistry.getInstance();
+        if (registry.snapshot().packs().isEmpty()) BundledServerSettingsRegistry.loadInto(registry, new BrowserSafeYamlServerSettingsMetadataParser());
+        ServerSettingsDocumentStore store = new ServerSettingsDocumentStore() {
+            @Override
+            public Async<Document> read(String relativePath) {
+                return Async.completed(Document.missing());
+            }
+
+            @Override
+            public Async<Void> write(String relativePath, String content) {
+                return Async.failed(new IllegalStateException("New Server Settings Must Be Included In Creation"));
+            }
+        };
+        var catalogs = remotelyClient == null ? null : remotelyClient.getComposition().serverSettingsCatalogService();
+        var view = catalogs == null ? null : catalogs.open(target.id(), 0L, target.minecraftVersion());
+        return new ServerSettingsDocumentDataController(target, registry.snapshot(target), store, BrowserSafeYaml::parse, view,
+                ScreenManager.getInstance()::execute);
+    }
+
     @SuppressWarnings("unchecked")
     static <T> Async<T> residentCatalog(Map<String, Async<?>> requests, String key, Supplier<Async<T>> fetch) {
         Async<?> existing = requests.get(key);
@@ -2085,6 +2197,10 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
 
     @Override
     public void openSettings(Screen current) {
+        openSettings(current, null);
+    }
+
+    private void openSettings(Screen current, String initialTab) {
         if (demo()) {
             unavailable(Action.HOST_SETTINGS);
             return;
@@ -2099,7 +2215,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
             return;
         }
         application.setScreen(SettingsScreenFactory.createGlobalSettingsScreen(parent, config,
-                BrowserGlobalSettingsProviders.create(parent, config, browserApi())));
+                BrowserGlobalSettingsProviders.create(parent, config, browserApi()), initialTab));
     }
 
     @Override
@@ -2231,10 +2347,10 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     private void bindEditorDecoration(EditorDecorationBinding binding) {
         if (binding == null || binding.editor() == null || !(binding.provider() instanceof BrowserServerFileSystemProvider provider)) return;
         NexoGlyphPreviewAccess access = glyphPreview(provider.server);
-        if (access == null) return;
+
         String filePath = binding.filePath() == null ? null : binding.filePath().asString();
         GlyphPreviewRenderer renderer = new GlyphPreviewRenderer(access, filePath, binding.language());
-        binding.editor().setLineDecoration(new TextLineDecoration() {
+        TextLineDecoration glyphs = access == null ? null : new TextLineDecoration() {
             @Override
             public void draw(TextLineDecorationContext context) {
                 renderer.drawEditor(context, glyphPreviewMode());
@@ -2249,8 +2365,9 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
             public boolean mouseClicked(TextLineDecorationClickContext context) {
                 return renderer.openHoveredAsset(context.mouseX(), context.mouseY(), context.button());
             }
-        });
-        access.refresh();
+        };
+        binding.editor().setLineDecoration(PluginConfigDecoration.compose(glyphs, PluginConfigDecoration.bind(binding, forwarding(provider.server), false)));
+        if (access != null) access.refresh();
     }
 
     private void installFileExplorerRuntime() {
@@ -2432,62 +2549,44 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     }
 
     private Async<Void> startReProxyOperation(ServerModels.ClientServerView server) {
-        BrowserRemotelyServerApi api = browserApi();
+        HostContext context = captureContext();
         String id = serverId(server);
-        if (api == null || id.isBlank() || !isLocalBackend(server)) return Async.failed(new UnsupportedOperationException("ReProxy Is Available For Local Servers Only"));
-        return api.getReProxySummary(id).thenCompose(summary -> {
-            if (summary != null && summary.activeTunnel != null && activeReProxyStatus(summary.activeTunnel.status)) {
-                reProxyStates.put(id, summary);
-                return Async.completed(null);
+        if (id.isBlank()) return Async.failed(new IllegalArgumentException("Choose A Server"));
+        return ReProxyManager.refreshSummary().thenCompose(summary -> {
+            Connection connection;
+            try {
+                connection = ReProxyManager.connectionForServer(id);
+            } catch (IllegalStateException unavailable) {
+                connection = null;
             }
-            ServerModels.ReProxyDomain domain = firstActiveReProxyDomain(summary);
-            if (domain == null || domain.id == null || domain.id.isBlank()) {
-                return Async.failed(new UnsupportedOperationException("Create A ReProxy Domain In Settings First"));
+            if (connection == null) {
+                Async<Void> result = Async.pending();
+                execute(() -> {
+                    if (!isCurrent(context)) {
+                        result.completeExceptionally(new IllegalStateException("Browser Session Expired"));
+                        return;
+                    }
+                    try {
+                        openSettings(application.getCurrentScreen(), "ReProxy");
+                        result.complete(null);
+                    } catch (RuntimeException failure) {
+                        result.completeExceptionally(failure);
+                    }
+                });
+                return result;
             }
-            int port = server.port > 0 ? server.port : 25565;
-            return api.startReProxyTunnel(id, domain.id, port, "MINECRAFT_JAVA_TCP")
-                    .thenCompose(ignored -> api.getReProxySummary(id))
-                    .thenApply(updated -> {
-                        reProxyStates.put(id, updated == null ? emptyReProxySummary() : updated);
-                        return null;
-                    });
+            return ReProxyManager.startConnection(connection);
         });
     }
 
     private Async<Void> stopReProxyOperation(ServerModels.ClientServerView server) {
-        BrowserRemotelyServerApi api = browserApi();
         String id = serverId(server);
-        if (api == null || id.isBlank() || !isLocalBackend(server)) return Async.failed(new UnsupportedOperationException("ReProxy Is Available For Local Servers Only"));
-        return api.getReProxySummary(id).thenCompose(summary -> {
-            ServerModels.ReProxyTunnel tunnel = summary == null ? null : summary.activeTunnel;
-            if (tunnel == null || tunnel.id == null || tunnel.id.isBlank()) {
-                reProxyStates.put(id, summary == null ? emptyReProxySummary() : summary);
-                return Async.completed(null);
-            }
-            return api.stopReProxyTunnel(id, tunnel.id)
-                    .thenCompose(ignored -> api.getReProxySummary(id))
-                    .thenApply(updated -> {
-                        reProxyStates.put(id, updated == null ? emptyReProxySummary() : updated);
-                        return null;
-                    });
+        if (id.isBlank()) return Async.failed(new IllegalArgumentException("Choose A Server"));
+        return ReProxyManager.refreshSummary().thenCompose(summary -> {
+            Connection connection = ReProxyManager.connectionForServer(id);
+            if (connection == null) return Async.completed(null);
+            return ReProxyManager.stopConnection(connection.id(), null);
         });
-    }
-
-    private static ServerModels.ReProxyDomain firstActiveReProxyDomain(ServerModels.ReProxySummary summary) {
-        if (summary == null || summary.domains == null) return null;
-        return summary.domains.stream().filter(Objects::nonNull)
-                .filter(domain -> "ACTIVE".equalsIgnoreCase(domain.status))
-                .findFirst().orElse(null);
-    }
-
-    private static ServerModels.ReProxySummary emptyReProxySummary() {
-        ServerModels.ReProxySummary summary = new ServerModels.ReProxySummary();
-        summary.domains = List.of();
-        return summary;
-    }
-
-    private static boolean activeReProxyStatus(String status) {
-        return "CONNECTING".equalsIgnoreCase(status) || "ONLINE".equalsIgnoreCase(status);
     }
 
     private static boolean capabilityLoading(ServerUiCapabilityProvider.Availability availability) {
@@ -2566,6 +2665,14 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     }
 
     private void clearBrowserSessionState() {
+        if (pluginNetworkListening) removeNetworkChangeListener(pluginNetworkChanged);
+        pluginNetworkListening = false;
+        networkPluginForwarding.values().forEach(NetworkPluginForwarding::close);
+        networkPluginForwarding.clear();
+        pluginChanges = new NetworkPluginForwarding.Coordinator();
+        pluginForwarding.values().forEach(PluginForwarding::close);
+        pluginForwarding.clear();
+        pluginAuthority = "";
         if (remotelyClient != null) remotelyClient.storageBreakdownIndex().clear();
         advanceHostGeneration();
         if (fileTags != null) fileTags.close();
@@ -2591,9 +2698,6 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         serverStates.clear();
         stateListeners.clear();
         stateRequests.clear();
-        reProxyStates.clear();
-        reProxyRefreshListeners.clear();
-        reProxyStateRequests.clear();
         playerMetrics.clear();
         playerMetricRefreshes.clear();
         playerMetricRequests.clear();
@@ -3186,6 +3290,19 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         }
 
         @Override
+        public Async<RemotePath> createArchive(List<RemotePath> paths) {
+            RemotePath directory;
+            try {
+                directory = RemoteFileSystemProvider.archiveDirectory(paths);
+            } catch (RuntimeException failure) {
+                return Async.failed(failure);
+            }
+            List<String> names = paths.stream().map(RemotePath::fileName).toList();
+            return operation("files.compress", () -> api.createFileArchive(serverId, remoteDirectory(directory), names))
+                    .thenApply(name -> RemoteFileSystemProvider.archivePath(directory, name));
+        }
+
+        @Override
         public Async<Void> compress(List<RemotePath> paths) {
             if (paths == null || paths.isEmpty()) return unsupported("Select Files To Archive");
             RemotePath parent = parent(paths.getFirst());
@@ -3287,7 +3404,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
             if (isCancelled != null && isCancelled.getAsBoolean()) return Async.failed(new Async.Cancellation());
             List<String> selected = sources == null ? List.of() : sources.stream()
                     .filter(Objects::nonNull).map(this::remote).toList();
-            return operation("files.download", () -> api.downloadFiles(serverId, selected))
+            return operation("files.download", () -> api.downloadFiles(serverId, selected, progressCallback, isCancelled))
                     .thenApply(ignored -> DeviceDownloadResult.started());
         }
 

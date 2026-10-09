@@ -76,7 +76,7 @@ public final class BrowserRemotelyConfigStore implements RemotelyConfigStore, Re
             Map.entry(SOUNDS, CapabilityDescriptor.supported(SOUNDS)),
             Map.entry(SERVERS, CapabilityDescriptor.supported(SERVERS)),
             Map.entry(STORAGE, CapabilityDescriptor.unavailable(STORAGE, "Browser Storage Settings Are Unavailable")),
-            Map.entry(RE_PROXY, CapabilityDescriptor.unavailable(RE_PROXY, "Browser ReProxy Settings Are Unavailable")),
+            Map.entry(RE_PROXY, CapabilityDescriptor.supported(RE_PROXY)),
             Map.entry(DISCORD, CapabilityDescriptor.unavailable(DISCORD, "Discord Settings Are Unavailable")),
             Map.entry(PACK_CONTENT, CapabilityDescriptor.supported(PACK_CONTENT)),
             Map.entry(JAVA, CapabilityDescriptor.unavailable(JAVA, "Java Settings Are Unavailable")),

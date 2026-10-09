@@ -2,6 +2,7 @@ package redxax.oxy.remotely.web.platform;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import restudio.rebase.ui.screens.resources.ResourceContainerItem;
 import org.teavm.jso.JSBody;
 import restudio.rebase.backend.CapabilityDescriptor;
 import restudio.rebase.backend.RemotePath;
@@ -496,6 +497,7 @@ final class HostedResourceContext implements ResourceBrowserContext {
         cache.resourceDirectoriesRequest = null;
         cancel(cache.resourceHydrationRequest);
         cache.resourceHydrationRequest = null;
+        cache.resourceHydrationScheduled = false;
         cache.resourceHydrationGeneration++;
         cancel(cache.modpackProfileRequest);
         cache.modpackProfileRequest = null;
@@ -626,8 +628,10 @@ final class HostedResourceContext implements ResourceBrowserContext {
         cancel(cache.resourceHydrationRequest);
         cache.resourceHydrationRequest = null;
         long generation = ++cache.resourceHydrationGeneration;
+        cache.resourceHydrationScheduled = true;
         scheduler.execute(() -> {
             if (!isInventoryCurrent(fence, cache, inventoryGeneration) || cache.resourceHydrationGeneration != generation) return;
+            cache.resourceHydrationScheduled = false;
             Async<ResourceIndexOrchestrator.Result> hydration = resourceIndex.hydrate(physical, resourceSource(fence, cache, inventoryGeneration),
                     this::resolveMetadata);
             cache.resourceHydrationRequest = hydration;
@@ -667,6 +671,7 @@ final class HostedResourceContext implements ResourceBrowserContext {
 
     static ResourceIndexOrchestrator.ResolvedEntry retainMetadata(ResourceIndexOrchestrator.ResolvedEntry previous,
                                                                   ResourceIndexOrchestrator.ResolvedEntry current) {
+        if (current.metadata() != null && current.metadata().status() != null && !current.metadata().status().isBlank()) return current;
         if (previous == null || !previous.path().equals(current.path()) || previous.size() != current.size()
                 || previous.mtime() != current.mtime()) return current;
         if (current.hash() != null && !current.hash().isBlank()
@@ -1941,6 +1946,7 @@ final class HostedResourceContext implements ResourceBrowserContext {
         dataCache.canonicalResourceRequest = null;
         dataCache.canonicalResourceResult = null;
         dataCache.resourceHydrationRequest = null;
+        dataCache.resourceHydrationScheduled = false;
         dataCache.modpackProfileRequest = null;
         dataCache.modpackProfileScheduled = false;
         dataCache.resourceDirectoriesRequest = null;
@@ -1956,6 +1962,54 @@ final class HostedResourceContext implements ResourceBrowserContext {
         clearInventoryCache();
     }
 
+    void resourceToggled(String source, String target, ResourceContainerItem resource) {
+        OperationFence fence = captureFence();
+        ResourceDataCache cache = dataCache;
+        ResourceIndexOrchestrator.ResolvedEntry previous = cache.indexedResources.stream()
+                .filter(entry -> source.equals(entry.path())).findFirst().orElse(null);
+        ResourceIndexOrchestrator.ResolvedEntry updated = toggledEntry(previous, source, target, resource);
+        if (updated == null
+                || cache.indexedResources.stream().anyMatch(entry -> target.equals(entry.path()))) {
+            invalidateFileCache();
+            return;
+        }
+        boolean hydrating = cache.resourceHydrationRequest != null || cache.resourceHydrationScheduled;
+        cache.resourceIndexGeneration++;
+        cache.resourceHydrationGeneration++;
+        cancel(cache.canonicalResourceRequest);
+        cancel(cache.resourceHydrationRequest);
+        cache.resourceHydrationRequest = null;
+        cache.resourceHydrationScheduled = false;
+        List.copyOf(cache.resourceDirectoryRequests.values()).forEach(HostedResourceContext::cancel);
+        cache.resourceDirectoryRequests.clear();
+        if (cache.modpackProfileRequest != null && !cache.modpackProfileRequest.isDone()) {
+            cancel(cache.modpackProfileRequest);
+            cache.modpackProfileRequest = null;
+        }
+        cache.modpackProfileScheduled = false;
+        String filename = target.substring(target.lastIndexOf('/') + 1);
+        cache.indexedResources = cache.indexedResources.stream().map(entry -> entry.equals(previous) ? updated : entry).toList();
+        cache.resourceDirectorySnapshots.computeIfPresent(previous.directoryPath(), (directory, entries) -> entries.stream().map(entry ->
+                entry.fileName().equals(previous.fileName()) ? new ResourceIndexOrchestrator.Entry(entry.directoryPath(), filename,
+                        entry.size(), entry.mtime(), resource.isEnabled(), entry.hash(), entry.murmur2(), entry.metadata()) : entry).toList());
+        Map<String, String> failures = cache.canonicalResourceResult == null ? Map.of() : cache.canonicalResourceResult.failures();
+        cache.canonicalResourceResult = new ResourceIndexOrchestrator.Result(cache.indexedResources, failures);
+        cache.canonicalResourceRequest = Async.completed(cache.canonicalResourceResult);
+        notifyResourceListeners(fence);
+        if (hydrating) scheduleResourceHydration(cache.canonicalResourceResult, fence);
+    }
+
+    static ResourceIndexOrchestrator.ResolvedEntry toggledEntry(ResourceIndexOrchestrator.ResolvedEntry previous, String source,
+                                                               String target, ResourceContainerItem resource) {
+        if (previous == null || !source.equals(previous.path()) || !resourcePath(source).equals(resourcePath(target))
+                || !Objects.equals(previous.hash(), resource.getFileHash())) return null;
+        ResourceIndexOrchestrator.ResolvedMetadata metadata = previous.metadata();
+        if (metadata != null && (!Objects.equals(metadata.provider(), resource.getProviderName())
+                || !Objects.equals(metadata.projectId(), resource.getProjectId()) || !Objects.equals(metadata.versionId(), resource.getVersionId()))) return null;
+        return new ResourceIndexOrchestrator.ResolvedEntry(previous.directoryPath(), target.substring(target.lastIndexOf('/') + 1),
+                previous.size(), previous.mtime(), resource.isEnabled(), previous.hash(), previous.murmur2(), metadata);
+    }
+
     private static void clearDataCache(ResourceDataCache cache) {
         cache.resourceIndexGeneration++;
         cache.resourceHydrationGeneration++;
@@ -1969,6 +2023,7 @@ final class HostedResourceContext implements ResourceBrowserContext {
         cache.canonicalResourceRequest = null;
         cache.canonicalResourceResult = null;
         cache.resourceHydrationRequest = null;
+        cache.resourceHydrationScheduled = false;
         cache.modpackProfileRequest = null;
         cache.modpackProfileScheduled = false;
         cache.resourceDirectoriesRequest = null;
@@ -2163,6 +2218,7 @@ final class HostedResourceContext implements ResourceBrowserContext {
         private Async<ResourceIndexOrchestrator.Result> canonicalResourceRequest;
         private ResourceIndexOrchestrator.Result canonicalResourceResult;
         private Async<ResourceIndexOrchestrator.Result> resourceHydrationRequest;
+        private boolean resourceHydrationScheduled;
         private long resourceHydrationGeneration;
         private Async<ModpackProfile> modpackProfileRequest;
         private boolean modpackProfileScheduled;

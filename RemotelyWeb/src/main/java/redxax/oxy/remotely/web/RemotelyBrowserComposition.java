@@ -1,6 +1,7 @@
 package redxax.oxy.remotely.web;
 
 import redxax.oxy.remotely.RemotelyClient;
+import redxax.oxy.remotely.servers.ReProxyManager;
 import redxax.oxy.remotely.RemotelyComposition;
 import redxax.oxy.remotely.ui.server.ServerManagerScreen;
 import redxax.oxy.remotely.data.flow.FlowManager;
@@ -29,6 +30,7 @@ import redxax.oxy.remotely.web.platform.BrowserHttpTransport;
 import redxax.oxy.remotely.web.platform.BrowserLaunchSession;
 import redxax.oxy.remotely.web.platform.BrowserMarketplaceDetailsProvider;
 import redxax.oxy.remotely.web.platform.BrowserMetadataRepository;
+import redxax.oxy.remotely.web.platform.BrowserNetworkManager;
 import redxax.oxy.remotely.web.platform.BrowserReSyncClock;
 import redxax.oxy.remotely.web.platform.BrowserReSyncIdentityProvider;
 import redxax.oxy.remotely.web.platform.BrowserReSyncStorage;
@@ -109,6 +111,7 @@ public final class RemotelyBrowserComposition {
         BrowserReScreenClient screenClient = null;
         Screen browserRoot = null;
         RemotelyComposition composition = null;
+        BrowserNetworkManager networkManager = null;
         ServerSettingsRegistry.StorageSnapshot serverSettingsStorage = null;
         OptionCatalogCache previousOptionCatalogCache = null;
         try {
@@ -149,6 +152,8 @@ public final class RemotelyBrowserComposition {
             ReSyncFrameTransportFactory transportFactory = endpoint -> new ReSyncWebSocketFrameTransport(endpoint, activeAdapters.webSocket(),
                 () -> WebSocketOptions.subprotocols(List.of("resync.v1", "resync-ticket." + BrowserLaunchSession.ticket())), false);
             ReSyncCredentialProvider credentials = ReSyncCredentialProvider.browserTicket();
+            networkManager = new BrowserNetworkManager(activeAdapters.webSocket(), activeAdapters.scheduler(), activeAdapters.clock());
+            BrowserNetworkManager activeNetworkManager = networkManager;
             ReSyncFlowClientFactory flowFactory = (serverId, apiClient, directWsUrl, directApiKey, suppliedTransport, state) -> {
                 ReSyncFlowClientContext context = state instanceof ReSyncFlowClientContext resolved ? resolved : ReSyncFlowClientContext.defaults();
                 ReSyncFrameTransport frameTransport = suppliedTransport;
@@ -160,7 +165,9 @@ public final class RemotelyBrowserComposition {
                 BrowserCatalogPublicationDecoder catalogDecoder = new BrowserCatalogPublicationDecoder();
                 try {
                     return new ReSyncFlowClient(serverId, frameTransport, directApiKey, context,
-                        activeAdapters.scheduler(), activeAdapters.clock(), identity, credentials, false, catalogDecoder);
+                        activeAdapters.scheduler(), activeAdapters.clock(), identity,
+                        suppliedTransport != null && directApiKey != null && !directApiKey.isBlank() ? ReSyncCredentialProvider.apiKey() : credentials,
+                        false, catalogDecoder);
                 } catch (RuntimeException | Error exception) {
                     catalogDecoder.close();
                     throw exception;
@@ -170,6 +177,7 @@ public final class RemotelyBrowserComposition {
                 .configManager(config)
                 .storageBreakdownStore(BrowserKeyValueStore.local("remotely:storage-breakdown:v1"), 1_500_000)
                 .apiClient(serverApi)
+                .networkManagerFactory(() -> activeNetworkManager)
                 .scheduler(activeAdapters.scheduler())
                 .clock(activeAdapters.clock())
                 .reSyncFlowClientFactory(flowFactory)
@@ -184,6 +192,7 @@ public final class RemotelyBrowserComposition {
             ServerSettingsRegistry settingsRegistry = ServerSettingsRegistry.getInstance();
             BundledServerSettingsRegistry.loadInto(settingsRegistry, new BrowserSafeYamlServerSettingsMetadataParser());
             client = new RemotelyClient(composition);
+            ReProxyManager.configure(serverApi.reProxy().client(), serverApi.reProxy().connector());
             client.initialize();
             if (demo) host.notify("Reactor Demo", "Shared With Other Visitors. Resets When Everyone Is Idle", ReSyncNotificationLevel.INFO);
             browserRoot = host.getCurrentScreen();
@@ -201,6 +210,7 @@ public final class RemotelyBrowserComposition {
                 serverSettingsStorage, previousOptionCatalogCache,
                 new CloseState());
         } catch (Throwable failure) {
+            if (networkManager != null) networkManager.close();
             restoreRuntime(host, client, screenClient, communityProvider, adapters, serverApi, browserWorldMapProvider, developerAdapter,
                 config, previousConfig, previousApplicationHost, previousScheduler, previousAsync, previousApplicationDirectory,
                 previousTextRenderer, previousRemotelyRenderer, previousClient, previousMonoFont, previousOs,

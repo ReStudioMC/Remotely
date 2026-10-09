@@ -4,6 +4,7 @@ import org.teavm.jso.JSBody;
 import restudio.rebase.ui.screens.collaboration.CollaborationScreen;
 import redxax.oxy.remotely.ui.server.ResourcePoolScreen;
 import redxax.oxy.remotely.web.platform.BrowserLaunchSession;
+import redxax.oxy.remotely.web.platform.BrowserIntegrationCatalog;
 
 public final class RemotelyBrowserMain {
     private static RemotelyBrowserComposition.Runtime runtime;
@@ -21,25 +22,12 @@ public final class RemotelyBrowserMain {
         BrowserLaunchSession.launch(new BrowserLaunchSession.Callback() {
             @Override
             public void ready(BrowserLaunchSession.Metadata metadata) {
-                if (runtime != null) {
-                    return;
-                }
-                try {
-                    runtime = RemotelyBrowserComposition.start("remotely-canvas", metadata);
-                    if (resourcesView() && !metadata.demo()) {
-                        runtime.host().setScreen(new ResourcePoolScreen(runtime.root(), runtime.client()));
-                    }
-                    String invitation = invitationCode();
-                    if (!metadata.demo() && !invitation.isBlank()) runtime.host().setScreen(new CollaborationScreen(runtime.root()).invitation(invitation));
-                    startupInFlight = false;
-                    if (!loopStarted) {
-                        loopStarted = true;
-                        startLoop();
-                    }
-                } catch (Throwable error) {
-                    startupInFlight = false;
-                    fail(error.getMessage());
-                }
+                BrowserIntegrationCatalog.initialize().whenComplete((ignored, failure) -> {
+                    if (failure != null) {
+                        startupInFlight = false;
+                        fail(failure.getMessage());
+                    } else start(metadata);
+                });
             }
 
             @Override
@@ -48,6 +36,28 @@ public final class RemotelyBrowserMain {
                 fail(message);
             }
         });
+    }
+
+    private static void start(BrowserLaunchSession.Metadata metadata) {
+        if (runtime != null) {
+            return;
+        }
+        try {
+            runtime = RemotelyBrowserComposition.start("remotely-canvas", metadata);
+            if (resourcesView() && !metadata.demo()) {
+                runtime.host().setScreen(new ResourcePoolScreen(runtime.root(), runtime.client()));
+            }
+            String invitation = invitationCode();
+            if (!metadata.demo() && !invitation.isBlank()) runtime.host().setScreen(new CollaborationScreen(runtime.root()).invitation(invitation));
+            startupInFlight = false;
+            if (!loopStarted) {
+                loopStarted = true;
+                startLoop();
+            }
+        } catch (Throwable error) {
+            startupInFlight = false;
+            fail(error.getMessage());
+        }
     }
 
     public static void renderFrame(double timestamp) {

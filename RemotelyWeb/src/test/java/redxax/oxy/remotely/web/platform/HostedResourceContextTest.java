@@ -33,6 +33,11 @@ class HostedResourceContextTest {
         assertSame(metadata, reused.metadata());
         assertEquals("abc", reused.hash());
         assertFalse(reused.enabled());
+        ResourceIndexOrchestrator.ResolvedMetadata pending = new ResourceIndexOrchestrator.ResolvedMetadata(
+                "", "", "", "", "plugin.jar", "", List.of(), "", "", null, "", "pending");
+        ResourceIndexOrchestrator.ResolvedEntry indexed = new ResourceIndexOrchestrator.ResolvedEntry(
+                "/plugins", "plugin.jar", 42L, 100L, true, null, null, pending);
+        assertSame(indexed, HostedResourceContext.retainMetadata(previous, indexed));
         for (ResourceIndexOrchestrator.ResolvedEntry changed : List.of(
                 new ResourceIndexOrchestrator.ResolvedEntry("/plugins", "plugin.jar", 43L, 100L, true, null, null, null),
                 new ResourceIndexOrchestrator.ResolvedEntry("/plugins", "plugin.jar", 42L, 101L, true, null, null, null),
@@ -48,6 +53,19 @@ class HostedResourceContextTest {
         ResourceIndexOrchestrator.ResolvedEntry signed = new ResourceIndexOrchestrator.ResolvedEntry(
                 "/plugins", "plugin.jar", 42L, 0L, true, "sha1:ABC", null, null);
         assertSame(metadata, HostedResourceContext.retainMetadata(unstamped, signed).metadata());
+        ResourceContainerItem toggled = new ResourceContainerItem("/plugins/plugin.jar.disabled", ResourceType.PLUGIN, "plugin.jar.disabled", false);
+        toggled.setFileHash("abc");
+        toggled.setProviderName("Modrinth");
+        toggled.setProjectId("project");
+        toggled.setVersionId("version");
+        ResourceIndexOrchestrator.ResolvedEntry disabled = HostedResourceContext.toggledEntry(previous, previous.path(), toggled.path(), toggled);
+        assertSame(metadata, disabled.metadata());
+        assertEquals("abc", disabled.hash());
+        assertEquals("plugin.jar.disabled", disabled.fileName());
+        assertEquals(100L, disabled.mtime());
+        assertFalse(disabled.enabled());
+        toggled.setFileHash("replacement");
+        assertEquals(null, HostedResourceContext.toggledEntry(previous, previous.path(), toggled.path(), toggled));
     }
 
     @Test
@@ -285,7 +303,7 @@ class HostedResourceContextTest {
         assertTrue(context.supportsPlugins());
         assertFalse(context.supportsMods());
         assertEquals("PURPUR", context.serverSoftwareType());
-        assertEquals(List.of("purpur", "paper"), context.providerLoaderTokens(ResourceType.PLUGIN));
+        assertEquals(List.of("purpur", "paper", "spigot", "bukkit"), context.providerLoaderTokens(ResourceType.PLUGIN));
     }
 
     private static ResourceIndexOrchestrator.Result canonicalIndex(List<String> directories,

@@ -145,6 +145,8 @@ val canonicalBrowserClasses = linkedSetOf(
     "redxax.oxy.remotely.ui.server.ServerManagerScreen",
     "redxax.oxy.remotely.ui.server.ServerDetailsScreen",
     "redxax.oxy.remotely.ui.server.NetworkOverviewScreen",
+    "redxax.oxy.remotely.network.NetworkRuntimeMonitor",
+    "redxax.oxy.remotely.network.ReSyncNetworkFrameTransport",
     "redxax.oxy.remotely.ui.server.ServerTerminal",
     "redxax.oxy.remotely.ui.server.ServerConfigurationScreen",
     "redxax.oxy.remotely.flow.ui.FlowEditorScreen",
@@ -302,6 +304,11 @@ val verifyBrowserGraph by tasks.registering {
                 }
             }
         }
+        val requiredAdapters = setOf(
+            "redxax/oxy/remotely/web/platform/BrowserNetworkManager",
+            "redxax/oxy/remotely/web/platform/BrowserNetworkRuntimeAccess"
+        )
+        require(requiredAdapters.all(classBytes::containsKey)) { "Browser Network Adapters Are Missing" }
         require(leaks.isEmpty()) { "Browser Reachability Contains Desktop Symbols:\n${leaks.joinToString("\n")}" }
         val internalReference = Regex("(?:L|\\[L)?((?:restudio/rebase|restudio/rescreen|restudio/resync|redxax/oxy/remotely)/[A-Za-z0-9_$/]+)")
         val artifactMissing = classBytes.entries.flatMap { (className, bytes) ->
