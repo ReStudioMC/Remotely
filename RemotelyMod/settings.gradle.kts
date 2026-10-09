@@ -28,7 +28,7 @@ pluginManagement {
         kotlin("jvm") version("2.2.10")
         id("dev.deftu.gradle.multiversion-root") version("2.73.0")
         id("com.hypherionmc.modutils.modpublisher") version "2.1.8"
-        id("net.neoforged.moddev") version "2.0.141"
+        id("net.neoforged.moddev") version "2.0.148"
     }
 }
 
@@ -79,6 +79,8 @@ includeBuild("../../Rebase") {
 }
 
 includeBuild("../../Recast")
+
+includeBuild("../../ReProxy/java")
 
 includeBuild("../../ReSync") {
     dependencySubstitution {
@@ -161,7 +163,8 @@ listOf(
     "1.21.11-neoforge",
     "1.21.11-fabric",
 
-    "26.3-rc-3-fabric",
+    "26.3-fabric",
+    "26.3-neoforge",
     "26.2-fabric",
     "26.2-neoforge",
     "26.1-neoforge",

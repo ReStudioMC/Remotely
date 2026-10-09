@@ -17,6 +17,8 @@ import restudio.rescreen.game.MinecraftGameAssets;
 import restudio.rescreen.platform.ClipboardHandler;
 import restudio.rescreen.platform.CursorHandler;
 import restudio.rescreen.platform.HostActionHandler;
+import restudio.rescreen.platform.GalleryMediaProvider;
+import restudio.rescreen.platform.desktop.DesktopGalleryMediaProvider;
 import restudio.rescreen.platform.ITextRenderer;
 import restudio.rescreen.platform.MarkdownMedia;
 import restudio.rescreen.platform.ReScreenRuntime;
@@ -95,6 +97,11 @@ public class MinecraftApplicationHost extends ReScreenApplicationHost {
         @Override
         public ImageAssetRegistry imageAssets() {
             return imageAssets;
+        }
+
+        @Override
+        public GalleryMediaProvider galleryMedia() {
+            return DesktopGalleryMediaProvider.INSTANCE;
         }
 
         @Override

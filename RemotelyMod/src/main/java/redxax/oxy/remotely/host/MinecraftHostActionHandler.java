@@ -25,6 +25,16 @@ public final class MinecraftHostActionHandler implements DesktopFileActionHandle
     }
 
     @Override
+    public Async<Boolean> downloadAsync(String name, String contentType, byte[] content) {
+        return desktop.downloadAsync(name, contentType, content);
+    }
+
+    @Override
+    public Async<MediaView> openVideo(String name, String contentType, byte[] content) {
+        return desktop.openVideo(name, contentType, content);
+    }
+
+    @Override
     public boolean trashFiles(List<Path> paths, boolean permanentDelete) {
         return desktop.trashFiles(paths, permanentDelete);
     }

@@ -64,7 +64,9 @@ registerPublishAggregate("publishAllVersionsToCurseForge", "Publishes every enab
 preprocess {
     strictExtraMappings.set(true)
 
-    "26.3-rc-3-fabric"(26_03, "srg") {
+    "26.3-fabric"(26_03, "srg") {
+        "26.3-neoforge"(26_03, "srg") {
+        }
         "26.2-fabric"(26_02, "srg") {
             "26.2-neoforge"(26_02, "srg") {
             }

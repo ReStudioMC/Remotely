@@ -350,6 +350,7 @@ private fun Project.configureSharedDependencies() {
     bundled("dev.restudio:rescreen:1.0")
     bundled("dev.restudio:remodel:1.0.0")
     bundled("dev.restudio:rebase:1.0-SNAPSHOT")
+    bundled("dev.restudio:reproxy-connector:2.0.0")
     bundled("dev.restudio.recast:recast-bridge:1.0.0-SNAPSHOT")
     bundled("restudio.resync:ReSyncCore:1.3.0")
     bundled("io.github.canary-prism:querz-nbt:6.2.1")
@@ -691,7 +692,12 @@ private fun Project.configureNeoForgeModDev() {
     extensions.configure(NeoForgeExtension::class.java, action<NeoForgeExtension> { extension ->
         extension.setVersion(neoForgeVersion)
         extension.runs(action { runs ->
-            runs.create("client", action<RunModel> { run -> run.client() })
+            runs.create("client", action<RunModel> { run ->
+                run.client()
+                if (compareMinecraftVersions(minecraftVersion(), "26.3") >= 0) {
+                    run.programArguments.addAll("--graphicsBackend", "opengl")
+                }
+            })
             runs.create("server", action<RunModel> { run -> run.server() })
         })
         extension.mods(action { mods ->
@@ -962,6 +968,11 @@ private fun verifyPackagedRuntime(archive: File, loader: String, runtimeJars: Se
     ZipFile(archive).use { packaged ->
         val packagedEntries = packaged.entries().asSequence().map { it.name }.toHashSet()
         val missing = linkedSetOf<String>()
+        val requiredClasses = linkedSetOf(
+            "restudio/reproxy/connector/ReProxyConnector.class",
+            "restudio/reproxy/connector/ReProxyConnector\$Listener.class"
+        )
+        requiredClasses.removeAll(packagedEntries)
         jars.forEach { jar ->
             if (loader == "fabric" && isReStudioNestedJar(jar)) {
                 ZipFile(jar).use { source ->
@@ -973,8 +984,14 @@ private fun verifyPackagedRuntime(archive: File, loader: String, runtimeJars: Se
                 }
             } else if ("$nestedRoot/${jar.name}" !in packagedEntries) {
                 missing.add("$nestedRoot/${jar.name}")
+            } else if (requiredClasses.isNotEmpty()) {
+                val entry = packaged.getEntry("$nestedRoot/${jar.name}")
+                ZipInputStream(packaged.getInputStream(entry)).use { nested ->
+                    generateSequence { nested.nextEntry }.forEach { requiredClasses.remove(it.name) }
+                }
             }
         }
+        missing.addAll(requiredClasses)
         if (missing.isNotEmpty()) {
             val preview = missing.take(20).joinToString(", ")
             val remainder = missing.size - minOf(missing.size, 20)

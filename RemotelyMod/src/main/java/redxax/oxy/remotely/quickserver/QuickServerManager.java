@@ -18,6 +18,7 @@ import redxax.oxy.remotely.DesktopRemotelyPaths;
 import redxax.oxy.remotely.mixin.accessor.MinecraftAccessor;
 import redxax.oxy.remotely.servers.QuickServerSyncManager;
 import redxax.oxy.remotely.servers.ReProxyManager;
+import redxax.oxy.remotely.servers.JvmReProxyConnectorCapability;
 import restudio.rebase.Rebase;
 import restudio.rebase.instance.Instance;
 import restudio.rebase.instance.InstanceFactory;
@@ -178,7 +179,7 @@ public final class QuickServerManager {
             if (instance == null) {
                 continue;
             }
-            ReProxyManager.stopQuietly(instance.getPort(), null);
+            ReProxyManager.stopQuietly(JvmReProxyConnectorCapability.server(instance), null);
             if (!instance.isLocalLifecyclePersistent()) {
                 stopLocalServerQuietly(instance);
                 waitForStop(instance);
@@ -289,14 +290,14 @@ public final class QuickServerManager {
                     stateConsumer.accept("Online");
                     change(notification, "Joining Server", "127.0.0.1:" + instance.getPort(), Notification.Type.INFO, null, true);
                     connectOwnerToLocalServer(instance);
-                    if (ReProxyManager.isForwarded(instance)) {
+                    if (ReProxyManager.isForwarded(JvmReProxyConnectorCapability.server(instance))) {
                         String address = quickServerAddress(instance);
                         copyAddress(address);
                         change(notification, "Quick Server Online", address, Notification.Type.SUCCESS, () -> copyAddress(address), false);
                     } else {
                         change(notification, "Quick Server Online", "Starting ReProxy", Notification.Type.INFO, null, false);
                         startReProxy(instance, () -> ScreenManager.getInstance().execute(() -> {
-                            boolean forwarded = ReProxyManager.isForwarded(instance);
+                            boolean forwarded = ReProxyManager.isForwarded(JvmReProxyConnectorCapability.server(instance));
                             stateConsumer.accept("Online");
                             String address = quickServerAddress(instance);
                             if (forwarded) {
@@ -358,7 +359,7 @@ public final class QuickServerManager {
         }
         new Thread(() -> {
             try {
-                ReProxyManager.stopQuietly(instance.getPort(), null);
+                ReProxyManager.stopQuietly(JvmReProxyConnectorCapability.server(instance), null);
                 stopLocalServerQuietly(instance);
                 waitForStop(instance);
                 syncServerWorldBack(instance);
@@ -540,7 +541,7 @@ public final class QuickServerManager {
         if (!isQuickServer(instance)) {
             return false;
         }
-        String forwarded = ReProxyManager.getForwardedAddress(instance);
+        String forwarded = ReProxyManager.getForwardedAddress(JvmReProxyConnectorCapability.server(instance));
         if (forwarded != null && !forwarded.isBlank() && normalizeAddress(forwarded).equals(normalizeAddress(address))) {
             return true;
         }
@@ -1450,9 +1451,7 @@ public final class QuickServerManager {
         if (nextPort <= 0 || nextPort > 65535 || !isPortAvailable(nextPort)) {
             throw new IOException("No Available Server Port");
         }
-        if (currentPort > 0 && ReProxyManager.isForwarded(currentPort)) {
-            ReProxyManager.stopQuietly(currentPort, null);
-        }
+        ReProxyManager.stopQuietly(JvmReProxyConnectorCapability.server(instance), null);
         instance.getServerProperties().setProperty("server-port", String.valueOf(nextPort));
         instance.saveServerProperties().join();
         change(notification, "Binding Port", "Using " + nextPort, Notification.Type.INFO, null, true);
@@ -1523,7 +1522,7 @@ public final class QuickServerManager {
     }
 
     private static boolean isQuickServerManagedRunning(Instance instance) {
-        return isLocalServerRunning(instance) || (ReProxyManager.isForwarded(instance) && isMinecraftServerReady(instance));
+        return isLocalServerRunning(instance) || (ReProxyManager.isForwarded(JvmReProxyConnectorCapability.server(instance)) && isMinecraftServerReady(instance));
     }
 
     private static boolean isMinecraftServerReady(Instance instance) {
@@ -2014,7 +2013,7 @@ public final class QuickServerManager {
     }
 
     private static void startReProxy(Instance instance, Runnable onComplete) {
-        ReProxyManager.startQuietly(instance, onComplete);
+        ReProxyManager.startQuietly(JvmReProxyConnectorCapability.server(instance), onComplete);
     }
 
     private static void connectOwnerToLocalServer(Instance instance) {
@@ -2183,7 +2182,7 @@ public final class QuickServerManager {
     }
 
     private static String quickServerAddress(Instance instance) {
-        String address = ReProxyManager.getForwardedAddress(instance);
+        String address = ReProxyManager.getForwardedAddress(JvmReProxyConnectorCapability.server(instance));
         if (address == null || address.isBlank()) {
             return "127.0.0.1:" + instance.getPort();
         }
