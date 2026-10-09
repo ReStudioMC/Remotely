@@ -6,6 +6,7 @@ import redxax.oxy.remotely.config.DesktopRemotelyConfigManager;
 import redxax.oxy.remotely.data.flow.ReSyncDesktopIdentityProvider;
 import redxax.oxy.remotely.packcontent.RemotelyPackContentIntegration;
 import redxax.oxy.remotely.servers.ReProxyAutoStartService;
+import redxax.oxy.remotely.servers.reproxy.JvmIntegrationCatalog;
 import redxax.oxy.remotely.servers.DesktopServerSchedules;
 import restudio.rebase.Rebase;
 import restudio.rebase.instance.InstanceManager;
@@ -29,6 +30,7 @@ import java.util.List;
 import java.util.Objects;
 
 public class RemotelyInit {
+    private static ReProxyAutoStartService reProxy;
     private static final String MAC_RELAUNCH_PROPERTY = "remotely.macos.firstThreadReady";
 
     public static void initCommon() {
@@ -40,6 +42,7 @@ public class RemotelyInit {
     }
 
     public static void initCommon(RemotelyApplication application, LogConsole console) {
+        JvmIntegrationCatalog.initialize();
         if (isRebaseInitialized()) {
             if (Config.applicationDir instanceof Path applicationDirectory) {
                 ReSyncDesktopIdentityProvider.initialize(applicationDirectory);
@@ -70,8 +73,16 @@ public class RemotelyInit {
         Runtime.getRuntime().addShutdownHook(new Thread(schedules::close, "Remotely Schedule Shutdown"));
         ReStudio.getInstance().init(remotelyDir, application.reStudioClientId());
         ReSyncDesktopIdentityProvider.initialize(remotelyDir);
-        new ReProxyAutoStartService(InstanceManager.getInstance()).start();
+        reProxy = new ReProxyAutoStartService(InstanceManager.getInstance());
+        reProxy.start();
+        Runtime.getRuntime().addShutdownHook(new Thread(RemotelyInit::closeReProxy, "Remotely ReProxy Shutdown"));
         RemotelyPackContentIntegration.install();
+    }
+
+    public static synchronized void closeReProxy() {
+        if (reProxy == null) return;
+        reProxy.close();
+        reProxy = null;
     }
 
     private static boolean isRebaseInitialized() {

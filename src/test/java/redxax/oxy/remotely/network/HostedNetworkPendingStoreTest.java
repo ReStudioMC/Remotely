@@ -1,6 +1,8 @@
 package redxax.oxy.remotely.network;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import redxax.oxy.remotely.config.RemotelyConfigManager;
 import redxax.oxy.remotely.config.RemotelyConfigStore;
 import redxax.oxy.remotely.config.RemotelyGroup;
 import redxax.oxy.remotely.network.protocol.NetworkCommand;
@@ -9,6 +11,7 @@ import redxax.oxy.remotely.network.protocol.NetworkOperationState;
 import restudio.rescreen.platform.Async;
 import restudio.rescreen.platform.TaskScheduler;
 
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -56,6 +59,73 @@ class HostedNetworkPendingStoreTest {
         assertNull(new HostedNetworkPendingStore(config).current("true:account-a"));
     }
 
+    @Test
+    void discardsUnfinishedRequestAndKeepsNewRequestWhenOldOutcomeArrives() {
+        MemoryConfig config = new MemoryConfig();
+        HostedNetworkPendingStore store = new HostedNetworkPendingStore(config);
+        NetworkCommand.Create original = command();
+        store.admit("true:account-a", original);
+
+        assertThrows(IllegalStateException.class, () -> store.discard("true:account-a", "other-request", original.networkId()));
+        assertThrows(IllegalStateException.class, () -> store.discard("true:account-b", original.requestId(), original.networkId()));
+        assertEquals(original.requestId(), store.current("true:account-a").command().requestId());
+        store.discard("true:account-a", original.requestId(), original.networkId());
+        HostedNetworkPendingStore reopened = new HostedNetworkPendingStore(config);
+        assertNull(reopened.current("true:account-a"));
+
+        NetworkCommand.Create next = command();
+        reopened.admit("true:account-a", next);
+        reopened.clearTerminal("true:account-a", original.requestId(), original.networkId());
+        reopened.markTerminal("true:account-a", original.requestId(), original.networkId(), NetworkOperationState.FAILED);
+        HostedNetworkPendingStore.Pending saved = new HostedNetworkPendingStore(config).current("true:account-a");
+        assertEquals(next.requestId(), saved.command().requestId());
+        assertEquals(next.networkId(), saved.command().networkId());
+        assertNull(saved.terminal());
+    }
+
+    @Test
+    void replaysFrozenAttachmentAndPreservesReplacementWhenOldOutcomeArrives(@TempDir Path directory) {
+        RemotelyConfigStore config = new RemotelyConfigManager(directory);
+        HostedNetworkPendingStore store = new HostedNetworkPendingStore(config);
+        NetworkCommand.Member member = new NetworkCommand.Member(new NetworkMemberSource.Draft(
+                UUID.randomUUID().toString(), UUID.randomUUID().toString(), "", UUID.randomUUID().toString(), Long.MAX_VALUE,
+                new NetworkMemberSource.DraftMetadata("Backend", "minecraft:java", "paper", Map.of(), Map.of()),
+                new NetworkMemberSource.Compute(4096, 100), new NetworkMemberSource.Compute(4096, 100),
+                new NetworkMemberSource.Storage(8192, 0)), "backend", NetworkMemberRole.GAMEPLAY, 25566, 0, false);
+        NetworkCommand.Attach command = new NetworkCommand.Attach(1, UUID.randomUUID().toString(), "network", Long.MAX_VALUE, member);
+        HostedNetworkPendingStore.PendingAttach admitted = store.admitAttachment("true:account-a", command);
+        NetworkCommand.Attach changed = new NetworkCommand.Attach(1, command.requestId(), command.networkId(), 1, member);
+        assertThrows(IllegalStateException.class, () -> store.admitAttachment("true:account-a", changed));
+        assertNull(store.attachment("true:account-b", command.networkId()));
+        assertNull(store.attachment("true:account-a", "other-network"));
+
+        HostedNetworkPendingStore reopened = new HostedNetworkPendingStore(config);
+        HostedNetworkPendingStore.PendingAttach pending = reopened.attachment("true:account-a", command.networkId());
+        assertEquals(command, pending.command());
+        assertEquals(admitted.body(), pending.body());
+        String[] submitted = {""};
+        HostedNetworkClient client = new HostedNetworkClient((method, path, body) -> {
+            submitted[0] = body;
+            return Async.completed(status(command));
+        });
+        assertThrows(IllegalArgumentException.class, () -> client.execute(changed, pending.body(), TaskScheduler.direct(), () -> true));
+        assertEquals("", submitted[0]);
+        client.execute(pending.command(), pending.body(), TaskScheduler.direct(), () -> true).join();
+        assertEquals(admitted.body(), submitted[0]);
+        reopened.markAttachmentTerminal("true:account-a", command.requestId(), command.networkId(), NetworkOperationState.NEEDS_REVIEW);
+        assertEquals(NetworkOperationState.NEEDS_REVIEW,
+                new HostedNetworkPendingStore(config).attachment("true:account-a", command.networkId()).terminal());
+        reopened.acknowledgeAttachment("true:account-a", command.requestId(), command.networkId());
+
+        NetworkCommand.Attach next = new NetworkCommand.Attach(1, UUID.randomUUID().toString(), command.networkId(), 1, member);
+        reopened.admitAttachment("true:account-a", next);
+        reopened.clearAttachment("true:account-a", command.requestId(), command.networkId());
+        reopened.markAttachmentTerminal("true:account-a", command.requestId(), command.networkId(), NetworkOperationState.FAILED);
+        HostedNetworkPendingStore.PendingAttach saved = new HostedNetworkPendingStore(config).attachment("true:account-a", command.networkId());
+        assertEquals(next, saved.command());
+        assertNull(saved.terminal());
+    }
+
     private static NetworkCommand.Create command() {
         String request = UUID.randomUUID().toString();
         return new NetworkCommand.Create(1, request, "network-" + request, "Network", 25565,
@@ -67,12 +137,12 @@ class HostedNetworkPendingStoreTest {
                 Map.of("firewallVerified", true));
     }
 
-    private static String status(NetworkCommand.Create command) {
+    private static String status(NetworkCommand command) {
         return """
-                {"schemaVersion":1,"requestId":"%s","networkId":"%s","command":"CREATE",
+                {"schemaVersion":1,"requestId":"%s","networkId":"%s","command":"%s",
                  "state":"SUCCEEDED","stage":"COMPLETE","operationId":"operation-1",
                  "networkRevision":"1","message":"Created","createdAt":"1","updatedAt":"2","members":[]}
-                """.formatted(command.requestId(), command.networkId());
+                """.formatted(command.requestId(), command.networkId(), command.type().name());
     }
 
     private static final class MemoryConfig implements RemotelyConfigStore {

@@ -28,6 +28,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.HashSet;
+import java.util.Set;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.LocalDate;
@@ -47,6 +49,7 @@ public final class ServerScheduleSettingsController {
     private boolean loaded;
     private boolean loading;
     private boolean action;
+    private final Set<String> running = new HashSet<>();
     private boolean closed;
     private String loadError = "";
     private long generation;
@@ -164,7 +167,7 @@ public final class ServerScheduleSettingsController {
                 rendered = current;
                 displayZone = zone;
             }
-            run.active = !action && canRun;
+            run.active = !action && canRun && !current.processing() && !running.contains(current.id());
             edit.active = !action;
             delete.active = !action;
         }
@@ -475,11 +478,10 @@ public final class ServerScheduleSettingsController {
     }
 
     private void run(ServerScheduleModels.Schedule schedule) {
-        if (action) return;
-        action = true;
+        if (action || schedule.processing() || !running.add(schedule.id())) return;
         feature.runSchedule(schedule.id(), operationKey()).whenComplete((run, failure) -> ScreenManager.getInstance().execute(() -> {
             if (closed) return;
-            action = false;
+            running.remove(schedule.id());
             boolean failed = failure != null || run != null && "FAILED".equals(run.status());
             String title = failed ? "Run Failed" : run != null && "COMPLETED".equals(run.status()) ? "Schedule Completed" : "Schedule Started";
             String result = failure != null ? error(failure) : failed && run != null ? run.result() : schedule.name();

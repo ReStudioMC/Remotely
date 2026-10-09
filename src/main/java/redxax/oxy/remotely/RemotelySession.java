@@ -1,6 +1,7 @@
 package redxax.oxy.remotely;
 
 import restudio.rebase.backend.FileExplorerProviders;
+import redxax.oxy.remotely.servers.ReProxyManager;
 
 import java.util.Objects;
 
@@ -53,6 +54,7 @@ public final class RemotelySession implements AutoCloseable {
             return;
         }
         closed = true;
+        ReProxyManager.cancelAll();
         try {
             if (initialized) {
                 client.shutdownAllTerminals();

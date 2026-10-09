@@ -37,6 +37,7 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.math.RoundingMode;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -62,7 +63,7 @@ public final class ServerConfigurationUiComposition {
         Map<String, Supplier<List<Setting>>> settings = new LinkedHashMap<>();
         List<Runnable> cleanup = new ArrayList<>();
         TextInputWidget instanceLocationField = null;
-        if (!state.editMode() && !state.restudioCreation() && state.remoteHost() == null) {
+        if (!state.editMode() && !state.restudioCreation() && !state.resourcePoolCreation() && state.remoteHost() == null) {
             instanceLocationField = new TextInputWidget.Builder()
                     .text(defaultLocation == null ? "" : defaultLocation)
                     .placeholder("Instances Path")
@@ -70,11 +71,15 @@ public final class ServerConfigurationUiComposition {
                     .build();
         }
         TextInputWidget locationField = instanceLocationField;
-        List<ProfileChoice> profileChoices = state.resourcePoolCreation() ? choices(state.poolOptions()) : List.of();
+        Supplier<ResourcePoolModels.DraftOptions> options = owner instanceof ServerConfigurationScreen creation && state.resourcePoolCreation()
+                ? creation::poolOptions : state::poolOptions;
+        List<ProfileChoice> profileChoices = new ArrayList<>(state.resourcePoolCreation() ? choices(options.get()) : List.of());
         ScrollSelectorWidget profile = state.resourcePoolCreation() ? new ScrollSelectorWidget.Builder()
                 .options(profileChoices.stream().map(ProfileChoice::label).toList())
                 .selectedIndex(profileIndex(profileChoices, remoteVariables.get("VERSION"))).size(200, 20).build() : null;
-        PoolCreationPreview preview = state.resourcePoolCreation() ? new PoolCreationPreview(state.poolView(), state.poolOptions()) : null;
+        if (profile != null) profile.setActive(!profileChoices.isEmpty());
+        PoolCreationPreview preview = state.resourcePoolCreation()
+                ? state.poolPreview() == null ? new PoolCreationPreview(state.poolView(), state.poolOptions(), state.poolShares()) : state.poolPreview() : null;
         VersionSettingsController version = new VersionSettingsController(platform.versionTarget(), platform.versionCatalog());
         if (state.restudioBackend() || state.restudioCreation()) {
             version.bindToRemoteVariables(remoteVariables);
@@ -88,9 +93,20 @@ public final class ServerConfigurationUiComposition {
         cleanup.add(modpack::cleanup);
         ServerPlanSettingsController plan = state.restudioCreation() && !state.resourcePoolCreation()
                 ? new ServerPlanSettingsController(platform.planSettingsProvider()) : null;
+        TextInputWidget subdomain = state.resourcePoolCreation() && owner instanceof ServerConfigurationScreen
+                ? new TextInputWidget.Builder().placeholder("Optional Subdomain").size(230, 20).build() : null;
+        List<Setting> addressSettings = new ArrayList<>();
+        if (subdomain != null) {
+            Setting.Builder address = new Setting.Builder("Subdomain");
+            address.addRow("Subdomain", subdomain);
+            address.addRow("", new MountableButtonWidget.Builder("Server Address")
+                    .description("Choose A ReStudio Subdomain Or Leave It Empty To Use The Server Address").build());
+            addressSettings.add(address.build());
+        }
         if (plan != null) plan.selectPlanByName(state.preselectedPlanName());
         Supplier<List<Setting>> poolSettings = state.resourcePoolCreation()
-                ? poolSettings(screen, preview, cleanup) : () -> List.of();
+                ? state.poolPreview() == null ? poolSettings(screen, preview, cleanup) : sharedPoolSettings(preview, cleanup) : () -> List.of();
+        if (state.poolPreview() != null) settings.put("Resources", poolSettings);
         List<Setting> storageSettings = new ArrayList<>();
         if (locationField != null) {
             Setting.Builder storage = new Setting.Builder("Storage");
@@ -102,6 +118,8 @@ public final class ServerConfigurationUiComposition {
             List<Setting> result = new ArrayList<>();
             if (plan != null) result.addAll(plan.getSettings());
             result.addAll(general.getSettings());
+            if (owner instanceof ServerConfigurationScreen creation && state.resourcePoolCreation()) result.addAll(creation.poolLoadingSettings());
+            result.addAll(addressSettings);
             if (state.resourcePoolCreation()) {
                 if (!linkedModpack) version.bindToRemoteVariables(remoteVariables);
                 if (poolVersions.isEmpty()) {
@@ -114,7 +132,7 @@ public final class ServerConfigurationUiComposition {
                             .addWidget(profile).build());
                 }
                 result.addAll(poolVersions);
-                result.addAll(poolSettings.get());
+                if (state.poolPreview() == null) result.addAll(poolSettings.get());
             } else if (!linkedModpack) {
                 if (state.restudioBackend() || state.restudioCreation()) version.bindToRemoteVariables(remoteVariables);
                 result.addAll(version.getSettings());
@@ -125,7 +143,8 @@ public final class ServerConfigurationUiComposition {
             }
             return result;
         });
-        settings.put("Features", new ServerFeatureSettingsController(platform.featureSettingsProvider())::getSettings);
+        settings.put("Features", new ServerFeatureSettingsController(platform.featureSettingsProvider(),
+                !state.restudioCreation() && !state.resourcePoolCreation())::getSettings);
         if ((state.editMode() && state.restudioBackend()) || state.resourcePoolCreation()) {
             settings.put("Software Settings", new ServerStartupSettingsController(ServerStartupSettingsProvider.map(remoteVariables,
                     linkedModpack ? Set.of("AUTOMATIC_UPDATING") : Set.of()))::getSettings);
@@ -188,7 +207,7 @@ public final class ServerConfigurationUiComposition {
         Runnable dispose = () -> cleanup.forEach(Runnable::run);
         return new ServerScreenHost.ConfigurationUi(settings, dispose, title,
                 () -> plan == null ? "" : plan.getSelectedPlanName(),
-                () -> plan == null ? "" : plan.getSubdomain(),
+                () -> subdomain == null ? plan == null ? "" : plan.getSubdomain() : subdomain.getText().strip().toLowerCase(Locale.ROOT),
                 () -> plan == null ? null : plan.getCustomPlanRequest(),
                 () -> locationField == null ? defaultLocation : locationField.getText().trim(),
                 () -> {
@@ -200,8 +219,24 @@ public final class ServerConfigurationUiComposition {
                             preview.value(PoolAllocationEditor.Resource.RAM).toString(),
                             preview.value(PoolAllocationEditor.Resource.CPU).toString(),
                             preview.value(PoolAllocationEditor.Resource.DISK).toString(),
-                            preview.value(PoolAllocationEditor.Resource.BACKUP).toString());
-                }, () -> version.refreshRemoteVariables(remoteVariables));
+                            "0");
+                }, () -> {
+                    version.refreshRemoteVariables(remoteVariables);
+                    if (profile == null) return;
+                    ResourcePoolModels.DraftOptions available = options.get();
+                    List<ProfileChoice> next = choices(available);
+                    if (!profileChoices.equals(next)) {
+                        ProfileChoice previous = profileChoices.isEmpty() ? null
+                                : profileChoices.get(Math.clamp(profile.getSelectedIndex(), 0, profileChoices.size() - 1));
+                        profileChoices.clear();
+                        profileChoices.addAll(next);
+                        profile.setOptions(profileChoices.stream().map(ProfileChoice::label).toList());
+                        int selected = previous == null ? -1 : profileChoices.indexOf(previous);
+                        profile.setSelectedIndex(selected >= 0 ? selected : profileIndex(profileChoices, remoteVariables.get("VERSION")));
+                    }
+                    profile.setActive(!profileChoices.isEmpty());
+                    preview.acceptOptions(available);
+                });
     }
 
     private static Supplier<List<Setting>> poolSettings(ReScreen screen, PoolCreationPreview preview,
@@ -239,6 +274,7 @@ public final class ServerConfigurationUiComposition {
         CreationControl ram = creationSlider(preview, PoolAllocationEditor.Resource.RAM, refreshAndUpdate);
         CreationControl cpu = creationSlider(preview, PoolAllocationEditor.Resource.CPU, refreshAndUpdate);
         CreationControl disk = creationSlider(preview, PoolAllocationEditor.Resource.DISK, refreshAndUpdate);
+        List<CreationControl> controls = List.of(ram, cpu, disk);
         ramBar.onChange(ram.refresh());
         cpuBar.onChange(cpu.refresh());
         diskBar.onChange(disk.refresh());
@@ -308,10 +344,46 @@ public final class ServerConfigurationUiComposition {
             allocation.addRow("", ram.row());
             allocation.addRow("", cpu.row());
             allocation.addRow("", disk.row());
+            Setting serverResources = allocation.build();
+            serverResources.setChanges(new Setting.Changes() {
+                @Override
+                public String validate() {
+                    return controls.stream().map(control -> control.failure().get()).filter(value -> !value.isBlank()).findFirst().orElse("");
+                }
+            });
             poolSettings.add(capacity);
-            poolSettings.add(allocation.build());
+            poolSettings.add(serverResources);
             return List.copyOf(poolSettings);
         };
+    }
+
+    private static Supplier<List<Setting>> sharedPoolSettings(PoolCreationPreview preview, List<Runnable> cleanup) {
+        List<CreationControl> controls = new ArrayList<>();
+        Map<PoolAllocationEditor.Resource, BigInteger> initial = new EnumMap<>(PoolAllocationEditor.Resource.class);
+        Setting.Builder resources = new Setting.Builder("Server Resources");
+        for (PoolAllocationEditor.Resource resource : List.of(PoolAllocationEditor.Resource.RAM, PoolAllocationEditor.Resource.CPU, PoolAllocationEditor.Resource.DISK)) {
+            initial.put(resource, preview.value(resource));
+            CreationControl control = creationSlider(preview, resource, () -> {});
+            controls.add(control);
+            resources.addRow("", control.row());
+        }
+        Setting setting = resources.build();
+        setting.setChanges(new Setting.Changes() {
+            @Override
+            public String validate() {
+                String failure = controls.stream().map(control -> control.failure().get()).filter(value -> !value.isBlank()).findFirst().orElse("");
+                return !failure.isBlank() ? failure : preview.possible() ? "" : "This Server Needs More Available Capacity During Setup";
+            }
+
+            @Override
+            public boolean hasPending() {
+                return initial.entrySet().stream().anyMatch(entry -> !entry.getValue().equals(preview.value(entry.getKey())))
+                        || controls.stream().anyMatch(control -> !control.failure().get().isBlank());
+            }
+        });
+        List<Setting> resident = List.of(setting);
+        cleanup.add(preview.watch(() -> controls.forEach(control -> control.refresh().run())));
+        return () -> resident;
     }
 
     private static List<ProfileChoice> choices(ResourcePoolModels.DraftOptions options) {
@@ -357,48 +429,71 @@ public final class ServerConfigurationUiComposition {
         TextInputWidget input = new TextInputWidget.Builder().text(preview.value(resource).toString())
                 .numericOnly(true).size(72, 20).build();
         MountableButtonWidget row = new MountableButtonWidget.Builder(title).addWidget(slider).addWidget(input).build();
+        boolean[] editing = {false};
         Runnable update = () -> {
             refresh.run();
             slider.label = capacityText(preview.value(resource), resource);
             slider.setValue(preview.fraction(resource));
             slider.setFineStep(precision(preview, resource));
-            if (!input.isFocused()) input.setText(preview.value(resource).toString());
+            if (!input.isFocused() && !editing[0]) input.setText(preview.value(resource).toString());
             boolean available = preview.available(resource).compareTo(PoolCreationPreview.minimum(resource)) >= 0;
-            slider.setActive(available);
-            input.setActive(available);
+            boolean editable = preview.editLimit(resource).compareTo(PoolCreationPreview.minimum(resource)) >= 0;
+            slider.setActive(editable);
+            input.setActive(editable);
             String setup = (resource == PoolAllocationEditor.Resource.RAM || resource == PoolAllocationEditor.Resource.CPU)
                     && preview.reserved(resource).compareTo(preview.value(resource)) > 0
                     ? " • " + capacityText(preview.reserved(resource), resource) + " During Setup" : "";
             row.setDescription((available ? capacityText(preview.free(resource), resource) + " Free After Creation" : "No Capacity Available") + setup
-                    + (resource == PoolAllocationEditor.Resource.BACKUP ? " • Space For Backup Files" : ""));
+                    + (resource == PoolAllocationEditor.Resource.DISK ? " • Server Files And Backups Share This Limit" : ""));
         };
         slider.onChange = () -> {
             preview.propose(resource, slider.getValue());
             input.setFocused(false);
             update.run();
         };
-        input.onEnter = () -> {
+        Supplier<String> failure = () -> {
+            try {
+                BigInteger value = new BigInteger(input.getText().trim());
+                return value.compareTo(PoolCreationPreview.minimum(resource)) < 0 || value.compareTo(preview.available(resource)) > 0
+                        ? "Set " + title + " Within Available Capacity" : "";
+            } catch (NumberFormatException invalid) {
+                return "Enter A Whole " + title + " Value";
+            }
+        };
+        input.onChange = () -> {
+            editing[0] = true;
             try {
                 if (!preview.set(resource, new BigInteger(input.getText().trim()))) {
                     row.setDescription("Enter A Value Within Available Capacity");
                     return;
                 }
-                input.setFocused(false);
                 update.run();
-            } catch (NumberFormatException failure) {
+            } catch (NumberFormatException invalid) {
                 row.setDescription("Enter A Whole MiB Or CPU Percent Value");
+            } finally {
+                editing[0] = false;
             }
+        };
+        input.onEnter = () -> {
+            String error = failure.get();
+            if (!error.isBlank()) {
+                row.setDescription(error);
+                return;
+            }
+            input.onChange.run();
+            input.setFocused(false);
+            update.run();
         };
         slider.setTextCommitHandler(text -> {
             try {
                 if (preview.set(resource, parseCapacity(text, resource))) update.run();
                 else row.setDescription("Enter A Value Within Available Capacity");
-            } catch (NumberFormatException | ArithmeticException failure) {
+            } catch (NumberFormatException | ArithmeticException error) {
                 row.setDescription("Enter A Whole MiB Or CPU Percent Value");
             }
         });
         update.run();
-        return new CreationControl(row, update);
+        return new CreationControl(row, update, failure);
     }
 
     private static BigInteger parseCapacity(String text, PoolAllocationEditor.Resource resource) {
@@ -413,7 +508,7 @@ public final class ServerConfigurationUiComposition {
     }
 
     private static double precision(PoolCreationPreview preview, PoolAllocationEditor.Resource resource) {
-        BigInteger span = preview.available(resource).subtract(PoolCreationPreview.minimum(resource));
+        BigInteger span = preview.editLimit(resource).subtract(PoolCreationPreview.minimum(resource));
         return span.signum() <= 0 ? 0 : 1.0 / span.doubleValue();
     }
 
@@ -424,7 +519,7 @@ public final class ServerConfigurationUiComposition {
                 .stripTrailingZeros().toPlainString() + " GiB";
     }
 
-    private record CreationControl(MountableButtonWidget row, Runnable refresh) {
+    private record CreationControl(MountableButtonWidget row, Runnable refresh, Supplier<String> failure) {
     }
 
     private record ProfileChoice(String gameId, String profileId, String label) {

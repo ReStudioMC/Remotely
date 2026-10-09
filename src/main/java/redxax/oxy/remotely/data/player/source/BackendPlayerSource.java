@@ -45,6 +45,10 @@ public class BackendPlayerSource implements IPlayerSource {
     public void refresh() {
         if (!enabled || service == null) return;
 
+        if (!feature.supportsOnlinePlayers()) {
+            processPlayers(List.of());
+            return;
+        }
         feature.getOnlinePlayers().thenAccept(this::processPlayers)
                 .exceptionally(e -> {
                     ReLog.logger(LogTypes.NETWORK).source(LogSource.application("Remotely")).component(BackendPlayerSource.class).operation("Refresh Players").error("Could not fetch players from backend", e);

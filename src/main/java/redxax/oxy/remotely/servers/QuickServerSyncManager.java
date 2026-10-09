@@ -66,7 +66,7 @@ public final class QuickServerSyncManager {
         if (!isQuickServer(instance)) {
             return;
         }
-        ReProxyManager.stopQuietly(instance.getPort(), null);
+        ReProxyManager.stopQuietly(JvmReProxyConnectorCapability.server(instance), null);
         try {
             LocalServerControllerClient.stop(instance);
         } catch (IOException e) {

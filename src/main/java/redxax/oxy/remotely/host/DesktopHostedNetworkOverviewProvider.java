@@ -2,6 +2,7 @@ package redxax.oxy.remotely.host;
 
 import com.google.gson.JsonObject;
 import redxax.oxy.remotely.DesktopRemotelyServerApi;
+import redxax.oxy.remotely.RemotelyClient;
 import redxax.oxy.remotely.ui.server.HostedNetworkOverviewProvider;
 import redxax.oxy.remotely.ui.server.ServerScreenHost;
 import restudio.rebase.restudio.ReStudio;
@@ -13,7 +14,7 @@ import java.util.Objects;
 import java.util.function.BiConsumer;
 
 final class DesktopHostedNetworkOverviewProvider extends HostedNetworkOverviewProvider {
-    DesktopHostedNetworkOverviewProvider(DesktopRemotelyServerApi api, BiConsumer<Screen, String> openServer) {
+    DesktopHostedNetworkOverviewProvider(DesktopRemotelyServerApi api, RemotelyClient client, BiConsumer<Screen, String> openServer) {
         super(new Transport() {
             @Override
             public Async<JsonObject> request(String method, String path, Object body) {
@@ -35,7 +36,7 @@ final class DesktopHostedNetworkOverviewProvider extends HostedNetworkOverviewPr
             public void openServer(Screen current, String serverId) {
                 openServer.accept(current, serverId);
             }
-        });
+        }, client);
         Objects.requireNonNull(api, "api");
         Objects.requireNonNull(openServer, "openServer");
     }

@@ -6,9 +6,15 @@ import restudio.rescreen.ui.settings.options.ConfigOption;
 import java.util.List;
 public class ServerFeatureSettingsController {
     private final ServerFeatureSettingsProvider provider;
+    private final boolean allowLocalOptions;
 
     public ServerFeatureSettingsController(ServerFeatureSettingsProvider provider) {
+        this(provider, true);
+    }
+
+    public ServerFeatureSettingsController(ServerFeatureSettingsProvider provider, boolean allowLocalOptions) {
         this.provider = provider;
+        this.allowLocalOptions = allowLocalOptions;
     }
 
     private List<Setting> residentSettings;
@@ -20,7 +26,7 @@ public class ServerFeatureSettingsController {
 
     private List<Setting> createSettings() {
         Setting.Builder builder = new Setting.Builder("Features & Integrations");
-        if (provider.local()) {
+        if (allowLocalOptions && provider.local()) {
             builder.addOption(ConfigOption.<Boolean>builder("Keep Running")
                     .description("Keep Server Running After Remotely Closes On Next Start.")
                     .bind(provider::lifecyclePersistent, provider::lifecyclePersistent)

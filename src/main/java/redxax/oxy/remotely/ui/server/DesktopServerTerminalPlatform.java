@@ -6,6 +6,7 @@ import redxax.oxy.remotely.packcontent.GlyphPreviewRenderer;
 import redxax.oxy.remotely.packcontent.RemotelyPackContentIntegration;
 import redxax.oxy.remotely.servers.QuickServerSyncManager;
 import redxax.oxy.remotely.servers.ReProxyManager;
+import redxax.oxy.remotely.servers.JvmReProxyConnectorCapability;
 import restudio.rebase.api.unified.InstanceApi;
 import restudio.rebase.api.unified.adapter.UnifiedFileSystemProvider;
 import restudio.rebase.backend.feature.ResourceUsageFeature;
@@ -35,6 +36,7 @@ public final class DesktopServerTerminalPlatform implements ServerTerminalPlatfo
     private static final long LOCAL_START_GATE_POLL_MS = 250;
 
     private final Instance instance;
+    private boolean localSessionAvailable;
     private final AtomicBoolean localServerStartIssued = new AtomicBoolean();
     private final AtomicReference<String> localStartGateOperationId = new AtomicReference<>("");
     private final AtomicBoolean localLaunchAllowed = new AtomicBoolean();
@@ -156,8 +158,8 @@ public final class DesktopServerTerminalPlatform implements ServerTerminalPlatfo
         InstanceState previousState = instance.getState();
         String stopOperationId = LifecycleManager.requestStop(instance);
         instance.setState(InstanceState.STOPPING);
-        if (ReProxyManager.isForwarded(instance)) ReProxyManager.stop(instance.getPort(), null);
         if (!isLocal()) return;
+        ReProxyManager.stop(JvmReProxyConnectorCapability.server(instance), null);
         Thread.ofVirtual().name("Remotely Local Server Stop").start(() -> {
             try {
                 LocalServerControllerModels.StatusResponse status = LocalServerControllerClient.stop(instance);
@@ -210,6 +212,11 @@ public final class DesktopServerTerminalPlatform implements ServerTerminalPlatfo
     private boolean isCurrentStopRequest(String operationId) {
         InstanceOperation operation = instance == null ? null : instance.getOperation();
         return operation != null && operation.type() == InstanceOperation.Type.STOP && operation.id().equals(operationId);
+    }
+
+    @Override
+    public boolean canAttachTerminal(ServerTerminal terminal) {
+        return !isLocal() || localSessionAvailable;
     }
 
     @Override
@@ -289,6 +296,9 @@ public final class DesktopServerTerminalPlatform implements ServerTerminalPlatfo
 
     private void applyLocalStatus(ServerTerminal terminal, LocalServerControllerModels.StatusResponse status) {
         if (status == null || !status.ok || isStaleLocalControllerStatus(status)) return;
+        InstanceOperation operation = instance.getOperation();
+        if (operation != null && operation.isActive() && operation.type() == InstanceOperation.Type.INSTALL) return;
+        localSessionAvailable = hasManagedProcess(status);
         String state = status.state == null ? "" : status.state.trim().toUpperCase(Locale.ROOT);
         boolean startPending = LifecycleManager.isStartPending(instance);
         boolean stopPending = LifecycleManager.isStopPending(instance);
@@ -336,7 +346,7 @@ public final class DesktopServerTerminalPlatform implements ServerTerminalPlatfo
             case "STOPPED" -> {
                 LifecycleManager.complete(instance, LifecycleManager.activeOperationId(instance), InstanceState.STOPPED);
                 QuickServerSyncManager.syncBackAfterStop(instance);
-                if (ReProxyManager.isForwarded(instance)) ReProxyManager.stopQuietly(instance.getPort(), null);
+                ReProxyManager.stopQuietly(JvmReProxyConnectorCapability.server(instance), null);
                 terminal.acceptPlatformState("stopped");
                 terminal.platformStopAndShowStopped();
             }

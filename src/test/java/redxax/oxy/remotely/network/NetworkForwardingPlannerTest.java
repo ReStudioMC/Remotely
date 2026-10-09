@@ -29,6 +29,20 @@ class NetworkForwardingPlannerTest {
         NetworkDefinition network = new NetworkDefinition(local.schemaVersion(), local.networkId(), local.name(), local.revision(), local.proxyInstanceId(), local.desiredState(), local.forwarding(), local.entryPoints(), List.of(local.members().getFirst(), isolated), local.routingGroups(), local.syncRealms(), runtime, local.features(), local.createdAt(), local.updatedAt());
         NetworkReconciliationPlan plan = new NetworkDesiredStatePlanner().plan(DesktopNetworkPlanInput.from(discovery(network, proxy, backend)), secrets());
         assertTrue(plan.mutations().stream().anyMatch(mutation -> mutation.key().equals("server-ip") && mutation.currentValue().equals("127.0.0.1") && mutation.desiredValue().isEmpty()));
+
+        NetworkMember localProxy = local.proxyMember();
+        NetworkMember hostedProxy = new NetworkMember(localProxy.instanceId(), localProxy.nodeId(), localProxy.routeName(), localProxy.role(),
+                "node.example.com", "10.0.0.10", localProxy.port(), localProxy.capacity(), true);
+        NetworkMember hostedBackend = new NetworkMember(current.instanceId(), current.nodeId(), current.routeName(), current.role(),
+                hostedProxy.hostScope(), "10.0.0.20", current.port(), current.capacity(), true);
+        NetworkDefinition hosted = new NetworkDefinition(local.schemaVersion(), local.networkId(), local.name(), local.revision(),
+                local.proxyInstanceId(), local.desiredState(), local.forwarding(), local.entryPoints(), List.of(hostedProxy, hostedBackend),
+                local.routingGroups(), local.syncRealms(), runtime, local.features(), local.createdAt(), local.updatedAt());
+        backend.getServerProperties().put("server-ip", "0.0.0.0");
+        NetworkReconciliationPlan hostedPlan = new NetworkDesiredStatePlanner().plan(DesktopNetworkPlanInput.from(discovery(hosted, proxy, backend)), secrets());
+        assertFalse(hostedPlan.mutations().stream().anyMatch(mutation -> mutation.key().equals("server-ip")));
+        NetworkReconciliationPlan localPlan = new NetworkDesiredStatePlanner().plan(DesktopNetworkPlanInput.from(discovery(local, proxy, backend)), secrets());
+        assertTrue(localPlan.mutations().stream().anyMatch(mutation -> mutation.key().equals("server-ip") && mutation.desiredValue().equals("127.0.0.1")));
     }
 
     @Test

@@ -117,7 +117,7 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
         this(source, snapshot, store, true, structuredParser, hostedCatalogs, loadScheduler);
     }
 
-    private ServerSettingsDocumentDataController(ServerSettingsDocumentTarget source, ServerSettingsSnapshot snapshot,
+    protected ServerSettingsDocumentDataController(ServerSettingsDocumentTarget source, ServerSettingsSnapshot snapshot,
                                                  ServerSettingsDocumentStore store, boolean writeServerProperties,
                                                  StructuredDocumentParser structuredParser,
                                                  ServerSettingsCatalogService.View hostedCatalogs,

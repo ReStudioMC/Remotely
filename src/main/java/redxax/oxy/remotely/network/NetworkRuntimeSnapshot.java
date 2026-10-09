@@ -26,6 +26,10 @@ public record NetworkRuntimeSnapshot(String networkId, NetworkRuntimeConnectionS
         return Optional.ofNullable(nodes.get(nodeId));
     }
 
+    public Optional<NetworkRuntimeNodePresence> liveNode(String nodeId, long now) {
+        return connected() ? node(nodeId).filter(presence -> presence.fresh(now) || presence.status() == NetworkRuntimeNodeStatus.OFFLINE || presence.status() == NetworkRuntimeNodeStatus.REVOKED) : Optional.empty();
+    }
+
     public int players() {
         return nodes.values().stream().filter(presence -> presence.status() != NetworkRuntimeNodeStatus.OFFLINE && presence.status() != NetworkRuntimeNodeStatus.REVOKED).mapToInt(NetworkRuntimeNodePresence::players).sum();
     }

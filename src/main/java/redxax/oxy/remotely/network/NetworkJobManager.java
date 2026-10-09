@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 public class NetworkJobManager {
@@ -60,19 +61,53 @@ public class NetworkJobManager {
 
     public synchronized void completeCreationMetadata(String jobId) {
         NetworkJob current = requireJob(jobId);
-        if (current.type() != NetworkJobType.QUICK_CREATE || current.status() != NetworkJobStatus.SUCCEEDED) {
+        boolean address = !current.context().getOrDefault("reproxyCreation", "").isBlank();
+        if (current.type() != NetworkJobType.QUICK_CREATE || current.status() != NetworkJobStatus.SUCCEEDED
+                && (!address || current.status() != NetworkJobStatus.RUNNING || !"true".equals(current.context().get("creationConfigurationCommitted")))) {
             throw new IllegalStateException("Network Creation Has Not Succeeded");
         }
         if (!"true".equals(current.context().get("creationMetadataPending"))) return;
         Map<String, String> context = new LinkedHashMap<>(current.context());
         context.put("creationMetadataPending", "false");
         persist(new NetworkJob(current.schemaVersion(), current.jobId(), current.networkId(), current.networkRevision(),
-                current.type(), current.status(), current.initiator(), current.createdAt(), current.updatedAt(), current.attempt(),
-                current.message(), context, current.documents(), current.issues()));
+                current.type(), NetworkJobStatus.SUCCEEDED, current.initiator(), current.createdAt(), current.updatedAt(), current.attempt(),
+                address ? "Network Created" : current.message(), context, current.documents(), current.issues()));
+    }
+
+    public synchronized NetworkJob beginCreationAddress(String jobId) {
+        NetworkJob current = requireJob(jobId);
+        if (current.type() != NetworkJobType.QUICK_CREATE || current.context().getOrDefault("reproxyCreation", "").isBlank()
+                || !"true".equals(current.context().get("creationConfigurationApplied"))
+                || !"true".equals(current.context().get("creationMetadataPending"))
+                || current.status() != NetworkJobStatus.RUNNING && current.status() != NetworkJobStatus.INTERRUPTED
+                && current.status() != NetworkJobStatus.FAILED) throw new IllegalStateException("Network Address Creation Is Unavailable");
+        Map<String, String> context = new LinkedHashMap<>(current.context());
+        context.put("creationConfigurationCommitted", "true");
+        NetworkJob pending = new NetworkJob(current.schemaVersion(), current.jobId(), current.networkId(), current.networkRevision(),
+                current.type(), NetworkJobStatus.RUNNING, current.initiator(), current.createdAt(), current.updatedAt(), current.attempt(),
+                "Saving Network Address", context, current.documents(), current.issues());
+        persist(pending);
+        return pending;
     }
 
     public Async<NetworkJob> execute(NetworkDefinition network, NetworkReconciliationPlan plan, Collection<Instance> instances, NetworkJobType type, String initiator) {
         return execute(network, plan, instances, type, initiator, Map.of());
+    }
+
+    public synchronized NetworkJob completeEnrollmentMetadata(String jobId) {
+        NetworkJob current = requireJob(jobId);
+        if (!"renew-enrollment".equals(current.context().get("operation"))
+                || current.status() != NetworkJobStatus.SUCCEEDED && current.status() != NetworkJobStatus.ROLLED_BACK) {
+            throw new IllegalStateException("Server Enrollment Renewal Has Not Settled");
+        }
+        if (!"true".equals(current.context().get("enrollmentMetadataPending"))) return current;
+        Map<String, String> context = new LinkedHashMap<>(current.context());
+        context.put("enrollmentMetadataPending", "false");
+        NetworkJob settled = new NetworkJob(current.schemaVersion(), current.jobId(), current.networkId(), current.networkRevision(),
+                current.type(), current.status(), current.initiator(), current.createdAt(), current.updatedAt(), current.attempt(),
+                current.message(), context, current.documents(), current.issues());
+        persist(settled);
+        return settled;
     }
 
     public Async<NetworkJob> execute(NetworkDefinition network, NetworkReconciliationPlan plan, Collection<Instance> instances, NetworkJobType type, String initiator, Map<String, String> context) {
@@ -130,6 +165,11 @@ public class NetworkJobManager {
     }
 
     public Async<NetworkJob> rollback(String jobId, Collection<Instance> instances) {
+        return rollback(jobId, instances, () -> Async.completed(null));
+    }
+
+    public Async<NetworkJob> rollback(String jobId, Collection<Instance> instances, Supplier<Async<Void>> completion) {
+        Objects.requireNonNull(completion, "Network Rollback Completion Is Required");
         NetworkJob job;
         synchronized (this) {
             job = requireJob(jobId);
@@ -139,7 +179,8 @@ public class NetworkJobManager {
             persist(job.withStatus(NetworkJobStatus.ROLLING_BACK, "Restoring configuration backups"));
         }
         NetworkTransactionListener listener = listener(jobId);
-        Async<NetworkJob> rollback = transaction.rollback(jobId, job.documents(), instances, listener).thenApply(unused -> {
+        Async<NetworkJob> rollback = transaction.rollback(jobId, job.documents(), instances, listener)
+                .thenCompose(unused -> Objects.requireNonNull(completion.get(), "Network Rollback Completion Result Is Required")).thenApply(unused -> {
             synchronized (this) {
                 NetworkJob rolledBack = requireJob(jobId).withStatus(NetworkJobStatus.ROLLED_BACK, "Network changes rolled back");
                 persist(rolledBack);
@@ -204,7 +245,14 @@ public class NetworkJobManager {
         NetworkJob current = requireJob(jobId);
         NetworkJob completed;
         if (result.applied()) {
-            completed = current.withStatus(NetworkJobStatus.SUCCEEDED, current.restartRequired() ? "Restart Affected Servers To Apply Changes" : result.message());
+            if (current.type() == NetworkJobType.QUICK_CREATE && !current.context().getOrDefault("reproxyCreation", "").isBlank()
+                    && "true".equals(current.context().get("creationMetadataPending"))) {
+                Map<String, String> context = new LinkedHashMap<>(current.context());
+                context.put("creationConfigurationApplied", "true");
+                completed = new NetworkJob(current.schemaVersion(), current.jobId(), current.networkId(), current.networkRevision(),
+                        current.type(), NetworkJobStatus.RUNNING, current.initiator(), current.createdAt(), current.updatedAt(), current.attempt(),
+                        "Saving Network Address", context, current.documents(), current.issues());
+            } else completed = current.withStatus(NetworkJobStatus.SUCCEEDED, current.restartRequired() ? "Restart Affected Servers To Apply Changes" : result.message());
         } else {
             boolean partialChangesRemain = current.documents().stream().anyMatch(document -> document.state() == NetworkJobDocumentState.APPLIED);
             NetworkJobStatus status = result.rolledBack() && !partialChangesRemain ? NetworkJobStatus.ROLLED_BACK : NetworkJobStatus.FAILED;

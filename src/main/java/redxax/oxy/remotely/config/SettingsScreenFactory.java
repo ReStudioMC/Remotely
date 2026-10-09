@@ -35,6 +35,10 @@ public final class SettingsScreenFactory {
     }
 
     public static SettingsScreen createGlobalSettingsScreen(ReScreen parent, RemotelyConfigStore config, GlobalSettingsProviders providers) {
+        return createGlobalSettingsScreen(parent, config, providers, null);
+    }
+
+    public static SettingsScreen createGlobalSettingsScreen(ReScreen parent, RemotelyConfigStore config, GlobalSettingsProviders providers, String initialTab) {
         Objects.requireNonNull(parent, "parent");
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(providers, "providers");
@@ -78,20 +82,25 @@ public final class SettingsScreenFactory {
         settingsByTab.put("File Explorer", explorer::getSettings);
         settingsByTab.put("Backups", backups::getSettings);
         settingsByTab.put("Presets", presets::getSettings);
-        settingsByTab.put("About", () -> {
-            List<Setting> settings = new ArrayList<>(account.getSettings());
+        settingsByTab.put("Account", () -> {
+            List<Setting> settings = new ArrayList<>(account.getAccountSettings());
             settings.addAll(collaboration.getSettings());
             return settings;
         });
-        settingsByTab.put("Membership", account::getMembershipSettings);
+        settingsByTab.put("About", account::getAboutSettings);
         if (providers.connections() != null) settingsByTab.put("Connections", providers.connections());
         settingsByTab.put("Logs", logs::getSettings);
-        settingsByTab.put("Development", development::getSettings);
+        settingsByTab.put("Development", () -> {
+            List<Setting> settings = new ArrayList<>(development.getSettings());
+            settings.addAll(account.getDeveloperSettings());
+            return settings;
+        });
         boolean[] active = {false};
         Runnable cleanup = () -> {
             if (active[0]) {
                 active[0] = false;
                 backups.cleanup();
+                account.cleanup();
                 reProxy.cleanup();
                 runtime.cleanup();
             }
@@ -102,7 +111,7 @@ public final class SettingsScreenFactory {
             config.save();
             config.apply();
             runtime.afterApply();
-        }, cleanup) {
+        }, cleanup, "Membership".equals(initialTab) ? "Account" : initialTab) {
             public String getDesktopAppId() { return "global-settings"; }
             public String getDesktopAppTitle() { return "Settings"; }
             public String getDesktopAppIconPath() { return "remotely.png"; }

@@ -10,6 +10,12 @@ import redxax.oxy.remotely.host.ApplicationHost;
 import redxax.oxy.remotely.network.NetworkDefinition;
 import redxax.oxy.remotely.network.NetworkRuntimeSnapshot;
 import redxax.oxy.remotely.session.TerminalSession;
+import redxax.oxy.remotely.servers.ReProxyManager;
+import redxax.oxy.remotely.servers.ReProxyTarget;
+import restudio.rebase.reproxy.ReProxyModels.Address;
+import restudio.rebase.reproxy.ReProxyModels.AddressSpec;
+import restudio.rebase.reproxy.ReProxyModels.Connection;
+import restudio.rebase.reproxy.ReProxyModels.Suffix;
 import redxax.oxy.remotely.ui.server.containers.PlayersContainer;
 import redxax.oxy.remotely.ui.widgets.management.PlayerManagerController;
 import restudio.rebase.api.unified.internal.StandardOutputStateParser;
@@ -44,6 +50,7 @@ import restudio.rescreen.ui.widgets.PopupWidget;
 import restudio.rescreen.ui.widgets.AnimatedWidget;
 import restudio.rescreen.ui.widgets.SquareButtonWidget;
 import restudio.rescreen.ui.widgets.ToggleWidget;
+import restudio.rescreen.ui.widgets.TextInputWidget;
 import restudio.rescreen.util.Identifier;
 import restudio.rescreen.util.Notification;
 import restudio.rescreen.util.UiTasks;
@@ -52,10 +59,13 @@ import java.util.*;
 import java.time.Duration;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 import static restudio.rescreen.config.Config.desktopMode;
 
 public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider, DesktopWindowBehaviorProvider, ServerDevelopmentHost {
+    private static final Identifier REPROXY_CONNECT = Identifier.icon("reverse.png");
+    private static final Identifier REPROXY_LOADING = Identifier.animatedIcon("loadingBlue");
 
     private final RemotelyClient remotelyClient;
     private final Object parent;
@@ -69,6 +79,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
     private boolean openDevelopmentOnStart;
     private boolean clearBrowserDetailStateOnRemove;
     private LifecycleButtonWidget startIconButton;
+    private IconButton reProxyStartButton;
     private ToggleWidget developmentModeToggle;
     private boolean applyingDevelopmentMode;
     private PopupWidget networkSummaryPopup;
@@ -96,6 +107,10 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
     private boolean serverHealthAuthStateListenerRegistered;
     private final Map<String, Consumer<ServerScreenHost.ServerState>> restartListeners = new HashMap<>();
     private ItemSelectorWidget terminalTargetSelector;
+    private ItemSelectorWidget reProxySelector;
+    private PopupWidget reProxyPopup;
+    private long reProxySelectorGeneration;
+    private final Set<String> reProxyConnecting = new HashSet<>();
     private Async<List<ServerScreenHost.HostView>> terminalHostsRequest;
     private Async<List<ServerModels.ClientServerView>> terminalServersRequest;
     private long terminalSelectorGeneration;
@@ -543,13 +558,14 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
             TerminalSession info = getCurrentInfo();
             if (info != null && info.getResourceContainer() != null) info.getResourceContainer().openInstanceResources();
         }, "Resources");
-        header().addLeft("reverse.png", () -> {
+        reProxyStartButton = new IconButton.Builder().identifier(REPROXY_CONNECT).hint("Start ReProxy").size(18, 18).onClick(() -> {
             TabContext context = getActiveContext();
-            if (context != null) screenHost().startReProxy(context.instance, () -> onViewChanged(context, null));
-        }, "Start ReProxy");
+            if (context != null) startReProxy(context);
+        }).build();
+        header().addLeft(reProxyStartButton);
         header().addLeft("closeReverse.png", () -> {
             TabContext context = getActiveContext();
-            if (context != null) screenHost().stopReProxy(context.instance, () -> onViewChanged(context, null));
+            if (context != null) stopReProxy(context);
         }, "Stop ReProxy");
         header().addLeft("download.png", () -> {
             TerminalSession info = getCurrentInfo();
@@ -858,15 +874,14 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         header().setButtonVisible("edit.png", server && !panel);
         header().setButtonVisible("merge.png", !panel && developmentAvailable);
         bindCapabilityListener(context, server ? screenHost().serverView(context.instance) : null);
-        boolean reProxyAvailable = server && screenHost().supportsReProxy(context.instance);
-        header().setButtonVisible("reverse.png", reProxyAvailable && !screenHost().isReProxyForwarded(context.instance));
-        header().setButtonVisible("closeReverse.png", reProxyAvailable && screenHost().isReProxyForwarded(context.instance));
-        if (reProxyAvailable) {
+        ReProxyTarget reProxyTarget = server ? screenHost().reProxyTarget(context.instance) : null;
+        boolean reProxyAvailable = reProxyTarget != null && screenHost().supportsReProxy(context.instance);
+        refreshReProxyButtons(context, reProxyAvailable);
+        if (reProxyAvailable && !reProxyConnecting.contains(reProxyTarget.key())) {
             screenHost().refreshReProxy(context.instance, () -> screenHost().application().execute(() -> {
-                if (closed || !tabContexts.containsValue(context)) return;
-                boolean forwarded = screenHost().isReProxyForwarded(context.instance);
-                header().setButtonVisible("reverse.png", !forwarded);
-                header().setButtonVisible("closeReverse.png", forwarded);
+                if (closed || getActiveContext() != context || !tabContexts.containsValue(context)) return;
+                ReProxyTarget currentTarget = screenHost().reProxyTarget(context.instance);
+                refreshReProxyButtons(context, currentTarget != null && screenHost().supportsReProxy(context.instance));
             }));
         }
         if (developmentModeToggle != null) {
@@ -908,6 +923,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
 
     protected void onTabSelected(TabsManager.Tab tab){
         if (tab == null) return;
+        hideReProxyControls();
         for (TerminalSession session : contextInfos.values()) {
             if (session != null && session.getResourceContainer() != null) {
                 session.getResourceContainer().setSelectorsVisible(false);
@@ -1041,8 +1057,10 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         builder.addRow(poolDetail("Desired", poolCompute(allocation.desired())));
         builder.addRow(poolDetail("Reserved", poolCompute(allocation.reserved())));
         builder.addRow(poolDetail("Effective", poolCompute(allocation.effective())));
-        builder.addRow(poolDetail("Storage", allocation.retained().diskMiB() + " MiB Disk • "
-                + allocation.retained().backupMiB() + " MiB Backup"));
+        boolean cleanupPending = allocation.state() == ResourcePoolModels.AllocationState.DISABLED
+                && "0".equals(allocation.retained().diskMiB()) && !"0".equals(allocation.retained().backupMiB());
+        builder.addRow(cleanupPending ? poolDetail("Storage", "Backups Awaiting Cleanup")
+                : poolDetail("Disk", allocation.retained().diskMiB() + " MiB • Server Files And Backups Share This Limit"));
         if (poolPendingRestart(allocation)) {
             builder.addRow(poolDetail("Restart", "Pending Restart Keeps Reserved Compute"));
         }
@@ -1232,6 +1250,208 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
             if (target != null && provider.supports(target)) persisted.add(new NewTerminalTargetProvider.Tab(target, tab.getName()));
         }
         provider.persist(new NewTerminalTargetProvider.State(persisted, tabs().getActiveTabIndex()));
+    }
+
+    private void refreshReProxyButtons(TabContext context, boolean available) {
+        ReProxyTarget target = available ? screenHost().reProxyTarget(context.instance) : null;
+        boolean busy = target != null && reProxyConnecting.contains(target.key());
+        boolean forwarded = available && screenHost().isReProxyForwarded(context.instance);
+        boolean startVisible = available && (busy || !forwarded);
+        if (reProxyStartButton.visible != startVisible) {
+            reProxyStartButton.setVisible(startVisible);
+            reProxyStartButton.resetEntranceAnimation();
+        }
+        header().setButtonVisible("closeReverse.png", available && !busy && forwarded);
+        reProxyStartButton.setIcon(busy ? REPROXY_LOADING : REPROXY_CONNECT);
+        reProxyStartButton.setHint(busy ? "Updating ReProxy" : "Start ReProxy");
+    }
+
+    private void startReProxy(TabContext context) {
+        ReProxyTarget target = screenHost().reProxyTarget(context.instance);
+        if (target == null || reProxyConnecting.contains(target.key())) return;
+        ServerScreenHost.AccountIdentity account = screenHost().accountIdentity();
+        if (!target.connectionId().isBlank()) {
+            connectReProxy(context, target, account, "", null);
+            return;
+        }
+        reProxyConnecting.add(target.key());
+        refreshReProxyButtons(context, true);
+        ReProxyManager.serverSummary().whenComplete((summary, failure) -> screenHost().application().execute(() -> {
+            reProxyConnecting.remove(target.key());
+            if (!reProxyCurrent(context, target, account)) return;
+            if (failure != null) {
+                reProxyFailure(failure);
+                refreshReProxyButtons(context, true);
+                return;
+            }
+            try {
+                Connection attached = ReProxyManager.serverConnection(screenHost().reProxyTarget(context.instance));
+                if (attached == null) showReProxyAddresses(context);
+                else connectReProxy(context, target, account, attached.address().id(), null);
+            } catch (Throwable error) {
+                reProxyFailure(error);
+            }
+            refreshReProxyButtons(context, true);
+        }));
+    }
+
+    private void stopReProxy(TabContext context) {
+        ReProxyTarget target = screenHost().reProxyTarget(context.instance);
+        if (target == null || !reProxyConnecting.add(target.key())) return;
+        refreshReProxyButtons(context, true);
+        screenHost().stopReProxy(context.instance, () -> screenHost().application().execute(() -> {
+            reProxyConnecting.remove(target.key());
+            if (!closed && getActiveContext() == context) onViewChanged(context, null);
+        }));
+    }
+
+    private void showReProxyAddresses(TabContext context) {
+        ReProxyTarget target = screenHost().reProxyTarget(context.instance);
+        if (target == null || reProxyConnecting.contains(target.key())) return;
+        hideReProxyControls();
+        long generation = ++reProxySelectorGeneration;
+        ServerScreenHost.AccountIdentity account = screenHost().accountIdentity();
+        ItemSelectorWidget selector = new ItemSelectorWidget.Builder(this).size(Math.min(340, Math.max(220, width - 20)), 240)
+                .entryHeight(22).searchPlaceholder("Search Addresses").emptyMessage("No Available Addresses")
+                .onClose(this::hideReProxySelector).addItem("Loading Addresses", null).build();
+        reProxySelector = selector;
+        addDrawableChild(selector);
+        selector.show(Math.max(4, (width - selector.getWidth()) / 2), Math.max(4, (height - selector.getHeight()) / 2));
+        ReProxyManager.serverSummary().whenComplete((summary, failure) -> screenHost().application().execute(() -> {
+            if (generation != reProxySelectorGeneration || reProxySelector != selector || !reProxyCurrent(context, target, account)) return;
+            selector.clearItems();
+            if (failure != null) {
+                hideReProxySelector();
+                reProxyFailure(failure);
+                return;
+            }
+            Map<String, Connection> owners = new HashMap<>();
+            for (Connection connection : summary.connections()) {
+                if (connection.address() != null) owners.put(connection.address().id(), connection);
+            }
+            summary.addresses().stream().filter(address -> "ACTIVE".equalsIgnoreCase(address.status()) || "AVAILABLE".equalsIgnoreCase(address.status()))
+                    .filter(address -> {
+                        Connection owner = owners.get(address.id());
+                        if (owner != null && !target.matches(owner.binding())) return false;
+                        String reserved = address.connectionId();
+                        return reserved == null || reserved.isBlank() || summary.connections().stream().anyMatch(connection -> reserved.equals(connection.id()) && target.matches(connection.binding()));
+                    }).sorted(Comparator.comparing(Address::publicHost, String.CASE_INSENSITIVE_ORDER)).forEach(address -> {
+                        Connection owner = owners.get(address.id());
+                        selector.addItem(address.publicHost(), "reverse.png", owner == null ? "Connect This Server" : "Assigned To This Server", address.publicHost(),
+                                () -> connectReProxy(context, target, account, address.id(), null));
+                    });
+            selector.addItem("Create Address", "create.png", "Choose A New Address For This Server", "create new address", () -> createReProxyAddress(context, target, account));
+        }));
+    }
+
+    private void createReProxyAddress(TabContext context, ReProxyTarget target, ServerScreenHost.AccountIdentity account) {
+        if (!reProxyCurrent(context, target, account)) return;
+        long generation = ++reProxySelectorGeneration;
+        ReProxyManager.serverCatalog().whenComplete((catalog, failure) -> screenHost().application().execute(() -> {
+            if (generation != reProxySelectorGeneration || !reProxyCurrent(context, target, account)) return;
+            if (failure != null) { reProxyFailure(failure); return; }
+            List<Suffix> domains = catalog.suffixes().stream().filter(suffix -> "READY".equalsIgnoreCase(suffix.readiness()) && "ACTIVE".equalsIgnoreCase(suffix.state()))
+                    .filter(suffix -> suffix.transports().contains("TCP") && suffix.routingModes().contains("JAVA_HOSTNAME")).toList();
+            if (domains.isEmpty()) {
+                screenHost().application().notify("No Domains Available", "Try Again Shortly", ReSyncNotificationLevel.WARN);
+                return;
+            }
+            String label = target.name().toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9-]", "-").replaceAll("-+", "-").replaceAll("^-|-$", "");
+            TextInputWidget name = new TextInputWidget.Builder().text(label.length() > 32 ? label.substring(0, 32) : label).placeholder("Your Server Name").maxLength(32).build();
+            Suffix[] chosen = {domains.stream().filter(suffix -> "reproxy.link".equalsIgnoreCase(suffix.suffix())).findFirst().orElse(domains.getFirst())};
+            PopupWidget.Builder popup = new PopupWidget.Builder("Create Address").width(330).setResizable(false).setAntiOutOfBound(true);
+            PopupWidget widget = popup.getWidget();
+            popup.addRow("Name", name);
+            if (domains.size() == 1) {
+                popup.addRow("Domain", new AnimatedButton.Builder().label(chosen[0].suffix()).active(false).build());
+            } else {
+                AnimatedButton domain = new AnimatedButton.Builder().label(chosen[0].suffix()).build();
+                domain.setAction(() -> {
+                    hideReProxySelector();
+                    ItemSelectorWidget options = new ItemSelectorWidget.Builder(this).size(300, 200).entryHeight(22).searchPlaceholder("Search Domains")
+                            .onClose(this::hideReProxySelector).build();
+                    for (Suffix suffix : domains) options.addItem(suffix.suffix(), () -> { chosen[0] = suffix; domain.setMessage(suffix.suffix()); });
+                    reProxySelector = options;
+                    addDrawableChild(options);
+                    options.show(Math.max(4, Math.min(width - options.getWidth() - 4, domain.getX())), Math.max(4, Math.min(height - options.getHeight() - 4, domain.getY() + domain.getHeight())));
+                });
+                popup.addRow("Domain", domain);
+            }
+            popup.addTitleAction("Connect", () -> {
+                String value = name.getText().trim().toLowerCase(Locale.ROOT);
+                if (!value.matches("[a-z0-9](?:[a-z0-9-]{1,30}[a-z0-9])")) {
+                    screenHost().application().notify("Choose Another Name", "Use 3 To 32 Letters, Numbers Or Hyphens", ReSyncNotificationLevel.WARN);
+                    return;
+                }
+                hideReProxyControls();
+                connectReProxy(context, target, account, "", new AddressSpec(value, chosen[0].id()));
+            }, PopupWidget.TitleActionRole.PRIMARY);
+            widget.onClose = () -> {
+                hideReProxySelector();
+                if (reProxyPopup == widget) { reProxyPopup = null; remove(widget); }
+            };
+            reProxyPopup = popup.build();
+            addDrawableChild(reProxyPopup);
+            reProxyPopup.show();
+        }));
+    }
+
+    private void connectReProxy(TabContext context, ReProxyTarget target, ServerScreenHost.AccountIdentity account, String addressId, AddressSpec address) {
+        if (!reProxyCurrent(context, target, account)) return;
+        ReProxyTarget current = screenHost().reProxyTarget(context.instance);
+        if (current == null || !reProxyConnecting.add(current.key())) return;
+        hideReProxyControls();
+        onViewChanged(context, null);
+        reProxyAction(context, current, account, () -> screenHost().loadReProxyTarget(context.instance)).thenCompose(fresh ->
+                reProxyAction(context, current, account, () -> fresh == null ? Async.failed(new Async.Cancellation()) : ReProxyManager.prepareServer(fresh, addressId, address)))
+                .thenCompose(connection -> reProxyAction(context, current, account,
+                        () -> screenHost().saveReProxyConnection(context.instance, connection).thenApply(ignored -> connection)))
+                .thenCompose(connection -> reProxyAction(context, current, account, () -> ReProxyManager.startServer(screenHost().reProxyTarget(context.instance)))).whenComplete((ignored, failure) -> screenHost().application().execute(() -> {
+                    reProxyConnecting.remove(current.key());
+                    if (!reProxyCurrent(context, current, account)) return;
+                    if (failure != null) reProxyFailure(failure);
+                    else screenHost().application().notify("Server Connected", ReProxyManager.getForwardedAddress(current), ReSyncNotificationLevel.SUCCESS);
+                    onViewChanged(context, null);
+                }));
+    }
+
+    private <T> Async<T> reProxyAction(TabContext context, ReProxyTarget target, ServerScreenHost.AccountIdentity account, Supplier<Async<T>> action) {
+        Async<T> result = Async.pending();
+        screenHost().application().execute(() -> {
+            if (!reProxyCurrent(context, target, account)) { result.fail(new Async.Cancellation()); return; }
+            try {
+                action.get().whenComplete((value, failure) -> {
+                    if (failure == null) result.complete(value); else result.fail(failure);
+                });
+            } catch (Throwable failure) { result.fail(failure); }
+        });
+        return result;
+    }
+
+    private boolean reProxyCurrent(TabContext context, ReProxyTarget target, ServerScreenHost.AccountIdentity account) {
+        if (closed || getActiveContext() != context || !tabContexts.containsValue(context)) return false;
+        ServerScreenHost.AccountIdentity currentAccount = screenHost().accountIdentity();
+        ReProxyTarget current = screenHost().reProxyTarget(context.instance);
+        return current != null && target.key().equals(current.key()) && account.authenticated() == currentAccount.authenticated()
+                && account.subjectId().equals(currentAccount.subjectId());
+    }
+
+    private void reProxyFailure(Throwable failure) {
+        screenHost().application().notify("Could Not Connect", ReProxyManager.failureMessage(failure), ReSyncNotificationLevel.ERROR);
+    }
+
+    private void hideReProxySelector() {
+        reProxySelectorGeneration++;
+        ItemSelectorWidget selector = reProxySelector;
+        reProxySelector = null;
+        if (selector != null) { selector.hide(); remove(selector); }
+    }
+
+    private void hideReProxyControls() {
+        hideReProxySelector();
+        PopupWidget popup = reProxyPopup;
+        reProxyPopup = null;
+        if (popup != null) { popup.hide(); remove(popup); }
     }
 
     private void showTerminalTargets() {
@@ -1880,7 +2100,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         private final TerminalSession info;
         private final String healthKey;
         private final PopupWidget popup;
-        private final ServerHealth status;
+        private ServerHealth status;
         private final List<HealthCheckControl> checks = new ArrayList<>();
         private final IconButton launchButton;
         private final IconButton launchAnywayButton;
@@ -1950,21 +2170,32 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         }
 
         private void updateHealthButton(HealthCheckControl control) {
+            ServerHealth.LaunchCheck check = currentCheck(control.check().id());
+            if (check == null) {
+                control.button().setMessage(control.check().label() + " • Unavailable");
+                control.button().setAccent(ThemeManager.getDefaultAccent());
+                if (control.fixButton() != null) control.fixButton().setActive(false);
+                return;
+            }
             boolean repairing = healthRepairing(repair, control.repair());
             boolean available = control.availability() != null && control.availability().available();
-            String label = repairing ? "Repairing..." : switch (control.check().state()) {
+            String label = repairing ? "Repairing..." : switch (check.state()) {
                 case VERIFIED -> "Verified";
                 case FAILED -> "Failed";
                 case NOT_APPLICABLE -> "Not Applicable";
                 case UNAVAILABLE -> "Unavailable";
             };
-            control.button().setMessage(control.check().label() + " • " + label);
-            control.button().setAccent(control.check().state() == ServerHealth.CheckState.VERIFIED ? ThemeManager.getAccent("nice")
-                    : ThemeManager.getDefaultAccent());
+            control.button().setMessage(check.label() + " • " + label);
+            control.button().setAccent(check.state() == ServerHealth.CheckState.VERIFIED ? ThemeManager.getAccent("nice")
+                    : check.state() == ServerHealth.CheckState.FAILED ? ThemeManager.getAccent("danger") : ThemeManager.getDefaultAccent());
             if (control.fixButton() == null) return;
             control.fixButton().setHint(available ? "Fix " + control.check().label() : control.availability().reason());
-            control.fixButton().setActive(control.check().state() == ServerHealth.CheckState.FAILED
+            control.fixButton().setActive(check.state() == ServerHealth.CheckState.FAILED
                     && repair == ServerHealthRepair.NONE && available);
+        }
+
+        private ServerHealth.LaunchCheck currentCheck(String id) {
+            return status.launchChecks().stream().filter(check -> check.id().equals(id)).findFirst().orElse(null);
         }
 
         private void repair(ServerHealthRepair target, ServerHealth.LaunchCheck check, String action) {
@@ -1972,10 +2203,12 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
                 hideServerHealthPopup(popup);
                 return;
             }
-            HealthCheckControl control = checks.stream().filter(value -> value.repair() == target).findFirst().orElse(null);
-            if (control == null || check.state() != ServerHealth.CheckState.FAILED || repair != ServerHealthRepair.NONE
+            HealthCheckControl control = checks.stream().filter(value -> value.check().id().equals(check.id())).findFirst().orElse(null);
+            ServerHealth.LaunchCheck current = currentCheck(check.id());
+            if (current == null) return;
+            if (control == null || current.state() != ServerHealth.CheckState.FAILED || repair != ServerHealthRepair.NONE
                     || !control.availability().available()) {
-                if (check.state() == ServerHealth.CheckState.FAILED && control != null && !control.availability().available()) {
+                if (current.state() == ServerHealth.CheckState.FAILED && control != null && !control.availability().available()) {
                     screenHost().application().notify("Repair Unavailable", control.availability().reason(), ReSyncNotificationLevel.WARN);
                 }
                 return;
@@ -2017,9 +2250,8 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
                     finishRepair(request, target);
                     return;
                 }
+                status = updated;
                 finishRepair(request, target);
-                hideServerHealthPopup(popup);
-                showServerHealthPopup(context, info, updated);
             }));
         }
 
@@ -2055,7 +2287,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
     }
 
     private IconButton checkButton(String gameId, ServerHealth.LaunchCheck check) {
-        IconButton.Builder builder = new IconButton.Builder().size(0, 18).active(false);
+        IconButton.Builder builder = new IconButton.Builder().size(0, 18);
         if (!ServerHealth.MINECRAFT_JAVA.equals(gameId)) return builder.build();
         return switch (check.id()) {
             case "minecraft:eula" -> builder.inClickableWhenInactive(true).hint("Open Minecraft EULA")
@@ -2838,7 +3070,10 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         ViewEntry active = context.views.get(context.selectedViewIndex);
         active.ensureLoaded();
         context.mainContainer.detachWidgets();
-        if (active.widget() != null) context.mainContainer.addWidget(active.widget());
+        if (active.widget() != null) {
+            if (active.widget() instanceof Container container) container.backgroundDrawing(false);
+            context.mainContainer.addWidget(active.widget());
+        }
         for (ViewEntry view : context.views) {
             boolean visible = view == active;
             for (AnimatedWidget toolbarWidget : view.loadedToolbarWidgets()) {
@@ -3125,6 +3360,8 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
     @Override
     public void removed(){
         closed = true;
+        hideReProxyControls();
+        reProxyConnecting.clear();
         if (serverHealthAuthStateListenerRegistered) {
             screenHost().removeAuthStateListener(serverHealthAuthStateListener);
             serverHealthAuthStateListenerRegistered = false;

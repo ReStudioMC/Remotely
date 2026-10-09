@@ -7,6 +7,7 @@ import restudio.rebase.backend.DeveloperCapabilityProvider;
 import restudio.rebase.backend.feature.BackupOperations;
 import redxax.oxy.remotely.flow.ui.marketplace.ReSyncMarketplaceApi;
 import redxax.oxy.remotely.ui.server.NetworkOverviewProvider;
+import redxax.oxy.remotely.ui.server.ServerScreenHost;
 import restudio.rebase.restudio.api.models.ServerModels;
 import restudio.rebase.resource.ResourcePoolClient;
 import restudio.rebase.resource.marketplace.HostedModpackSelection;
@@ -27,6 +28,37 @@ public interface RemotelyServerApi {
     }
 
     Async<List<ServerModels.ClientServerView>> getServers();
+
+    default Async<List<ServerScreenHost.NetworkView>> hostedNetworkViews() {
+        return Async.failed(new UnsupportedOperationException("Reactor Network Inventory Is Unavailable"));
+    }
+
+    record ServerSubdomain(String serverId, String subdomain, String fullDomain, String networkId, String networkRevision, boolean editable, String reason) {
+        public ServerSubdomain(String serverId, String subdomain, String fullDomain) {
+            this(serverId, subdomain, fullDomain, "", "0", true, "");
+        }
+
+        public ServerSubdomain {
+            serverId = serverId == null ? "" : serverId;
+            subdomain = subdomain == null ? "" : subdomain;
+            fullDomain = fullDomain == null ? "" : fullDomain;
+            networkId = networkId == null ? "" : networkId;
+            networkRevision = networkRevision == null ? "0" : networkRevision;
+            reason = reason == null ? "" : reason;
+        }
+    }
+
+    default Async<ServerSubdomain> serverSubdomain(String serverId) {
+        return Async.failed(new UnsupportedOperationException("Server Subdomain Is Unavailable"));
+    }
+
+    default Async<ServerSubdomain> updateServerSubdomain(String serverId, String subdomain) {
+        return updateServerSubdomain(serverId, subdomain, "", "0");
+    }
+
+    default Async<ServerSubdomain> updateServerSubdomain(String serverId, String subdomain, String expectedNetworkId, String expectedNetworkRevision) {
+        return Async.failed(new UnsupportedOperationException("Server Subdomain Changes Are Unavailable"));
+    }
 
     default ResourcePoolClient resourcePools() {
         return new ResourcePoolClient((method, path, body) ->
@@ -223,6 +255,10 @@ public interface RemotelyServerApi {
 
     default Async<Void> chmodFiles(String serverId, String root, List<ServerModels.PteroFileChmodItem> files) {
         return Async.failed(new UnsupportedOperationException("File Permissions Are Unavailable"));
+    }
+
+    default Async<String> createFileArchive(String serverId, String root, List<String> files) {
+        return Async.failed(new UnsupportedOperationException("File Archives Are Unavailable"));
     }
 
     default Async<Void> compressFiles(String serverId, String root, List<String> files) {

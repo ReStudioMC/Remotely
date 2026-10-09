@@ -1,8 +1,14 @@
 package redxax.oxy.remotely.ui.server;
 
+import redxax.oxy.remotely.RemotelyClient;
+import redxax.oxy.remotely.ui.settings.controllers.ServerSubdomainSettingsController;
+import redxax.oxy.remotely.ui.settings.controllers.ReProxyServerSettingsController;
+import restudio.rebase.restudio.api.models.ServerModels;
 import redxax.oxy.remotely.network.ForwardingMode;
+import redxax.oxy.remotely.network.HostedNetworkClient;
 import redxax.oxy.remotely.util.TextLines;
 import redxax.oxy.remotely.network.NetworkDefinition;
+import redxax.oxy.remotely.network.NetworkEditorConnection;
 import redxax.oxy.remotely.network.NetworkDiscoveryResult;
 import redxax.oxy.remotely.network.NetworkJob;
 import redxax.oxy.remotely.network.NetworkJobStatus;
@@ -17,6 +23,7 @@ import redxax.oxy.remotely.network.NetworkLifecycleStatus;
 import redxax.oxy.remotely.network.NetworkMember;
 import redxax.oxy.remotely.network.NetworkPathSync;
 import redxax.oxy.remotely.network.NetworkRuntimeSnapshot;
+import redxax.oxy.remotely.network.NetworkRuntimeIdentity;
 import redxax.oxy.remotely.network.NetworkRuntimeNodePresence;
 import redxax.oxy.remotely.network.NetworkRuntimeNodeStatus;
 import redxax.oxy.remotely.network.NetworkSharedDataPolicy;
@@ -29,7 +36,10 @@ import redxax.oxy.remotely.network.RoutingStrategy;
 import redxax.oxy.remotely.network.SyncDataFamily;
 import redxax.oxy.remotely.network.SyncLocationPolicy;
 import redxax.oxy.remotely.network.SyncRealm;
+import redxax.oxy.remotely.network.protocol.NetworkOperationStatus;
+import redxax.oxy.remotely.network.protocol.NetworkOperationState;
 import restudio.rescreen.platform.Async;
+import restudio.rescreen.platform.Clock;
 import restudio.rebase.ui.widgets.LifecycleButtonWidget;
 import redxax.oxy.remotely.ui.widgets.NetworkTopologyWidget;
 import restudio.rebase.ui.widgets.editor.TextAreaWidget;
@@ -66,17 +76,21 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.function.BiConsumer;
+import java.util.function.BooleanSupplier;
 import java.util.stream.Collectors;
 
 public class NetworkOverviewScreen extends ReScreen {
-    static final List<String> TAB_NAMES = List.of("Overview", "Servers", "Sharing", "Settings");
+    static final List<String> TAB_NAMES = List.of("Overview", "Servers", "Resources", "Sharing", "Settings");
     static final List<String> RIGHT_HEADER_ACTIONS = List.of("Save", "Close");
     private final Screen parent;
     private final String networkId;
-    private NetworkDefinition network;
+    private volatile NetworkDefinition network;
     private NetworkDiscoveryResult discovery;
     private List<NetworkOverviewProvider.ServerView> instances = List.of();
     private final Map<String, NetworkOverviewProvider.ServerView> instancesById = new LinkedHashMap<>();
+    private final Map<String, String> observedServerStates = new LinkedHashMap<>();
+    private volatile long serverStateGeneration;
     private Map<String, NetworkOverviewProvider.NetworkCapability> capabilities = Map.of();
     private Map<String, Boolean> reSyncInstalled = Map.of();
     private PopupWidget dissolvePopup;
@@ -86,8 +100,22 @@ public class NetworkOverviewScreen extends ReScreen {
     private List<SyncRealm> syncRealms = List.of();
     private Container overviewContainer;
     private Container serversContainer;
+    private Container resourcesContainer;
+    private Setting resourcesSetting;
+    private final Map<String, MountableButtonWidget> resourceRows = new LinkedHashMap<>();
+    private final Map<String, String> resourceErrors = new LinkedHashMap<>();
+    private String openingResourceNode = "";
+    private volatile long resourceGeneration;
+    private long nextResourceExpiry = Long.MAX_VALUE;
+    private final List<TextInputWidget> secretInputs = new ArrayList<>();
+    private PopupWidget connectionKeyPopup;
+    private BooleanSupplier connectionKeyCurrent = () -> false;
+    private boolean authListenerRegistered;
+    private final Runnable authListener = () -> ScreenManager.getInstance().execute(this::checkConnectionKey);
     private Container sharingContainer;
     private Container settingsContainer;
+    private ServerSubdomainSettingsController subdomain;
+    private ReProxyServerSettingsController networkAddress;
     private final Map<Container, PlayerGroupEditor> playerGroupEditors = new LinkedHashMap<>();
     private SquareButtonWidget deletePlayerGroupButton;
     private NetworkTopologyWidget topologyWidget;
@@ -108,6 +136,7 @@ public class NetworkOverviewScreen extends ReScreen {
     private final NetworkOverviewProvider provider;
     private final Consumer<NetworkOverviewProvider.OverviewState> networkChangeListener = this::queueNetworkState;
     private final Consumer<NetworkRuntimeSnapshot> runtimeChangeListener = this::queueRuntimeSnapshot;
+    private final BiConsumer<String, String> serverStateListener = this::queueServerState;
     private NetworkRuntimeSnapshot runtimeSnapshot;
     private List<NetworkIncident> incidents = List.of();
     private List<NetworkLifecycleJob> lifecycleJobs = List.of();
@@ -128,8 +157,9 @@ public class NetworkOverviewScreen extends ReScreen {
     private NetworkSharedDataPolicy.ConflictPolicy resourceConflictPolicy;
     private int maximumPayloadBytes;
     private boolean batchingLayout;
-    private boolean networkChangeListenerRegistered;
+    private volatile boolean networkChangeListenerRegistered;
     private boolean runtimeChangeListenerRegistered;
+    private boolean serverStateListenerRegistered;
 
     public NetworkOverviewScreen(Screen parent, NetworkOverviewProvider provider, String networkId) {
         this.parent = parent;
@@ -158,6 +188,7 @@ public class NetworkOverviewScreen extends ReScreen {
     @Override
     public void init() {
         super.init();
+        clearSecretInputs();
         playerGroupEditors.values().forEach(PlayerGroupEditor::close);
         playerGroupEditors.clear();
         if (!provider.available()) {
@@ -167,11 +198,17 @@ public class NetworkOverviewScreen extends ReScreen {
         }
         registerNetworkChangeListener();
         registerRuntimeChangeListener();
-        applyingNetworkChange = true;
+        if (!serverStateListenerRegistered) {
+            serverStateListenerRegistered = true;
+            provider.addServerStateListener(serverStateListener);
+        }
+        setApplyingNetworkChange(true);
         activityRows.clear();
         attentionRows.clear();
         attentionItems.clear();
         serverRows.clear();
+        resourceRows.clear();
+        resourcesSetting = null;
         memberActions.clear();
         routingRows.clear();
         playerDataRows.clear();
@@ -191,12 +228,14 @@ public class NetworkOverviewScreen extends ReScreen {
         int contentHeight = Math.max(80, height - contentY - 6);
         overviewContainer = tabContainer("network_overview", contentY, contentHeight);
         serversContainer = tabContainer("network_servers", contentY, contentHeight);
+        resourcesContainer = tabContainer("network_resources", contentY, contentHeight);
         sharingContainer = tabContainer("network_sharing", contentY, contentHeight);
         settingsContainer = tabContainer("network_settings", contentY, contentHeight);
         tabs().addTab(TAB_NAMES.get(0), overviewContainer);
         tabs().addTab(TAB_NAMES.get(1), serversContainer);
-        tabs().addTab(TAB_NAMES.get(2), sharingContainer);
-        tabs().addTab(TAB_NAMES.get(3), settingsContainer);
+        tabs().addTab(TAB_NAMES.get(2), resourcesContainer);
+        tabs().addTab(TAB_NAMES.get(3), sharingContainer);
+        tabs().addTab(TAB_NAMES.get(4), settingsContainer);
         tabsManager.builder().allowAdd(false).allowClose(true).allowRename(false).allowReorder(false).position(6, 36).size(width - 12, 18)
             .onTabSelected(this::selectNetworkTab)
             .onTabCloseRequested(tab -> tab != null && playerGroupEditors.containsKey(tab.getContainer()))
@@ -209,7 +248,7 @@ public class NetworkOverviewScreen extends ReScreen {
             if (generation != refreshGeneration) {
                 return;
             }
-            applyingNetworkChange = false;
+            setApplyingNetworkChange(false);
             if (throwable != null || state == null || state.network() == null) {
                 new Notification("Network Unavailable", throwable == null ? "Network Data Is Unavailable" : rootMessage(throwable), Notification.Type.ERROR);
                 ScreenManager.getInstance().goBack(this, parent);
@@ -254,7 +293,7 @@ public class NetworkOverviewScreen extends ReScreen {
             new Notification("Network Is Current", network.name(), Notification.Type.INFO);
             return;
         }
-        applyingNetworkChange = true;
+        setApplyingNetworkChange(true);
         List<RoutingGroup> targetRouting = List.copyOf(routingGroups);
         List<SyncRealm> targetRealms = List.copyOf(syncRealms);
         Notification notification = operationNotification("Saving Network", network.name());
@@ -262,7 +301,7 @@ public class NetworkOverviewScreen extends ReScreen {
                 nameChanged ? name : network.name(), targetRouting, targetRealms, features, policy);
         Async<NetworkDefinition> save = provider.save(networkId, request);
         save.whenComplete((updated, throwable) -> ScreenManager.getInstance().execute(() -> {
-            applyingNetworkChange = false;
+            setApplyingNetworkChange(false);
             if (throwable != null) {
                 notification.update().message("Save Failed").description(rootMessage(throwable)).type(Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
                 refresh();
@@ -275,7 +314,7 @@ public class NetworkOverviewScreen extends ReScreen {
 
     private void applyInitialState(NetworkOverviewProvider.OverviewState state) {
         network = state.network();
-        instances = state.servers();
+        instances = liveServers(state.servers());
         instancesById.clear();
         instances.forEach(instance -> instancesById.put(instance.id(), instance));
         discovery = state.discovery();
@@ -300,6 +339,7 @@ public class NetworkOverviewScreen extends ReScreen {
         try {
             populateOverviewTab(overviewContainer);
             populateServersTab(serversContainer);
+            populateResourcesTab(resourcesContainer);
             populateSharingTab(sharingContainer);
             populateSettingsTab(settingsContainer);
         } finally {
@@ -307,8 +347,224 @@ public class NetworkOverviewScreen extends ReScreen {
         }
         overviewContainer.updateWidgetPositions();
         serversContainer.updateWidgetPositions();
+        resourcesContainer.updateWidgetPositions();
         sharingContainer.updateWidgetPositions();
         settingsContainer.updateWidgetPositions();
+    }
+
+    private void populateResourcesTab(Container container) {
+        NetworkOverviewProvider.NetworkCapability capability = provider.operatorCapability();
+        MountableButtonWidget connection = actionRow("Network Connection", capability.supported() ? "Connect Securely To This Network" : capability.reason(), "network.png", this::operatorConnection);
+        styleRow(container, connection, ThemeManager.getDefaultAccent(), 30);
+        container.addWidget(connection);
+        resourcesSetting = new Setting.Builder("Server Resources").build();
+        container.addWidget(resourcesSetting);
+        syncResourceRows();
+    }
+
+    private void syncResourceRows() {
+        if (resourcesSetting == null || network == null) return;
+        Set<String> desired = network.members().stream().filter(member -> !member.isProxy()).map(NetworkMember::nodeId).collect(Collectors.toSet());
+        for (String nodeId : List.copyOf(resourceRows.keySet())) {
+            if (desired.contains(nodeId)) continue;
+            resourcesSetting.removeRow("resource:" + nodeId);
+            resourceRows.remove(nodeId);
+            resourceErrors.remove(nodeId);
+        }
+        nextResourceExpiry = Long.MAX_VALUE;
+        long now = Clock.system().millis();
+        for (NetworkMember member : network.members()) {
+            if (member.isProxy()) continue;
+            NetworkRuntimeNodePresence presence = runtimeSnapshot == null ? null : runtimeSnapshot.node(member.nodeId()).orElse(null);
+            if (presence != null && presence.fresh(now)) nextResourceExpiry = Math.min(nextResourceExpiry, presence.observedAt() + 20_001L);
+            MountableButtonWidget row = resourceRows.get(member.nodeId());
+            if (row == null) {
+                String nodeId = member.nodeId();
+                row = new MountableButtonWidget.Builder(displayName(member)).icon(memberIcon(member)).onClick(() -> openResources(nodeId)).build();
+                row.addMountedWidget(rowAction("edit.png", "Open Resources", () -> openResources(nodeId)));
+                row.addMountedWidget(rowAction("settings.png", "Connection Details", () -> resourceConnection(nodeId)));
+                resourceRows.put(nodeId, row);
+                resourcesSetting.addRow("resource:" + nodeId, "", row);
+            }
+            String issue = resourceIssue(member);
+            row.setName(displayName(member));
+            row.setIcon(memberIcon(member));
+            row.setDescription(issue.isBlank() ? "Browse All Resource Types And Open Their Designers" : issue);
+            row.setHiddenText(member.nodeId().equals(openingResourceNode) ? "Connecting" : issue.isBlank() ? "Available" : "Unavailable");
+            row.setHint("Open Resources");
+            styleRow(resourcesContainer, row, issue.isBlank() ? ThemeManager.getAccent("nice") : ThemeManager.getDefaultAccent(), 30);
+        }
+        requestLayout(resourcesContainer);
+    }
+
+    private String resourceIssue(NetworkMember member) {
+        NetworkOverviewProvider.NetworkCapability capability = provider.resourcesCapability();
+        if (!capability.supported()) return capability.reason();
+        if (!network.runtime().enabled()) return "Enable ReSync Network Connections To Open Resources";
+        if (runtimeSnapshot == null || !runtimeSnapshot.connected()) return runtimeSnapshot == null || runtimeSnapshot.message().isBlank() ? "Network Connection Is Unavailable" : runtimeSnapshot.message();
+        NetworkRuntimeNodePresence presence = runtimeSnapshot.node(member.nodeId()).orElse(null);
+        if (presence == null || !presence.fresh(Clock.system().millis())) {
+            if (member.isManaged() && !member.resyncEnabled()) return "Enable ReSync On This Server";
+            return "Server Is Offline";
+        }
+        if (presence.status() == NetworkRuntimeNodeStatus.OFFLINE) return "Server Is Offline";
+        if (presence.status() == NetworkRuntimeNodeStatus.REVOKED) return "Server Access Was Revoked";
+        return resourceErrors.getOrDefault(member.nodeId(), "");
+    }
+
+    @Override
+    public void tick() {
+        super.tick();
+        long now = Clock.system().millis();
+        if (now >= nextResourceExpiry && resourcesSetting != null) {
+            syncResourceRows();
+            if (network != null && serversContainer != null) {
+                for (NetworkMember member : network.members()) {
+                    MountableButtonWidget row = serverRows.get(member.nodeId());
+                    if (row != null) updateMemberRow(serversContainer, row, member, runtimeSnapshot);
+                }
+            }
+        }
+    }
+
+    private TextInputWidget secretInput(int limit, Consumer<String> changed) {
+        TextInputWidget input = new TextInputWidget.Builder().size(200, 18).maxLength(limit).onChange(changed).build();
+        secretInputs.add(input);
+        return input;
+    }
+
+    private void clearSecretInputs() {
+        secretInputs.forEach(input -> input.setText(""));
+        secretInputs.clear();
+        if (connectionKeyPopup != null) connectionKeyPopup.hide();
+        connectionKeyPopup = null;
+        connectionKeyCurrent = () -> false;
+    }
+
+    private void checkConnectionKey() {
+        if (connectionKeyCurrent.getAsBoolean()) return;
+        resourceGeneration++;
+        clearSecretInputs();
+    }
+
+    private void operatorConnection() {
+        NetworkOverviewProvider.NetworkCapability capability = provider.operatorCapability();
+        if (!capability.supported()) {
+            new Notification("Network Connection", capability.reason(), Notification.Type.INFO);
+            return;
+        }
+        if (!openingResourceNode.isBlank()) return;
+        String[] endpoint = {""};
+        String[] credential = {""};
+        String[] enrollmentToken = {""};
+        TextInputWidget credentialInput = secretInput(128, value -> credential[0] = value == null ? "" : value);
+        TextInputWidget tokenInput = secretInput(512, value -> enrollmentToken[0] = value == null ? "" : value);
+        PopupWidget[] popup = new PopupWidget[1];
+        Runnable clear = () -> {
+            credentialInput.setText("");
+            tokenInput.setText("");
+            credential[0] = "";
+            enrollmentToken[0] = "";
+            secretInputs.remove(credentialInput);
+            secretInputs.remove(tokenInput);
+            popup[0].hide();
+        };
+        PopupWidget.Builder builder = new PopupWidget.Builder("Network Connection").width(360).onClose(clear)
+                .addTitleAction("Connect", () -> {
+                    NetworkEditorConnection connection;
+                    try {
+                        connection = new NetworkEditorConnection(endpoint[0], credential[0], enrollmentToken[0]);
+                    } catch (RuntimeException failure) {
+                        new Notification("Connection Details Invalid", rootMessage(failure), Notification.Type.ERROR);
+                        return;
+                    }
+                    clear.run();
+                    long generation = ++resourceGeneration;
+                    provider.configureOperator(networkId, connection).whenComplete((ignored, failure) -> ScreenManager.getInstance().execute(() -> {
+                        if (generation != resourceGeneration || !networkChangeListenerRegistered) return;
+                        if (failure != null) new Notification("Network Connection Failed", rootMessage(failure), Notification.Type.ERROR);
+                        if (failure == null) runtimeSnapshot = null;
+                        resourceErrors.clear();
+                        refresh();
+                    }));
+                }, "Connect", PopupWidget.TitleActionRole.PRIMARY);
+        builder.addRow(new PopupWidget.PopupRow.Builder("Operator ID", inactive(NetworkRuntimeIdentity.operatorNodeId(networkId), ThemeManager.getDefaultAccent())).description("Allow This Operator To Open Server Resources In The Hub Configuration").build());
+        builder.addTextField("Secure Hub Endpoint", "Use The Network's Secure WebSocket Address", "", value -> endpoint[0] = value == null ? "" : value);
+        builder.addRow(new PopupWidget.PopupRow.Builder("Operator Credential", credentialInput).description("Use An Existing Network Operator Credential").build());
+        builder.addRow(new PopupWidget.PopupRow.Builder("Enrollment Token", tokenInput).description("Use An Enrollment Token For A New Connection").build());
+        popup[0] = showPopup(builder.build());
+    }
+
+    private void resourceConnection(String nodeId) {
+        if (!openingResourceNode.isBlank() || currentMember(nodeId).filter(value -> !value.isProxy()).isEmpty()) return;
+        String[] serverId = {""};
+        String[] apiKey = {""};
+        TextInputWidget keyInput = secretInput(128, value -> apiKey[0] = value == null ? "" : value);
+        PopupWidget[] popup = new PopupWidget[1];
+        Runnable clear = () -> {
+            keyInput.setText("");
+            apiKey[0] = "";
+            secretInputs.remove(keyInput);
+            popup[0].hide();
+        };
+        PopupWidget.Builder builder = new PopupWidget.Builder("Resource Connection").width(340).onClose(clear)
+                .addTitleAction("Open Resources", () -> {
+                    String canonicalId;
+                    try {
+                        canonicalId = UUID.fromString(serverId[0].trim()).toString();
+                        if (apiKey[0].isBlank()) throw new IllegalArgumentException("ReSync API Key Is Required");
+                    } catch (RuntimeException failure) {
+                        new Notification("Connection Details Invalid", rootMessage(failure), Notification.Type.ERROR);
+                        return;
+                    }
+                    String key = apiKey[0];
+                    clear.run();
+                    openResources(nodeId, canonicalId, key);
+                }, "Open Resources", PopupWidget.TitleActionRole.PRIMARY);
+        builder.addTextField("Server ID", "Use This Server's ReSync Server ID", "", value -> serverId[0] = value == null ? "" : value);
+        builder.addRow(new PopupWidget.PopupRow.Builder("API Key", keyInput).description("Use This Server's ReSync API Key").build());
+        popup[0] = showPopup(builder.build());
+    }
+
+    private void openResources(String nodeId) {
+        openResources(nodeId, "", "");
+    }
+
+    private void openResources(String nodeId, String serverId, String apiKey) {
+        if (!openingResourceNode.isBlank()) return;
+        NetworkMember member = currentMember(nodeId).filter(value -> !value.isProxy()).orElse(null);
+        if (member == null) return;
+        resourceErrors.remove(nodeId);
+        String issue = resourceIssue(member);
+        if (!issue.isBlank()) {
+            new Notification("Resources Unavailable", issue, Notification.Type.WARN);
+            syncResourceRows();
+            return;
+        }
+        openingResourceNode = nodeId;
+        long generation = ++resourceGeneration;
+        syncResourceRows();
+        Async<Void> opening;
+        try {
+            opening = serverId.isBlank() ? provider.openResources(this, networkId, nodeId, () -> generation == resourceGeneration && networkChangeListenerRegistered && currentMember(nodeId).filter(value -> !value.isProxy()).isPresent())
+                    : provider.openResources(this, networkId, nodeId, serverId, apiKey, () -> generation == resourceGeneration && networkChangeListenerRegistered && currentMember(nodeId).filter(value -> !value.isProxy()).isPresent());
+        } catch (RuntimeException failure) {
+            opening = Async.failed(failure);
+        }
+        opening.whenComplete((ignored, failure) -> ScreenManager.getInstance().execute(() -> {
+            if (generation != resourceGeneration || !networkChangeListenerRegistered) return;
+            openingResourceNode = "";
+            if (failure != null) {
+                String message = rootMessage(failure);
+                if ("This Server Needs Its ReSync Server ID And API Key".equals(message)) {
+                    resourceConnection(nodeId);
+                } else {
+                    resourceErrors.put(nodeId, message);
+                    new Notification("Resources Unavailable", message, Notification.Type.ERROR);
+                }
+            }
+            syncResourceRows();
+        }));
     }
 
     private void requestLayout(Container container) {
@@ -373,6 +629,7 @@ public class NetworkOverviewScreen extends ReScreen {
     }
 
     private boolean requireNetworkCapability(String operation) {
+        if (applyingNetworkChange) return false;
         if (networkSupports(operation)) return true;
         NetworkOverviewProvider.NetworkCapability capability = capabilities.get(operation);
         String reason = capability == null || capability.reason().isBlank() ? "Network Operation Is Unavailable" : capability.reason();
@@ -461,6 +718,11 @@ public class NetworkOverviewScreen extends ReScreen {
         entry.setActive(networkSupports("preflight"));
         maintenance.addRow("entry", "", entry);
         if (network.forwarding().mode() == ForwardingMode.MODERN) {
+            if (network.members().stream().anyMatch(member -> !member.isManaged())) {
+                MountableButtonWidget copy = actionRow("Connection Key", "Copy The Proxy's Key To Configure Velocity Forwarding On An External Backend", "shades.png", this::openConnectionKey);
+                copy.setActive(provider.connectionKeyCapability().supported());
+                maintenance.addRow("connectionKey", "", copy);
+            }
             MountableButtonWidget key = actionRow("Replace Connection Key", "Create a new private key shared by the proxy and managed servers. Stop network servers before applying.", "shades.png", this::prepareSecretRotation);
             key.setActive(networkSupports("secretRotation"));
             maintenance.addRow("key", "", key);
@@ -483,6 +745,28 @@ public class NetworkOverviewScreen extends ReScreen {
             runtime.addRow("install", "", install);
         }
         container.addWidget(runtime.build());
+
+        NetworkOverviewProvider.ServerView proxy = instancesById.get(network.proxyInstanceId());
+        if (provider.reactorNetwork() && proxy != null && proxy.managed() && proxy.proxy() && !proxy.serverId().isBlank()) {
+            if (subdomain == null) {
+                subdomain = new ServerSubdomainSettingsController(RemotelyClient.INSTANCE, proxy.serverId(), true);
+                subdomain.network(network.networkId());
+                subdomain.owner(() -> this);
+                subdomain.onChanged(() -> requestLayout(settingsContainer));
+            }
+            subdomain.settings().forEach(container::addWidget);
+        } else if (!provider.reactorNetwork()) {
+            ServerScreenHost host = RemotelyClient.INSTANCE.getHost().serverScreenHost(RemotelyClient.INSTANCE);
+            ServerModels.ClientServerView server = host.reProxyNetworkServer(network.proxyInstanceId());
+            if (server != null) {
+                if (networkAddress == null) {
+                    networkAddress = new ReProxyServerSettingsController(host, server, host.reProxyTarget(server), true);
+                    networkAddress.owner(() -> this);
+                    networkAddress.onChanged(() -> requestLayout(settingsContainer));
+                }
+                networkAddress.getSettings().forEach(container::addWidget);
+            }
+        }
 
         Setting.Builder safety = new Setting.Builder("Network Removal");
         MountableButtonWidget dissolve = actionRow("Dissolve Network", "Restore every managed server to independent operation and remove this network without deleting server files or worlds.", "delete.png", ThemeManager.getAccent("danger"), this::openDissolvePopup);
@@ -883,19 +1167,24 @@ public class NetworkOverviewScreen extends ReScreen {
             row.addMountedWidget(maintenanceMode);
         }
         SquareButtonWidget installReSync = null;
+        SquareButtonWidget reconnectReSync = null;
         if (member.isManaged()) {
             installReSync = rowAction("download.png", "Install ReSync", this::installNetworkReSync, ThemeManager.getAccent("nice"));
             row.addMountedWidget(installReSync);
+            if (!member.isProxy()) {
+                reconnectReSync = rowAction("refresh.png", "Reconnect ReSync", () -> currentMember(nodeId).ifPresent(this::renewServerEnrollment));
+                row.addMountedWidget(reconnectReSync);
+            }
         }
         if (!member.isProxy()) {
             row.addMountedWidget(rowAction("unmerge.png", "Detach", () -> currentMember(nodeId).ifPresent(current -> confirmDetach(current, instancesById.get(current.instanceId()))), ThemeManager.getAccent("danger")));
         }
-        return new MemberActions(acceptPlayers, drainServer, maintenanceMode, installReSync);
+        return new MemberActions(acceptPlayers, drainServer, maintenanceMode, installReSync, reconnectReSync);
     }
 
     private void updateMemberRow(Container container, MountableButtonWidget row, NetworkMember member, NetworkRuntimeSnapshot runtime) {
         NetworkOverviewProvider.ServerView instance = instancesById.get(member.instanceId());
-        NetworkRuntimeNodePresence presence = runtime == null ? null : runtime.node(member.nodeId()).orElse(null);
+        NetworkRuntimeNodePresence presence = runtime == null ? null : runtime.liveNode(member.nodeId(), Clock.system().millis()).orElse(null);
         boolean connected = runtime != null && runtime.connected();
         boolean installed = reSyncInstalled.getOrDefault(member.instanceId(), false);
         String status;
@@ -905,18 +1194,19 @@ public class NetworkOverviewScreen extends ReScreen {
         } else if (member.isManaged() && (!member.resyncEnabled() || !network.runtime().enabled())) {
             status = "ReSync Disabled";
         } else if (member.isProxy()) {
-            status = connected ? "Online" : runtime == null ? "Unavailable" : titleCase(runtime.state().name());
+            status = "ReSync " + (connected ? "Online" : runtime == null ? "Unavailable" : titleCase(runtime.state().name()));
         } else if (presence == null) {
-            status = member.resyncEnabled() ? "Unavailable" : instance == null && member.isManaged() ? "Missing" : "Configured";
+            status = member.resyncEnabled() ? "ReSync " + (runtime == null || connected ? "Unavailable" : titleCase(runtime.state().name())) : instance == null && member.isManaged() ? "Missing" : "Configured";
         } else {
-            status = titleCase(presence.status().name());
-            capacity = " • " + presence.players() + (presence.capacity() > 0 ? "/" + presence.capacity() : "") + " Players";
+            status = "ReSync " + titleCase(presence.status().name());
+            if (presence.status() != NetworkRuntimeNodeStatus.OFFLINE && presence.status() != NetworkRuntimeNodeStatus.REVOKED) capacity = " • " + presence.players() + (presence.capacity() > 0 ? "/" + presence.capacity() : "") + " Players";
         }
         String management = member.isProxy() ? "Proxy" : member.isManaged() ? "Server" : "External Server";
         row.setName(displayName(member));
         row.setIcon(memberIcon(member));
-        row.setDescription(management + capacity);
-        row.setHiddenText(status);
+        row.setDescription(management + " • " + status + capacity);
+        String state = memberState(member);
+        row.setHiddenText(member.isManaged() ? state == null || state.isBlank() ? "Unavailable" : titleCase(state) : status);
         updateMemberActions(member, runtime, presence, installed);
         styleRow(container, row, memberAccent(member, presence, instance), 30);
     }
@@ -926,7 +1216,7 @@ public class NetworkOverviewScreen extends ReScreen {
         if (actions == null) {
             return;
         }
-        boolean available = networkSupports("runtimeControl") && installed && member.resyncEnabled() && network.runtime().enabled() && runtime != null && runtime.connected() && presence != null;
+        boolean available = !applyingNetworkChange && networkSupports("runtimeControl") && installed && member.resyncEnabled() && network.runtime().enabled() && runtime != null && runtime.connected() && presence != null;
         String unavailableHint = !networkSupports("runtimeControl") ? "Runtime Controls Are Unavailable" : !installed || !member.resyncEnabled() || !network.runtime().enabled() ? "Install ReSync To Access This Feature" : "ReSync Is Connecting";
         updateRuntimeAction(actions.acceptPlayers(), "Accept Players", unavailableHint, available);
         updateRuntimeAction(actions.drainServer(), "Drain Server", unavailableHint, available);
@@ -934,9 +1224,26 @@ public class NetworkOverviewScreen extends ReScreen {
         if (actions.installReSync() != null) {
             boolean installAvailable = networkSupports("resync") && (!installed || !member.resyncEnabled() || !network.runtime().enabled());
             actions.installReSync().setVisible(installAvailable);
-            actions.installReSync().setActive(installAvailable);
+            actions.installReSync().setActive(installAvailable && !applyingNetworkChange);
             actions.installReSync().setHint(installAvailable ? "Install ReSync" : "ReSync Installed");
         }
+        if (actions.reconnectReSync() != null) {
+            boolean disconnected = installed && member.resyncEnabled() && network.runtime().enabled()
+                    && (presence == null || presence.status() == NetworkRuntimeNodeStatus.OFFLINE || presence.status() == NetworkRuntimeNodeStatus.REVOKED);
+            actions.reconnectReSync().setVisible(disconnected);
+            actions.reconnectReSync().setActive(disconnected && networkSupports("enrollmentRenewal") && !applyingNetworkChange);
+            actions.reconnectReSync().setHint(networkSupports("enrollmentRenewal") ? "Reset The ReSync Connection, Then Restart This Server" : "ReSync Connection Reset Is Unavailable From This Client");
+        }
+    }
+
+    private void renewServerEnrollment(NetworkMember member) {
+        if (applyingNetworkChange || !requireNetworkCapability("enrollmentRenewal")) return;
+        setApplyingNetworkChange(true);
+        Notification notification = operationNotification("Reconnecting ReSync", displayName(member));
+        provider.renewServerEnrollment(networkId, member.nodeId()).whenComplete((job, failure) -> ScreenManager.getInstance().execute(() -> {
+            setApplyingNetworkChange(false);
+            finishOperation(notification, job, failure, "ReSync Connection Reset");
+        }));
     }
 
     private void updateRuntimeAction(SquareButtonWidget action, String availableHint, String unavailableHint, boolean available) {
@@ -992,11 +1299,23 @@ public class NetworkOverviewScreen extends ReScreen {
         if (networkPowerButton == null || network == null) {
             return;
         }
-        networkPowerButton.setActive(networkSupports("lifecycle"));
+        networkPowerButton.setActive(networkSupports("lifecycle") && !applyingNetworkChange);
         AnimatedWidget saveButton = header().getButtonByImagePath("save.png");
-        if (saveButton != null) saveButton.setActive(networkSupports("save"));
-        networkPowerButton.updateState(networkState());
+        if (saveButton != null) saveButton.setActive(networkSupports("save") && !applyingNetworkChange);
+        if (!applyingNetworkChange) networkPowerButton.updateState(networkState());
         header().requestLayoutUpdate();
+    }
+
+    private void setApplyingNetworkChange(boolean applying) {
+        applyingNetworkChange = applying;
+        updateNetworkPowerButton();
+        if (topologyWidget != null) topologyWidget.setActive(!applying);
+        if (network == null) return;
+        for (NetworkMember member : network.members()) {
+            NetworkRuntimeNodePresence presence = runtimeSnapshot == null ? null
+                    : runtimeSnapshot.liveNode(member.nodeId(), Clock.system().millis()).orElse(null);
+            updateMemberActions(member, runtimeSnapshot, presence, reSyncInstalled.getOrDefault(member.instanceId(), false));
+        }
     }
 
     private void toggleNetworkPower() {
@@ -1014,7 +1333,7 @@ public class NetworkOverviewScreen extends ReScreen {
     private void toggleMemberPower(NetworkMember member) {
         if (member == null) return;
         NetworkOverviewProvider.ServerView instance = instancesById.get(member.instanceId());
-        if (instance == null) {
+        if (instance == null || instance.serverId().isBlank()) {
             new Notification("Server Unavailable", displayName(member), Notification.Type.ERROR);
             return;
         }
@@ -1032,10 +1351,10 @@ public class NetworkOverviewScreen extends ReScreen {
             return;
         }
         if (operation == NetworkLifecycleOperation.START != canStart(instance.state())) return;
-        applyingNetworkChange = true;
+        setApplyingNetworkChange(true);
         Notification notification = operationNotification(operation == NetworkLifecycleOperation.START ? "Starting Server" : "Stopping Server", displayName(member));
-        provider.memberLifecycle(networkId, member.nodeId(), operation).whenComplete((job, throwable) -> ScreenManager.getInstance().execute(() -> {
-            applyingNetworkChange = false;
+        provider.memberLifecycle(networkId, member.nodeId(), operation, operationProgress(notification, "Server")).whenComplete((job, throwable) -> ScreenManager.getInstance().execute(() -> {
+            setApplyingNetworkChange(false);
             if (throwable != null || job == null || job.status() != NetworkLifecycleStatus.SUCCEEDED) {
                 notification.update().message("Server Action Failed").description(throwable == null ? job == null ? "The server action did not finish" : job.message() : rootMessage(throwable)).type(Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
             } else {
@@ -1104,6 +1423,7 @@ public class NetworkOverviewScreen extends ReScreen {
             serversSetting.setRowVisibility("server:" + member.nodeId(), serverSearchQuery.isBlank() || serverSearchText(member).contains(serverSearchQuery));
         }
         requestLayout(serversContainer);
+        syncResourceRows();
     }
 
     private MountableButtonWidget routingRow(RoutingGroup group) {
@@ -1408,10 +1728,13 @@ public class NetworkOverviewScreen extends ReScreen {
         }).build();
         Setting.Builder servers = new Setting.Builder("Network Servers");
         servers.addRow("search", "", search);
-        MountableButtonWidget addServer = actionRow("Add Server", "Add an existing Remotely server or register a server managed elsewhere.", "merge.png", this::openAddServer);
-        addServer.setActive(networkSupports("membership") || networkSupports("externalMembership"));
+        MountableButtonWidget addServer = actionRow("Add Server", "Add An Existing Server Or Create A Server On This Network's Host", "merge.png", this::openAddServer);
+        addServer.setActive(networkSupports("membership"));
         styleRow(container, addServer, ThemeManager.getDefaultAccent(), 30);
         servers.addRow("add", "", addServer);
+        if (networkSupports("externalMembership")) {
+            servers.addRow("external", "", actionRow("Register External Server", "Connect A Server Managed By Another Provider", "merge.png", this::openExternalServer));
+        }
         for (NetworkMember member : network.members()) {
             MountableButtonWidget row = memberRow(container, member, runtimeSnapshot);
             serverRows.put(member.nodeId(), row);
@@ -1424,46 +1747,8 @@ public class NetworkOverviewScreen extends ReScreen {
     }
 
     private void openAddServer() {
-        provider.availableServers(networkId).whenComplete((available, throwable) -> ScreenManager.getInstance().execute(() -> {
-            if (throwable != null) {
-                new Notification("Servers Unavailable", rootMessage(throwable), Notification.Type.ERROR);
-                return;
-            }
-            openAddServer(available);
-        }));
-    }
-
-    private void openAddServer(List<NetworkOverviewProvider.ServerView> available) {
-        List<String> serverIds = available.stream().map(NetworkOverviewProvider.ServerView::id).toList();
-        String[] selectedServer = {serverIds.isEmpty() ? "" : serverIds.getFirst()};
-        List<String> joinRules = new ArrayList<>();
-        joinRules.add("");
-        routingGroups.stream().map(RoutingGroup::id).forEach(joinRules::add);
-        String[] joinRule = {""};
-        PopupWidget[] popup = new PopupWidget[1];
-        Runnable add = () -> {
-            NetworkOverviewProvider.ServerView instance = instancesById.get(selectedServer[0]);
-            if (instance == null) {
-                new Notification("Choose A Server", "Create a server in Remotely first, or register an external server.", Notification.Type.ERROR);
-                return;
-            }
-            popup[0].hide();
-            attachManaged(instance, joinRule[0]);
-        };
-        Runnable external = () -> {
-            popup[0].hide();
-            openExternalServer();
-        };
-        PopupWidget.Builder builder = new PopupWidget.Builder("Add Server").width(260).setExpandWithDropdowns(true).onClose(() -> popup[0].hide())
-            .addTitleAction("External", external, "Register External Server", PopupWidget.TitleActionRole.SECONDARY);
-        if (available.isEmpty()) {
-            builder.addRow(new PopupWidget.PopupRow.Builder("Remotely Servers", inactive("No Available Servers", ThemeManager.getDefaultAccent())).id("available").description("Every existing Remotely server is already part of a network. Create another server first, or register a server that is managed elsewhere.").build());
-        } else {
-            builder.addTitleAction("Add", add, "Add Server", PopupWidget.TitleActionRole.PRIMARY);
-            builder.addDropdown("Server", "Choose a Remotely server that is not already connected to a network.", serverIds, selectedServer[0], this::instanceName, value -> selectedServer[0] = value);
-            builder.addDropdown("Join Rule", "Choose Later leaves the server out of player routing. A named rule makes the server available through that join path.", joinRules, joinRule[0], value -> value.isBlank() ? "Choose Later" : routingGroupName(value), value -> joinRule[0] = value);
-        }
-        popup[0] = showPopup(builder.build());
+        if (applyingNetworkChange || !requireNetworkCapability("membership")) return;
+        ScreenManager.getInstance().setScreen(new NetworkMemberScreen(this, RemotelyClient.INSTANCE, provider, networkId));
     }
 
     private void openExternalServer() {
@@ -1500,49 +1785,16 @@ public class NetworkOverviewScreen extends ReScreen {
         popup[0] = showPopup(builder.build());
     }
 
-    private void attachManaged(NetworkOverviewProvider.ServerView instance, String joinRule) {
-        if (applyingNetworkChange) {
-            return;
-        }
-        if (!network.runtime().enabled()) {
-            runManagedAttach(instance, joinRule, false);
-            return;
-        }
-        PopupWidget[] popup = new PopupWidget[1];
-        PopupWidget.Builder builder = new PopupWidget.Builder("Install ReSync").width(400);
-        builder.addRow(new PopupWidget.PopupRow.Builder("Enable Live Server Features").id("resync").description("Install The Latest ReSync On " + instance.name() + " For Player Controls, Shared Features, Events, And Live Status.").build());
-        builder.addTitleAction("Continue Without ReSync", () -> {
-            popup[0].hide();
-            runManagedAttach(instance, joinRule, false);
-        }, PopupWidget.TitleActionRole.SECONDARY);
-        builder.addTitleAction("Install ReSync", () -> {
-            popup[0].hide();
-            runManagedAttach(instance, joinRule, true);
-        }, PopupWidget.TitleActionRole.PRIMARY);
-        popup[0] = showPopup(builder.build());
-    }
-
-    private void runManagedAttach(NetworkOverviewProvider.ServerView instance, String joinRule, boolean installReSync) {
-        if (!requireNetworkCapability("membership")) return;
-        applyingNetworkChange = true;
-        Notification notification = operationNotification(installReSync ? "Installing ReSync" : "Adding Server", instance.name());
-        provider.attach(networkId, new NetworkOverviewProvider.AttachRequest(instance.id(), joinRule, installReSync))
-            .whenComplete((job, throwable) -> ScreenManager.getInstance().execute(() -> {
-                applyingNetworkChange = false;
-                finishOperation(notification, job, throwable, "Server Added");
-            }));
-    }
-
     private void attachExternal(String name, String address, int port, int capacity, String joinRule) {
         if (applyingNetworkChange) {
             return;
         }
         if (!requireNetworkCapability("externalMembership")) return;
-        applyingNetworkChange = true;
+        setApplyingNetworkChange(true);
         Notification notification = operationNotification("Registering Server", name);
         provider.attachExternal(networkId, new NetworkOverviewProvider.ExternalAttachRequest(name, address, port, capacity, joinRule))
             .whenComplete((job, throwable) -> ScreenManager.getInstance().execute(() -> {
-                applyingNetworkChange = false;
+                setApplyingNetworkChange(false);
                 finishOperation(notification, job, throwable, "Server Registered");
             }));
     }
@@ -1613,7 +1865,7 @@ public class NetworkOverviewScreen extends ReScreen {
                 new Notification("Join Rule Invalid", rootMessage(exception), Notification.Type.ERROR);
             }
         };
-        PopupWidget.Builder builder = new PopupWidget.Builder(existing == null ? "Add Join Rule" : "Edit " + existing.name()).width(300).setResizable(true).setExpandWithDropdowns(true).onClose(() -> popup[0].hide());
+        PopupWidget.Builder builder = new PopupWidget.Builder(existing == null ? "Add Join Rule" : "Edit " + existing.name()).width(390).setResizable(true).setExpandWithDropdowns(true).onClose(() -> popup[0].hide());
         if (existing != null) {
             builder.addTitleAction("Delete", () -> {
                 if (routingGroups.stream().anyMatch(group -> group.fallbackGroupId().equals(existing.id()))) {
@@ -1626,12 +1878,19 @@ public class NetworkOverviewScreen extends ReScreen {
             }, "Delete Join Rule", PopupWidget.TitleActionRole.DESTRUCTIVE);
         }
         builder.addTitleAction(existing == null ? "Add" : "Update", save, existing == null ? "Add Join Rule" : "Update Join Rule", PopupWidget.TitleActionRole.PRIMARY);
+        builder.addMarkdown("", "Enter a short name for this player join rule.");
         builder.addTextField("Name", "Enter a short name for this player join rule.", name[0], value -> name[0] = value);
+        builder.addMarkdown("", "Use Listed Order tries Servers from left to right. Choose Least Busy uses the server with the fewest players. Use Custom Priorities uses the values in Priorities.");
         builder.addScrollSelector("Player Choice", "Use Listed Order tries Servers from left to right. Choose Least Busy uses the server with the fewest players. Use Custom Priorities uses the values in Priorities.", Arrays.stream(RoutingStrategy.values()).map(this::routingStrategyLabel).toList(), strategy[0].ordinal(), index -> strategy[0] = RoutingStrategy.values()[index]);
+        builder.addMarkdown("", "List server names in the order players should try them, separated with commas.");
         builder.addTextField("Servers", "List server names in the order players should try them, separated with commas.", servers[0], value -> servers[0] = value);
+        builder.addMarkdown("", "Only used with Custom Priorities. Enter each server name followed by = and a positive number, such as Survival=3.");
         builder.addTextField("Priorities", "Only used with Custom Priorities. Enter each server name followed by = and a positive number, such as Survival=3.", weights[0], value -> weights[0] = value);
+        builder.addMarkdown("", "Optional addresses that should send players through this rule, such as play.example.com. Separate multiple addresses with commas.");
         builder.addTextField("Join Addresses", "Optional addresses that should send players through this rule, such as play.example.com. Separate multiple addresses with commas.", addresses[0], value -> addresses[0] = value);
+        builder.addMarkdown("", "No Other Rule ends this path when every server is unavailable. A named rule tries that player path next.");
         builder.addDropdown("If Unavailable", "No Other Rule ends this path when every server is unavailable. A named rule tries that player path next.", fallbacks, fallback[0], value -> value.isBlank() ? "No Other Rule" : routingGroupName(value), value -> fallback[0] = value);
+        builder.addMarkdown("", "Optional permission required to use this rule. Leave it empty when every player may use it.");
         builder.addTextField("Access Permission", "Optional permission required to use this rule. Leave it empty when every player may use it.", permission[0], value -> permission[0] = value);
         popup[0] = showPopup(builder.build());
     }
@@ -1702,8 +1961,10 @@ public class NetworkOverviewScreen extends ReScreen {
 
     private void runPreflight() {
         if (!requireNetworkCapability("preflight")) return;
+        setApplyingNetworkChange(true);
         Notification notification = operationNotification("Checking Join Path", network.name());
         provider.preflight(networkId).whenComplete((report, throwable) -> ScreenManager.getInstance().execute(() -> {
+            setApplyingNetworkChange(false);
             if (throwable != null) {
                 notification.update().message("Player Join Check Failed").description(rootMessage(throwable)).type(Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
                 refresh();
@@ -1735,11 +1996,11 @@ public class NetworkOverviewScreen extends ReScreen {
             return;
         }
         if (!requireNetworkCapability("secretRotation")) return;
-        applyingNetworkChange = true;
+        setApplyingNetworkChange(true);
         Notification notification = operationNotification("Refreshing Connection Security", network.name());
         provider.rotateSecret(networkId)
             .whenComplete((job, throwable) -> ScreenManager.getInstance().execute(() -> {
-                applyingNetworkChange = false;
+                setApplyingNetworkChange(false);
                 finishOperation(notification, job, throwable, "Connection Security Refreshed");
             }));
     }
@@ -1764,21 +2025,30 @@ public class NetworkOverviewScreen extends ReScreen {
             return;
         }
         if (!requireNetworkCapability("dissolve")) return;
-        applyingNetworkChange = true;
+        setApplyingNetworkChange(true);
         dissolvePopup.hide();
         Notification notification = operationNotification("Dissolving Network", network.name());
+        BooleanSupplier current = provider.mutationAdmission();
         provider.dissolve(networkId).whenComplete((job, throwable) -> ScreenManager.getInstance().execute(() -> {
-            applyingNetworkChange = false;
+            setApplyingNetworkChange(false);
+            if (!current.getAsBoolean()) {
+                notification.update().message("Account Changed").description("Refresh Your Servers To Check The Network").type(Notification.Type.WARN).loading(false).autoSlideOut(true).commit();
+                return;
+            }
             if (throwable != null) {
-                notification.update().message("Dissolve Failed").description(rootMessage(throwable)).type(Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
+                String message = throwable instanceof HostedNetworkClient.OperationFailure ? "Dissolve Failed" : "Dissolve Not Confirmed";
+                notification.update().message(message).description(rootMessage(throwable)).type(Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
+                refresh();
                 return;
             }
             if (job == null || job.status() != NetworkJobStatus.SUCCEEDED) {
                 notification.update().message("Network Needs Attention").description(job == null ? "Dissolve job did not finish" : job.message()).type(Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
+                refresh();
                 return;
             }
             notification.update().message("Network Dissolved").description(network.name()).type(Notification.Type.SUCCESS).loading(false).autoSlideOut(true).commit();
             ScreenManager.getInstance().goBack(this, parent);
+            if (parent instanceof ServerManagerScreen manager) manager.refreshNetworks(provider.inventoryNetworkId(networkId));
         }));
     }
 
@@ -1788,11 +2058,59 @@ public class NetworkOverviewScreen extends ReScreen {
             return;
         }
         NetworkOverviewProvider.ServerView instance = instancesById.get(member.instanceId());
-        if (instance == null) {
+        if (instance == null || instance.serverId().isBlank()) {
             new Notification("Server Unavailable", displayName(member), Notification.Type.ERROR);
             return;
         }
-        provider.openServer(this, instance.id());
+        provider.openServer(this, instance.serverId());
+    }
+
+    private void openConnectionKey() {
+        if (!provider.connectionKeyCapability().supported()) return;
+        if (!authListenerRegistered) {
+            provider.addAuthStateListener(authListener);
+            authListenerRegistered = true;
+        }
+        connectionKeyCurrent = provider.connectionKeyAdmission();
+        BooleanSupplier admission = connectionKeyCurrent;
+        long generation = ++resourceGeneration;
+        long revision = network.revision();
+        Async<String> request;
+        try {
+            request = provider.connectionKey(networkId);
+        } catch (RuntimeException failure) {
+            request = Async.failed(failure);
+        }
+        request.whenComplete((key, failure) -> ScreenManager.getInstance().execute(() -> {
+            if (generation != resourceGeneration || !networkChangeListenerRegistered || network.revision() != revision || !admission.getAsBoolean()) return;
+            if (failure != null || key == null || key.isBlank()) {
+                new Notification("Connection Key Unavailable", failure == null ? "Apply Network Settings Before Opening The Connection Key" : rootMessage(failure), Notification.Type.ERROR);
+                return;
+            }
+            TextInputWidget input = secretInput(256, value -> {});
+            input.setText(key.trim());
+            PopupWidget[] popup = new PopupWidget[1];
+            Runnable clear = () -> {
+                input.setText("");
+                secretInputs.remove(input);
+                popup[0].hide();
+                connectionKeyPopup = null;
+            };
+            PopupWidget.Builder builder = new PopupWidget.Builder("Connection Key").width(360).onClose(clear)
+                .addTitleAction("Copy Key", () -> {
+                    if (!admission.getAsBoolean()) {
+                        clear.run();
+                        return;
+                    }
+                    client.runtime().clipboardHandler().setClipboard(input.getText());
+                    clear.run();
+                    new Notification("Connection Key Copied", "Use This Key In The External Backend's Velocity Forwarding Settings", Notification.Type.SUCCESS);
+                }, "Copy Key", PopupWidget.TitleActionRole.PRIMARY);
+            builder.addRow(new PopupWidget.PopupRow.Builder("Connection Key", input)
+                .description("Enable Velocity Forwarding On The External Backend With This Key, Then Restrict Its Port To The Proxy").build());
+            popup[0] = showPopup(builder.build());
+            connectionKeyPopup = popup[0];
+        }));
     }
 
     private void confirmDetach(NetworkMember member, NetworkOverviewProvider.ServerView instance) {
@@ -1817,9 +2135,11 @@ public class NetworkOverviewScreen extends ReScreen {
 
     private void setRuntimeMode(NetworkMember member, NetworkRuntimeNodeStatus status) {
         if (!requireNetworkCapability("runtimeControl")) return;
+        setApplyingNetworkChange(true);
         String action = status == NetworkRuntimeNodeStatus.ONLINE ? "Resuming" : status == NetworkRuntimeNodeStatus.DRAINING ? "Draining" : "Starting Maintenance";
         Notification notification = operationNotification(action + " Server", displayName(member));
         provider.runtimeNodeMode(networkId, member.nodeId(), status).whenComplete((unused, throwable) -> ScreenManager.getInstance().execute(() -> {
+            setApplyingNetworkChange(false);
             if (throwable != null) {
                 notification.update().message("Server Update Failed").description(rootMessage(throwable)).type(Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
                 return;
@@ -1840,10 +2160,10 @@ public class NetworkOverviewScreen extends ReScreen {
             new Notification("ReSync Installation Failed", "The Proxy And At Least One Managed Server Are Required", Notification.Type.ERROR);
             return;
         }
-        applyingNetworkChange = true;
+        setApplyingNetworkChange(true);
         Notification notification = operationNotification("Installing ReSync", "Preparing Live Network Features");
         provider.installReSync(networkId).whenComplete((job, throwable) -> ScreenManager.getInstance().execute(() -> {
-            applyingNetworkChange = false;
+            setApplyingNetworkChange(false);
             if (throwable != null || job == null || job.status() != NetworkJobStatus.SUCCEEDED) {
                 notification.update().message("ReSync Installation Failed").description(throwable != null ? rootMessage(throwable) : job == null ? "Network Job Did Not Finish" : job.message()).type(Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
                 refresh();
@@ -1856,9 +2176,11 @@ public class NetworkOverviewScreen extends ReScreen {
 
     private void executeProxyCommand(TextInputWidget input) {
         if (!requireNetworkCapability("command")) return;
+        setApplyingNetworkChange(true);
         String command = input.getText().trim();
         Notification notification = operationNotification("Running Proxy Command", network.name());
         provider.executeProxyCommand(networkId, command).whenComplete((unused, throwable) -> ScreenManager.getInstance().execute(() -> {
+            setApplyingNetworkChange(false);
             if (throwable != null) {
                 notification.update().message("Proxy Command Failed").description(rootMessage(throwable)).type(Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
                 return;
@@ -1870,9 +2192,11 @@ public class NetworkOverviewScreen extends ReScreen {
 
     private void broadcastMessage(TextInputWidget input) {
         if (!requireNetworkCapability("broadcast")) return;
+        setApplyingNetworkChange(true);
         String message = input.getText().trim();
         Notification notification = operationNotification("Broadcasting Message", network.name());
         provider.broadcastMessage(networkId, message).whenComplete((unused, throwable) -> ScreenManager.getInstance().execute(() -> {
+            setApplyingNetworkChange(false);
             if (throwable != null) {
                 notification.update().message("Broadcast Failed").description(rootMessage(throwable)).type(Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
                 return;
@@ -1887,10 +2211,10 @@ public class NetworkOverviewScreen extends ReScreen {
             return;
         }
         if (!requireNetworkCapability("externalMembership")) return;
-        applyingNetworkChange = true;
+        setApplyingNetworkChange(true);
         Notification notification = operationNotification("Detaching External Server", displayName(member));
         provider.detach(networkId, member.nodeId()).whenComplete((job, throwable) -> ScreenManager.getInstance().execute(() -> {
-            applyingNetworkChange = false;
+            setApplyingNetworkChange(false);
             finishOperation(notification, job, throwable, "External Server Removed");
         }));
     }
@@ -1900,10 +2224,10 @@ public class NetworkOverviewScreen extends ReScreen {
             return;
         }
         if (!requireNetworkCapability("membership")) return;
-        applyingNetworkChange = true;
+        setApplyingNetworkChange(true);
         Notification notification = operationNotification("Detaching Server", displayName(member));
         provider.detach(networkId, member.nodeId()).whenComplete((job, throwable) -> ScreenManager.getInstance().execute(() -> {
-            applyingNetworkChange = false;
+            setApplyingNetworkChange(false);
             finishOperation(notification, job, throwable, "Server Detached");
         }));
     }
@@ -1913,25 +2237,33 @@ public class NetworkOverviewScreen extends ReScreen {
             return;
         }
         if (!requireNetworkCapability("reconcile")) return;
-        applyingNetworkChange = true;
+        setApplyingNetworkChange(true);
         boolean enableForwarding = network.forwarding().mode() == ForwardingMode.NONE;
         Notification notification = operationNotification("Reapplying Network Settings", network.name());
         provider.reconcile(networkId).whenComplete((job, throwable) -> ScreenManager.getInstance().execute(() -> {
-            applyingNetworkChange = false;
+            setApplyingNetworkChange(false);
             finishOperation(notification, job, throwable, enableForwarding ? "Modern Forwarding Enabled" : "Network Settings Reapplied");
         }));
     }
 
     private void resume(NetworkJob job) {
         if (!requireNetworkCapability("jobRecovery")) return;
+        setApplyingNetworkChange(true);
         Notification notification = operationNotification("Resuming Network", job.message());
-        provider.resumeJob(networkId, job.jobId()).whenComplete((updated, throwable) -> ScreenManager.getInstance().execute(() -> finishOperation(notification, updated, throwable)));
+        provider.resumeJob(networkId, job.jobId()).whenComplete((updated, throwable) -> ScreenManager.getInstance().execute(() -> {
+            setApplyingNetworkChange(false);
+            finishOperation(notification, updated, throwable);
+        }));
     }
 
     private void rollback(NetworkJob job) {
         if (!requireNetworkCapability("jobRecovery")) return;
+        setApplyingNetworkChange(true);
         Notification notification = operationNotification("Rolling Back Network", job.message());
-        provider.rollbackJob(networkId, job.jobId()).whenComplete((updated, throwable) -> ScreenManager.getInstance().execute(() -> finishOperation(notification, updated, throwable)));
+        provider.rollbackJob(networkId, job.jobId()).whenComplete((updated, throwable) -> ScreenManager.getInstance().execute(() -> {
+            setApplyingNetworkChange(false);
+            finishOperation(notification, updated, throwable);
+        }));
     }
 
     private void lifecycle(NetworkLifecycleOperation operation) {
@@ -1939,24 +2271,60 @@ public class NetworkOverviewScreen extends ReScreen {
             return;
         }
         if (!requireNetworkCapability("lifecycle")) return;
-        applyingNetworkChange = true;
+        setApplyingNetworkChange(true);
         networkPowerButton.updateState(operation == NetworkLifecycleOperation.START ? "STARTING" : "STOPPING");
         header().requestLayoutUpdate();
         Notification notification = operationNotification(titleCase(operation.name()) + " Network", network.name());
-        provider.lifecycle(networkId, operation).whenComplete((job, throwable) -> ScreenManager.getInstance().execute(() -> {
-            applyingNetworkChange = false;
+        provider.lifecycle(networkId, operation, operationProgress(notification, "Network")).whenComplete((job, throwable) -> ScreenManager.getInstance().execute(() -> {
+            setApplyingNetworkChange(false);
             finishLifecycle(notification, job, throwable);
         }));
     }
 
     private void resumeLifecycle(NetworkLifecycleJob job) {
         if (!requireNetworkCapability("lifecycleRecovery")) return;
+        setApplyingNetworkChange(true);
         Notification notification = operationNotification("Resuming " + titleCase(job.operation().name()), job.message());
-        provider.resumeLifecycle(networkId, job.jobId()).whenComplete((updated, throwable) -> ScreenManager.getInstance().execute(() -> finishLifecycle(notification, updated, throwable)));
+        provider.resumeLifecycle(networkId, job.jobId(), operationProgress(notification, "Network")).whenComplete((updated, throwable) -> ScreenManager.getInstance().execute(() -> {
+            setApplyingNetworkChange(false);
+            finishLifecycle(notification, updated, throwable);
+        }));
     }
 
     private Notification operationNotification(String message, String description) {
         return new Notification.Builder().message(message).description(description).type(Notification.Type.INFO).loading(true).autoSlideOut(false).build();
+    }
+
+    private Consumer<NetworkOperationStatus> operationProgress(Notification notification, String scope) {
+        return status -> ScreenManager.getInstance().execute(() -> {
+            String title = switch (status.stage()) {
+                case VALIDATING -> "Checking Network";
+                case PROVISIONING -> "Preparing Servers";
+                case PLANNING -> "Preparing Network";
+                case APPLYING -> "Configuring Network";
+                case LIFECYCLE -> status.lifecycleJob() == null ? "Updating " + scope : switch (status.lifecycleJob().operation()) {
+                    case START -> "Starting " + scope;
+                    case STOP -> "Stopping " + scope;
+                    case RESTART, ROLLING_RESTART -> "Restarting " + scope;
+                    case DRAIN -> "Draining " + scope;
+                };
+                case VERIFYING -> "Checking Servers";
+                case ROLLBACK -> "Restoring Network";
+                case COMPLETE -> "Finishing Network Action";
+            };
+            List<String> details = new ArrayList<>();
+            details.add(network == null ? "Network" : network.name());
+            if (status.state() == NetworkOperationState.ADMITTED) details.add("Request Accepted");
+            else if (!status.message().isBlank()) details.add(status.message());
+            if (status.lifecycleJob() != null && !status.lifecycleJob().steps().isEmpty()) {
+                long completed = status.lifecycleJob().steps().stream().filter(step -> switch (step.status()) {
+                    case SUCCEEDED, SKIPPED -> true;
+                    default -> false;
+                }).count();
+                details.add(completed + " Of " + status.lifecycleJob().steps().size() + " Steps Complete");
+            }
+            notification.update().message(title).description(String.join(" • ", details)).commit();
+        });
     }
 
     private void finishOperation(Notification notification, NetworkJob job, Throwable throwable) {
@@ -2019,7 +2387,7 @@ public class NetworkOverviewScreen extends ReScreen {
                 return;
             }
             network = state.network();
-            instances = state.servers();
+            instances = liveServers(state.servers());
             instancesById.clear();
             instances.forEach(instance -> instancesById.put(instance.id(), instance));
             discovery = state.discovery();
@@ -2053,6 +2421,7 @@ public class NetworkOverviewScreen extends ReScreen {
             }
             overviewContainer.updateWidgetPositions();
             serversContainer.updateWidgetPositions();
+            resourcesContainer.updateWidgetPositions();
             sharingContainer.updateWidgetPositions();
         }));
     }
@@ -2079,6 +2448,34 @@ public class NetworkOverviewScreen extends ReScreen {
         }
     }
 
+    private List<NetworkOverviewProvider.ServerView> liveServers(List<NetworkOverviewProvider.ServerView> servers) {
+        return servers.stream().map(server -> observedServerStates.containsKey(server.id()) ? withState(server, observedServerStates.get(server.id())) : server).toList();
+    }
+
+    private NetworkOverviewProvider.ServerView withState(NetworkOverviewProvider.ServerView server, String state) {
+        return server.state().equals(state) ? server : new NetworkOverviewProvider.ServerView(server.id(), server.name(), server.proxy(), server.managed(), server.hostScope(), server.address(), server.port(), state, server.icon(), server.serverId());
+    }
+
+    private void queueServerState(String serverId, String state) {
+        long generation = serverStateGeneration;
+        ScreenManager.getInstance().execute(() -> {
+            if (!serverStateListenerRegistered || generation != serverStateGeneration) return;
+            observedServerStates.put(serverId, state);
+            NetworkOverviewProvider.ServerView current = instancesById.get(serverId);
+            if (current == null || current.state().equals(state)) return;
+            NetworkOverviewProvider.ServerView updated = withState(current, state);
+            instancesById.put(serverId, updated);
+            instances = instances.stream().map(instance -> instance.id().equals(serverId) ? updated : instance).toList();
+            updateNetworkPowerButton();
+            if (network != null && serversContainer != null) {
+                for (NetworkMember member : network.members()) {
+                    MountableButtonWidget row = serverRows.get(member.nodeId());
+                    if (row != null && member.instanceId().equals(serverId)) updateMemberRow(serversContainer, row, member, runtimeSnapshot);
+                }
+            }
+        });
+    }
+
     private void queueRuntimeSnapshot(NetworkRuntimeSnapshot snapshot) {
         if (snapshot == null || !networkId.equals(snapshot.networkId())) {
             return;
@@ -2095,6 +2492,7 @@ public class NetworkOverviewScreen extends ReScreen {
             return;
         }
         runtimeSnapshot = latest;
+        syncResourceRows();
         if (network == null || serversContainer == null) {
             return;
         }
@@ -2115,7 +2513,20 @@ public class NetworkOverviewScreen extends ReScreen {
 
     @Override
     public void removed() {
+        if (subdomain != null) subdomain.close();
+        subdomain = null;
+        if (networkAddress != null) networkAddress.cleanup();
+        networkAddress = null;
+        clearSecretInputs();
+        if (authListenerRegistered) provider.removeAuthStateListener(authListener);
+        authListenerRegistered = false;
+        serverStateListenerRegistered = false;
+        serverStateGeneration++;
+        observedServerStates.clear();
+        provider.removeServerStateListener(serverStateListener);
         refreshGeneration++;
+        resourceGeneration++;
+        openingResourceNode = "";
         playerGroupEditors.values().forEach(PlayerGroupEditor::close);
         playerGroupEditors.clear();
         if (networkChangeListenerRegistered) {
@@ -2241,7 +2652,7 @@ public class NetworkOverviewScreen extends ReScreen {
     private record AttentionItem(String id, String title, String description, String detail, boolean blocking, NetworkMember member) {
     }
 
-    private record MemberActions(SquareButtonWidget acceptPlayers, SquareButtonWidget drainServer, SquareButtonWidget maintenanceMode, SquareButtonWidget installReSync) {
+    private record MemberActions(SquareButtonWidget acceptPlayers, SquareButtonWidget drainServer, SquareButtonWidget maintenanceMode, SquareButtonWidget installReSync, SquareButtonWidget reconnectReSync) {
     }
 
 }

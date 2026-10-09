@@ -9,6 +9,7 @@ import redxax.oxy.remotely.network.NetworkRuntimeNodePresence;
 import redxax.oxy.remotely.network.NetworkRuntimeNodeStatus;
 import redxax.oxy.remotely.network.NetworkRuntimeSnapshot;
 import redxax.oxy.remotely.network.NetworkTopologyHeat;
+import restudio.rescreen.platform.Clock;
 import restudio.rescreen.platform.IDrawContext;
 import restudio.rescreen.platform.input.ReMouseButton;
 import restudio.rescreen.platform.input.ReMouseEvent;
@@ -282,8 +283,10 @@ public class NetworkTopologyWidget extends AnimatedWidget {
             MountableButtonWidget button = node.button;
             Object state = memberState == null ? null : memberState.apply(member);
             NetworkRuntimeNodePresence presence = livePresence(runtime, member).orElse(null);
+            if (selectedHeat != NetworkTopologyHeat.STATUS && presence != null && (presence.status() == NetworkRuntimeNodeStatus.OFFLINE || presence.status() == NetworkRuntimeNodeStatus.REVOKED)) presence = null;
             button.setDescription(detail(member, state, presence));
-            button.setHiddenText(member.isProxy() ? "Proxy" : member.isManaged() ? "Server" : "External Server");
+            String kind = member.isProxy() ? "Proxy" : member.isManaged() ? "Server" : "External Server";
+            button.setHiddenText(selectedHeat == NetworkTopologyHeat.STATUS && member.isManaged() ? titleCase(stateName(state).isBlank() ? "Unavailable" : stateName(state)) : kind);
             button.setAccent(accent(member, state, presence, runtime));
             if (node.power != null) {
                 node.power.updateState(stateName(state));
@@ -354,6 +357,10 @@ public class NetworkTopologyWidget extends AnimatedWidget {
             return failures + (failures == 1 ? " Failed Transfer" : " Failed Transfers") + " In 24 Hours";
         }
         if (presence == null) {
+            if (selectedHeat == NetworkTopologyHeat.STATUS && member.resyncEnabled() && network.runtime().enabled()) {
+                NetworkRuntimeSnapshot runtime = snapshot();
+                return "ReSync " + (runtime != null && runtime.connected() && member.isProxy() ? "Online" : runtime == null || runtime.connected() ? "Unavailable" : titleCase(runtime.state().name()));
+            }
             return member.address() + ":" + member.port();
         }
         return switch (selectedHeat) {
@@ -367,10 +374,10 @@ public class NetworkTopologyWidget extends AnimatedWidget {
 
     private String presenceDetail(NetworkRuntimeNodePresence presence) {
         if (presence.status() != NetworkRuntimeNodeStatus.ONLINE) {
-            return titleCase(presence.status().name());
+            return "ReSync " + titleCase(presence.status().name());
         }
         if (presence.capacity() < 1 && presence.tps() < 0) {
-            return "Online";
+            return "ReSync Online";
         }
         String players = presence.capacity() > 0 ? presence.players() + "/" + presence.capacity() + " Players" : presence.players() + " Players";
         return presence.tps() < 0 ? players : players + " • " + String.format(Locale.ROOT, "%.1f TPS", presence.tps());
@@ -420,7 +427,7 @@ public class NetworkTopologyWidget extends AnimatedWidget {
     }
 
     private Optional<NetworkRuntimeNodePresence> livePresence(NetworkRuntimeSnapshot runtime, NetworkMember member) {
-        return runtime == null ? Optional.empty() : runtime.node(member.nodeId());
+        return runtime == null ? Optional.empty() : runtime.liveNode(member.nodeId(), Clock.system().millis());
     }
 
     private NetworkRuntimeSnapshot snapshot() {

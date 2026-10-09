@@ -19,6 +19,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -34,6 +35,8 @@ final class ResourceAllocationBarWidget extends ResourceBarWidget implements Sto
 
     private final PoolAllocationEditor editor;
     private final PoolCreationPreview creation;
+    private NetworkPoolBudget network;
+    private BooleanSupplier editable = () -> true;
     private final PoolAllocationEditor.Resource resource;
     private List<StoragePart> storageParts;
     private BigInteger storageCapacity;
@@ -48,6 +51,7 @@ final class ResourceAllocationBarWidget extends ResourceBarWidget implements Sto
     private HoveredServer lastHoveredServer;
     private boolean dragging;
     private String draggedServerId;
+    private String draggedPreviewId;
     private BigInteger dragBase = BigInteger.ZERO;
     private BigInteger dragStartValue = BigInteger.ZERO;
     private double dragStartX;
@@ -85,6 +89,30 @@ final class ResourceAllocationBarWidget extends ResourceBarWidget implements Sto
         this.names = names;
         initializeHover();
         refresh();
+    }
+
+    ResourceAllocationBarWidget(PoolAllocationEditor.Resource resource, Function<String, String> names) {
+        super(title(resource), icon(resource), unit(resource));
+        editor = null;
+        creation = null;
+        this.resource = resource;
+        allocations = List.of();
+        this.names = names;
+        initializeHover();
+    }
+
+    void setNetwork(NetworkPoolBudget budget) {
+        if (network != budget) {
+            dragging = false;
+            draggedPreviewId = null;
+            setImmediate(false);
+            network = budget;
+        }
+        refresh();
+    }
+
+    void editable(BooleanSupplier value) {
+        editable = value;
     }
 
     ResourceAllocationBarWidget(String title, List<StoragePart> parts, BigInteger capacityBytes) {
@@ -154,6 +182,14 @@ final class ResourceAllocationBarWidget extends ResourceBarWidget implements Sto
     void refresh() {
         if (storageParts != null) {
             refreshStorage();
+            return;
+        }
+        if (network != null) {
+            refreshNetwork();
+            return;
+        }
+        if (creation == null && editor == null) {
+            setSegments(List.of(), BigInteger.ONE);
             return;
         }
         List<Segment> next = new ArrayList<>(allocations.size() + 3);
@@ -234,13 +270,39 @@ final class ResourceAllocationBarWidget extends ResourceBarWidget implements Sto
         BigInteger free = creation == null ? editor.previewAvailable(resource) : creation.free(resource);
         BigInteger scale = (creation == null ? editor.total(resource) : creation.total(resource)).max(used.add(free)).max(BigInteger.ONE);
         BigInteger unavailable = scale.subtract(used).subtract(free).max(BigInteger.ZERO);
-        next.add(new Segment("free", "Free", free,
-                Style.theme(ThemeColor.inClickableBackground, ThemeColor.inClickableBorder, ThemeColor.inClickableBackground, ThemeColor.globalOuterBorder),
-                "Available Now", false, false, creation == null ? "" : "Drag To Allocate"));
-        next.add(new Segment("unavailable", "Unavailable", unavailable,
-                Style.theme(ThemeColor.innerBackground, ThemeColor.innerBorder, ThemeColor.innerBackground, ThemeColor.globalOuterBorder),
-                "Not Available", false, false, ""));
+        next.add(freePart(free, creation == null ? "" : "Drag To Allocate"));
+        next.add(unavailablePart(unavailable));
         setSegments(next, scale);
+    }
+
+    private void refreshNetwork() {
+        List<Segment> next = new ArrayList<>(network.previews().size() + 3);
+        BigInteger used = network.committed(resource).add(network.used(resource));
+        next.add(new Segment("other", "Other Servers", network.committed(resource),
+                Style.theme(ThemeColor.elementHoverBackground, ThemeColor.innerBorder, ThemeColor.inClickableBackground, ThemeColor.globalOuterBorder),
+                "", false, false, ""));
+        int index = 0;
+        for (Map.Entry<String, PoolCreationPreview> entry : network.previews().entrySet()) {
+            next.add(new Segment("preview:" + entry.getKey(), names.apply(entry.getKey()), entry.getValue().reserved(resource),
+                    Style.accent(index++), "Preview", false, false, "Drag Divider To Allocate"));
+        }
+        BigInteger free = network.free(resource);
+        BigInteger scale = network.total(resource).max(used.add(free)).max(BigInteger.ONE);
+        next.add(freePart(free, ""));
+        next.add(unavailablePart(scale.subtract(used).subtract(free).max(BigInteger.ZERO)));
+        setSegments(next, scale);
+    }
+
+    private static Segment freePart(BigInteger amount, String hint) {
+        return new Segment("free", "Free", amount,
+                Style.theme(ThemeColor.inClickableBackground, ThemeColor.inClickableBorder, ThemeColor.inClickableBackground, ThemeColor.globalOuterBorder),
+                "Available Now", false, false, hint);
+    }
+
+    private static Segment unavailablePart(BigInteger amount) {
+        return new Segment("unavailable", "Unavailable", amount,
+                Style.theme(ThemeColor.innerBackground, ThemeColor.innerBorder, ThemeColor.innerBackground, ThemeColor.globalOuterBorder),
+                "Not Available", false, false, "");
     }
 
     private void refreshStorage() {
@@ -311,6 +373,8 @@ final class ResourceAllocationBarWidget extends ResourceBarWidget implements Sto
         if (event.button() != ReMouseButton.LEFT || !isMouseOver(event.x(), event.y())) {
             return super.mouseClicked(event);
         }
+        if (!editable.getAsBoolean()) return super.mouseClicked(event);
+        if (network != null) return startNetworkDrag(event.x()) ? event.finish(true) : super.mouseClicked(event);
         if (startServerDrag(event.x())) return event.finish(true);
         if (creation == null || creation.available(resource).compareTo(PoolCreationPreview.minimum(resource)) < 0) {
             return super.mouseClicked(event);
@@ -335,6 +399,32 @@ final class ResourceAllocationBarWidget extends ResourceBarWidget implements Sto
         setImmediate(true);
         if (!event.modifiers().shift()) moveBoundary(event.x(), false);
         return event.finish(true);
+    }
+
+    private boolean startNetworkDrag(double mouseX) {
+        int bestIndex = -1;
+        double nearest = 7;
+        List<Segment> parts = segments();
+        for (int i = 0; i < parts.size(); i++) {
+            Segment part = parts.get(i);
+            if (!part.key().startsWith("preview:") || part.amount().signum() <= 0) continue;
+            double distance = Math.abs(mouseX - boundaryAt(i));
+            if (distance < nearest) {
+                nearest = distance;
+                bestIndex = i;
+            }
+        }
+        if (bestIndex < 0) return false;
+        String id = parts.get(bestIndex).key().substring("preview:".length());
+        PoolCreationPreview preview = network.previews().get(id);
+        if (preview == null) return false;
+        draggedPreviewId = id;
+        dragBase = parts.subList(0, bestIndex).stream().map(Segment::amount).reduce(BigInteger.ZERO, BigInteger::add);
+        dragStartValue = preview.value(resource);
+        dragStartX = mouseX;
+        dragging = true;
+        setImmediate(true);
+        return true;
     }
 
     private boolean startServerDrag(double mouseX) {
@@ -372,7 +462,7 @@ final class ResourceAllocationBarWidget extends ResourceBarWidget implements Sto
 
     @Override
     public boolean mouseDragged(ReMouseEvent event) {
-        if (!dragging || event.button() != ReMouseButton.LEFT) return super.mouseDragged(event);
+        if (!dragging || event.button() != ReMouseButton.LEFT || !editable.getAsBoolean()) return super.mouseDragged(event);
         moveBoundary(event.x(), event.modifiers().shift());
         return event.finish(true);
     }
@@ -383,6 +473,7 @@ final class ResourceAllocationBarWidget extends ResourceBarWidget implements Sto
         dragging = false;
         setImmediate(false);
         draggedServerId = null;
+        draggedPreviewId = null;
         return event.finish(true);
     }
 
@@ -391,6 +482,7 @@ final class ResourceAllocationBarWidget extends ResourceBarWidget implements Sto
         dragging = false;
         setImmediate(false);
         draggedServerId = null;
+        draggedPreviewId = null;
         super.onRelease(mouseX, mouseY);
     }
 
@@ -400,7 +492,16 @@ final class ResourceAllocationBarWidget extends ResourceBarWidget implements Sto
         BigInteger amount = fine ? dragStartValue.add(BigInteger.valueOf(Math.round(mouseX - dragStartX)))
                 : new BigDecimal(capacity()).multiply(BigDecimal.valueOf(Math.clamp(mouseX - left, 0, span)))
                 .divide(BigDecimal.valueOf(span), 0, RoundingMode.HALF_UP).toBigInteger().subtract(dragBase);
-        if (draggedServerId != null) {
+        if (draggedPreviewId != null && network != null) {
+            PoolCreationPreview preview = network.previews().get(draggedPreviewId);
+            if (preview == null) return;
+            BigInteger previous = preview.value(resource);
+            BigInteger bounded = amount.max(PoolCreationPreview.minimum(resource)).min(preview.editLimit(resource));
+            if (preview.set(resource, bounded) && !previous.equals(preview.value(resource))) {
+                refresh();
+                onChange.run();
+            }
+        } else if (draggedServerId != null) {
             if (editor.selected() == null || !draggedServerId.equals(editor.selected().serverId())) return;
             BigInteger previous = editor.value(resource);
             if (editor.propose(resource, amount) && !previous.equals(editor.value(resource))) onChange.run();

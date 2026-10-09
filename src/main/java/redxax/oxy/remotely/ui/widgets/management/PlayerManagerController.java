@@ -486,8 +486,10 @@ public class PlayerManagerController {
 
     private void unifiedPlayersFailed(UnifiedPlayerSource source, Throwable failure) {
         if (source != unifiedPlayerSource) return;
-        String reason = failure == null || failure.getMessage() == null || failure.getMessage().isBlank()
-                ? "Could Not Load Players" : failure.getMessage();
+        Throwable cause = failure;
+        while (cause != null && cause.getCause() != null && cause.getCause() != cause) cause = cause.getCause();
+        String reason = cause == null || cause.getMessage() == null || cause.getMessage().isBlank()
+                ? "Could Not Load Players" : cause.getMessage();
         setLoadState(LoadState.FAILED, reason);
     }
 

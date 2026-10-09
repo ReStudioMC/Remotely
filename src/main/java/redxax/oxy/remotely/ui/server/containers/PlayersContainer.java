@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -172,9 +173,12 @@ public class PlayersContainer extends SelectableContainer {
             boolean loading = state == PlayerManagerController.LoadState.LOADING;
             boolean failed = state == PlayerManagerController.LoadState.FAILED;
             String failure = controller == null ? "Player Management Is Unavailable" : controller.getLoadFailure();
-            emptyMessage.setMessage(!available ? availability.reason() : failed ? failure : loading ? "Loading Players" : "No Players Found");
-            emptyMessage.setIcon(!available || failed ? "report.png" : loading ? "remotely.png" : "emptyFolder.png");
-            emptyMessage.setPosition(getX() + (getWidth() - emptyMessage.getWidth()) / 2, getY() + (getHeight() - emptyMessage.getHeight()) / 2);
+            String message = !available ? availability.reason() : failed ? failure : loading ? "Loading Players" : "No Players Found";
+            String icon = !available || failed ? "report.png" : loading ? "remotely.png" : "emptyFolder.png";
+            if (!Objects.equals(emptyMessage.getMessage(), message)) emptyMessage.setMessage(message);
+            if (!Objects.equals(emptyMessage.iconPath, icon)) emptyMessage.setIcon(icon);
+            emptyMessage.setPosition(getX() + (getWidth() - emptyMessage.getWidth()) / 2,
+                    getY() + Math.max(0, (getHeight() - emptyMessage.getContentHeight()) / 2));
             emptyMessage.render(ctx, mouseX, mouseY, 0f);
         }
         super.drawContent(ctx, mouseX, mouseY);

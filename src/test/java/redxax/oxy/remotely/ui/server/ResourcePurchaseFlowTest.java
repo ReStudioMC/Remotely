@@ -43,11 +43,10 @@ class ResourcePurchaseFlowTest {
         assertTrue(row(fixture.flow, "resource-0").visible);
         assertFalse(row(fixture.flow, "resource-1").visible);
         assertFalse(row(fixture.flow, "resource-2").visible);
-        assertFalse(row(fixture.flow, "resource-3").visible);
         assertEquals("$22.40 / 30 Days", card(fixture.flow, "summary").name);
         assertTrue(card(fixture.flow, "summary").description.contains("8 GB RAM"));
         assertTrue(card(fixture.flow, "summary").description.contains("4 Shared CPU"));
-        assertTrue(card(fixture.flow, "summary").description.contains("64 GB Storage"));
+        assertTrue(card(fixture.flow, "summary").description.contains("64 GB Disk"));
         assertTrue(row(fixture.flow, "renewal").visible);
         assertEquals("Renews At $22.40 Every 30 Days", card(fixture.flow, "renewal").name);
         enter(fixture.flow, 0, "12");
@@ -63,7 +62,7 @@ class ResourcePurchaseFlowTest {
         assertEquals("2", slider(fixture.flow, 1).label);
         assertTrue(row(fixture.flow, "disk-terms").visible);
         assertTrue(card(fixture.flow, "disk-terms").description.contains("3x Unit Rate"));
-        assertTrue(card(fixture.flow, "disk-terms").description.contains("32 Extra GB Storage In This Price"));
+        assertTrue(card(fixture.flow, "disk-terms").description.contains("32 Extra GB Disk In This Price"));
         assertEquals("$20.80 / 30 Days", card(fixture.flow, "summary").name);
     }
 
@@ -119,13 +118,15 @@ class ResourcePurchaseFlowTest {
         assertEquals("16", slider(fixture.flow, 0).label);
         assertEquals("10", slider(fixture.flow, 1).label);
         assertEquals("96", slider(fixture.flow, 2).label);
-        assertEquals("8", slider(fixture.flow, 3).label);
+        assertEquals("8192", fixture.controller.snapshot().pools().getFirst().pool().balance().entitled().backupMiB());
         click(fixture.flow, "advanced", 0);
         enter(fixture.flow, 0, "24");
         assertEquals("10", slider(fixture.flow, 1).label);
         assertEquals("96", slider(fixture.flow, 2).label);
-        assertEquals("8", slider(fixture.flow, 3).label);
         assertTrue(card(fixture.flow, "renewal").description.contains("Before Unused Time Credit"));
+        click(fixture.flow, "form-actions", 0);
+        assertEquals(new ResourcePoolModels.Resources("24576", "1000", "98304", "0"), fixture.requests.getFirst().resources());
+        assertEquals("8192", fixture.controller.snapshot().pools().getFirst().pool().balance().entitled().backupMiB());
     }
 
     @Test
@@ -135,6 +136,8 @@ class ResourcePurchaseFlowTest {
         ResourcePoolModels.Offer larger = new ResourcePoolModels.Offer("larger", "Larger Catalog Configuration", current.planId(), current.planName(), current.location(), current.locationLabel(),
                 current.cpuClass(), current.cpuClassLabel(), "24576", "1200", "65536", "0", "4000", "USD", "Every 30 Days");
         UUID poolId = fixture.controller.snapshot().pools().getFirst().pool().id();
+        field(fixture.controller, "snapshot", new ResourcePoolController.Snapshot("account", fixture.controller.snapshot().pools(),
+                List.of(current, larger), List.of(), false, "", 0));
         ResourcePurchaseFlow flow = new ResourcePurchaseFlow(fixture.controller, List.of(current, larger), poolId, 800, 600, Runnable::run, () -> false,
                 (intent, selected, quote) -> { throw new AssertionError("Checkout Must Not Run"); });
         @SuppressWarnings("unchecked")
@@ -143,7 +146,10 @@ class ResourcePurchaseFlowTest {
         assertEquals("24", slider(flow, 0).label);
         assertEquals("12", slider(flow, 1).label);
         assertEquals("96", slider(flow, 2).label);
-        assertEquals("8", slider(flow, 3).label);
+        click(flow, "form-actions", 0);
+        assertEquals(new ResourcePoolModels.Resources("24576", "1200", "98304", "0"), fixture.requests.getFirst().resources());
+        assertEquals("8192", fixture.controller.snapshot().pools().getFirst().pool().balance().entitled().backupMiB());
+        assertEquals("Review Purchase", flow.popup().getTitle());
     }
 
     @Test
@@ -245,7 +251,7 @@ class ResourcePurchaseFlowTest {
                 requests.add(request);
                 ResourcePricePreview.Price preview = new ResourcePricePreview(rate).price(request.resources(), Instant.now());
                 ResourcePoolModels.Price price = new ResourcePoolModels.Price("USD", 30, request.resources(), preview.subtotalCents(), "0", "0", "0", preview.subtotalCents(), preview.discountCents(), preview.firstPeriodCents(), preview.renewalCents(), "");
-                lastQuote = new ResourcePoolModels.Quote(request.requestId(), offer.id(), planId, "product", domain, rate.pricingRevision(), price, Instant.now().toString(), Instant.now().plusSeconds(900).toString(), poolId, "0", preview.firstPeriodCents());
+                lastQuote = new ResourcePoolModels.Quote(request.requestId(), request.offerId(), planId, "product", domain, rate.pricingRevision(), price, Instant.now().toString(), Instant.now().plusSeconds(900).toString(), poolId, "0", preview.firstPeriodCents());
                 if (delayQuote) {
                     pending = Async.pending();
                     return pending;

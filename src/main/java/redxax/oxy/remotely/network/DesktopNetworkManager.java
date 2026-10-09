@@ -1,5 +1,7 @@
 package redxax.oxy.remotely.network;
 
+import redxax.oxy.remotely.data.flow.ReSyncFrameTransport;
+
 import redxax.oxy.remotely.util.TaskSchedulers;
 
 import redxax.oxy.remotely.util.AsyncTools;
@@ -7,6 +9,9 @@ import redxax.oxy.remotely.util.AsyncTools;
 import redxax.oxy.remotely.util.BrowserSafeState;
 import redxax.oxy.remotely.DesktopRemotelyPaths;
 import redxax.oxy.remotely.flow.ui.ReSyncProvisioningService;
+import redxax.oxy.remotely.servers.JvmReProxyConnectorCapability;
+import redxax.oxy.remotely.servers.ReProxyManager;
+import restudio.rebase.reproxy.ReProxyModels.AddressSpec;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
@@ -15,7 +20,12 @@ import redxax.oxy.remotely.network.config.NetworkConfigurationAdapter;
 import redxax.oxy.remotely.network.config.NetworkConfigurationAdapters;
 import redxax.oxy.remotely.network.config.DesktopStructuredDocumentParser;
 import restudio.rebase.api.unified.InstanceApi;
+import restudio.rebase.backend.ServerBackend;
+import restudio.rebase.backend.BackendConfig;
+import restudio.rebase.backend.feature.PortForwardFeature;
+import restudio.rebase.backend.impl.LocalBackend;
 import restudio.rebase.instance.Instance;
+import restudio.rebase.instance.InstanceManager;
 import restudio.rebase.instance.InstanceState;
 import restudio.rebase.instance.loaders.ModLoader;
 import restudio.rescreen.platform.Clock;
@@ -31,10 +41,12 @@ import restudio.resync.network.NetworkSnapshotMetadata;
 import restudio.resync.network.NetworkStateReconciliationRequest;
 import restudio.resync.network.PlayerTransfer;
 
+import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -51,6 +63,7 @@ import restudio.rebase.platform.jvm.JvmAsyncBridge;
 
 
 import java.util.function.Consumer;
+import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -82,6 +95,13 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
     private final List<Consumer<List<NetworkDefinition>>> listeners = BrowserSafeState.list();
     private volatile NetworkCatalog networkCatalog = NetworkCatalog.empty();
     private volatile List<Instance> runtimeInstances = List.of();
+    private final Object runtimeEndpointLock = new Object();
+    private volatile Map<String, RuntimeEndpoint> runtimeEndpoints = Map.of();
+    private long endpointGeneration;
+
+    private record RuntimeEndpoint(Instance instance, BackendConfig config, String path, String type, Map<String, String> credentials, long revision, String stamp) {
+    }
+
     private volatile String loadError = "";
 
     public DesktopNetworkManager(Path applicationDirectory) {
@@ -104,7 +124,41 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
         this.secretStore = new NetworkSecretStore();
         this.runtimeScheduler = Objects.requireNonNull(scheduler, "scheduler");
         this.ownsRuntimeScheduler = ownsRuntimeScheduler;
-        this.runtimeMonitor = new NetworkRuntimeMonitor(secretStore, webSocketTransport, scheduler, clock);
+        this.runtimeMonitor = new NetworkRuntimeMonitor(new NetworkRuntimeMonitor.Access() {
+            @Override
+            public String credential(String networkId, String nodeId) {
+                return secretStore.resolveRuntimeCredential(networkId, nodeId);
+            }
+
+            @Override
+            public void saveCredential(String networkId, String nodeId, String credential) {
+                secretStore.saveRuntimeCredential(networkId, nodeId, credential);
+            }
+
+            @Override
+            public boolean saveCredential(String networkId, String nodeId, String credential, String expectedStamp) {
+                synchronized (runtimeEndpointLock) {
+                    if (!Objects.equals(runtimeEndpointStamp(networkId), expectedStamp)) return false;
+                    secretStore.saveRuntimeCredential(networkId, nodeId, credential);
+                    return true;
+                }
+            }
+
+            @Override
+            public String enrollmentToken(String networkId, String nodeId) {
+                return secretStore.getOrCreateEnrollmentToken(networkId, nodeId);
+            }
+
+            @Override
+            public String endpointStamp(String networkId) {
+                return runtimeEndpointStamp(networkId);
+            }
+
+            @Override
+            public Async<NetworkRuntimeMonitor.Endpoint> open(String networkId, NetworkRuntimePolicy policy) {
+                return Async.supplyAsync(() -> openRuntimeEndpoint(networkId, policy));
+            }
+        }, webSocketTransport, scheduler, clock);
         this.incidentManager = new NetworkIncidentManager(dataDirectory);
         this.runtimeMonitor.addListener(this::observeRuntimeIncidents);
         this.runtimeMonitor.addEventListener(this::observeRuntimeEvent);
@@ -121,6 +175,76 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
         reload();
     }
 
+    private synchronized void refreshRuntime(Collection<NetworkDefinition> definitions, Collection<Instance> instances) {
+        List<Instance> snapshot = instances == null ? List.of() : List.copyOf(instances);
+        Map<String, Instance> indexed = indexInstances(snapshot);
+        Map<String, RuntimeEndpoint> admitted = new LinkedHashMap<>();
+        Map<String, RuntimeEndpoint> previous = runtimeEndpoints;
+        for (NetworkDefinition network : definitions) {
+            NetworkMember proxy = network.proxyMember();
+            Instance instance = proxy == null ? null : indexed.get(proxy.instanceId());
+            BackendConfig config = instance == null ? null : instance.getBackendConfig();
+            String path = instance == null ? "" : instance.getPath();
+            String type = config == null ? "" : config.type;
+            Map<String, String> credentials = config == null || config.credentials == null ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(config.credentials));
+            RuntimeEndpoint current = previous.get(network.networkId());
+            if (current == null || current.instance() != instance || current.config() != config || !Objects.equals(current.path(), path)
+                    || !Objects.equals(current.type(), type) || !current.credentials().equals(credentials) || current.revision() != network.revision()) {
+                current = new RuntimeEndpoint(instance, config, path, type, credentials, network.revision(), Long.toString(++endpointGeneration));
+            }
+            admitted.put(network.networkId(), current);
+        }
+        Map<String, RuntimeEndpoint> prepared = Map.copyOf(admitted);
+        synchronized (runtimeEndpointLock) {
+            runtimeEndpoints = prepared;
+            runtimeInstances = snapshot;
+        }
+        runtimeMonitor.refresh(definitions);
+    }
+
+    private String runtimeEndpointStamp(String networkId) {
+        RuntimeEndpoint endpoint = runtimeEndpoints.get(networkId);
+        return endpoint == null ? "" : endpoint.stamp();
+    }
+
+    private NetworkRuntimeMonitor.Endpoint openRuntimeEndpoint(String networkId, NetworkRuntimePolicy policy) {
+        RuntimeEndpoint endpoint = runtimeEndpoints.get(networkId);
+        Instance instance = endpoint == null ? null : endpoint.instance();
+        if (instance == null) throw new IllegalStateException("Proxy Instance Is Unavailable");
+        BackendConfig config = instance.getBackendConfig();
+        Map<String, String> credentials = config == null || config.credentials == null ? Map.of() : config.credentials;
+        if (config != endpoint.config() || !Objects.equals(instance.getPath(), endpoint.path())
+                || !Objects.equals(config == null ? "" : config.type, endpoint.type()) || !endpoint.credentials().equals(credentials)) {
+            throw new IllegalStateException("Proxy Connection Settings Changed. Save The Server Settings And Retry");
+        }
+        if (policy.security() != NetworkTransportSecurity.LOOPBACK) return new NetworkRuntimeMonitor.Endpoint(policy.hubUrl(), null);
+        ServerBackend backend = instance.getBackend();
+        if (backend == null) throw new IllegalStateException("Proxy Connection Is Unavailable");
+        PortForwardFeature feature = backend.getFeature(PortForwardFeature.class).orElse(null);
+        if (feature == null) {
+            if (backend instanceof LocalBackend) return new NetworkRuntimeMonitor.Endpoint(policy.hubUrl(), null);
+            throw new IllegalStateException("Proxy Runtime Tunnel Is Unavailable");
+        }
+        PortForwardFeature.Forward forward;
+        try {
+            forward = feature.open(policy.hubAddress(), policy.hubPort());
+        } catch (IOException failure) {
+            throw new IllegalStateException("Proxy Runtime Tunnel Could Not Open", failure);
+        }
+        Runnable close = () -> {
+            try {
+                forward.close();
+            } catch (IOException ignored) {
+            }
+        };
+        try {
+            return new NetworkRuntimeMonitor.Endpoint("ws://127.0.0.1:" + forward.localPort(), close);
+        } catch (RuntimeException failure) {
+            close.run();
+            throw failure;
+        }
+    }
+
     public synchronized void reload() {
         try {
             List<NetworkDefinition> loaded = repository.loadAll();
@@ -131,7 +255,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
             notifyListeners();
         } catch (NetworkPersistenceException | IllegalArgumentException exception) {
             loadError = exception.getMessage() == null ? "Failed to load networks" : exception.getMessage();
-            runtimeMonitor.refresh(List.of(), runtimeInstances);
+            refreshRuntime(List.of(), runtimeInstances);
         }
     }
 
@@ -179,6 +303,10 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
 
     private NetworkDefinition saveInternal(NetworkDefinition network, boolean allowLocked) {
         Objects.requireNonNull(network, "Network is required");
+        if (jobManager.getJobs(network.networkId()).stream().anyMatch(job -> enrollmentRenewal(job)
+                && "true".equals(job.context().get("enrollmentMetadataPending")))) {
+            throw new IllegalStateException("Complete Server Enrollment Recovery Before Changing This Network");
+        }
         if (!allowLocked && mutationLocks.contains(network.networkId())) {
             throw new IllegalStateException("Network has an active operation");
         }
@@ -257,30 +385,54 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
     }
 
     public synchronized Async<NetworkJob> runPreparedCreation(NetworkCreationPreparedPlan creationPrepared, Collection<Instance> instances, String initiator) {
-        Objects.requireNonNull(creationPrepared, "Prepared network creation is required");
-        List<Instance> snapshot = instances == null ? List.of() : instances.stream().filter(Objects::nonNull).toList();
-        Set<String> selectedIds = creationPrepared.candidate().members().stream().filter(NetworkMember::isManaged).map(NetworkMember::instanceId).collect(Collectors.toCollection(LinkedHashSet::new));
-        return resolveProviderAllocations(instancesForIds(snapshot, selectedIds)).thenCompose(allocations -> runPreparedCreationResolved(creationPrepared, snapshot, initiator, allocations));
+        return runPreparedCreation(creationPrepared, instances, initiator, null, "", null, () -> true);
     }
 
-    private synchronized Async<NetworkJob> runPreparedCreationResolved(NetworkCreationPreparedPlan creationPrepared, Collection<Instance> instances, String initiator, Map<String, NetworkProviderAllocation> providerAllocations) {
+    public synchronized Async<NetworkJob> runPreparedCreation(NetworkCreationPreparedPlan creationPrepared, Collection<Instance> instances, String initiator,
+                                                              AddressSpec address, String account, String requestId, BooleanSupplier admitted) {
+        Objects.requireNonNull(creationPrepared, "Prepared network creation is required");
+        List<Instance> snapshot = instances == null ? List.of() : instances.stream().filter(Objects::nonNull).toList();
+        ReProxyManager.CreationIntent intent;
+        try {
+            NetworkDefinition candidate = creationPrepared.candidate();
+            Instance proxy = indexInstances(snapshot).get(candidate.proxyInstanceId());
+            int port = candidate.members().stream().filter(NetworkMember::isProxy).findFirst().orElseThrow().port();
+            intent = address == null ? null : ReProxyManager.CreationIntent.create(account,
+                    JvmReProxyConnectorCapability.server(proxy), port, address, requestId);
+            if (intent != null && (ReProxyManager.pendingCreation(JvmReProxyConnectorCapability.server(proxy)) || !admitted.getAsBoolean())) {
+                return Async.failed(new IllegalStateException("Resume The Proxy's Saved Address Before Creating A Network"));
+            }
+        } catch (Throwable failure) {
+            return Async.failed(failure);
+        }
+        Set<String> selectedIds = creationPrepared.candidate().members().stream().filter(NetworkMember::isManaged).map(NetworkMember::instanceId).collect(Collectors.toCollection(LinkedHashSet::new));
+        return resolveProviderAllocations(instancesForIds(snapshot, selectedIds)).thenCompose(allocations ->
+                runPreparedCreationResolved(creationPrepared, snapshot, initiator, allocations, intent, admitted));
+    }
+
+    private synchronized Async<NetworkJob> runPreparedCreationResolved(NetworkCreationPreparedPlan creationPrepared, Collection<Instance> instances, String initiator,
+                                                                       Map<String, NetworkProviderAllocation> providerAllocations,
+                                                                       ReProxyManager.CreationIntent address, BooleanSupplier admitted) {
         NetworkDefinition candidate = creationPrepared.candidate();
+        if (address != null && !admitted.getAsBoolean()) return Async.failed(new Async.Cancellation());
         if (networks.containsKey(candidate.networkId())) {
             return Async.failed(new IllegalStateException("Network already exists"));
         }
         validateProviderAllocations(candidate, instances, providerAllocations);
         validateGlobalMembership(List.of(candidate), candidate.networkId());
-        Map<String, String> context = Map.of(
+        Map<String, String> context = new LinkedHashMap<>(Map.of(
             "network", GSON.toJson(candidate),
             "secretReference", candidate.forwarding().secretReference(),
             "creationMetadataPending", "true",
             "bindings", GSON.toJson(captureCreationBindings(candidate, instances))
-        );
+        ));
+        if (address != null) context.put("reproxyCreation", GSON.toJson(address));
         return withMutationLock(candidate.networkId(), () -> jobManager.executePrepared(candidate, creationPrepared.prepared(), instances, NetworkJobType.QUICK_CREATE, initiator, context).thenCompose(job -> {
-            if (job.status() != NetworkJobStatus.SUCCEEDED) {
+            if (job.status() != NetworkJobStatus.SUCCEEDED && !(job.status() == NetworkJobStatus.RUNNING
+                    && "true".equals(job.context().get("creationConfigurationApplied")))) {
                 return Async.completed(job);
             }
-            return finalizeCreation(job, instances).thenApply(unused -> job);
+            return finishCreation(job, instances, address == null ? null : admitted);
         }));
     }
 
@@ -946,7 +1098,8 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
             return Async.failed(new IllegalStateException("Server Is Unavailable"));
         }
         Async<NetworkMemberRestorePoint> restorePoint = member.isManaged() ? resolveRestorePoint(current, member, instances) : Async.completed(null);
-        return restorePoint.thenCompose(original -> withMutationLock(current.networkId(), () -> {
+        return restorePoint.thenCompose(original -> withMutationLock(current.networkId(),
+                () -> configurationTransaction.observeServerProperties(current, instances).thenCompose(unused -> {
             NetworkDiscoveryResult discovery = discoverObserved(current, instances, List.of());
             NetworkReconciliationPlan plan = detachPlanner.plan(DesktopNetworkPlanInput.from(discovery), member.instanceId(), original,
                     entry -> entry.sensitive() ? secretStore.resolveRestoreValue(entry.value()) : entry.value());
@@ -956,9 +1109,9 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
             if (original != null) context.put("restorePoint", GSON.toJson(original));
             return jobManager.execute(current, plan, instances, NetworkJobType.DETACH, initiator, context).thenCompose(job -> {
                 if (job.status() != NetworkJobStatus.SUCCEEDED) return Async.completed(job);
-                return finalizeDetach(job, instances).thenApply(unused -> job);
+                return finalizeDetach(job, instances).thenApply(completed -> job);
             });
-        }));
+        })));
     }
 
     public synchronized void delete(String networkId, Collection<Instance> instances) {
@@ -1046,7 +1199,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
                 if (configurationJob != null && configurationJob.status() != NetworkJobStatus.SUCCEEDED) {
                     return Async.failed(new IllegalStateException(configurationJob.message()));
                 }
-                runtimeMonitor.refresh(getNetworks(), instances);
+                refreshRuntime(getNetworks(), instances);
                 return lifecycleJobManager.execute(current, instances, operation, initiator);
             }).thenCompose(job -> {
                 if (job.status() != NetworkLifecycleStatus.SUCCEEDED) {
@@ -1156,7 +1309,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
             Async<NetworkJob> preflight = operation == NetworkLifecycleOperation.START ? prepareStartup(current, instances, initiator) : Async.completed(null);
             return preflight.thenCompose(job -> {
                 if (job != null && job.status() != NetworkJobStatus.SUCCEEDED) return Async.failed(new IllegalStateException(job.message()));
-                runtimeMonitor.refresh(getNetworks(), instances);
+                refreshRuntime(getNetworks(), instances);
                 return lifecycleJobManager.executeMember(current, currentMember, instance, operation, initiator);
             });
         });
@@ -1174,7 +1327,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
             Async<NetworkJob> preparation = starting ? prepareStartup(current, instances, "Network Recovery") : Async.completed(null);
             return preparation.thenCompose(prepared -> {
                 if (prepared != null && prepared.status() != NetworkJobStatus.SUCCEEDED) return Async.failed(new IllegalStateException(prepared.message()));
-                runtimeMonitor.refresh(getNetworks(), instances);
+                refreshRuntime(getNetworks(), instances);
                 return lifecycleJobManager.resume(jobId, current, instances);
             }).thenCompose(updated -> {
             if (updated.status() != NetworkLifecycleStatus.SUCCEEDED) {
@@ -1207,7 +1360,9 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
             return Async.failed(new IllegalArgumentException("Network changed before the job started"));
         }
         if (type == NetworkJobType.RECONCILE && current.forwarding().needsRepair()) {
-            return prepareSecretRotation(current, instances).thenCompose(prepared -> runPreparedSecretRotation(prepared, instances, initiator)
+            return configurationTransaction.observeServerProperties(current, instances)
+                    .thenCompose(unused -> prepareSecretRotation(current, instances))
+                    .thenCompose(prepared -> runPreparedSecretRotation(prepared, instances, initiator)
                     .whenComplete((job, failure) -> {
                         if (failure != null) discardPreparedSecretRotation(prepared);
                     }));
@@ -1220,14 +1375,117 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
                     return Async.failed(new IllegalArgumentException("Network changed before the job started"));
                 }
             }
-            NetworkReconciliationPlan plan = desiredStatePlanner.plan(DesktopNetworkPlanInput.from(discoverObserved(current, instances, externalReservations)), secretStore);
-            return jobManager.execute(current, plan, instances, type, initiator);
+            Async<Void> observed = type == NetworkJobType.RECONCILE
+                    ? configurationTransaction.observeServerProperties(current, instances) : Async.completed(null);
+            return observed.thenCompose(ignored -> {
+                NetworkReconciliationPlan plan = desiredStatePlanner.plan(DesktopNetworkPlanInput.from(discoverObserved(current, instances, externalReservations)), secretStore);
+                return jobManager.execute(current, plan, instances, type, initiator);
+            });
         }));
+    }
+
+    public Async<NetworkJob> renewServerEnrollment(NetworkDefinition network, String nodeId, Collection<Instance> instances, String initiator) {
+        return withMutationLock(network.networkId(), () -> {
+            NetworkDefinition current = getNetwork(network.networkId()).orElseThrow(() -> new IllegalStateException("Network Is Unavailable"));
+            if (current.revision() != network.revision()) throw new IllegalStateException("Network Changed Before Server Enrollment Renewal");
+            NetworkMember member = requireEnrollmentMember(current, nodeId, instances);
+            NetworkEnrollment enrollment = secretStore.createEnrollment();
+            NetworkReconciliationPlan plan = enrollmentPlan(current, member, enrollment, null);
+            return configurationTransaction.prepare(plan, instances).thenCompose(prepared -> {
+                requireEnrollmentDocuments(current, member, prepared);
+                Map<String, String> context = Map.of("operation", "renew-enrollment", "nodeId", member.nodeId(),
+                        "enrollmentPrevious", secretStore.saveRestoreValue(secretStore.resolveEnrollmentToken(current.networkId(), member.nodeId())),
+                        "enrollmentProposed", secretStore.saveRestoreValue(enrollment.token()), "enrollmentMetadataPending", "true");
+                return jobManager.executePrepared(current, prepared, instances, NetworkJobType.RECONCILE, initiator, context)
+                        .thenApply(this::finishEnrollment);
+            });
+        });
+    }
+
+    private NetworkMember requireEnrollmentMember(NetworkDefinition network, String nodeId, Collection<Instance> instances) {
+        NetworkMember member = network.members().stream().filter(value -> value.nodeId().equals(nodeId) && value.isManaged()
+                && !value.isProxy() && value.resyncEnabled()).findFirst().orElseThrow(() -> new IllegalStateException("Choose A Managed ReSync Backend"));
+        NetworkMember proxy = network.members().stream().filter(value -> value.isProxy() && value.isManaged()
+                && value.instanceId().equals(network.proxyInstanceId())).findFirst().orElseThrow(() -> new IllegalStateException("A Managed Proxy Is Required"));
+        if (!network.runtime().enabled()) throw new IllegalStateException("ReSync Network Is Disabled");
+        Map<String, Instance> indexed = indexInstances(instances);
+        for (NetworkMember selected : List.of(proxy, member)) {
+            Instance instance = indexed.get(selected.instanceId());
+            if (instance == null) throw new IllegalStateException("Managed Server " + selected.routeName() + " Is Unavailable");
+            ServerBackend backend = instance.getBackend();
+            if (backend == null || backend.getFileSystem() == null || !backend.getFileSystem().supportsAtomicWrites()) {
+                throw new IllegalStateException("Safe Configuration Writes Are Unavailable For " + selected.routeName());
+            }
+        }
+        return member;
+    }
+
+    private NetworkReconciliationPlan enrollmentPlan(NetworkDefinition network, NetworkMember member, NetworkEnrollment enrollment, String planId) {
+        return new NetworkReconciliationPlan(planId, network.networkId(), network.revision(), 0, List.of(
+                new NetworkConfigMutation(member.instanceId(), "plugins/.resync-network.properties", ConfigurationFormat.PROPERTIES,
+                        "network.enrollment-token", "", enrollment.token(), true, true, "Renew Server Enrollment"),
+                new NetworkConfigMutation(network.proxyInstanceId(), "plugins/resyncvelocity/network.properties", ConfigurationFormat.PROPERTIES,
+                        "node." + member.nodeId() + ".enrollment-token-hash", "", enrollment.hash(), true, false, "Renew Server Enrollment")), List.of());
+    }
+
+    private void requireEnrollmentDocuments(NetworkDefinition network, NetworkMember member, NetworkPreparedPlan prepared) {
+        NetworkConfigurationAdapter adapter = new NetworkConfigurationAdapters(new DesktopStructuredDocumentParser()).get(ConfigurationFormat.PROPERTIES);
+        for (NetworkDocumentSnapshot document : prepared.documents().values()) {
+            NetworkConfigurationAdapter.Reader reader = adapter.prepare(document.content());
+            if (!document.exists() || !network.networkId().equals(reader.read("network.id")) || !"true".equalsIgnoreCase(reader.read("network.enabled"))) {
+                throw new IllegalStateException("Managed ReSync Settings Do Not Match This Network");
+            }
+            if (document.key().instanceId().equals(member.instanceId()) && !member.nodeId().equals(reader.read("network.node-id"))) {
+                throw new IllegalStateException("Managed ReSync Settings Do Not Match This Server");
+            }
+            if (document.key().instanceId().equals(network.proxyInstanceId())
+                    && (!commaSeparated(reader.read("nodes")).contains(member.nodeId()) || !"BACKEND".equals(reader.read("node." + member.nodeId() + ".role")))) {
+                throw new IllegalStateException("ReSync Hub Does Not Register This Backend");
+            }
+        }
+    }
+
+    private boolean enrollmentRenewal(NetworkJob job) {
+        return "renew-enrollment".equals(job.context().get("operation"));
+    }
+
+    private NetworkJob finishEnrollment(NetworkJob job) {
+        if (job.status() == NetworkJobStatus.ROLLED_BACK) return jobManager.completeEnrollmentMetadata(job.jobId());
+        if (job.status() != NetworkJobStatus.SUCCEEDED || !"true".equals(job.context().get("enrollmentMetadataPending"))) return job;
+        try {
+            secretStore.replaceEnrollmentToken(job.networkId(), job.context().get("nodeId"),
+                    secretStore.resolveRestoreValue(job.context().get("enrollmentPrevious")),
+                    secretStore.resolveRestoreValue(job.context().get("enrollmentProposed")));
+            return jobManager.completeEnrollmentMetadata(job.jobId());
+        } catch (RuntimeException exception) {
+            return jobManager.failCompletion(job.jobId(), "Server Enrollment Renewal Requires Recovery", exception);
+        }
+    }
+
+    private Async<NetworkJob> resumeEnrollment(NetworkJob job, NetworkDefinition network, Collection<Instance> instances) {
+        return withMutationLock(network.networkId(), job.jobId(), () -> {
+            if (getNetwork(network.networkId()).orElseThrow().revision() != job.networkRevision()) {
+                throw new IllegalStateException("Network Changed Before Server Enrollment Recovery");
+            }
+            NetworkMember member = requireEnrollmentMember(network, job.context().get("nodeId"), instances);
+            String token = secretStore.resolveRestoreValue(job.context().get("enrollmentProposed"));
+            NetworkEnrollment enrollment = secretStore.enrollmentValue(token);
+            return jobManager.resume(job.jobId(), network, enrollmentPlan(network, member, enrollment, job.jobId()), instances)
+                    .thenApply(this::finishEnrollment);
+        });
     }
 
     public synchronized Async<NetworkJob> resumeJob(String jobId, Collection<Instance> instances, Collection<PortReservation> externalReservations) {
         NetworkJob job = jobManager.getJob(jobId).orElseThrow(() -> new IllegalArgumentException("Network job does not exist: " + jobId));
         NetworkDefinition current = networks.get(job.networkId());
+        if (current != null && job.type() == NetworkJobType.QUICK_CREATE
+                && "true".equals(job.context().get("creationMetadataPending"))
+                && "true".equals(job.context().get("creationConfigurationApplied"))
+                && !job.context().getOrDefault("reproxyCreation", "").isBlank()) {
+            NetworkDefinition candidate = creationCandidateFromContext(job.context());
+            if (!current.equals(candidate)) return Async.failed(new IllegalStateException("Network Changed Before Address Recovery"));
+            return withMutationLock(current.networkId(), () -> finishCreation(job, instances, null));
+        }
         if (current == null && job.type() == NetworkJobType.QUICK_CREATE) {
             NetworkDefinition candidate = creationCandidateFromContext(job.context());
             List<Instance> snapshot = instances == null ? List.of() : instances.stream().filter(Objects::nonNull).toList();
@@ -1237,6 +1495,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
         if (current == null) {
             return Async.failed(new IllegalArgumentException("Network no longer exists"));
         }
+        if (enrollmentRenewal(job)) return resumeEnrollment(job, current, instances);
         if (job.type() == NetworkJobType.ROTATE_SECRET) {
             try {
                 requireManagedServersStopped(current, instances, "Stop Every Managed Network Server Before Resuming Secret Rotation");
@@ -1258,7 +1517,9 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
         if (current == null || current.revision() != reviewedNetwork.revision()) {
             return Async.failed(new IllegalStateException("Network changed before job recovery"));
         }
-        return withMutationLock(current.networkId(), () -> {
+        return withMutationLock(current.networkId(), () ->
+                (job.type() == NetworkJobType.DETACH || job.type() == NetworkJobType.RECONCILE
+                        ? configurationTransaction.observeServerProperties(current, instances) : Async.<Void>completed(null)).thenCompose(ignored -> {
             NetworkDefinition plannedNetwork = switch (job.type()) {
                 case ATTACH -> attachCandidateFromContext(current, job.context());
                 case ROUTING -> buildRoutingCandidate(current, routingGroupsFromContext(job.context()));
@@ -1310,32 +1571,41 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
                 }
                 return Async.completed(updated);
             });
-        });
+        }));
     }
 
     private synchronized Async<NetworkJob> resumeCreationJob(String jobId, NetworkDefinition candidate, Collection<Instance> instances, Collection<PortReservation> externalReservations, Map<String, NetworkProviderAllocation> providerAllocations) {
         validateProviderAllocations(candidate, instances, providerAllocations);
         return withMutationLock(candidate.networkId(), () -> {
             NetworkReconciliationPlan plan = desiredStatePlanner.plan(DesktopNetworkPlanInput.from(discoverObserved(candidate, instances, externalReservations)), secretStore);
-            return jobManager.resume(jobId, candidate, plan, instances).thenCompose(updated -> updated.status() == NetworkJobStatus.SUCCEEDED ? finalizeCreation(updated, instances).thenApply(unused -> updated) : Async.completed(updated));
+            return jobManager.resume(jobId, candidate, plan, instances).thenCompose(updated -> updated.status() == NetworkJobStatus.SUCCEEDED
+                    || updated.status() == NetworkJobStatus.RUNNING && "true".equals(updated.context().get("creationConfigurationApplied"))
+                    ? finishCreation(updated, instances, null) : Async.completed(updated));
         });
     }
 
     public synchronized Async<NetworkJob> rollbackJob(String jobId, Collection<Instance> instances) {
         NetworkJob job = jobManager.getJob(jobId).orElseThrow(() -> new IllegalArgumentException("Network job does not exist: " + jobId));
         NetworkDefinition network = networks.get(job.networkId());
-        if (network == null && job.type() == NetworkJobType.QUICK_CREATE) {
-            NetworkDefinition candidate = creationCandidateFromContext(job.context());
-            return withMutationLock(candidate.networkId(), () -> jobManager.rollback(jobId, instances).thenApply(updated -> {
-                if (updated.status() == NetworkJobStatus.ROLLED_BACK) {
-                    secretStore.deleteForwardingSecret(candidate.forwarding().secretReference());
-                    secretStore.deleteEnrollmentTokens(candidate);
-                }
-                return updated;
-            }));
+        if (job.type() == NetworkJobType.QUICK_CREATE) {
+            try {
+                NetworkDefinition candidate = creationCandidateFromContext(job.context());
+                List<InstanceBinding> bindings = restoreCreationBindings(candidate, instances, job.context().getOrDefault("bindings", ""));
+                return withMutationLock(candidate.networkId(), () -> rollbackCreationJob(job, candidate, bindings, instances));
+            } catch (RuntimeException failure) {
+                return Async.failed(failure);
+            }
         }
         if (network == null) {
             return Async.failed(new IllegalArgumentException("Network no longer exists"));
+        }
+        if (enrollmentRenewal(job)) {
+            if (job.status() == NetworkJobStatus.SUCCEEDED) return Async.failed(new IllegalStateException("Renewed Server Enrollment Requires A New Renewal To Change"));
+            String proposed = secretStore.resolveRestoreValue(job.context().get("enrollmentProposed"));
+            if (proposed.equals(secretStore.resolveEnrollmentToken(job.networkId(), job.context().get("nodeId")))) {
+                return Async.failed(new IllegalStateException("Resume Server Enrollment Renewal To Complete Its Saved Settings"));
+            }
+            return withMutationLock(network.networkId(), job.jobId(), () -> jobManager.rollback(jobId, instances).thenApply(this::finishEnrollment));
         }
         if (job.type() == NetworkJobType.DETACH && network.members().stream().noneMatch(member -> member.instanceId().equals(job.context().getOrDefault("instanceId", "")))) {
             return Async.failed(new IllegalStateException("Completed detach cannot be rolled back into network membership"));
@@ -1373,7 +1643,8 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
     public Async<Void> recoverCompletedJobs(Collection<Instance> instances) {
         Async<Void> recovery = Async.completed(null);
         for (NetworkJob job : jobManager.getJobs()) {
-            if (job.status() == NetworkJobStatus.SUCCEEDED) {
+            if (job.status() == NetworkJobStatus.SUCCEEDED || job.status() == NetworkJobStatus.ROLLED_BACK
+                    && enrollmentRenewal(job) && "true".equals(job.context().get("enrollmentMetadataPending"))) {
                 recovery = recovery.thenCompose(unused -> recoverCompletedJob(job, instances));
             }
         }
@@ -1387,6 +1658,14 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
 
     private Async<Void> recoverCompletedJob(NetworkJob job, Collection<Instance> instances) {
         NetworkDefinition network = getNetwork(job.networkId()).orElse(null);
+        if (enrollmentRenewal(job) && "true".equals(job.context().get("enrollmentMetadataPending"))) {
+            if (network == null || network.revision() != job.networkRevision()) return Async.failed(new IllegalStateException("Network Changed Before Server Enrollment Recovery"));
+            return withMutationLock(job.networkId(), job.jobId(), () -> {
+                NetworkJob recovered = finishEnrollment(job);
+                return recovered.status() == NetworkJobStatus.SUCCEEDED || recovered.status() == NetworkJobStatus.ROLLED_BACK
+                        ? Async.completed(null) : Async.failed(new IllegalStateException(recovered.message()));
+            });
+        }
         if (job.type() == NetworkJobType.QUICK_CREATE && "true".equals(job.context().get("creationMetadataPending"))) {
             boolean dissolved = jobManager.getJobs(job.networkId()).stream().anyMatch(value -> value.type() == NetworkJobType.DELETE
                     && value.status() == NetworkJobStatus.SUCCEEDED && "dissolve".equals(value.context().get("operation")));
@@ -1458,9 +1737,18 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
                 issues.add(new NetworkValidationIssue(NetworkValidationIssue.Severity.INFO, "binding.reconciled", instance.getInstanceId(), "Updated network binding to revision " + network.revision()));
             }
         }
-        runtimeInstances = instanceSnapshot;
-        runtimeMonitor.refresh(getNetworks(), instanceSnapshot);
+        refreshRuntime(getNetworks(), instanceSnapshot);
         return List.copyOf(issues);
+    }
+
+    @Override
+    public boolean editorAvailable() {
+        return true;
+    }
+
+    @Override
+    public ReSyncFrameTransport editorTransport(String networkId, String nodeId) {
+        return runtimeMonitor.editorTransport(networkId, nodeId);
     }
 
     public NetworkRuntimeSnapshot getRuntimeSnapshot(String networkId) {
@@ -1550,6 +1838,9 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
 
     public void close() {
         runtimeMonitor.close();
+        synchronized (runtimeEndpointLock) {
+            runtimeEndpoints = Map.of();
+        }
         if (ownsRuntimeScheduler && runtimeScheduler instanceof AutoCloseable closeable) {
             try {
                 closeable.close();
@@ -1603,7 +1894,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
         Map<String, NetworkDefinition> byId = snapshot.stream().collect(Collectors.toUnmodifiableMap(NetworkDefinition::networkId, network -> network));
         Map<String, NetworkDefinition> byInstanceId = snapshot.stream().flatMap(network -> network.members().stream().map(member -> Map.entry(member.instanceId(), network))).collect(Collectors.toUnmodifiableMap(Map.Entry::getKey, Map.Entry::getValue));
         networkCatalog = new NetworkCatalog(snapshot, byId, byInstanceId);
-        runtimeMonitor.refresh(snapshot, runtimeInstances);
+        refreshRuntime(snapshot, runtimeInstances);
         listeners.forEach(listener -> listener.accept(snapshot));
     }
 
@@ -2074,7 +2365,45 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
     }
 
     private Async<Void> finalizeCreation(NetworkJob job, Collection<Instance> instances) {
-        NetworkDefinition candidate = creationCandidateFromContext(job.context());
+        return finalizeCreation(job, instances, null);
+    }
+
+    private Async<NetworkJob> finishCreation(NetworkJob job, Collection<Instance> instances, BooleanSupplier admitted) {
+        return finalizeCreation(job, instances, admitted).handle((ignored, failure) -> {
+            NetworkJob current = jobManager.getJob(job.jobId()).orElseThrow();
+            if (failure != null && current.status() != NetworkJobStatus.ROLLED_BACK
+                    && (current.status() != NetworkJobStatus.FAILED || !committedCreation(current))) {
+                throw new IllegalStateException(unwrapCompletion(failure));
+            }
+            return current;
+        });
+    }
+
+    private Async<Void> finalizeCreation(NetworkJob job, Collection<Instance> instances, BooleanSupplier admitted) {
+        NetworkDefinition candidate;
+        ReProxyManager.CreationIntent address;
+        BooleanSupplier addressAdmission;
+        try {
+            candidate = creationCandidateFromContext(job.context());
+            address = creationAddress(job, candidate);
+            addressAdmission = address == null ? () -> true : admitted == null
+                    ? ReProxyManager.creationAdmission(address).current() : admitted;
+            if (!addressAdmission.getAsBoolean()) throw new Async.Cancellation();
+        } catch (Throwable failure) {
+            if (committedCreation(job)) {
+                jobManager.failCompletion(job.jobId(), "Network Created. Its Address Needs Recovery", failure);
+            } else if ("true".equals(job.context().get("creationConfigurationApplied"))) {
+                NetworkDefinition applied = creationCandidateFromContext(job.context());
+                List<InstanceBinding> previous = restoreCreationBindings(applied, instances, job.context().getOrDefault("bindings", ""));
+                return rollbackFinalizedCreation(job, applied, previous, instances, failure);
+            }
+            return Async.failed(failure);
+        }
+        if (address != null && committedCreation(job)) {
+            NetworkDefinition current = getNetwork(candidate.networkId()).orElse(null);
+            if (!candidate.equals(current)) return Async.failed(new IllegalStateException("Network Changed Before Address Recovery"));
+            return completeCreationAddress(job, candidate, instances, address, addressAdmission);
+        }
         List<InstanceBinding> previousBindings = restoreCreationBindings(candidate, instances, job.context().getOrDefault("bindings", ""));
         try {
             synchronized (this) {
@@ -2087,6 +2416,7 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
             Map<String, Instance> instancesById = indexInstances(instances);
             List<Async<Void>> metadataUpdates = new ArrayList<>();
             for (NetworkMember member : candidate.members()) {
+                if (!addressAdmission.getAsBoolean()) throw new Async.Cancellation();
                 Instance instance = instancesById.get(member.instanceId());
                 if (instance == null) {
                     if (!member.isManaged()) continue;
@@ -2095,11 +2425,69 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
                 instance.bindNetwork(candidate.networkId(), member.nodeId(), candidate.revision());
                 metadataUpdates.add(save(instance));
             }
-            return Async.allOf(metadataUpdates.toArray(Async[]::new)).thenRun(() -> commitCreationMetadata(candidate))
+            return Async.allOf(metadataUpdates.toArray(Async[]::new)).thenRun(() -> {
+                    if (!addressAdmission.getAsBoolean()) throw new Async.Cancellation();
+                    commitCreationMetadata(candidate);
+                })
                 .exceptionallyCompose(failure -> rollbackFinalizedCreation(job, candidate, previousBindings, instances, failure))
-                .thenRun(() -> jobManager.completeCreationMetadata(job.jobId()));
+                .thenCompose(ignored -> address == null ? Async.completed(null)
+                        : completeCreationAddress(job, candidate, instances, address, addressAdmission))
+                .thenRun(() -> { if (address == null) jobManager.completeCreationMetadata(job.jobId()); });
         } catch (RuntimeException failure) {
             return rollbackFinalizedCreation(job, candidate, previousBindings, instances, failure);
+        }
+    }
+
+    private ReProxyManager.CreationIntent creationAddress(NetworkJob job, NetworkDefinition candidate) {
+        String encoded = job.context().getOrDefault("reproxyCreation", "");
+        if (encoded.isBlank()) return null;
+        if (encoded.length() > 32_768) throw new IllegalStateException("Saved Network Address Request Is Too Large");
+        ReProxyManager.CreationIntent intent = GSON.fromJson(encoded, ReProxyManager.CreationIntent.class);
+        NetworkMember proxy = candidate.members().stream().filter(NetworkMember::isProxy).findFirst().orElseThrow();
+        if (intent == null || !candidate.proxyInstanceId().equals(intent.instanceId()) || proxy.port() != intent.port()) {
+            throw new IllegalStateException("Saved Network Address Belongs To Another Proxy");
+        }
+        return intent;
+    }
+
+    private boolean committedCreation(NetworkJob job) {
+        if (!"true".equals(job.context().get("creationConfigurationApplied"))) return false;
+        NetworkDefinition current = getNetwork(job.networkId()).orElse(null);
+        return current != null && current.equals(creationCandidateFromContext(job.context()));
+    }
+
+    private Async<Void> completeCreationAddress(NetworkJob job, NetworkDefinition candidate, Collection<Instance> instances,
+                                               ReProxyManager.CreationIntent intent, BooleanSupplier admitted) {
+        try {
+            Instance proxy = indexInstances(instances).get(candidate.proxyInstanceId());
+            if (proxy == null || !candidate.networkId().equals(proxy.getNetworkId()) || proxy.getNetworkRevision() != candidate.revision()) {
+                throw new IllegalStateException("Network Proxy Changed Before Address Recovery");
+            }
+            requireManagedServersStopped(candidate, instances, "Stop Every Network Server Before Recovering Its Address");
+            String path = proxy.getPath();
+            BackendConfig backend = proxy.getBackendConfig();
+            NetworkMember member = candidate.members().stream().filter(NetworkMember::isProxy).findFirst().orElseThrow();
+            NetworkDefinition committed = getNetwork(candidate.networkId()).orElseThrow();
+            if (!candidate.equals(committed)) throw new IllegalStateException("Network Changed Before Address Recovery");
+            var server = JvmReProxyConnectorCapability.server(proxy);
+            BooleanSupplier current = () -> admitted.getAsBoolean() && InstanceManager.getInstance().getInstanceById(proxy.getInstanceId()) == proxy
+                    && Objects.equals(path, proxy.getPath()) && backend == proxy.getBackendConfig()
+                    && committed == getNetwork(candidate.networkId()).orElse(null) && candidate.networkId().equals(proxy.getNetworkId())
+                    && member.nodeId().equals(proxy.getNetworkNodeId()) && candidate.revision() == proxy.getNetworkRevision()
+                    && intent.port() == server.port();
+            if (!current.getAsBoolean()) throw new Async.Cancellation();
+            jobManager.beginCreationAddress(job.jobId());
+            return ReProxyManager.prepareCreation(server, intent, current)
+                    .thenRun(() -> {
+                        if (!current.getAsBoolean()) throw new Async.Cancellation();
+                        jobManager.completeCreationMetadata(job.jobId());
+                    }).exceptionallyCompose(failure -> {
+                        jobManager.failCompletion(job.jobId(), "Network Created. Its Address Needs Recovery", failure);
+                        return Async.failed(failure);
+                    });
+        } catch (Throwable failure) {
+            jobManager.failCompletion(job.jobId(), "Network Created. Its Address Needs Recovery", failure);
+            return Async.failed(failure);
         }
     }
 
@@ -2148,65 +2536,56 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
     private Async<Void> rollbackFinalizedCreation(NetworkJob job, NetworkDefinition candidate, List<InstanceBinding> bindings,
                                                   Collection<Instance> instances, Throwable failure) {
         Throwable cause = unwrapCompletion(failure);
-        Async<NetworkJob> configurationRollback;
-        try {
-            configurationRollback = jobManager.rollback(job.jobId(), instances);
-        } catch (RuntimeException rollbackFailure) {
-            configurationRollback = Async.failed(rollbackFailure);
-        }
-        return configurationRollback.handle((rolledBack, rollbackFailure) -> {
+        return rollbackCreationJob(job, candidate, bindings, instances).handle((rolledBack, rollbackFailure) -> {
             if (rollbackFailure != null) cause.addSuppressed(unwrapCompletion(rollbackFailure));
+            else if (rolledBack == null || rolledBack.status() != NetworkJobStatus.ROLLED_BACK) {
+                cause.addSuppressed(new IllegalStateException(rolledBack == null ? "Network Creation Needs Recovery" : rolledBack.message()));
+            }
             return null;
-        }).thenCompose(ignored -> rollbackCreationMetadata(candidate, bindings, cause));
+        }).thenCompose(ignored -> Async.failed(cause));
     }
 
-    private Async<Void> rollbackCreationMetadata(NetworkDefinition candidate, List<InstanceBinding> bindings, Throwable cause) {
-        synchronized (this) {
-            NetworkDefinition current = networks.get(candidate.networkId());
-            if (current != null && current.equals(candidate)) {
-                try {
+    private Async<NetworkJob> rollbackCreationJob(NetworkJob job, NetworkDefinition candidate, List<InstanceBinding> bindings,
+                                                 Collection<Instance> instances) {
+        try {
+            NetworkDefinition current = getNetwork(candidate.networkId()).orElse(null);
+            if (current != null && !candidate.equals(current)) throw new IllegalStateException("Created Network Changed Before Rollback");
+            requireManagedServersStopped(candidate, instances, "Stop Every Network Server Before Restoring Its Creation");
+            return jobManager.rollback(job.jobId(), instances, () -> rollbackCreationMetadata(candidate, bindings));
+        } catch (RuntimeException failure) {
+            return Async.failed(failure);
+        }
+    }
+
+    private Async<Void> rollbackCreationMetadata(NetworkDefinition candidate, List<InstanceBinding> bindings) {
+        try {
+            synchronized (this) {
+                NetworkDefinition current = networks.get(candidate.networkId());
+                if (current != null && current.equals(candidate)) {
                     repository.delete(current);
-                } catch (RuntimeException rollbackFailure) {
-                    cause.addSuppressed(unwrapCompletion(rollbackFailure));
-                }
-                try {
-                    incidentManager.delete(current.networkId());
-                } catch (RuntimeException rollbackFailure) {
-                    cause.addSuppressed(unwrapCompletion(rollbackFailure));
-                }
-                networks.remove(current.networkId());
-                try {
+                    networks.remove(current.networkId());
                     notifyListeners();
-                } catch (RuntimeException rollbackFailure) {
-                    cause.addSuppressed(unwrapCompletion(rollbackFailure));
+                    incidentManager.delete(current.networkId());
+                } else if (current != null) {
+                    throw new IllegalStateException("Created Network Metadata Changed Before Rollback");
                 }
-            } else if (current != null) {
-                cause.addSuppressed(new IllegalStateException("Created Network Metadata Changed Before Rollback"));
             }
-        }
-        List<Async<Void>> metadataRollbacks = new ArrayList<>();
-        for (InstanceBinding binding : bindings) {
-            binding.restore();
-            try {
+            List<Async<Void>> metadataRollbacks = new ArrayList<>();
+            for (InstanceBinding binding : bindings) {
+                binding.restore();
                 metadataRollbacks.add(save(binding.instance()));
-            } catch (RuntimeException rollbackFailure) {
-                cause.addSuppressed(unwrapCompletion(rollbackFailure));
             }
-        }
-        return Async.allOf(metadataRollbacks.toArray(Async[]::new)).handle((ignored, rollbackFailure) -> {
-            if (rollbackFailure != null) cause.addSuppressed(unwrapCompletion(rollbackFailure));
-            try {
+            return Async.allOf(metadataRollbacks.toArray(Async[]::new)).thenRun(() -> {
                 boolean secretStillUsed;
                 synchronized (this) {
                     secretStillUsed = networks.values().stream().anyMatch(network -> network.forwarding().secretReference().equals(candidate.forwarding().secretReference()));
                 }
                 if (!secretStillUsed) secretStore.deleteForwardingSecret(candidate.forwarding().secretReference());
                 secretStore.deleteEnrollmentTokens(candidate);
-            } catch (RuntimeException rollbackError) {
-                cause.addSuppressed(unwrapCompletion(rollbackError));
-            }
-            return null;
-        }).thenCompose(ignored -> Async.failed(cause));
+            });
+        } catch (RuntimeException rollbackFailure) {
+            return Async.failed(rollbackFailure);
+        }
     }
 
     private NetworkDefinition buildCreationCandidate(NetworkCreationRequest request, Collection<Instance> instances, Collection<PortReservation> externalReservations, String secretReference, Map<String, NetworkProviderAllocation> providerAllocations) {
@@ -2843,7 +3222,15 @@ public final class DesktopNetworkManager implements NetworkManager<Instance, Por
     }
 
     private <T> Async<T> withMutationLock(String networkId, Supplier<Async<T>> operation) {
+        return withMutationLock(networkId, "", operation);
+    }
+
+    private <T> Async<T> withMutationLock(String networkId, String recoveryJobId, Supplier<Async<T>> operation) {
         synchronized (mutationGuard) {
+            if (jobManager.getJobs(networkId).stream().anyMatch(job -> enrollmentRenewal(job) && !job.jobId().equals(recoveryJobId)
+                    && "true".equals(job.context().get("enrollmentMetadataPending")))) {
+                return Async.failed(new IllegalStateException("Resume Or Roll Back Server Enrollment Renewal Before Changing This Network"));
+            }
             if (!mutationLocks.add(networkId)) {
                 return Async.failed(new IllegalStateException("Network has an active operation"));
             }

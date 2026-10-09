@@ -3,6 +3,7 @@ package redxax.oxy.remotely.ui.server;
 import restudio.rebase.instance.InstanceState;
 import restudio.rebase.ui.widgets.LifecycleButtonWidget;
 import redxax.oxy.remotely.network.NetworkAdoptionReport;
+import redxax.oxy.remotely.network.HostedNetworkClient;
 import redxax.oxy.remotely.RemotelyClient;
 import redxax.oxy.remotely.RemotelyComposition;
 import redxax.oxy.remotely.config.RemotelyConfigStore;
@@ -47,6 +48,8 @@ import restudio.rescreen.util.Notification;
 import restudio.rescreen.util.Sound;
 
 import java.util.*;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -64,6 +67,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
     private IconButton emptyServerButton;
     private IconButton modpackServerButton;
     private IconButton importServerButton;
+    private PopupWidget remoteHostTypePopup;
     private PopupWidget remoteHostPopup;
     private TextInputWidget remoteHostNameInput;
     private TextInputWidget remoteHostUserInput;
@@ -74,17 +78,17 @@ public class ServerManagerScreen extends DesktopShellScreen {
     private TextInputWidget remoteHostKeyPathInput;
     private TextInputWidget remoteHostKeyPassphraseInput;
     private TextInputWidget remoteHostRegistryPathInput;
-    private TabSwitchWidget remoteHostTypeSwitch;
+    private RemoteHostType remoteHostType = RemoteHostType.SSH;
     private TabSwitchWidget remoteHostAuthModeSwitch;
-    private AnimatedButton remoteHostConfirmButton;
-    private AnimatedButton remoteHostDeleteButton;
     private TabsManager.Tab remoteHostEditTab;
+    private boolean remoteHostEditActions;
+    private long remoteHostFormGeneration;
     private final Object parent;
     private IconButton userButton;
     private boolean serverManagerContextMenuPressed;
     private boolean networkOperationInFlight;
+    private final Set<String> deletingServers = new HashSet<>();
 
-    private static final String ROW_REMOTE_HOST_TYPE = "remoteHostType";
     private static final String ROW_REMOTE_HOST_USER = "remoteHostUser";
     private static final String ROW_REMOTE_HOST_IP = "remoteHostIp";
     private static final String ROW_REMOTE_HOST_PORT = "remoteHostPort";
@@ -94,6 +98,31 @@ public class ServerManagerScreen extends DesktopShellScreen {
     private static final String ROW_REMOTE_HOST_KEY_PATH = "remoteHostKeyPath";
     private static final String ROW_REMOTE_HOST_PASSPHRASE = "remoteHostPassphrase";
     private static final String ROW_REMOTE_HOST_REGISTRY_PATH = "remoteHostRegistryPath";
+
+    private enum RemoteHostType {
+        SSH("SSH", "SSH", "Connect With A Password Or SSH Key", false),
+        PTERO("PTERO", "Pterodactyl", "Connect Your Panel With A Client API Key", true),
+        CALAGOPUS("CALAGOPUS", "Calagopus", "Connect Your Panel With An API Key", true);
+
+        private final String id;
+        private final String label;
+        private final String description;
+        private final boolean panel;
+
+        RemoteHostType(String id, String label, String description, boolean panel) {
+            this.id = id;
+            this.label = label;
+            this.description = description;
+            this.panel = panel;
+        }
+
+        private static RemoteHostType fromId(String id) {
+            for (RemoteHostType type : values()) {
+                if (type.id.equalsIgnoreCase(id)) return type;
+            }
+            throw new IllegalArgumentException("Unknown Host Type: " + id);
+        }
+    }
 
     private static Identifier unknown, serverIcon, paper, vanilla, fabric, forge, neoforge, waterfall, velocity, leaf, quilt, spigot, bukkit, purpur;
     private final List<ServerModels.ClientServerView> restudioInstances = new ArrayList<>();
@@ -132,8 +161,11 @@ public class ServerManagerScreen extends DesktopShellScreen {
     private boolean restudioFetchInFlight;
     private String restudioFetchAccount = "";
     private long callbackGeneration;
+    private long networkFetchGeneration;
+    private boolean networkRefreshRequired;
     private List<DesktopGroup> instanceGroups = new ArrayList<>();
     private List<ServerScreenHost.NetworkView> networkViews = List.of();
+    private ServerScreenHost.AccountIdentity networkViewsAccount;
     private List<ServerModels.ClientServerView> currentServerViews = List.of();
     private final Map<TabsManager.Tab, List<ServerModels.ClientServerView>> pendingServerViews = new IdentityHashMap<>();
     private final Set<String> pendingNetworkMembershipInstances = new HashSet<>();
@@ -249,6 +281,8 @@ public class ServerManagerScreen extends DesktopShellScreen {
                 removeReStudioTab();
             }
             updatePositions();
+            if (networkAccountChanged()) refreshForAuthStateChange();
+            else if (networkRefreshRequired) refreshNetworks();
             return;
         }
         registerInstanceChangeListener();
@@ -568,6 +602,11 @@ public class ServerManagerScreen extends DesktopShellScreen {
             return;
         }
         boolean authenticated = authenticated();
+        boolean changed = networkAccountChanged();
+        if (changed) {
+            networkViews = List.of();
+            networkViewsAccount = null;
+        }
         refreshAccountButton();
         if (!authenticated) {
             restudioFetchGeneration++;
@@ -584,6 +623,14 @@ public class ServerManagerScreen extends DesktopShellScreen {
             removeReStudioTab();
         }
         updatePositions();
+        if (changed) loadServersForAllTabs();
+        refreshNetworks();
+    }
+
+    private boolean networkAccountChanged() {
+        ServerScreenHost.AccountIdentity account = serverHost().accountIdentity();
+        return networkViewsAccount != null && (networkViewsAccount.authenticated() != account.authenticated()
+                || account.authenticated() && !compatibleAccountHydration(networkViewsAccount, account));
     }
 
 
@@ -597,17 +644,47 @@ public class ServerManagerScreen extends DesktopShellScreen {
     private void refreshNetworkViews(Runnable afterRefresh) {
         contextMenuRequestGeneration++;
         long generation = callbackGeneration;
-        serverHost().networks().whenComplete((networks, failure) -> ScreenManager.getInstance().execute(() -> {
-            if (!isCurrentCallback(generation)) {
+        long requestGeneration = ++networkFetchGeneration;
+        ServerScreenHost host = serverHost();
+        ServerScreenHost.AccountIdentity account = host.accountIdentity();
+        host.networks().whenComplete((networks, failure) -> ScreenManager.getInstance().execute(() -> {
+            ServerScreenHost.AccountIdentity current = host.accountIdentity();
+            if (!isCurrentCallback(generation) || requestGeneration != networkFetchGeneration || host != serverHost()
+                    || account.authenticated() != current.authenticated()
+                    || account.authenticated() && !compatibleAccountHydration(account, current)) {
                 return;
             }
+            serverRefreshQueued = false;
             if (failure == null && networks != null) {
                 networkViews = List.copyOf(networks);
+                networkViewsAccount = account;
+            } else if (failure != null) {
+                new Notification("Network Refresh Failed", rootMessage(failure), Notification.Type.ERROR);
             }
             if (afterRefresh != null) {
                 afterRefresh.run();
             }
         }));
+    }
+
+    void refreshNetworks() {
+        networkRefreshRequired = true;
+        networkFetchGeneration++;
+        if (!isActiveScreen()) return;
+        networkRefreshRequired = false;
+        refreshNetworkViews(this::loadServersForAllTabs);
+    }
+
+    void refreshNetworks(String dissolvedId) {
+        invalidateNetwork(dissolvedId);
+        if (isActiveScreen()) loadServersForAllTabs();
+        refreshNetworks();
+    }
+
+    private void invalidateNetwork(String dissolvedId) {
+        networkViews = networkViews.stream().filter(network -> !network.id().equals(dissolvedId)).toList();
+        networkRefreshRequired = true;
+        networkFetchGeneration++;
     }
 
     private void loadIcons() {
@@ -1419,7 +1496,9 @@ public class ServerManagerScreen extends DesktopShellScreen {
     }
 
     public void openRemoteHostEditor() {
-        openRemoteHostPopup(null);
+        closeRemoteHostPopup();
+        resetRemoteHostFields();
+        showRemoteHostTypes();
     }
 
     private Accent getDesktopIconAccent(ServerModels.ClientServerView info, boolean isCreate) {
@@ -1627,6 +1706,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
             return true;
         }
         if (!reactorOnlyServerManager()) {
+            new Notification("Unavailable", serverHost().serverActionAvailability(server, action).reason(), Notification.Type.WARN);
             return false;
         }
         ServerUiCapabilityProvider.Availability availability = server == null
@@ -1678,7 +1758,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
             new Notification("Invalid Selection", "Choose Standalone Backends And At Most One Velocity Proxy", Notification.Type.ERROR);
             return;
         }
-        serverHost().application().setScreen(new NetworkCreationScreen(this, serverHost(), selected));
+        serverHost().application().setScreen(new NetworkCreationScreen(this, serverHost(), selected, NetworkCreationContext.from(serverHost(), target)));
     }
 
     private void openNetworkOverview(ServerScreenHost.NetworkView network) {
@@ -1779,17 +1859,31 @@ public class ServerManagerScreen extends DesktopShellScreen {
         networkOperationInFlight = true;
         Notification notification = new Notification.Builder().message("Dissolving Network").description("Restoring Standalone Settings").type(Notification.Type.INFO).loading(true).autoSlideOut(false).build();
         long generation = callbackGeneration;
-        serverHost().networkAction(network, "dissolve").whenComplete((ignored, throwable) -> ScreenManager.getInstance().execute(() -> {
+        ServerScreenHost host = serverHost();
+        ServerScreenHost.AccountIdentity account = host.accountIdentity();
+        var api = remotelyClient.getApiClient();
+        host.networkAction(network, "dissolve").whenComplete((ignored, throwable) -> ScreenManager.getInstance().execute(() -> {
+            ServerScreenHost.AccountIdentity current = host.accountIdentity();
+            boolean owned = host == serverHost() && remotelyClient.getApiClient() == api && account.authenticated() == current.authenticated()
+                    && (!account.authenticated() || compatibleAccountHydration(account, current));
+            if (owned && throwable == null) invalidateNetwork(network.id());
+            if (generation == callbackGeneration) networkOperationInFlight = false;
             if (!isCurrentCallback(generation)) {
                 return;
             }
-            networkOperationInFlight = false;
+            if (!owned) {
+                notification.update().message("Account Changed").description("Refresh Your Servers To Check The Network").type(Notification.Type.WARN).loading(false).autoSlideOut(true).commit();
+                return;
+            }
             if (throwable != null) {
-                notification.update().message("Dissolve Failed").description(rootMessage(throwable)).type(Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
+                String message = throwable instanceof HostedNetworkClient.OperationFailure ? "Dissolve Failed" : "Dissolve Not Confirmed";
+                notification.update().message(message).description(rootMessage(throwable)).type(Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
+                refreshNetworks();
                 return;
             }
             notification.update().message("Network Dissolved").description("Servers Restored As Standalone").type(Notification.Type.SUCCESS).loading(false).autoSlideOut(true).commit();
             loadServersForAllTabs();
+            refreshNetworks();
         }));
     }
 
@@ -2084,15 +2178,30 @@ public class ServerManagerScreen extends DesktopShellScreen {
 
 
     private void showSelectedServersMenu(DesktopIconWidget<ServerModels.ClientServerView> anchor, List<ServerModels.ClientServerView> selected) {
+        List<ServerModels.ClientServerView> targets = List.copyOf(selected);
+        long generation = callbackGeneration;
+        TabsManager.Tab tab = tabs().getActiveTab();
+        ServerScreenHost host = serverHost();
+        String account = accountKey(host.accountIdentity());
+        Consumer<Runnable> run = action -> {
+            if (isCurrentCallback(generation) && tab == tabs().getActiveTab() && host == serverHost()
+                    && account.equals(accountKey(host.accountIdentity()))) action.run();
+        };
         long running = selected.stream().filter(this::isServerActive).count();
         ContextMenuWidget.Builder builder = new ContextMenuWidget.Builder(this)
-                .addHeaderButton("start.png", () -> currentSelectedServerInstances().stream().filter(instance -> !isServerActive(instance)).forEach(instance -> setServerPower(instance, true)), "Start Selected", ThemeManager.getAccent("nice"))
-                .addHeaderButton("stop.png", () -> currentSelectedServerInstances().stream().filter(this::isServerActive).forEach(instance -> setServerPower(instance, false)), "Stop Selected", ThemeManager.getAccent("danger"))
-                .addHeaderButton("folder.png", () -> createServerGroup(currentSelectedServerInstances()), "Group Selected")
-                .addIconItem(selected.size() + " Servers Selected", "info.png", () -> {}, running + " Running");
+                .addIconItem(selected.size() + " Servers Selected", "info.png", () -> {}, running + " Running")
+                .addIconItem("Start Selected", "start.png", () -> run.accept(() -> targets.stream().filter(instance -> !isServerActive(instance))
+                        .forEach(instance -> setServerPower(instance, true))), "Start Servers That Are Stopped", ThemeManager.getAccent("nice"))
+                .addIconItem("Stop Selected", "stop.png", () -> run.accept(() -> targets.stream().filter(this::isServerActive)
+                        .forEach(instance -> setServerPower(instance, false))), "Stop Servers That Are Running", ThemeManager.getAccent("danger"))
+                .addIconItem("Group Selected", "folder.png", () -> run.accept(() -> createServerGroup(targets)), "Keep These Servers Together");
         if (selected.stream().allMatch(this::canDuplicateServer)) {
-            builder.addHeaderButton("copy.png", () -> currentSelectedServerInstances().stream().filter(this::canDuplicateServer).forEach(this::duplicateInstance), "Duplicate Selected");
+            builder.addIconItem("Duplicate Selected", "copy.png", () -> run.accept(() -> targets.forEach(this::duplicateInstance)), "Create A Copy Of Each Server");
         }
+        if (selected.stream().allMatch(server -> canServerManagerAction(server, ServerScreenHost.Action.DELETE_SERVER, "server.delete"))) {
+            builder.addIconItem("Delete Selected", "delete.png", () -> run.accept(() -> showDeleteServersPopup(targets)), "Review Deletion Options For These Servers", ThemeManager.getAccent("danger"));
+        }
+        builder.addIconItem("Hide Selected", "hide.png", () -> run.accept(() -> showDeleteServersPopup(targets)), "Review Options To Hide These Servers Without Deleting Files");
         showDesktopContextMenu(anchor.getX() + anchor.getWidth() + 4, anchor.getY() + 24, builder);
     }
 
@@ -2281,55 +2390,115 @@ public class ServerManagerScreen extends DesktopShellScreen {
         operation.run();
     }
 
+    private record ServerDeletion(ServerModels.ClientServerView server, String id, String name, String backend, String path, boolean hosted) {}
+
     private void showDeleteServerPopup(ServerModels.ClientServerView server) {
-        if (!ensureServerManagerAction(server, ServerScreenHost.Action.DELETE_SERVER, "server.delete")) {
-            return;
-        }
-        Object iconTarget = iconTarget(server);
-        Identifier iconId = iconTarget != null ? iconManager.getQuickIconId(iconTarget) : null;
-        IconButton entry = new IconButton.Builder()
-                .label(serverName(server))
-                .identifier(iconId != null ? iconId : serverIcon)
-                .iconSize(24)
-                .size(0, 30)
-                .build();
-        entry.setActive(false);
-        if (iconTarget != null) {
-            iconManager.loadIconIdAsync(iconTarget, entry::setIcon);
-        }
+        if (!ensureServerManagerAction(server, ServerScreenHost.Action.DELETE_SERVER, "server.delete")) return;
+        showDeleteServersPopup(List.of(server));
+    }
+
+    private void showDeleteServersPopup(List<ServerModels.ClientServerView> servers) {
+        List<ServerDeletion> selected = servers.stream().distinct()
+                .map(server -> new ServerDeletion(server, serverId(server), serverName(server), serverHost().identity(server).backendType(),
+                        serverHost().identity(server).path(), isRestudioServer(server))).toList();
+        if (selected.isEmpty()) return;
+        ServerScreenHost host = serverHost();
+        var api = remotelyClient.getApiClient();
+        String account = accountKey(host.accountIdentity());
+        long generation = callbackGeneration;
         List<AnimatedWidget> entries = new ArrayList<>();
-        entries.add(entry);
-        String path = serverHost().identity(server).path();
-        if (path != null && !path.isBlank()) {
-            entries.add(DeletionPopup.entry(path, "folder.png"));
+        Map<ServerDeletion, TextInputWidget> confirmations = new LinkedHashMap<>();
+        boolean canDelete = selected.stream().allMatch(target -> canServerManagerAction(target.server(), ServerScreenHost.Action.DELETE_SERVER, "server.delete"));
+        for (ServerDeletion target : selected) {
+            Object iconTarget = iconTarget(target.server());
+            Identifier iconId = iconTarget != null ? iconManager.getQuickIconId(iconTarget) : null;
+            IconButton entry = new IconButton.Builder().label(target.name()).identifier(iconId != null ? iconId : serverIcon).iconSize(24).size(0, 30).build();
+            entry.setActive(false);
+            if (iconTarget != null) iconManager.loadIconIdAsync(iconTarget, entry::setIcon);
+            entries.add(entry);
+            String path = host.identity(target.server()).path();
+            if (path != null && !path.isBlank()) entries.add(DeletionPopup.entry(path, "folder.png"));
+            if (canDelete && target.hosted()) {
+                TextInputWidget confirmation = new TextInputWidget.Builder().placeholder(target.name()).size(300, 20).build();
+                entries.add(DeletionPopup.entry("Enter The Server Name To Confirm", "edit.png"));
+                entries.add(confirmation);
+                confirmations.put(target, confirmation);
+            }
+        }
+        if (canDelete && !confirmations.isEmpty()) {
+            entries.add(DeletionPopup.entry("All Server Files And Worlds Will Be Deleted", "explorer.png"));
         }
         List<DeletionPopup.Action> actions = new ArrayList<>();
-        if (serverHost().serverManagerMode() != ServerScreenHost.ServerManagerMode.REACTOR_ONLY) {
-            actions.add(DeletionPopup.Action.trash(popup -> deleteServer(server, popup, false)));
+        BooleanSupplier current = () -> isCurrentCallback(generation) && host == serverHost()
+                && api == remotelyClient.getApiClient() && account.equals(accountKey(host.accountIdentity()));
+        Consumer<PopupWidget> permanent = popup -> {
+            if (!current.getAsBoolean() || !validateServerTargets(selected, true)) return;
+            for (Map.Entry<ServerDeletion, TextInputWidget> confirmation : confirmations.entrySet()) {
+                if (!confirmation.getKey().name().equals(confirmation.getValue().getText())) {
+                    new Notification("Name Does Not Match", "Enter The Name Of " + confirmation.getKey().name() + " Exactly To Delete It", Notification.Type.WARN);
+                    return;
+                }
+            }
+            popup.hide();
+            deleteServers(selected, 0, true, current);
+        };
+        if (canDelete) {
+            if (confirmations.isEmpty() && host.serverManagerMode() != ServerScreenHost.ServerManagerMode.REACTOR_ONLY) {
+                actions.add(DeletionPopup.Action.trash(popup -> {
+                    if (!current.getAsBoolean() || !validateServerTargets(selected, true)) return;
+                    popup.hide();
+                    deleteServers(selected, 0, false, current);
+                }));
+            }
+            actions.add(DeletionPopup.Action.permanent(permanent));
         }
-        actions.add(DeletionPopup.Action.permanent(popup -> deleteServer(server, popup, true)));
-        actions.add(DeletionPopup.Action.hide(popup -> hideServer(server, popup)));
+        actions.add(DeletionPopup.Action.hide(popup -> {
+            if (!current.getAsBoolean() || !validateServerTargets(selected, false)) return;
+            popup.hide();
+            for (ServerDeletion target : selected) hideServer(target.server());
+        }));
         DeletionPopup.show(this, entries, actions.toArray(DeletionPopup.Action[]::new));
     }
 
-    private void hideServer(ServerModels.ClientServerView server, PopupWidget popup) {
+    private boolean validateServerTargets(List<ServerDeletion> selected, boolean deleting) {
+        for (ServerDeletion target : selected) {
+            ServerModels.ClientServerView known = knownServerView(target.id());
+            ServerScreenHost.ServerIdentity identity = serverHost().identity(target.server());
+            ServerScreenHost.ServerIdentity knownIdentity = known == null ? identity : serverHost().identity(known);
+            if (!target.id().equals(serverId(target.server())) || !target.name().equals(serverName(target.server()))
+                    || !target.backend().equals(identity.backendType()) || !target.path().equals(identity.path())
+                    || target.hosted() != isRestudioServer(target.server())
+                    || known != null && (!target.name().equals(serverName(known)) || !target.backend().equals(knownIdentity.backendType())
+                            || !target.path().equals(knownIdentity.path()))) {
+                new Notification("Server Changed", "Reopen Deletion Options Before Continuing", Notification.Type.WARN);
+                return false;
+            }
+            if (deleting && !ensureServerManagerAction(target.server(), ServerScreenHost.Action.DELETE_SERVER, "server.delete")) return false;
+        }
+        return true;
+    }
+
+    private void deleteServers(List<ServerDeletion> selected, int index, boolean permanent, BooleanSupplier current) {
+        if (index == selected.size() || !current.getAsBoolean()) return;
+        ServerDeletion target = selected.get(index);
+        if (!validateServerTargets(List.of(target), true)) return;
+        deleteServer(target.server(), permanent).whenComplete((ignored, failure) -> ScreenManager.getInstance().execute(() -> {
+            if (failure == null) deleteServers(selected, index + 1, permanent, current);
+            else if (selected.size() > 1) new Notification("Deletion Stopped", "Remaining Servers Were Not Deleted", Notification.Type.WARN);
+        }));
+    }
+
+    private void hideServer(ServerModels.ClientServerView server) {
         playSound(Sound.CLICK);
-        if (popup != null) {
-            popup.hide();
-        }
-        RemotelyConfigStore config = remotelyClient.getComposition().configManager();
-        if (config != null) {
-            String identifier = serverId(server);
-            if (!identifier.isBlank()) config.hideRestudioServer(identifier);
-            String name = serverName(server);
-            if (!name.isBlank()) config.hideRestudioServer(name);
-        }
         long generation = callbackGeneration;
-        serverHost().serverAction(server, "hide").whenComplete((ignored, failure) -> ScreenManager.getInstance().execute(() -> {
-            if (!isCurrentCallback(generation)) {
+        ServerScreenHost host = serverHost();
+        String account = accountKey(host.accountIdentity());
+        Async.supply(() -> host.serverAction(server, "hide")).thenCompose(operation -> operation).whenComplete((ignored, failure) -> ScreenManager.getInstance().execute(() -> {
+            if (!isCurrentCallback(generation) || host != serverHost() || !account.equals(accountKey(host.accountIdentity()))) {
                 return;
             }
-            new Notification("Server Hidden", serverName(server), Notification.Type.SUCCESS);
+            new Notification(failure == null ? "Server Hidden" : "Hide Failed", failure == null ? serverName(server) : rootMessage(failure),
+                    failure == null ? Notification.Type.SUCCESS : Notification.Type.ERROR);
             loadServersForAllTabs();
         }));
     }
@@ -2354,11 +2523,17 @@ public class ServerManagerScreen extends DesktopShellScreen {
         return backend + "  •  " + state;
     }
 
-    private void deleteServer(ServerModels.ClientServerView server, PopupWidget popup, boolean permanent) {
-        playSound(Sound.DELETE);
-        if (popup != null) {
-            popup.hide();
+    private Async<Void> deleteServer(ServerModels.ClientServerView server, boolean permanent) {
+        if (!ensureServerManagerAction(server, ServerScreenHost.Action.DELETE_SERVER, "server.delete")) {
+            return Async.failed(new IllegalStateException("Server Deletion Is Unavailable"));
         }
+        ServerScreenHost host = serverHost();
+        var api = remotelyClient.getApiClient();
+        String account = accountKey(host.accountIdentity());
+        String deletion = account + ":" + serverId(server);
+        if (!deletingServers.add(deletion)) return Async.failed(new IllegalStateException("Server Deletion Is Already In Progress"));
+        Async<Void> result = Async.pending();
+        playSound(Sound.DELETE);
         Notification notification = new Notification.Builder()
                 .message(permanent ? "Deleting Server" : "Moving Server To Trash")
                 .description(serverName(server))
@@ -2367,17 +2542,33 @@ public class ServerManagerScreen extends DesktopShellScreen {
                 .autoSlideOut(false)
                 .build();
         long generation = callbackGeneration;
-        serverHost().serverAction(server, permanent ? "delete" : "trash").whenComplete((ignored, failure) -> ScreenManager.getInstance().execute(() -> {
-            if (!isCurrentCallback(generation)) {
+        Async.supply(() -> host.serverAction(server, permanent ? "delete" : "trash")).thenCompose(operation -> operation).whenComplete((ignored, failure) -> ScreenManager.getInstance().execute(() -> {
+            deletingServers.remove(deletion);
+            if (host != serverHost() || api != remotelyClient.getApiClient() || !account.equals(accountKey(host.accountIdentity()))) {
+                notification.update().loading(false).autoSlideOut(true).commit();
+                result.fail(new IllegalStateException("Server Account Changed"));
                 return;
             }
             if (failure != null) {
                 notification.update().message(permanent ? "Delete Failed" : "Move Failed").description(rootMessage(failure)).type(Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
+                result.fail(failure);
                 return;
             }
             notification.update().message(permanent ? "Server Deleted" : "Moved To Trash").description(serverName(server)).type(Notification.Type.SUCCESS).loading(false).autoSlideOut(true).commit();
-            loadServersForAllTabs();
+            boolean managed = isRestudioServer(server);
+            if (managed) {
+                restudioFetchGeneration++;
+                restudioFetchInFlight = false;
+                restudioFetchAccount = "";
+                restudioInstances.removeIf(value -> serverId(server).equals(serverId(value)));
+                restudioServerViews.values().removeIf(value -> serverId(server).equals(serverId(value)));
+                remotelyClient.cacheReStudioServerViews(restudioServerViews);
+                if (isActiveScreen()) fetchReStudioServers();
+            }
+            if (isCurrentCallback(generation) || managed && isActiveScreen()) loadServersForAllTabs();
+            result.complete(null);
         }));
+        return result;
     }
 
     private void openReactorPlanSelection() {
@@ -2608,47 +2799,85 @@ public class ServerManagerScreen extends DesktopShellScreen {
     }
 
     private void createRemoteHostPopup() {
+        PopupWidget.Builder types = new PopupWidget.Builder("Choose Host Type").width(300).setResizable(false);
+        for (RemoteHostType type : RemoteHostType.values()) {
+            MountableButtonWidget choice = new MountableButtonWidget.Builder(type.label)
+                    .description(type.description)
+                    .onClick(() -> {
+                        if (remoteHostType != type) {
+                            resetRemoteHostFields();
+                            remoteHostType = type;
+                        }
+                        remoteHostTypePopup.hide();
+                        openRemoteHostPopup(null);
+                    })
+                    .build();
+            types.addRow("", choice);
+        }
+        remoteHostTypePopup = types.build();
+        remoteHostTypePopup.hide();
+        addDrawableChild(remoteHostTypePopup);
+
         PopupWidget.Builder builder = new PopupWidget.Builder("Connect Remote Host").onClose(this::closeRemoteHostPopup)
-            .size(360, 350).setResizable(true)
-            .setAntiOutOfBound(true).setBoundOffset(header().headerSize)
-            .setMinSize(360, 350);
+                .width(340).setResizable(false).setAntiOutOfBound(true).setBoundOffset(header().headerSize)
+                .addTitleAction("Test & Add", this::onConfirmRemoteHost, PopupWidget.TitleActionRole.PRIMARY)
+                .addTitleAction("Back", this::showRemoteHostTypes, PopupWidget.TitleActionRole.SECONDARY);
 
         remoteHostNameInput = new TextInputWidget.Builder().size(18, 18).build();
         builder.addRow("Host Name", remoteHostNameInput);
-
-        remoteHostTypeSwitch = new TabSwitchWidget.Builder().options(List.of("SSH", "Pterodactyl", "Calagopus")).currentIndex(0).build();
-        builder.addRow(ROW_REMOTE_HOST_TYPE, "Host Type", remoteHostTypeSwitch);
-
         remoteHostUserInput = new TextInputWidget.Builder().size(18, 18).text("root").build();
         builder.addRow(ROW_REMOTE_HOST_USER, "User Name", remoteHostUserInput);
-
         remoteHostIpInput = new TextInputWidget.Builder().size(18, 18).build();
         builder.addRow(ROW_REMOTE_HOST_IP, "IP Or Domain", remoteHostIpInput);
-
         remoteHostPortInput = new TextInputWidget.Builder().size(18, 18).text("22").build();
         builder.addRow(ROW_REMOTE_HOST_PORT, "Port", remoteHostPortInput);
-
-        remoteHostPasswordInput = new TextInputWidget.Builder().size(18, 18).build();
-        builder.addRow(ROW_REMOTE_HOST_PASSWORD, "Password", remoteHostPasswordInput);
-
-        remoteHostSftpPasswordInput = new TextInputWidget.Builder().size(18, 18).build();
-        builder.addRow(ROW_REMOTE_HOST_SFTP_PASSWORD, "Panel Password (Optional, Required For SFTP)", remoteHostSftpPasswordInput);
-
-        remoteHostAuthModeSwitch = new TabSwitchWidget.Builder().options(List.of("Password", "SSH Key")).currentIndex(0).build();
+        remoteHostAuthModeSwitch = new TabSwitchWidget.Builder().options(List.of("Password", "SSH Key")).currentIndex(0)
+                .onChange(this::updateRemoteHostAdvancedVisibility).build();
         builder.addRow(ROW_REMOTE_HOST_AUTH_MODE, "Auth Mode", remoteHostAuthModeSwitch);
-
+        remoteHostPasswordInput = new TextInputWidget.Builder().size(18, 18).password(true).build();
+        builder.addRow(ROW_REMOTE_HOST_PASSWORD, "Password", remoteHostPasswordInput);
+        remoteHostSftpPasswordInput = new TextInputWidget.Builder().size(18, 18).password(true).build();
+        builder.addRow(ROW_REMOTE_HOST_SFTP_PASSWORD, "Panel Password", remoteHostSftpPasswordInput);
         remoteHostKeyPathInput = new TextInputWidget.Builder().size(18, 18).placeholder("Leave Empty For Auto Discovery").build();
         builder.addRow(ROW_REMOTE_HOST_KEY_PATH, "Key Path", remoteHostKeyPathInput);
-
-        remoteHostKeyPassphraseInput = new TextInputWidget.Builder().size(18, 18).build();
+        remoteHostKeyPassphraseInput = new TextInputWidget.Builder().size(18, 18).password(true).build();
         builder.addRow(ROW_REMOTE_HOST_PASSPHRASE, "Passphrase", remoteHostKeyPassphraseInput);
-
         remoteHostRegistryPathInput = new TextInputWidget.Builder().size(18, 18).placeholder("Optional File Path For Multiple Users").build();
         builder.addRow(ROW_REMOTE_HOST_REGISTRY_PATH, "Shared Registry File", remoteHostRegistryPathInput);
 
         remoteHostPopup = builder.build();
         remoteHostPopup.hide();
         addDrawableChild(remoteHostPopup);
+
+        remoteHostNameInput.addOnEnter(w -> remoteHostPopup.setFocusedWidget(isPanelHostSelected() ? remoteHostIpInput : remoteHostUserInput));
+        remoteHostUserInput.addOnEnter(w -> remoteHostPopup.setFocusedWidget(remoteHostIpInput));
+        remoteHostIpInput.addOnEnter(w -> remoteHostPopup.setFocusedWidget(isPanelHostSelected() ? remoteHostPasswordInput : remoteHostPortInput));
+        remoteHostPortInput.addOnEnter(w -> remoteHostPopup.setFocusedWidget(remoteHostAuthModeSwitch.getCurrentIndex() == 1 ? remoteHostKeyPathInput : remoteHostPasswordInput));
+        remoteHostPasswordInput.addOnEnter(w -> remoteHostPopup.setFocusedWidget(isPanelHostSelected() ? remoteHostSftpPasswordInput : remoteHostRegistryPathInput));
+        remoteHostSftpPasswordInput.addOnEnter(w -> onConfirmRemoteHost());
+        remoteHostKeyPathInput.addOnEnter(w -> remoteHostPopup.setFocusedWidget(remoteHostKeyPassphraseInput));
+        remoteHostKeyPassphraseInput.addOnEnter(w -> remoteHostPopup.setFocusedWidget(remoteHostRegistryPathInput));
+        remoteHostRegistryPathInput.addOnEnter(w -> onConfirmRemoteHost());
+    }
+
+    private void showRemoteHostTypes() {
+        remoteHostPopup.hide();
+        remoteHostTypePopup.centerOnOwner();
+        remoteHostTypePopup.show();
+    }
+
+    private void resetRemoteHostFields() {
+        remoteHostFormGeneration++;
+        remoteHostNameInput.setText("");
+        remoteHostUserInput.setText("root");
+        remoteHostIpInput.setText("");
+        remoteHostPortInput.setText("22");
+        remoteHostPasswordInput.setText("");
+        remoteHostSftpPasswordInput.setText("");
+        remoteHostAuthModeSwitch.setCurrentIndex(0);
+        remoteHostKeyPathInput.setText("");
+        remoteHostKeyPassphraseInput.setText("");
+        remoteHostRegistryPathInput.setText("");
     }
 
     private void connectRemoteHostAsync(ServerScreenHost.HostView hostInfo, Runnable onSuccess, Runnable onFailure) {
@@ -2701,105 +2930,45 @@ public class ServerManagerScreen extends DesktopShellScreen {
     }
 
     private void openRemoteHostPopup(TabsManager.Tab editTab) {
-        remoteHostEditTab = editTab;
         ServerScreenHost.HostView host = editTab != null && editTab.getData() instanceof ServerScreenHost.HostView value ? value : null;
-        boolean isEditing = host != null;
-
-        remoteHostPopup.clearRows();
-
-        String nameText = "";
-        String userText = "root";
-        String ipText = "";
-        String portText = "22";
-        String passwordText = "";
-        String sftpPasswordText = "";
-        String hostType = "SSH";
-        String registryPathText = "";
-
-        if (isEditing) {
-            nameText = host.name();
-            userText = host.user().isBlank() ? userText : host.user();
-            ipText = host.address();
-            portText = String.valueOf(host.port());
-            hostType = host.type();
-
-            remoteHostConfirmButton = new AnimatedButton.Builder().label(("Save")).size(18, 18).accentType(ThemeManager.getAccent("nice")).onClick(this::onConfirmRemoteHost).build();
-            remoteHostDeleteButton = new AnimatedButton.Builder().label(("Delete")).size(18, 18).onClick(this::onDeleteRemoteHost).accentType(ThemeManager.getAccent("danger")).build();
-        } else {
-            remoteHostConfirmButton = new AnimatedButton.Builder().label(("Test & Add")).size(18, 18).accentType(ThemeManager.getAccent("nice")).onClick(this::onConfirmRemoteHost).build();
-            remoteHostDeleteButton = null;
-        }
-
-        String authModeText = "PASSWORD";
-        String keyPathText = "";
-        if (isEditing) {
-            authModeText = host.authMode();
-            keyPathText = host.keyPath();
-            registryPathText = host.registryPath();
-        }
-
-        remoteHostNameInput.setText(nameText);
-        remoteHostTypeSwitch.setCurrentIndex(remoteHostTypeIndex(hostType));
-        remoteHostUserInput.setText(isPanelType(hostType) ? "" : userText);
-        remoteHostIpInput.setText(ipText);
-        remoteHostPortInput.setText(portText);
-        remoteHostPasswordInput.setText(passwordText);
-        remoteHostSftpPasswordInput.setText(sftpPasswordText);
-        remoteHostAuthModeSwitch.setCurrentIndex("KEY".equalsIgnoreCase(authModeText) ? 1 : 0);
-        remoteHostKeyPathInput.setText(keyPathText);
-        remoteHostKeyPassphraseInput.setText("");
-        remoteHostRegistryPathInput.setText(registryPathText);
-
-        remoteHostPopup.addRow("Host Name", remoteHostNameInput);
-        remoteHostPopup.addRow(ROW_REMOTE_HOST_TYPE, "Host Type", remoteHostTypeSwitch);
-        remoteHostPopup.addRow(ROW_REMOTE_HOST_USER, "User Name", remoteHostUserInput);
-        remoteHostPopup.addRow(ROW_REMOTE_HOST_IP, "IP Or Domain", remoteHostIpInput);
-        remoteHostPopup.addRow(ROW_REMOTE_HOST_PORT, "Port", remoteHostPortInput);
-        remoteHostPopup.addRow(ROW_REMOTE_HOST_AUTH_MODE, "Auth Mode", remoteHostAuthModeSwitch);
-        remoteHostPopup.addRow(ROW_REMOTE_HOST_PASSWORD, "Secret", remoteHostPasswordInput);
-        remoteHostPopup.addRow(ROW_REMOTE_HOST_SFTP_PASSWORD, "Panel Password", remoteHostSftpPasswordInput);
-        remoteHostPopup.addRow(ROW_REMOTE_HOST_KEY_PATH, "Key Path", remoteHostKeyPathInput);
-        remoteHostPopup.addRow(ROW_REMOTE_HOST_PASSPHRASE, "Passphrase", remoteHostKeyPassphraseInput);
-        remoteHostPopup.addRow(ROW_REMOTE_HOST_REGISTRY_PATH, "Shared Registry File", remoteHostRegistryPathInput);
-
-        remoteHostPopup.clearTitleActions();
-        remoteHostPopup.addTitleAction(isEditing ? "Save" : "Test & Add", () -> remoteHostConfirmButton.onClick(0, 0, 0), PopupWidget.TitleActionRole.PRIMARY);
-        if (isEditing && remoteHostDeleteButton != null) {
-            remoteHostPopup.addTitleAction("Delete", () -> remoteHostDeleteButton.onClick(0, 0, 0), PopupWidget.TitleActionRole.DESTRUCTIVE);
-        }
-
-        remoteHostTypeSwitch.setOnChange(this::updateRemoteHostAdvancedVisibility);
-        remoteHostAuthModeSwitch.setOnChange(this::updateRemoteHostAdvancedVisibility);
-        updateRemoteHostAdvancedVisibility();
-
-        remoteHostNameInput.addOnEnter((w) -> remoteHostPopup.setFocusedWidget(isPanelHostSelected() ? remoteHostIpInput : remoteHostUserInput));
-        remoteHostUserInput.addOnEnter((w) -> {
-            if (isPanelHostSelected()) {
-                remoteHostPopup.setFocusedWidget(remoteHostSftpPasswordInput);
-            } else {
-                remoteHostPopup.setFocusedWidget(remoteHostIpInput);
-            }
-        });
-        remoteHostIpInput.addOnEnter((w) -> remoteHostPopup.setFocusedWidget(isPanelHostSelected() ? remoteHostPasswordInput : remoteHostPortInput));
-        remoteHostPortInput.addOnEnter((w) -> remoteHostPopup.setFocusedWidget(remoteHostPasswordInput));
-        remoteHostPasswordInput.addOnEnter((w) -> {
-            if (isPanelHostSelected()) {
-                remoteHostPopup.setFocusedWidget(remoteHostSftpPasswordInput);
+        if (host != null) {
+            RemoteHostType type;
+            try {
+                type = RemoteHostType.fromId(host.type());
+            } catch (IllegalArgumentException error) {
+                new Notification("Host Type Unavailable", error.getMessage(), Notification.Type.ERROR);
                 return;
             }
-            if (remoteHostAuthModeSwitch.getCurrentIndex() == 1) {
-                remoteHostPopup.setFocusedWidget(remoteHostKeyPathInput);
+            resetRemoteHostFields();
+            remoteHostType = type;
+            remoteHostNameInput.setText(host.name());
+            remoteHostUserInput.setText(host.user().isBlank() ? "root" : host.user());
+            remoteHostIpInput.setText(host.address());
+            remoteHostPortInput.setText(String.valueOf(host.port()));
+            remoteHostAuthModeSwitch.setCurrentIndex("KEY".equalsIgnoreCase(host.authMode()) ? 1 : 0);
+            remoteHostKeyPathInput.setText(host.keyPath());
+            remoteHostRegistryPathInput.setText(host.registryPath());
+        }
+        remoteHostEditTab = editTab;
+        remoteHostTypePopup.hide();
+        remoteHostPopup.setTitle((host == null ? "Connect " : "Edit ") + remoteHostType.label + " Host");
+        boolean editing = host != null;
+        if (remoteHostEditActions != editing) {
+            remoteHostEditActions = editing;
+            remoteHostPopup.clearTitleActions();
+            remoteHostPopup.addTitleAction(editing ? "Save" : "Test & Add", this::onConfirmRemoteHost, PopupWidget.TitleActionRole.PRIMARY);
+            if (editing) {
+                remoteHostPopup.addTitleAction("Delete", this::onDeleteRemoteHost, PopupWidget.TitleActionRole.DESTRUCTIVE);
             } else {
-                remoteHostPopup.setFocusedWidget(remoteHostRegistryPathInput);
+                remoteHostPopup.addTitleAction("Back", this::showRemoteHostTypes, PopupWidget.TitleActionRole.SECONDARY);
             }
-        });
-        remoteHostSftpPasswordInput.addOnEnter((w) -> onConfirmRemoteHost());
-        remoteHostKeyPathInput.addOnEnter((w) -> remoteHostPopup.setFocusedWidget(remoteHostKeyPassphraseInput));
-        remoteHostKeyPassphraseInput.addOnEnter((w) -> remoteHostPopup.setFocusedWidget(remoteHostRegistryPathInput));
-        remoteHostRegistryPathInput.addOnEnter((w) -> onConfirmRemoteHost());
-
-        remoteHostPopup.setX((this.width - remoteHostPopup.getWidth()) / 2);
-        remoteHostPopup.setY((this.height - remoteHostPopup.getHeight()) / 2);
+        }
+        for (PopupWidget.PopupRow row : remoteHostPopup.getRows()) {
+            if (ROW_REMOTE_HOST_IP.equals(row.id)) row.setLabel(remoteHostType.panel ? "Panel URL" : "IP Or Domain");
+            if (ROW_REMOTE_HOST_PASSWORD.equals(row.id)) row.setLabel(remoteHostType.panel ? "API Key" : "Password");
+        }
+        updateRemoteHostAdvancedVisibility();
+        remoteHostPopup.centerOnOwner();
         remoteHostPopup.show();
     }
 
@@ -2814,12 +2983,12 @@ public class ServerManagerScreen extends DesktopShellScreen {
             new Notification("Error", "Port Must Be A Valid Number", Notification.Type.ERROR);
             return;
         }
-        String type = isPanel ? selectedPanelType() : "SSH";
+        String type = remoteHostType.id;
         String authMode = isPanel ? "PASSWORD" : (remoteHostAuthModeSwitch.getCurrentIndex() == 1 ? "KEY" : "PASSWORD");
         String address = remoteHostIpInput.getText();
         String name = remoteHostNameInput.getText();
         if (name == null || name.isBlank() || address == null || address.isBlank()) {
-            new Notification("Error", "Host Name and IP cannot be empty.", Notification.Type.ERROR);
+            new Notification("Error", "Host Name And Address Are Required", Notification.Type.ERROR);
             return;
         }
         String id = isEditing && editTab.getData() instanceof ServerScreenHost.HostView host ? host.id() : "";
@@ -2829,6 +2998,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
         Notification notification = new Notification.Builder().message(isEditing ? "Saving Host" : "Testing Host").description("Connecting... 0%").type(Notification.Type.INFO).loading(true).progress(0, 100).autoSlideOut(false).build();
         Async<ServerScreenHost.HostView> save = isEditing ? serverHost().saveRemoteHost(draft) : serverHost().testAndSaveRemoteHost(draft);
         long generation = callbackGeneration;
+        long formGeneration = remoteHostFormGeneration;
         save.whenComplete((host, failure) -> ScreenManager.getInstance().execute(() -> {
             if (!isCurrentCallback(generation)) {
                 return;
@@ -2841,7 +3011,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
                 notification.update().description("Connecting... 100%").progress(100, 100).commit();
                 notification.update().message("Host Ready").description(host.name()).type(Notification.Type.SUCCESS).loading(false).autoSlideOut(true).commit();
                 addHostTab(host);
-                closeRemoteHostPopup();
+                if (formGeneration == remoteHostFormGeneration) closeRemoteHostPopup();
                 return;
             }
             notification.update().message("Host Ready").description(host.name()).type(Notification.Type.SUCCESS).loading(false).autoSlideOut(true).commit();
@@ -2849,40 +3019,39 @@ public class ServerManagerScreen extends DesktopShellScreen {
                 editTab.setName(host.name());
                 editTab.setData(host);
             }
-            closeRemoteHostPopup();
+            if (formGeneration == remoteHostFormGeneration) closeRemoteHostPopup();
         }));
     }
 
     private void updateRemoteHostAdvancedVisibility() {
-        boolean usePtero = isPanelHostSelected();
-        boolean useKey = !usePtero && remoteHostAuthModeSwitch != null && remoteHostAuthModeSwitch.getCurrentIndex() == 1;
+        boolean usePanel = isPanelHostSelected();
+        boolean useKey = !usePanel && remoteHostAuthModeSwitch != null && remoteHostAuthModeSwitch.getCurrentIndex() == 1;
         if (remoteHostPopup != null) {
-            remoteHostPopup.setRowVisibility(ROW_REMOTE_HOST_TYPE, true);
-            remoteHostPopup.setRowVisibility(ROW_REMOTE_HOST_USER, !usePtero);
+            remoteHostPopup.setRowVisibility(ROW_REMOTE_HOST_USER, !usePanel);
             remoteHostPopup.setRowVisibility(ROW_REMOTE_HOST_IP, true);
-            remoteHostPopup.setRowVisibility(ROW_REMOTE_HOST_PORT, !usePtero);
-            remoteHostPopup.setRowVisibility(ROW_REMOTE_HOST_PASSWORD, usePtero || !useKey);
-            remoteHostPopup.setRowVisibility(ROW_REMOTE_HOST_AUTH_MODE, !usePtero);
-            remoteHostPopup.setRowVisibility(ROW_REMOTE_HOST_SFTP_PASSWORD, usePtero);
+            remoteHostPopup.setRowVisibility(ROW_REMOTE_HOST_PORT, !usePanel);
+            remoteHostPopup.setRowVisibility(ROW_REMOTE_HOST_PASSWORD, usePanel || !useKey);
+            remoteHostPopup.setRowVisibility(ROW_REMOTE_HOST_AUTH_MODE, !usePanel);
+            remoteHostPopup.setRowVisibility(ROW_REMOTE_HOST_SFTP_PASSWORD, usePanel);
             remoteHostPopup.setRowVisibility(ROW_REMOTE_HOST_KEY_PATH, useKey);
             remoteHostPopup.setRowVisibility(ROW_REMOTE_HOST_PASSPHRASE, useKey);
-            remoteHostPopup.setRowVisibility(ROW_REMOTE_HOST_REGISTRY_PATH, !usePtero);
+            remoteHostPopup.setRowVisibility(ROW_REMOTE_HOST_REGISTRY_PATH, !usePanel);
         }
         if (remoteHostUserInput != null) {
-            remoteHostUserInput.setActive(!usePtero);
-            remoteHostUserInput.setVisible(!usePtero);
+            remoteHostUserInput.setActive(!usePanel);
+            remoteHostUserInput.setVisible(!usePanel);
         }
         if (remoteHostPortInput != null) {
-            remoteHostPortInput.setActive(!usePtero);
-            remoteHostPortInput.setVisible(!usePtero);
+            remoteHostPortInput.setActive(!usePanel);
+            remoteHostPortInput.setVisible(!usePanel);
         }
         if (remoteHostPasswordInput != null) {
-            remoteHostPasswordInput.setActive(usePtero || !useKey);
-            remoteHostPasswordInput.setVisible(usePtero || !useKey);
+            remoteHostPasswordInput.setActive(usePanel || !useKey);
+            remoteHostPasswordInput.setVisible(usePanel || !useKey);
         }
         if (remoteHostSftpPasswordInput != null) {
-            remoteHostSftpPasswordInput.setActive(usePtero);
-            remoteHostSftpPasswordInput.setVisible(usePtero);
+            remoteHostSftpPasswordInput.setActive(usePanel);
+            remoteHostSftpPasswordInput.setVisible(usePanel);
         }
         if (remoteHostKeyPathInput != null) {
             remoteHostKeyPathInput.setActive(useKey);
@@ -2893,40 +3062,24 @@ public class ServerManagerScreen extends DesktopShellScreen {
             remoteHostKeyPassphraseInput.setVisible(useKey);
         }
         if (remoteHostRegistryPathInput != null) {
-            remoteHostRegistryPathInput.setActive(!usePtero);
-            remoteHostRegistryPathInput.setVisible(!usePtero);
+            remoteHostRegistryPathInput.setActive(!usePanel);
+            remoteHostRegistryPathInput.setVisible(!usePanel);
         }
         if (remoteHostAuthModeSwitch != null) {
-            remoteHostAuthModeSwitch.setActive(!usePtero);
-            remoteHostAuthModeSwitch.setVisible(!usePtero);
-        }
-        if (remoteHostTypeSwitch != null) {
-            remoteHostTypeSwitch.setActive(true);
-            remoteHostTypeSwitch.setVisible(true);
+            remoteHostAuthModeSwitch.setActive(!usePanel);
+            remoteHostAuthModeSwitch.setVisible(!usePanel);
         }
     }
 
     private boolean isPanelHostSelected() {
-        return remoteHostTypeSwitch != null && remoteHostTypeSwitch.getCurrentIndex() > 0;
-    }
-
-    private String selectedPanelType() {
-        return remoteHostTypeSwitch != null && remoteHostTypeSwitch.getCurrentIndex() == 2 ? "CALAGOPUS" : "PTERO";
-    }
-
-    private int remoteHostTypeIndex(String type) {
-        if ("CALAGOPUS".equalsIgnoreCase(type)) return 2;
-        return "PTERO".equalsIgnoreCase(type) ? 1 : 0;
-    }
-
-    private boolean isPanelType(String type) {
-        return "PTERO".equalsIgnoreCase(type) || "CALAGOPUS".equalsIgnoreCase(type);
+        return remoteHostType.panel;
     }
 
     private void onDeleteRemoteHost() {
         TabsManager.Tab editTab = remoteHostEditTab;
         if (editTab == null || !(editTab.getData() instanceof ServerScreenHost.HostView host)) return;
         long generation = callbackGeneration;
+        long formGeneration = remoteHostFormGeneration;
         serverHost().hostAction(host, "delete").whenComplete((ignored, failure) -> ScreenManager.getInstance().execute(() -> {
             if (!isCurrentCallback(generation)) {
                 return;
@@ -2943,7 +3096,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
                     tabs().setActiveTab(0);
                 }
             }
-            closeRemoteHostPopup();
+            if (formGeneration == remoteHostFormGeneration) closeRemoteHostPopup();
         }));
     }
 
@@ -2973,10 +3126,10 @@ public class ServerManagerScreen extends DesktopShellScreen {
     }
 
     private void closeRemoteHostPopup() {
+        remoteHostFormGeneration++;
         remoteHostEditTab = null;
-        if(remoteHostPopup != null) {
-            remoteHostPopup.hide();
-        }
+        if (remoteHostPopup != null) remoteHostPopup.hide();
+        if (remoteHostTypePopup != null) remoteHostTypePopup.hide();
     }
 
     private void openImportFileExplorer() {
@@ -3067,6 +3220,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
     @Override
     public void tick() {
         super.tick();
+        if (networkRefreshRequired && isActiveScreen()) refreshNetworks();
         Object data = tabs().getActiveTab() != null ? tabs().getActiveTab().getData() : null;
         if (!(data instanceof ServerScreenHost.HostView) && !"RESTUDIO_MARKER".equals(data)) {
             pollPersistentLocalServerStates(getCurrentServers(), false);

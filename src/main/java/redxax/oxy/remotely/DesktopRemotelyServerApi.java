@@ -15,7 +15,9 @@ import restudio.rebase.Rebase;
 import restudio.rebase.backend.feature.BackupOperations;
 import restudio.rebase.minecraft.GameVersion;
 import restudio.rebase.restudio.ReStudio;
+import restudio.rebase.restudio.ReStudioEnvironment;
 import restudio.rebase.restudio.api.ReStudioApiClient;
+import restudio.rebase.restudio.api.ReStudioApiException;
 import restudio.rebase.restudio.api.models.MarketplaceModels;
 import restudio.rebase.restudio.api.models.ReleaseModels;
 import restudio.rebase.restudio.api.models.ServerModels;
@@ -28,17 +30,27 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HexFormat;
+import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
+import java.util.function.BooleanSupplier;
 
 public final class DesktopRemotelyServerApi implements RemotelyServerApi {
     private static final Duration MODPACK_JOB_TIMEOUT = Duration.ofMinutes(30);
@@ -47,10 +59,25 @@ public final class DesktopRemotelyServerApi implements RemotelyServerApi {
     private final ReStudioApiClient delegate;
     private final HostedNetworkClient networks;
     private final Map<String, PendingNetworkMutation> pendingNetworkMutations = new ConcurrentHashMap<>();
+    private final Set<Runnable> networkListeners = Collections.newSetFromMap(new IdentityHashMap<>());
+    private final Map<String, NetworkRevision> networkRevisions = new LinkedHashMap<>();
+    private String observationAccount = "";
+    private String networkInventory;
+    private long networkSequence;
+    private long inventorySequence;
     private String networkAccount = "";
 
     private record ServerDeletionStatus(String serverId, String status, String failedStep) {}
     private record PendingNetworkMutation(String body, String key) {}
+    private record NetworkRevision(long sequence, long revision) {}
+
+    public synchronized void addNetworkChangeListener(Runnable listener) {
+        if (listener != null) networkListeners.add(listener);
+    }
+
+    public synchronized void removeNetworkChangeListener(Runnable listener) {
+        networkListeners.remove(listener);
+    }
 
     public DesktopRemotelyServerApi(ReStudioApiClient delegate) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
@@ -62,6 +89,7 @@ public final class DesktopRemotelyServerApi implements RemotelyServerApi {
         return networks;
     }
 
+    @Override
     public Async<List<ServerScreenHost.NetworkView>> hostedNetworkViews() {
         return hostedNetworkValueRequest("GET", "/networks", null).thenApply(value -> {
             if (!value.isJsonArray()) throw new IllegalStateException("Hosted Network List Is Invalid");
@@ -87,19 +115,105 @@ public final class DesktopRemotelyServerApi implements RemotelyServerApi {
         }
         UUID sessionId = studio.getSessionId();
         String userId = studio.getUserId();
+        ReStudioEnvironment environment = studio.getEnvironment();
+        String account = environment.name() + ":" + userId + ":" + sessionId;
+        long sequence;
+        synchronized (this) {
+            sequence = ++networkSequence;
+        }
+        BooleanSupplier current = () -> ReStudio.getInstance() == studio && studio.isAuthenticated() && studio.getApi() == delegate
+                && studio.getEnvironment() == environment
+                && sessionId.equals(studio.getSessionId()) && userId.equals(studio.getUserId());
         String content = body == null ? null : GSON.toJson(body);
         String mutation = method + " " + path;
-        String requestKey = "GET".equals(method) ? null : networkRequestKey(userId + ":" + sessionId, mutation, content);
+        String requestKey = "GET".equals(method) ? null : networkRequestKey(account, mutation, content);
         return delegate.async().hostedNetworkRequest(method, "/hosted-networks/views" + ("/networks".equals(path) ? "" : path.substring("/networks".length())), content, requestKey)
                 .thenApply(response -> {
-                    if (ReStudio.getInstance() != studio || !studio.isAuthenticated() || studio.getApi() != delegate
-                            || !sessionId.equals(studio.getSessionId()) || !userId.equals(studio.getUserId())) {
+                    if (!current.getAsBoolean()) {
                         throw new IllegalStateException("Hosted Network Account Changed");
                     }
                     JsonElement result = JsonTreeParser.parse(response);
                     if (requestKey != null) clearNetworkRequestKey(mutation, requestKey);
+                    observeNetwork(account, method, path, sequence, result, current);
                     return result;
                 });
+    }
+
+    private void observeNetwork(String account, String method, String path, long sequence, JsonElement value, BooleanSupplier current) {
+        List<Runnable> listeners;
+        synchronized (this) {
+            if (!current.getAsBoolean()) return;
+            if (!observationAccount.equals(account)) {
+                observationAccount = account;
+                networkInventory = null;
+                inventorySequence = 0;
+                networkRevisions.clear();
+            }
+            boolean changed = false;
+            if ("GET".equals(method) && "/networks".equals(path) && value.isJsonArray()) {
+                if (sequence < inventorySequence) return;
+                Map<String, Object> members = new TreeMap<>();
+                for (JsonElement item : value.getAsJsonArray()) {
+                    if (!item.isJsonObject()) continue;
+                    JsonObject network = item.getAsJsonObject();
+                    String id = network.has("id") && !network.get("id").isJsonNull() ? network.get("id").getAsString() : "";
+                    String proxy = network.has("proxyId") && !network.get("proxyId").isJsonNull() ? network.get("proxyId").getAsString() : "";
+                    List<String> identities = new ArrayList<>();
+                    if (network.has("members") && network.get("members").isJsonArray()) {
+                        for (JsonElement member : network.getAsJsonArray("members")) {
+                            if (!member.isJsonNull()) identities.add(member.getAsString());
+                        }
+                    }
+                    identities.sort(String::compareTo);
+                    members.put(id, List.of(proxy, identities));
+                }
+                String stamp = networkStamp(GSON.toJson(members));
+                changed = networkInventory != null && !networkInventory.equals(stamp);
+                networkInventory = stamp;
+                inventorySequence = sequence;
+                networkRevisions.keySet().retainAll(members.keySet());
+            } else if (value.isJsonObject()) {
+                JsonObject object = value.getAsJsonObject();
+                JsonElement definition = object.get("network");
+                if ("GET".equals(method) && definition != null && definition.isJsonObject() && sequence >= inventorySequence) {
+                    JsonObject network = definition.getAsJsonObject();
+                    if (network.has("networkId") && network.has("revision")) {
+                        String id = network.get("networkId").getAsString();
+                        long revision = network.get("revision").getAsLong();
+                        if (path.equals("/networks/" + URLEncoder.encode(id, StandardCharsets.UTF_8).replace("+", "%20"))) {
+                            NetworkRevision previous = networkRevisions.get(id);
+                            if (previous == null || sequence > previous.sequence() && revision >= previous.revision()) {
+                                changed = previous != null && previous.revision() != revision;
+                                networkRevisions.put(id, new NetworkRevision(sequence, revision));
+                                trimNetworkStamps();
+                            }
+                        }
+                    }
+                }
+            }
+            listeners = changed ? new ArrayList<>(networkListeners) : List.of();
+        }
+        for (Runnable listener : listeners) {
+            synchronized (this) {
+                if (!current.getAsBoolean() || !networkListeners.contains(listener)) continue;
+            }
+            try {
+                listener.run();
+            } catch (RuntimeException ignored) {
+            }
+        }
+    }
+
+    private void trimNetworkStamps() {
+        while (networkRevisions.size() > 128) networkRevisions.remove(networkRevisions.keySet().iterator().next());
+    }
+
+    private static String networkStamp(String value) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException failure) {
+            throw new IllegalStateException(failure);
+        }
     }
 
     private synchronized String networkRequestKey(String account, String mutation, String body) {
@@ -203,6 +317,36 @@ public final class DesktopRemotelyServerApi implements RemotelyServerApi {
     @Override
     public Async<List<ServerModels.ClientServerView>> getServers() {
         return JvmAsyncBridge.fromFuture(delegate.getServers());
+    }
+
+    @Override
+    public Async<ServerSubdomain> serverSubdomain(String serverId) {
+        if (serverId == null || serverId.isBlank()) return Async.failed(new IllegalArgumentException("Server Is Required"));
+        return delegate.async().communityRequest("GET", "/servers/" + URLEncoder.encode(serverId, StandardCharsets.UTF_8) + "/subdomain", null)
+                .thenApply(body -> serverSubdomain(serverId, body));
+    }
+
+    @Override
+    public Async<ServerSubdomain> updateServerSubdomain(String serverId, String subdomain, String expectedNetworkId, String expectedNetworkRevision) {
+        if (serverId == null || serverId.isBlank() || subdomain == null || subdomain.isBlank()) {
+            return Async.failed(new IllegalArgumentException("Server And Subdomain Are Required"));
+        }
+        if (expectedNetworkId == null || expectedNetworkRevision == null || !expectedNetworkRevision.matches("0|[1-9][0-9]*")) {
+            return Async.failed(new IllegalArgumentException("Subdomain Authority Is Required"));
+        }
+        return delegate.async().communityRequest("PUT", "/servers/" + URLEncoder.encode(serverId, StandardCharsets.UTF_8) + "/subdomain",
+                GSON.toJson(Map.of("subdomain", subdomain, "expectedNetworkId", expectedNetworkId, "expectedNetworkRevision", expectedNetworkRevision)))
+                .thenApply(body -> serverSubdomain(serverId, body));
+    }
+
+    private static ServerSubdomain serverSubdomain(String serverId, String body) {
+        JsonObject response = GSON.fromJson(body, JsonObject.class);
+        if (response == null) throw new IllegalStateException("Server Subdomain Response Is Invalid");
+        ServerSubdomain value = GSON.fromJson(response, ServerSubdomain.class);
+        if (value == null || value.serverId().isBlank()) {
+            throw new IllegalStateException("Server Subdomain Response Is Invalid");
+        }
+        return value;
     }
 
     @Override
@@ -493,6 +637,11 @@ public final class DesktopRemotelyServerApi implements RemotelyServerApi {
     @Override
     public Async<Void> chmodFiles(String serverId, String root, List<ServerModels.PteroFileChmodItem> files) {
         return JvmAsyncBridge.fromFuture(delegate.chmodFiles(serverId, root, files));
+    }
+
+    @Override
+    public Async<String> createFileArchive(String serverId, String root, List<String> files) {
+        return JvmAsyncBridge.fromFuture(delegate.createFileArchive(serverId, root, files));
     }
 
     @Override

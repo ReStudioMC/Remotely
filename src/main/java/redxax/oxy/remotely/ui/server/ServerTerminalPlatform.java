@@ -34,6 +34,10 @@ public interface ServerTerminalPlatform {
     default void stopRequested(ServerTerminal terminal) {
     }
 
+    default boolean canAttachTerminal(ServerTerminal terminal) {
+        return true;
+    }
+
     default boolean beforeStartServerProcess(ServerTerminal terminal) {
         return true;
     }

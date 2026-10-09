@@ -41,7 +41,7 @@ final class ResourcePurchaseFlow {
     private final AnimatedButton status = label("");
     private final MountableButtonWidget summary = information("Resources", "", "Reactor.png");
     private final MountableButtonWidget cpuTerms = information("CPU Pricing", "", "cpu.png");
-    private final MountableButtonWidget diskTerms = information("Storage Pricing", "", "disk.png");
+    private final MountableButtonWidget diskTerms = information("Disk Pricing", "", "disk.png");
     private final AnimatedButton advanced = button("Advanced", this::toggleAdvanced);
     private final AnimatedButton followRam = button("CPU Follows RAM", this::followRam);
     private final AnimatedButton cancel = button("Cancel", this::close);
@@ -95,8 +95,7 @@ final class ResourcePurchaseFlow {
                 .onSelectionChanged(this::select).size(300, 18).build();
         amounts.add(new Amount("Memory (GB)", "ram.png", 1024));
         amounts.add(new Amount("CPU Equivalents", "cpu.png", 100));
-        amounts.add(new Amount("Storage (GB)", "disk.png", 1024));
-        amounts.add(new Amount("Backups (GB)", "backup.png", 1024));
+        amounts.add(new Amount("Disk (GB)", "disk.png", 1024));
         addRow("summary", "", summary);
         addRow("offer", "Recommended Configuration", selector);
         for (int index = 0; index < amounts.size(); index++) {
@@ -152,8 +151,7 @@ final class ResourcePurchaseFlow {
         ResourcePoolModels.Resources maximum = available.maximum();
         return new BigInteger(minimum.ramMiB()).compareTo(limit(rate.maximum().ramMiB(), maximum.ramMiB(), false)) <= 0
                 && new BigInteger(minimum.cpuQuotaPercent()).compareTo(limit(rate.maximum().cpuQuotaPercent(), maximum.cpuQuotaPercent(), true)) <= 0
-                && new BigInteger(minimum.diskMiB()).compareTo(limit(rate.maximum().diskMiB(), maximum.diskMiB(), false)) <= 0
-                && new BigInteger(minimum.backupMiB()).compareTo(limit(rate.maximum().backupMiB(), maximum.backupMiB(), false)) <= 0;
+                && new BigInteger(minimum.diskMiB()).compareTo(limit(rate.maximum().diskMiB(), maximum.diskMiB(), false)) <= 0;
     }
 
     private static BigInteger limit(String catalog, String available, boolean unlimited) {
@@ -180,12 +178,11 @@ final class ResourcePurchaseFlow {
         amounts.get(0).text = units(offer.ramMiB(), 1024);
         amounts.get(1).text = units(offer.cpuQuotaPercent(), 100);
         amounts.get(2).text = units(offer.diskMiB(), 1024);
-        amounts.get(3).text = units(offer.backupMiB(), 1024);
         if (poolId != null) {
             ResourcePoolModels.Pool pool = controller.snapshot().pools().stream().map(ResourcePoolController.PoolView::pool)
                     .filter(value -> value.id().equals(poolId)).findFirst().orElseThrow(() -> new IllegalArgumentException("Refresh This Pool Before Expanding"));
             ResourcePoolModels.Resources existing = pool.balance().entitled();
-            List<String> quantities = List.of(existing.ramMiB(), existing.cpuQuotaPercent(), existing.diskMiB(), existing.backupMiB());
+            List<String> quantities = List.of(existing.ramMiB(), existing.cpuQuotaPercent(), existing.diskMiB());
             for (int index = 0; index < amounts.size(); index++) {
                 Amount amount = amounts.get(index);
                 BigInteger value = new BigInteger(quantities.get(index)).max(amount.value()).max(amount.minimum);
@@ -217,7 +214,6 @@ final class ResourcePurchaseFlow {
         amounts.get(0).limits(rate.minimum().ramMiB(), limit(rate.maximum().ramMiB(), available.maximum().ramMiB(), false).toString(), rate.step().ramMiB());
         amounts.get(1).limits(rate.minimum().cpuQuotaPercent(), limit(rate.maximum().cpuQuotaPercent(), available.maximum().cpuQuotaPercent(), true).toString(), rate.step().cpuQuotaPercent());
         amounts.get(2).limits(rate.minimum().diskMiB(), limit(rate.maximum().diskMiB(), available.maximum().diskMiB(), false).toString(), rate.step().diskMiB());
-        amounts.get(3).limits(rate.minimum().backupMiB(), limit(rate.maximum().backupMiB(), available.maximum().backupMiB(), false).toString(), rate.step().backupMiB());
     }
 
     private void changed() {
@@ -270,7 +266,7 @@ final class ResourcePurchaseFlow {
     }
 
     private ResourcePoolModels.Resources resources() {
-        return new ResourcePoolModels.Resources(amounts.get(0).raw(), amounts.get(1).raw(), amounts.get(2).raw(), amounts.get(3).raw());
+        return new ResourcePoolModels.Resources(amounts.get(0).raw(), amounts.get(1).raw(), amounts.get(2).raw(), "0");
     }
 
     private BigDecimal cpuAllowance() {
@@ -334,10 +330,11 @@ final class ResourcePurchaseFlow {
         boolean capacityReady = capacityCurrent();
         amounts.get(0).card.setDescription(cpuManual ? "Custom CPU • Edit In Advanced" : cpuQuotaPerMiB.signum() > 0 ? "CPU Follows RAM" : "CPU From Selected Configuration");
         amounts.get(1).card.setDescription("Shared Quota • 1 CPU Equivalent = 100%");
+        amounts.get(2).card.setDescription("Server Files And Backups Share This Limit");
         followRam.setMessage(cpuManual ? "Use CPU From RAM" : "CPU Follows RAM");
         followRam.active = !busy && capacityReady && cpuQuotaPerMiB.signum() > 0;
         cpuSurcharge = rate != null && describeTerms(cpuTerms, amounts.get(1), rate.cpuQuotaPerGiB(), rate.excessCpuMultiplier(), "CPU Equivalents");
-        diskSurcharge = rate != null && describeTerms(diskTerms, amounts.get(2), rate.diskMiBPerGiB(), rate.excessDiskMultiplier(), "GB Storage");
+        diskSurcharge = rate != null && describeTerms(diskTerms, amounts.get(2), rate.diskMiBPerGiB(), rate.excessDiskMultiplier(), "GB Disk");
         nextPriceChange = rate == null ? null : rate.automaticDiscounts().stream().flatMap(value -> value.endsAt() == null
                         ? Stream.of(value.startsAt()) : Stream.of(value.startsAt(), value.endsAt()))
                 .filter(time -> time.isAfter(now)).min(Instant::compareTo).orElse(null);
@@ -382,7 +379,7 @@ final class ResourcePurchaseFlow {
     private void updateVisibility() {
         visible("offer", !reviewing);
         for (int index = 0; index < amounts.size(); index++) {
-            boolean shown = !reviewing && (index == 0 || advancedOpen && (index < 3 || amounts.get(index).maximum.signum() > 0 || !amounts.get(index).text.equals("0")));
+            boolean shown = !reviewing && (index == 0 || advancedOpen);
             visible("resource-" + index, shown);
         }
         visible("cpu-follow", !reviewing && advancedOpen && cpuQuotaPerMiB.signum() > 0);
@@ -466,7 +463,7 @@ final class ResourcePurchaseFlow {
         discount.setDescription("-" + money(price.currency(), price.discountCents()));
         credit.setDescription("-" + money(price.currency(), quote.creditCents()));
         renewal.setName("Renews At " + money(price.currency(), price.renewalCents()) + " Every " + price.periodDays() + " Days");
-        renewal.setDescription("Resources Activate After Payment");
+        renewal.setDescription("Resources Become Available After Payment And Review");
         pay.setMessage("Checkout • " + money(price.currency(), quote.dueCents()));
         reviewing = true;
         status("");
@@ -518,7 +515,7 @@ final class ResourcePurchaseFlow {
 
     static String specs(ResourcePoolModels.Resources resources) {
         String result = units(resources.ramMiB(), 1024) + " GB RAM  •  " + units(resources.cpuQuotaPercent(), 100)
-                + " Shared CPU  •  " + units(resources.diskMiB(), 1024) + " GB Storage";
+                + " Shared CPU  •  " + units(resources.diskMiB(), 1024) + " GB Disk";
         return resources.backupMiB().equals("0") ? result : result + "  •  " + units(resources.backupMiB(), 1024) + " GB Backups";
     }
 

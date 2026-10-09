@@ -222,6 +222,10 @@ public class ServerTerminal extends TerminalWidget implements ServerTerminalLife
 
     @Override
     public void start() {
+        if (!isRunningState() || !platform.canAttachTerminal(this)) {
+            if (!platform.replacesStatusPolling()) refreshStatus();
+            return;
+        }
         super.start();
         if (!platform.replacesStatusPolling()) refreshStatus();
     }
@@ -305,7 +309,7 @@ public class ServerTerminal extends TerminalWidget implements ServerTerminalLife
             renderCentered(reconnectingMessage, context, mouseX, mouseY);
             return;
         }
-        if (!isTerminalReady() && !explicitDisconnect && !forceStoppedView && !hasContent) {
+        if (isRunningState() && !isTerminalReady() && !explicitDisconnect && !forceStoppedView && !hasContent) {
             renderCentered(connectingMessage, context, mouseX, mouseY);
             return;
         }
@@ -369,6 +373,8 @@ public class ServerTerminal extends TerminalWidget implements ServerTerminalLife
         reconnecting = false;
         broadcastNotice("Stop Requested...");
         broadcastNotice("Waiting For Shutdown...");
+        state = "stopping";
+        setObservedState(ServerScreenHost.ServerState.STOPPING);
         platform.stopRequested(this);
     }
 
@@ -396,10 +402,12 @@ public class ServerTerminal extends TerminalWidget implements ServerTerminalLife
     private void refreshStatus() {
         if (api == null || server == null || disposed || statusRequestInFlight) return;
         statusRequestInFlight = true;
+        long requestedStart = lastStartRequested;
+        long requestedStop = lastStopRequested;
         try {
             host.serverStatus(api, server).whenComplete((value, failure) -> host.application().execute(() -> {
                 statusRequestInFlight = false;
-                if (disposed || failure != null || value == null) return;
+                if (disposed || failure != null || value == null || requestedStart != lastStartRequested || requestedStop != lastStopRequested) return;
                 applyStatus(value);
             }));
         } catch (Throwable failure) {
@@ -408,7 +416,12 @@ public class ServerTerminal extends TerminalWidget implements ServerTerminalLife
     }
 
     private void applyStatus(ServerModels.ServerStatus value) {
-        state = value.currentState == null ? "offline" : value.currentState.trim().toLowerCase(Locale.ROOT);
+        String observed = value.currentState == null ? "offline" : value.currentState.trim().toLowerCase(Locale.ROOT);
+        boolean stopping = !value.suspended && !value.installing && ("running".equals(observed) || "starting".equals(observed))
+                && desiredPower == DesiredPower.STOPPED && lastStopRequested > 0
+                && System.currentTimeMillis() - lastStopRequested < STOP_GRACE_MS;
+        if (stopping) return;
+        state = observed;
         if (value.suspended || value.installing) {
             desiredPower = value.suspended ? DesiredPower.STOPPED : DesiredPower.RUNNING;
             forceStoppedView = value.suspended;
@@ -418,9 +431,6 @@ public class ServerTerminal extends TerminalWidget implements ServerTerminalLife
             return;
         }
         if ("running".equals(state) || "starting".equals(state)) {
-            boolean withinStopGrace = desiredPower == DesiredPower.STOPPED && lastStopRequested > 0
-                    && System.currentTimeMillis() - lastStopRequested < STOP_GRACE_MS;
-            if (withinStopGrace) return;
             desiredPower = DesiredPower.RUNNING;
             explicitDisconnect = false;
             forceStoppedView = false;
@@ -512,6 +522,8 @@ public class ServerTerminal extends TerminalWidget implements ServerTerminalLife
     private void setObservedState(ServerScreenHost.ServerState observedState) {
         if (observedState != null && observedState != ServerScreenHost.ServerState.UNKNOWN) {
             host.setState(server, observedState);
+            ServerScreenHost.ServerState accepted = host.state(server);
+            if (accepted != null && accepted != ServerScreenHost.ServerState.UNKNOWN) acceptPlatformState(accepted.name());
         }
     }
 

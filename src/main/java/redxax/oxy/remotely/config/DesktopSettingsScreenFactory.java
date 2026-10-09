@@ -31,6 +31,10 @@ public final class DesktopSettingsScreenFactory {
     }
 
     public static SettingsScreen createGlobalSettingsScreen(ReScreen parent, RemotelyConfigManager config) {
+        return createGlobalSettingsScreen(parent, config, null);
+    }
+
+    public static SettingsScreen createGlobalSettingsScreen(ReScreen parent, RemotelyConfigManager config, String initialTab) {
         JvmInstanceStorageSettingsProvider storage = new JvmInstanceStorageSettingsProvider(config);
         RemotelyClient client = RemotelyClient.INSTANCE;
         ServerScreenHost serverHost = client == null || client.getHost() == null
@@ -87,6 +91,6 @@ public final class DesktopSettingsScreenFactory {
                 new JvmLogSettingsProvider(),
                 null,
                 runtime);
-        return SettingsScreenFactory.createGlobalSettingsScreen(parent, config, providers);
+        return SettingsScreenFactory.createGlobalSettingsScreen(parent, config, providers, initialTab);
     }
 }

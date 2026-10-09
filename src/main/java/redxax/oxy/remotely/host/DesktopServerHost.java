@@ -1,5 +1,7 @@
 package redxax.oxy.remotely.host;
 
+import restudio.rebase.platform.ExternalOpenResult;
+
 import restudio.rebase.backend.ServerBackend;
 import redxax.oxy.remotely.network.NetworkBootstrap;
 import redxax.oxy.remotely.flow.ui.ReSyncProvisioningService;
@@ -37,6 +39,25 @@ import redxax.oxy.remotely.network.DesktopNetworkAccess;
 import redxax.oxy.remotely.network.DesktopNetworkManager;
 import redxax.oxy.remotely.servers.QuickServerSyncManager;
 import redxax.oxy.remotely.servers.ReProxyManager;
+import redxax.oxy.remotely.servers.ReProxyTarget;
+import redxax.oxy.remotely.servers.reproxy.PluginForwarding;
+import redxax.oxy.remotely.packcontent.RemotelyPackContentIntegration;
+import redxax.oxy.remotely.ui.settings.controllers.ReProxyServerSettingsController;
+import restudio.rebase.ui.screens.resources.ResourceContainerItem;
+import restudio.rescreen.ui.settings.SettingsScreen;
+import restudio.rescreen.ui.settings.Setting;
+import redxax.oxy.remotely.servers.reproxy.JvmPluginAccess;
+import redxax.oxy.remotely.servers.reproxy.HostedPluginAccess;
+import redxax.oxy.remotely.servers.reproxy.NetworkPluginForwarding;
+import redxax.oxy.remotely.servers.reproxy.SshPluginAccess;
+import restudio.rebase.ui.screens.resources.ResourceForwarding;
+import restudio.rebase.reproxy.ReProxyModels.Binding;
+import restudio.rebase.reproxy.ReProxyModels.AddressSpec;
+import restudio.rebase.reproxy.ReProxyModels.Connection;
+import restudio.rebase.reproxy.ReProxyModels.Suffix;
+import restudio.rebase.restudio.ReStudioEnvironment;
+import restudio.rebase.restudio.api.ReStudioApiClient;
+import redxax.oxy.remotely.servers.JvmReProxyConnectorCapability;
 import redxax.oxy.remotely.ui.server.NetworkAdoptionScreen;
 import redxax.oxy.remotely.ui.server.NetworkMigrationScreen;
 import redxax.oxy.remotely.ui.server.NetworkOverviewScreen;
@@ -144,9 +165,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.HashMap;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.HashSet;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
@@ -161,6 +184,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletionException;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 public final class DesktopServerHost implements ServerScreenHost {
@@ -172,6 +196,8 @@ public final class DesktopServerHost implements ServerScreenHost {
     private static final String HOSTED_NETWORK_PREFIX = "hosted:";
     private final RemotelyClient client;
     private final Map<Runnable, Consumer<List<NetworkDefinition>>> networkListeners = new IdentityHashMap<>();
+    private final Map<Runnable, DesktopNetworkManager> networkListenerOwners = new IdentityHashMap<>();
+    private final Map<Runnable, DesktopRemotelyServerApi> hostedNetworkListeners = new IdentityHashMap<>();
     private final Map<Runnable, Consumer<NetworkRuntimeSnapshot>> runtimeListeners = new IdentityHashMap<>();
     private final Map<Instance, Map<Consumer<ServerScreenHost.ServerState>, Consumer<InstanceState>>> stateListeners = new IdentityHashMap<>();
     private final Map<Runnable, AuthStateListener> authStateListeners = new IdentityHashMap<>();
@@ -180,16 +206,45 @@ public final class DesktopServerHost implements ServerScreenHost {
     private final Map<String, ServerModels.ClientServerView> restudioBridgeViews = new ConcurrentHashMap<>();
     private volatile List<ServerModels.ClientServerView> restudioServerSnapshot = List.of();
     private final AtomicLong restudioRequestGeneration = new AtomicLong();
+    private final AtomicLong reProxyAuthGeneration = new AtomicLong();
     private final ServerIconProvider iconProvider;
     private final ServerIconManager iconManager;
     private final HostedNetworkPendingStore pendingHostedNetworks;
+    private final Map<String, PluginForwarding> pluginForwarding = new ConcurrentHashMap<>();
+    private final Map<String, NetworkPluginForwarding> networkPluginForwarding = new ConcurrentHashMap<>();
+    private final Map<String, PluginPort> pluginPorts = new ConcurrentHashMap<>();
+    private record PluginPort(NetworkDefinition network, String nodeId, int port) { }
+    private NetworkPluginForwarding.Coordinator pluginChanges = new NetworkPluginForwarding.Coordinator();
+    private DesktopNetworkManager pluginNetworks;
+    private DesktopRemotelyServerApi pluginHostedApi;
+    private final Runnable pluginHostedChanged = () -> networkPluginForwarding.values().forEach(NetworkPluginForwarding::invalidate);
+    private final Consumer<List<NetworkDefinition>> pluginNetworkListener = ignored -> networkPluginForwarding.values().forEach(NetworkPluginForwarding::invalidate);
+    private record PluginOwner(ReStudio studio, ReStudioApiClient api, ReStudioEnvironment environment, String user, UUID session) { }
+    private PluginOwner pluginOwner;
 
     public DesktopServerHost(RemotelyClient client) {
         this.client = Objects.requireNonNull(client, "client");
+        JvmReProxyConnectorCapability.configureGamePort(instance -> {
+            DesktopNetworkManager manager = DesktopNetworkAccess.manager(client);
+            if (instance.getNetworkId().isBlank() && (manager == null || manager.getNetworkForInstance(instance.getInstanceId()).isEmpty())) {
+                return instance.getPort();
+            }
+            return pluginGamePort(instance);
+        });
+        ReProxyManager.configure(ReStudio.getInstance().getApi().reProxy(), JvmReProxyConnectorCapability.INSTANCE);
         this.iconProvider = client.getComposition().serverIconProvider();
         this.iconManager = new ServerIconManager(iconProvider);
         this.pendingHostedNetworks = new HostedNetworkPendingStore(client.getComposition().configManager());
         FileExplorerProviders.installAdditionalRootGroups(this, this::reactorExplorerRootGroups);
+        RemotelyPackContentIntegration.install(binding -> {
+            ResourceForwarding forwarding = serverResourceForwarding(binding.instance());
+            return forwarding instanceof PluginForwarding flow ? flow : null;
+        });
+        addAuthStateListener(this::clearPluginForwarding);
+        addAuthStateListener(reProxyAuthGeneration::incrementAndGet);
+        ReProxyManager.configureCreation(() -> new ReProxyManager.CreationAdmission(hostedAccount(), reProxyCreationAdmission()));
+        InstanceManager.getInstance().getAllInstances().stream().filter(this::isAttachedLocalServer)
+                .forEach(instance -> pluginForwarding(instance).reconcile());
     }
 
     @Override
@@ -299,7 +354,7 @@ public final class DesktopServerHost implements ServerScreenHost {
     public Async<String> connectionInfo(Object value) {
         Instance instance = instance(value);
         if (instance == null) return Async.completed("");
-        String forwarded = ReProxyManager.getForwardedAddress(instance);
+        String forwarded = ReProxyManager.getForwardedAddress(reProxyTarget(value));
         if (forwarded != null && !forwarded.isBlank()) return Async.completed(forwarded);
         if (instance.getBackend() == null) return Async.completed("");
         ServerInfoFeature feature = instance.getBackend().getFeature(ServerInfoFeature.class).orElse(null);
@@ -310,7 +365,7 @@ public final class DesktopServerHost implements ServerScreenHost {
     @Override
     public String reProxyAddress(Object value) {
         Instance instance = instance(value);
-        return instance == null ? "" : ReProxyManager.getForwardedAddress(instance);
+        return ReProxyManager.getForwardedAddress(reProxyTarget(value));
     }
 
     @Override
@@ -372,6 +427,8 @@ public final class DesktopServerHost implements ServerScreenHost {
         }
         if (instance == null || status == null || !status.controllerAvailable() || !status.knownSession()
                 || isStaleLocalStatus(instance, status)) return;
+        InstanceOperation operation = instance.getOperation();
+        if (operation != null && operation.isActive() && operation.type() == InstanceOperation.Type.INSTALL) return;
         String state = status.state().trim().toUpperCase(Locale.ROOT);
         switch (state) {
             case "STARTING" -> {
@@ -389,7 +446,7 @@ public final class DesktopServerHost implements ServerScreenHost {
             case "STOPPED" -> {
                 LifecycleManager.complete(instance, LifecycleManager.activeOperationId(instance), InstanceState.STOPPED);
                 QuickServerSyncManager.syncBackAfterStop(instance);
-                if (ReProxyManager.isForwarded(instance)) ReProxyManager.stopQuietly(instance.getPort(), null);
+                ReProxyManager.stopQuietly(JvmReProxyConnectorCapability.server(instance), null);
                 if (session != null && session.getTerminalWidget() instanceof ServerTerminalLifecycle terminal
                         && session.getTerminalWidget() instanceof TerminalWidget widget && widget.isTerminalReady()) {
                     terminal.stopProcessAsync();
@@ -398,7 +455,7 @@ public final class DesktopServerHost implements ServerScreenHost {
             case "CRASHED" -> {
                 String message = status.lastError().isBlank() ? "Server Crashed" : status.lastError();
                 LifecycleManager.fail(instance, LifecycleManager.activeOperationId(instance), InstanceState.CRASHED, message);
-                if (ReProxyManager.isForwarded(instance)) ReProxyManager.stopQuietly(instance.getPort(), null);
+                ReProxyManager.stopQuietly(JvmReProxyConnectorCapability.server(instance), null);
                 if (session != null && session.getTerminalWidget() instanceof ServerTerminalLifecycle terminal
                         && session.getTerminalWidget() instanceof TerminalWidget widget && widget.isTerminalReady()) {
                     terminal.stopProcessAsync();
@@ -416,29 +473,200 @@ public final class DesktopServerHost implements ServerScreenHost {
     }
 
     @Override
-    public boolean isReProxyForwarded(Object value) {
+    public ReProxyTarget reProxyTarget(Object value) {
         Instance instance = instance(value);
-        return instance != null && ReProxyManager.isForwarded(instance);
+        if (instance == null && value instanceof ServerModels.ClientServerView server) instance = resolve(server);
+        if (instance == null || !instance.isServer() || !isLocalInstance(instance)) return null;
+        return new ReProxyTarget(instance.getInstanceId(), instance.getName(), pluginGamePort(instance),
+                new Binding("", "LOCAL", instance.getInstanceId(), "", "", "", ""),
+                instance.getSettings().getProperty("reproxy.connectionId", ""), instance.getSettings().getProperty("reproxy.bindingId", ""));
+    }
+
+    @Override
+    public NetworkRole networkRole(Object value) {
+        Instance instance = instance(value);
+        if (instance == null && value instanceof ServerModels.ClientServerView server) instance = resolve(server);
+        if (instance == null || !isLocalInstance(instance)) return NetworkRole.NONE;
+        DesktopNetworkManager manager = DesktopNetworkAccess.manager(client);
+        NetworkDefinition network = manager == null ? null : manager.getNetworkForInstance(instance.getInstanceId()).orElse(null);
+        return network == null ? NetworkRole.NONE : instance.getInstanceId().equals(network.proxyInstanceId()) ? NetworkRole.PROXY : NetworkRole.MEMBER;
+    }
+
+    @Override
+    public ServerModels.ClientServerView reProxyNetworkServer(String proxyId) {
+        if (proxyId == null || proxyId.isBlank()) return null;
+        Instance instance = Rebase.get().getInstanceManager().getInstanceById(proxyId);
+        return instance != null && networkRole(instance) == NetworkRole.PROXY && reProxyTarget(instance) != null ? serverView(instance) : null;
+    }
+
+    @Override
+    public Async<ReProxyTarget> loadReProxyTarget(Object value) {
+        Instance instance = instance(value);
+        if (instance == null && value instanceof ServerModels.ClientServerView server) instance = resolve(server);
+        if (instance == null || reProxyTarget(instance) == null) return Async.completed(null);
+        Instance target = instance;
+        return loadInstanceProperties(target, false).thenApply(ignored -> reProxyTarget(target));
+    }
+
+    @Override
+    public Async<Void> saveReProxyConnection(Object value, Connection connection) {
+        Instance instance = instance(value);
+        if (instance == null && value instanceof ServerModels.ClientServerView server) instance = resolve(server);
+        if (instance == null || reProxyTarget(instance) == null) return Async.failed(new IllegalArgumentException("Choose A Private Server"));
+        return ReProxyManager.setConnection(JvmReProxyConnectorCapability.server(instance), connection);
+    }
+
+    @Override
+    public ActionAvailability reProxyCreationAvailability(HostView host) {
+        if (host != null) return ActionAvailability.disabled("ReProxy Addresses Require A Local Server");
+        return hostedAccount().isBlank() ? ActionAvailability.disabled("Sign In To ReStudio To Create A Server Address")
+                : ActionAvailability.enabled();
+    }
+
+    @Override
+    public String authenticationSession() {
+        ReStudio studio = ReStudio.getInstance();
+        return studio != null && studio.isAuthenticated() && studio.getSessionId() != null ? studio.getSessionId().toString() : "";
+    }
+
+    @Override
+    public Async<List<Suffix>> reProxyCreationSuffixes() {
+        try {
+            ActionAvailability availability = reProxyCreationAvailability(null);
+            if (!availability.available()) return Async.failed(new IllegalStateException(availability.reason()));
+            BooleanSupplier admitted = reProxyCreationAdmission();
+            return ReProxyManager.serverCatalog().thenApply(catalog -> {
+                if (!admitted.getAsBoolean()) throw new Async.Cancellation();
+                return catalog.suffixes().stream().filter(suffix -> "READY".equalsIgnoreCase(suffix.readiness())
+                        && "ACTIVE".equalsIgnoreCase(suffix.state()) && suffix.transports().contains("TCP")
+                        && suffix.routingModes().contains("JAVA_HOSTNAME")).toList();
+            });
+        } catch (Throwable failure) {
+            return Async.failed(failure);
+        }
+    }
+
+    @Override
+    public boolean pendingReProxyCreation(Object value) {
+        Instance instance = reProxyCreationInstance(value);
+        return instance != null && isLocalInstance(instance)
+                && ReProxyManager.pendingCreation(JvmReProxyConnectorCapability.server(instance));
+    }
+
+    @Override
+    public Async<Void> prepareReProxyCreation(Object value, AddressSpec address, String requestId) {
+        if (address == null) return Async.completed(null);
+        try {
+            Instance instance = reProxyCreationInstance(value);
+            if (instance == null || reProxyTarget(instance) == null) throw new IllegalArgumentException("Choose A Local Server To Create An Address");
+            String account = hostedAccount();
+            BooleanSupplier admitted = reProxyAddressAdmission(instance, reProxyCreationAdmission());
+            var server = JvmReProxyConnectorCapability.server(instance);
+            ReProxyManager.CreationIntent intent = ReProxyManager.creationIntent(server);
+            if (intent == null) intent = ReProxyManager.CreationIntent.create(account, server, server.port(), address, requestId);
+            if (!account.equals(intent.account()) || !requestId.equals(intent.requestId()) || !address.equals(intent.address())) {
+                throw new IllegalStateException("Resume The Saved Server Address Before Choosing Another Address");
+            }
+            return ReProxyManager.prepareCreation(server, intent, admitted);
+        } catch (Throwable failure) {
+            return Async.failed(failure);
+        }
+    }
+
+    @Override
+    public Async<Void> resumeReProxyCreation(Object value) {
+        try {
+            Instance instance = reProxyCreationInstance(value);
+            if (instance == null || reProxyTarget(instance) == null) return Async.completed(null);
+            var server = JvmReProxyConnectorCapability.server(instance);
+            ReProxyManager.CreationIntent intent = ReProxyManager.creationIntent(server);
+            if (intent == null) return Async.completed(null);
+            if (!hostedAccount().equals(intent.account())) throw new IllegalStateException("Sign In To The Account That Created This Server Address");
+            return ReProxyManager.prepareCreation(server, intent, reProxyAddressAdmission(instance, reProxyCreationAdmission()));
+        } catch (Throwable failure) {
+            return Async.failed(failure);
+        }
+    }
+
+    private BooleanSupplier reProxyCreationAdmission() {
+        ReStudio studio = ReStudio.getInstance();
+        if (studio == null || !studio.isAuthenticated() || studio.getUserId() == null || studio.getSessionId() == null) {
+            throw new IllegalStateException("Sign In To ReStudio To Create A Server Address");
+        }
+        PluginOwner owner = pluginOwner(studio);
+        long generation = reProxyAuthGeneration.get();
+        return () -> reProxyAuthGeneration.get() == generation && ReStudio.getInstance() == studio
+                && studio.isAuthenticated() && owner.equals(pluginOwner(studio));
+    }
+
+    private Instance reProxyCreationInstance(Object value) {
+        Instance instance = instance(value);
+        return instance == null && value instanceof ServerModels.ClientServerView server ? resolve(server) : instance;
+    }
+
+    private static BooleanSupplier reProxyInstanceAdmission(Instance instance, BooleanSupplier admitted) {
+        String id = instance.getInstanceId();
+        String path = instance.getPath();
+        BackendConfig backend = instance.getBackendConfig();
+        return () -> admitted.getAsBoolean() && InstanceManager.getInstance().getInstanceById(id) == instance
+                && Objects.equals(path, instance.getPath()) && instance.getBackendConfig() == backend && isLocalInstance(instance);
+    }
+
+    private BooleanSupplier reProxyAddressAdmission(Instance instance, BooleanSupplier admitted) {
+        BooleanSupplier current = reProxyInstanceAdmission(instance, admitted);
+        String networkId = instance.getNetworkId();
+        String nodeId = instance.getNetworkNodeId();
+        long revision = instance.getNetworkRevision();
+        int port = pluginGamePort(instance);
+        return () -> current.getAsBoolean() && Objects.equals(networkId, instance.getNetworkId())
+                && Objects.equals(nodeId, instance.getNetworkNodeId()) && revision == instance.getNetworkRevision()
+                && port == pluginGamePort(instance);
+    }
+
+    @Override
+    public BooleanSupplier networkCreationAdmission(NetworkCreationPlan plan) {
+        return plan.reProxyAddress() == null ? () -> true : reProxyCreationAdmission();
+    }
+
+    @Override
+    public boolean isReProxyForwarded(Object value) {
+        return ReProxyManager.isForwarded(reProxyTarget(value));
+    }
+
+    @Override
+    public void refreshReProxy(Object value, Runnable onComplete) {
+        if (reProxyTarget(value) == null) return;
+        ReProxyManager.serverSummary().whenComplete((summary, error) -> application().execute(() -> {
+            if (onComplete != null) onComplete.run();
+        }));
     }
 
     @Override
     public void startReProxy(Object value, Runnable onComplete) {
-        Instance instance = instance(value);
-        if (instance == null) {
-            unavailable(Action.NETWORK_LIFECYCLE);
+        ReProxyTarget target = reProxyTarget(value);
+        if (target == null) {
+            try { unavailable(Action.NETWORK_LIFECYCLE); }
+            finally { if (onComplete != null) onComplete.run(); }
             return;
         }
-        ReProxyManager.start(instance, onComplete);
+        loadReProxyTarget(value).thenCompose(ReProxyManager::startServer).whenComplete((ignored, error) -> application().execute(() -> {
+            if (error != null) application().notify("Could Not Connect", ReProxyManager.failureMessage(error), ReSyncNotificationLevel.ERROR);
+            if (onComplete != null) onComplete.run();
+        }));
     }
 
     @Override
     public void stopReProxy(Object value, Runnable onComplete) {
-        Instance instance = instance(value);
-        if (instance == null) {
-            unavailable(Action.NETWORK_LIFECYCLE);
+        ReProxyTarget target = reProxyTarget(value);
+        if (target == null) {
+            try { unavailable(Action.NETWORK_LIFECYCLE); }
+            finally { if (onComplete != null) onComplete.run(); }
             return;
         }
-        ReProxyManager.stop(instance.getPort(), onComplete);
+        ReProxyManager.stopServer(target).whenComplete((ignored, error) -> application().execute(() -> {
+            if (error != null) application().notify("Could Not Disconnect", ReProxyManager.failureMessage(error), ReSyncNotificationLevel.ERROR);
+            if (onComplete != null) onComplete.run();
+        }));
     }
 
     @Override
@@ -818,8 +1046,8 @@ public final class DesktopServerHost implements ServerScreenHost {
     }
 
     @Override
-    public void openExternal(String url) {
-        if (url != null && !url.isBlank()) BrowserUtils.openBrowser(url);
+    public Async<ExternalOpenResult> openExternal(String url) {
+        return ExternalOpenResult.open(() -> ScreenManager.getInstance().hostActions().openBrowserAsync(url));
     }
 
     @Override
@@ -830,8 +1058,15 @@ public final class DesktopServerHost implements ServerScreenHost {
                                                                    List<String> extraFiles,
                                                                    Runnable reloadDataDrivenSettings,
                                                                    BooleanSupplier allowServerSoftwareChange) {
-        return DesktopServerConfigurationUi.create(owner, state, settingsController, remoteVariables, extraFiles,
+        ConfigurationUi ui = DesktopServerConfigurationUi.create(owner, state, settingsController, remoteVariables, extraFiles,
                 reloadDataDrivenSettings, allowServerSoftwareChange, defaultInstanceLocation());
+        ReProxyTarget target = state.editMode() ? reProxyTarget(state.original()) : null;
+        if (target == null) return ui;
+        ReProxyServerSettingsController proxy = new ReProxyServerSettingsController(this, state.original(), target);
+        Map<String, Supplier<List<Setting>>> settings = new LinkedHashMap<>(ui.settings());
+        settings.put("ReProxy", proxy::getSettings);
+        return new ConfigurationUi(settings, () -> { proxy.cleanup(); ui.cleanup().run(); }, ui.title(), ui.planName(), ui.subdomain(),
+                ui.customPlan(), ui.localLocation(), ui.poolResources(), ui.startupLoaded(), ui.reProxyAddress());
     }
 
     @Override
@@ -1089,8 +1324,11 @@ public final class DesktopServerHost implements ServerScreenHost {
         if (original == null || template == null || settingsController == null) {
             return Async.failed(new IllegalArgumentException("Server Configuration Is Unavailable"));
         }
+        Set<String> retained = new HashSet<>();
+        original.getSettings().stringPropertyNames().stream().filter(key -> key.startsWith("reproxy.")).forEach(retained::add);
+        template.getSettings().stringPropertyNames().stream().filter(key -> key.startsWith("reproxy.")).forEach(retained::add);
         return JvmAsyncBridge.fromFuture(Rebase.get().getInstanceManager().applyInstanceEdit(original, template, newName,
-                        repairStartScript, reinstallSoftware, notification))
+                        repairStartScript, reinstallSoftware, notification, retained))
                 .thenCompose(ignored -> settingsController.save(original));
     }
 
@@ -1278,10 +1516,11 @@ public final class DesktopServerHost implements ServerScreenHost {
                     String identifier = entry.getKey();
                     Instance instance = entry.getValue();
                     ServerModels.ClientServerView server = nextViews.get(identifier);
+                    InstanceOperation observedOperation = instance.getOperation();
                     try {
                         studio.getApi().getServerResources(identifier)
                                 .thenAccept(stats -> {
-                                    if (stats != null && requestGeneration == restudioRequestGeneration.get()) {
+                                    if (stats != null && requestGeneration == restudioRequestGeneration.get() && Objects.equals(observedOperation, instance.getOperation())) {
                                         applyRestudioObservedState(instance, stats.currentState, server.isSuspended || stats.isSuspended,
                                                 server.isInstalling);
                                     }
@@ -1395,10 +1634,19 @@ public final class DesktopServerHost implements ServerScreenHost {
 
     @Override
     public void addNetworkChangeListener(Runnable listener) {
+        if (listener == null) return;
+        if (client.getApiClient() instanceof DesktopRemotelyServerApi api && hostedNetworkListeners.get(listener) != api) {
+            DesktopRemotelyServerApi previous = hostedNetworkListeners.put(listener, api);
+            if (previous != null) previous.removeNetworkChangeListener(listener);
+            api.addNetworkChangeListener(listener);
+        }
         DesktopNetworkManager manager = DesktopNetworkAccess.manager(client);
-        if (manager == null || listener == null) {
+        if (manager == null || networkListenerOwners.get(listener) == manager) {
             return;
         }
+        DesktopNetworkManager previous = networkListenerOwners.put(listener, manager);
+        Consumer<List<NetworkDefinition>> old = networkListeners.remove(listener);
+        if (previous != null && old != null) previous.removeListener(old);
         Consumer<List<NetworkDefinition>> callback = ignored -> listener.run();
         networkListeners.put(listener, callback);
         manager.addListener(callback);
@@ -1406,7 +1654,9 @@ public final class DesktopServerHost implements ServerScreenHost {
 
     @Override
     public void removeNetworkChangeListener(Runnable listener) {
-        DesktopNetworkManager manager = DesktopNetworkAccess.manager(client);
+        DesktopRemotelyServerApi api = hostedNetworkListeners.remove(listener);
+        if (api != null) api.removeNetworkChangeListener(listener);
+        DesktopNetworkManager manager = networkListenerOwners.remove(listener);
         Consumer<List<NetworkDefinition>> callback = networkListeners.remove(listener);
         if (manager != null && callback != null) {
             manager.removeListener(callback);
@@ -1526,7 +1776,7 @@ public final class DesktopServerHost implements ServerScreenHost {
                         network.description(), network.members(), network.managed(), network.proxyId()));
             }
             return List.copyOf(merged);
-        }).exceptionally(ignored -> localNetworks);
+        });
     }
 
     @Override
@@ -1555,7 +1805,7 @@ public final class DesktopServerHost implements ServerScreenHost {
 
     private NetworkOverviewProvider hostedNetworkOverviewProvider() {
         if (!(client.getApiClient() instanceof DesktopRemotelyServerApi api)) return NetworkOverviewProvider.unavailableProvider();
-        return new DesktopHostedNetworkOverviewProvider(api, this::openHostedNetworkServer);
+        return new DesktopHostedNetworkOverviewProvider(api, client, this::openHostedNetworkServer);
     }
 
     private void openHostedNetworkServer(Screen current, String serverId) {
@@ -1625,7 +1875,7 @@ public final class DesktopServerHost implements ServerScreenHost {
             case "sync", "reconcile" -> job(manager, network, instances, NetworkJobType.RECONCILE);
             case "resume", "recover" -> resumeJob(manager, network, instances);
             case "rollback" -> rollbackJob(manager, network, instances);
-            case "dissolve" -> JvmAsyncBridge.fromFuture(manager.dissolveSafely(network, instances, "Server Manager")).thenApply(ignored -> null);
+            case "dissolve" -> JvmAsyncBridge.fromFuture(manager.dissolveSafely(network, instances, "Server Manager")).thenApply(DesktopServerHost::requireSuccessfulJob);
             case "preflight" -> JvmAsyncBridge.fromFuture(manager.runPreflight(network, instances)).thenApply(ignored -> null);
             case "rename" -> Async.failed(new UnsupportedOperationException("Network Name Is Required"));
             default -> normalized.startsWith("rename:") ? renameNetwork(manager, network, rawAction.substring("rename:".length()), instances) : Async.failed(new UnsupportedOperationException("Network Action Is Unavailable"));
@@ -1844,13 +2094,18 @@ public final class DesktopServerHost implements ServerScreenHost {
 
     @Override
     public Async<String> createHostedNetwork(NetworkCreationPlan plan) {
+        return createHostedNetwork(plan, null);
+    }
+
+    @Override
+    public Async<String> createHostedNetwork(NetworkCreationPlan plan, Consumer<NetworkOperationStatus> progress) {
         ReStudio studio = ReStudio.getInstance();
         if (studio == null || !studio.isAuthenticated() || studio.getUserId() == null || studio.getSessionId() == null) {
             return Async.failed(new IllegalStateException("Sign In To Create A Reactor Network"));
         }
         try {
             String account = hostedAccount();
-            return runHostedNetwork(pendingHostedNetworks.admit(account, plan.hostedCommand()), account);
+            return runHostedNetwork(pendingHostedNetworks.admit(account, plan.hostedCommand()), account, progress);
         } catch (RuntimeException error) {
             return Async.failed(error);
         }
@@ -1869,14 +2124,34 @@ public final class DesktopServerHost implements ServerScreenHost {
     }
 
     @Override
+    public HostedNetworkPendingStore hostedNetworkPendingStore() {
+        return pendingHostedNetworks;
+    }
+
+    @Override
+    public String hostedNetworkAccount() {
+        return hostedAccount();
+    }
+
+    @Override
     public Async<String> resumeHostedNetwork() {
+        return resumeHostedNetwork(null);
+    }
+
+    @Override
+    public Async<String> resumeHostedNetwork(Consumer<NetworkOperationStatus> progress) {
         try {
             String account = hostedAccount();
             HostedNetworkPendingStore.Pending pending = pendingHostedNetwork();
-            return pending == null ? Async.failed(new IllegalStateException("No Pending Network Request")) : runHostedNetwork(pending, account);
+            return pending == null ? Async.failed(new IllegalStateException("No Pending Network Request")) : runHostedNetwork(pending, account, progress);
         } catch (RuntimeException error) {
             return Async.failed(error);
         }
+    }
+
+    @Override
+    public void discardHostedNetwork(String requestId, String networkId) {
+        pendingHostedNetworks.discard(hostedAccount(), requestId, networkId);
     }
 
     @Override
@@ -1889,7 +2164,8 @@ public final class DesktopServerHost implements ServerScreenHost {
         return identity.authenticated() ? "true:" + ReStudio.getInstance().getEnvironment().name() + ":" + identity.subjectId() : "";
     }
 
-    private Async<String> runHostedNetwork(HostedNetworkPendingStore.Pending pending, String account) {
+    private Async<String> runHostedNetwork(HostedNetworkPendingStore.Pending pending, String account,
+                                          Consumer<NetworkOperationStatus> progress) {
         ReStudio studio = ReStudio.getInstance();
         if (studio == null || !studio.isAuthenticated() || studio.getUserId() == null || studio.getSessionId() == null
                 || !account.equals(hostedAccount())) {
@@ -1901,7 +2177,7 @@ public final class DesktopServerHost implements ServerScreenHost {
         Async<NetworkOperationStatus> request = api.hostedNetworks().execute(
                 pending.command(), pending.body(), client.getComposition().scheduler(),
                 () -> ReStudio.getInstance() == studio && studio.isAuthenticated() && client.getApiClient() == api
-                        && session.equals(studio.getSessionId()) && subject.equals(studio.getUserId()));
+                        && session.equals(studio.getSessionId()) && subject.equals(studio.getUserId()), progress);
         request.whenComplete((status, error) -> {
             if (status != null) {
                 pendingHostedNetworks.clearTerminal(account, pending.command().requestId(), pending.command().networkId());
@@ -1928,11 +2204,34 @@ public final class DesktopServerHost implements ServerScreenHost {
     @Override
     public Async<Void> createNetwork(String name, String proxyId, int entryPort, List<NetworkCreationMember> members,
                                      boolean installReSync, boolean firewallVerified) {
+        return createNetwork(name, proxyId, entryPort, members, installReSync, firewallVerified, null, null);
+    }
+
+    @Override
+    public Async<Void> createNetwork(String name, String proxyId, int entryPort, List<NetworkCreationMember> members,
+                                     boolean installReSync, boolean firewallVerified, AddressSpec reProxyAddress, String requestId) {
+        return createNetwork(name, proxyId, entryPort, members, installReSync, firewallVerified, reProxyAddress, requestId, () -> true);
+    }
+
+    @Override
+    public Async<Void> createNetwork(String name, String proxyId, int entryPort, List<NetworkCreationMember> members,
+                                     boolean installReSync, boolean firewallVerified, AddressSpec reProxyAddress, String requestId,
+                                     BooleanSupplier admitted) {
         DesktopNetworkManager manager = DesktopNetworkAccess.manager(client);
         if (manager == null) return Async.failed(new IllegalStateException("Network Manager Is Unavailable"));
         List<Instance> instances = Rebase.get().getInstanceManager().getAllInstances();
         Instance proxy = instances.stream().filter(instance -> instance != null && instance.getInstanceId().equals(proxyId)).findFirst().orElse(null);
         if (proxy == null) return Async.failed(new IllegalArgumentException("Proxy Server Is Unavailable"));
+        String addressAccount;
+        BooleanSupplier addressAdmission;
+        try {
+            if (reProxyAddress != null && reProxyTarget(proxy) == null) throw new IllegalArgumentException("ReProxy Addresses Require A Local Proxy");
+            addressAccount = reProxyAddress == null ? "" : hostedAccount();
+            BooleanSupplier current = reProxyAddress == null ? () -> true : reProxyInstanceAdmission(proxy, reProxyCreationAdmission());
+            addressAdmission = () -> admitted.getAsBoolean() && current.getAsBoolean();
+        } catch (Throwable failure) {
+            return Async.failed(failure);
+        }
         List<NetworkCreationMember> backends = members == null ? List.of() : List.copyOf(members);
         Map<String, Instance> instancesById = instances.stream().filter(Objects::nonNull).collect(Collectors.toMap(Instance::getInstanceId, instance -> instance, (first, ignored) -> first, LinkedHashMap::new));
         if (!isVelocityProxy(proxy) || !canManageNetworkMember(proxy)) {
@@ -1958,7 +2257,10 @@ public final class DesktopServerHost implements ServerScreenHost {
         if (installReSync || backends.stream().anyMatch(NetworkCreationMember::resyncEnabled)) reSyncTargets.add(proxy);
         backends.stream().filter(NetworkCreationMember::resyncEnabled).map(member -> instancesById.get(member.instanceId())).filter(Objects::nonNull).forEach(reSyncTargets::add);
         return manager.prepareCreation(request, instances, List.of())
-                .thenCompose(prepared -> manager.runPreparedCreation(prepared, instances, "Server Manager")
+                .thenCompose(prepared -> manager.runPreparedCreation(prepared, instances, "Server Manager", reProxyAddress,
+                                addressAccount, requestId, addressAdmission)
+                        .exceptionallyCompose(failure -> reProxyAddress != null && prepared.candidate().equals(manager.getNetwork(prepared.candidate().networkId()).orElse(null))
+                                ? Async.failed(new NetworkCreationFailure(prepared.candidate().networkId(), failure)) : Async.failed(failure))
                         .whenComplete((job, failure) -> manager.discardPreparedCreation(prepared)))
                 .thenCompose(job -> completeNetworkCreation(manager, instances, job))
                 .thenCompose(ignored -> reSyncTargets.isEmpty() ? Async.completed(null)
@@ -2082,6 +2384,10 @@ public final class DesktopServerHost implements ServerScreenHost {
 
     private Async<Void> completeNetworkCreation(DesktopNetworkManager manager, List<Instance> instances, NetworkJob job) {
         if (job != null && job.status() == NetworkJobStatus.SUCCEEDED) return Async.completed(null);
+        if (job != null && !job.context().getOrDefault("reproxyCreation", "").isBlank()
+                && "true".equals(job.context().get("creationConfigurationApplied")) && manager.getNetwork(job.networkId()).isPresent()) {
+            return Async.failed(new NetworkCreationFailure(job.networkId(), new IllegalStateException(job.message())));
+        }
         Throwable failure = new IllegalStateException(job == null ? "Network Creation Did Not Finish" : job.message());
         if (job == null || !job.canRollback()) return Async.failed(failure);
         Async<NetworkJob> rollback;
@@ -2286,6 +2592,12 @@ public final class DesktopServerHost implements ServerScreenHost {
                 }
             }
             return Async.completed(null);
+        }
+        if ("delete".equals(normalized) && isReStudioTarget(server)) {
+            if (!serverActionAvailability(server, Action.DELETE_SERVER).available()) {
+                return Async.failed(new IllegalStateException("Server Deletion Is Unavailable"));
+            }
+            return client.getApiClient().deleteServer(restudioIdentifier(server), server.name);
         }
         Instance instance = resolve(server);
         if (instance == null) {
@@ -2533,17 +2845,202 @@ public final class DesktopServerHost implements ServerScreenHost {
     @Override
     public ResourceContainerAdapter createResourceContainer(ReScreen host, Object value, ServerModels.ClientServerView server,
                                                             int x, int y, int width, int height) {
-        if (!(value instanceof Instance instance) || !instance.isServer()) {
-            return null;
-        }
-        ResourceContainer container = new ResourceContainer(host, new DesktopResourceContainerProvider(instance), x, y, width, height,
+        Instance instance = instance(value);
+        if (instance == null && value instanceof ServerModels.ClientServerView target) instance = resolve(target);
+        if (instance == null && server != null) instance = resolve(server);
+        if (instance == null || !instance.isServer()) return null;
+        ResourceContainer container = new ResourceContainer(host, new DesktopResourceContainerProvider(instance, pluginForwarding(instance)), x, y, width, height,
                 InstanceResourceWidget::new, true);
         return new CanonicalResourceContainerAdapter(container);
     }
 
     @Override
+    public ResourceForwarding serverResourceForwarding(Object value) {
+        Instance instance = instance(value);
+        if (instance == null && value instanceof ServerModels.ClientServerView server) instance = resolve(server);
+        return instance == null ? ResourceForwarding.none() : pluginForwarding(instance);
+    }
+
+    @Override
+    public Async<List<ResourceContainerItem>> serverResources(Object value) {
+        Instance instance = instance(value);
+        if (instance == null && value instanceof ServerModels.ClientServerView server) instance = resolve(server);
+        return instance == null ? Async.completed(List.of()) : new DesktopResourceContainerProvider(instance, pluginForwarding(instance)).load(false);
+    }
+
+    @Override
+    public void openServerReProxySettings(Screen current, Object value) {
+        ReProxyTarget target = reProxyTarget(value);
+        if (target == null) return;
+        ReProxyServerSettingsController controller = new ReProxyServerSettingsController(this, value, target);
+        SettingsScreen settings = new SettingsScreen(current, target.name(), Map.of("ReProxy", controller::getSettings), () -> {}, controller::cleanup, "ReProxy");
+        ScreenManager.getInstance().navigate(current, settings);
+    }
+
+    private boolean isAttachedLocalServer(Instance instance) {
+        return instance != null && instance.isServer() && isLocalInstance(instance) && !instance.getSettings().getProperty("reproxy.connectionId", "").isBlank();
+    }
+
+    public void closePluginForwarding() {
+        if (pluginHostedApi != null) pluginHostedApi.removeNetworkChangeListener(pluginHostedChanged);
+        pluginHostedApi = null;
+        networkPluginForwarding.values().forEach(NetworkPluginForwarding::close);
+        networkPluginForwarding.clear();
+        pluginPorts.clear();
+        pluginChanges = new NetworkPluginForwarding.Coordinator();
+        if (pluginNetworks != null) pluginNetworks.removeListener(pluginNetworkListener);
+        pluginNetworks = null;
+        pluginForwarding.values().forEach(PluginForwarding::close);
+        pluginForwarding.clear();
+        pluginOwner = null;
+    }
+
+    private void clearPluginForwarding() {
+        ReStudio studio = ReStudio.getInstance();
+        PluginOwner owner = pluginOwner(studio);
+        if (owner.equals(pluginOwner)) return;
+        closePluginForwarding();
+        pluginOwner = owner;
+        if (studio.isAuthenticated()) InstanceManager.getInstance().getAllInstances().stream().filter(this::isAttachedLocalServer)
+                .forEach(instance -> pluginForwarding(instance).reconcile());
+    }
+
+    private ResourceForwarding pluginForwarding(Instance instance) {
+        PluginForwarding forwarding = pluginConnection(instance);
+        if (forwarding == null) return ResourceForwarding.none();
+        if (client.getApiClient() instanceof DesktopRemotelyServerApi api && api != pluginHostedApi) {
+            if (pluginHostedApi != null) pluginHostedApi.removeNetworkChangeListener(pluginHostedChanged);
+            pluginHostedApi = api;
+            api.addNetworkChangeListener(pluginHostedChanged);
+        }
+        DesktopNetworkManager manager = DesktopNetworkAccess.manager(client);
+        if (manager != pluginNetworks) {
+            if (pluginNetworks != null) pluginNetworks.removeListener(pluginNetworkListener);
+            pluginNetworks = manager;
+            if (manager != null) manager.addListener(pluginNetworkListener);
+        }
+        NetworkPluginForwarding known = networkPluginForwarding.get(forwarding.access().serverKey());
+        if (known != null && known.connection() != forwarding) {
+            networkPluginForwarding.remove(forwarding.access().serverKey(), known);
+            known.close();
+        }
+        return networkPluginForwarding.computeIfAbsent(forwarding.access().serverKey(), ignored ->
+                new NetworkPluginForwarding(forwarding, () -> pluginNetwork(instance), pluginChanges));
+    }
+
+    private PluginForwarding pluginConnection(Instance instance) {
+        ReStudio studio = ReStudio.getInstance();
+        PluginOwner owner = pluginOwner(studio);
+        if (!owner.equals(pluginOwner)) {
+            closePluginForwarding();
+            pluginOwner = owner;
+        }
+        String localKey = "local:" + instance.getInstanceId();
+        PluginForwarding known = pluginForwarding.get(localKey);
+        boolean local = isLocalInstance(instance);
+        if (known != null && (!local || !known.authorityStamp().equals(studio.getUserId() + ":" + localKey + ":" + Path.of(instance.getPath()).toAbsolutePath().normalize()))) {
+            pluginForwarding.remove(localKey);
+            known.close();
+        }
+        if (local) return pluginForwarding.computeIfAbsent(localKey, ignored -> new PluginForwarding(new JvmPluginAccess(instance, () -> pluginGamePort(instance))));
+        if (instance.getBackendConfig() != null && "SSH".equalsIgnoreCase(instance.getBackendConfig().type)) {
+            String key = "ssh:" + instance.getInstanceId();
+            PluginForwarding cached = pluginForwarding.get(key);
+            if (cached != null && cached.access() instanceof SshPluginAccess ssh && !ssh.currentLocation()) {
+                pluginForwarding.remove(key, cached);
+                cached.close();
+            }
+            return pluginForwarding.computeIfAbsent(key, ignored -> new PluginForwarding(new SshPluginAccess(instance, () -> pluginGamePort(instance))));
+        }
+        String identifier = restudioIdentifier(instance);
+        return identifier.isBlank() ? null : hostedPluginConnection(identifier, instance.getName(), observedPort(instance, 25565));
+    }
+
+    private PluginForwarding hostedPluginConnection(String identifier, String name, int port) {
+        ReStudio studio = ReStudio.getInstance();
+        PluginOwner owner = pluginOwner(studio);
+        return pluginForwarding.computeIfAbsent("reactor:" + identifier, ignored -> new PluginForwarding(new HostedPluginAccess(identifier, name,
+                port, owner.api().async()::communityRequest,
+                () -> studio.isAuthenticated() && owner.equals(pluginOwner(ReStudio.getInstance())))));
+    }
+
+    private static PluginOwner pluginOwner(ReStudio studio) {
+        return new PluginOwner(studio, studio.getApi(), studio.getEnvironment(), studio.getUserId(), studio.getSessionId());
+    }
+
+    private int pluginGamePort(Instance instance) {
+        DesktopNetworkManager manager = DesktopNetworkAccess.manager(client);
+        String networkId = instance.getNetworkId();
+        if (networkId == null || networkId.isBlank()) {
+            if (manager != null && manager.getNetworkForInstance(instance.getInstanceId()).isPresent()) {
+                throw new IllegalStateException("Network Server Binding Needs Recovery");
+            }
+            return observedPort(instance, 25565);
+        }
+        NetworkDefinition network = manager == null ? null : manager.getNetwork(networkId).orElse(null);
+        if (network == null || network.revision() != instance.getNetworkRevision()) {
+            throw new IllegalStateException("Network Server Binding Needs Recovery");
+        }
+        PluginPort admitted = pluginPorts.get(instance.getInstanceId());
+        if (admitted != null && admitted.network() == network && admitted.nodeId().equals(instance.getNetworkNodeId())) return admitted.port();
+        NetworkMember member = network.members().stream().filter(value -> value.instanceId().equals(instance.getInstanceId())
+                && value.nodeId().equals(instance.getNetworkNodeId())).findFirst()
+                .orElseThrow(() -> new IllegalStateException("Network Server Binding Needs Recovery"));
+        int port = member.port();
+        pluginPorts.put(instance.getInstanceId(), new PluginPort(network, member.nodeId(), port));
+        return port;
+    }
+
+    private Async<NetworkPluginForwarding.Network> pluginNetwork(Instance instance) {
+        DesktopNetworkManager manager = DesktopNetworkAccess.manager(client);
+        NetworkDefinition network = manager == null ? null : manager.getNetworkForInstance(instance.getInstanceId()).orElse(null);
+        if (network != null) {
+            Map<String, Instance> instances = new HashMap<>();
+            InstanceManager.getInstance().getAllInstances().forEach(value -> instances.put(value.getInstanceId(), value));
+            List<NetworkPluginForwarding.Member> members = network.members().stream().map(member -> {
+                Instance target = member.isManaged() ? instances.get(member.instanceId()) : null;
+                return new NetworkPluginForwarding.Member(member.instanceId(), member.routeName(), member.hostScope(), member.address(), member.port(), member.isProxy(),
+                        target == null ? null : pluginConnection(target));
+            }).toList();
+            List<NetworkPluginForwarding.Member> hosts = instances.values().stream().filter(Instance::isServer).map(target ->
+                    new NetworkPluginForwarding.Member(target.getInstanceId(), target.getName(), NetworkHostScope.resolve(target), "127.0.0.1", pluginGamePort(target), target.isProxyServer(), pluginConnection(target))).toList();
+            List<NetworkPluginForwarding.Listener> listeners = new ArrayList<>();
+            var summary = ReProxyManager.accountSummary();
+            if (summary != null) {
+                Map<String, Binding> bindings = new HashMap<>();
+                summary.bindings().forEach(binding -> bindings.put(binding.id(), binding));
+                for (Connection connection : summary.connections()) for (var endpoint : connection.endpoints()) {
+                    if (!"UDP".equals(endpoint.protocol()) || !endpoint.enabled() || endpoint.target() == null) continue;
+                    Binding binding = bindings.get(endpoint.target().bindingId());
+                    Instance target = binding == null ? null : instances.get(binding.instanceId());
+                    if (target != null) listeners.add(new NetworkPluginForwarding.Listener(target.getInstanceId(), NetworkHostScope.resolve(target), endpoint.target().port(), endpoint.id()));
+                }
+            }
+            return Async.completed(new NetworkPluginForwarding.Network(network.networkId(), network.revision(), instance.getInstanceId(), members, false, hosts, listeners));
+        }
+        String id = restudioIdentifier(instance);
+        if (id.isBlank()) return Async.completed(null);
+        return hostedNetworkOverviewProvider().loadForServer(id).thenApply(state -> hostedPluginNetwork(state, id)).exceptionallyCompose(failure ->
+                "Network Is Unavailable".equals(failure.getMessage()) ? Async.completed(null) : Async.failed(failure));
+    }
+
+    private NetworkPluginForwarding.Network hostedPluginNetwork(NetworkOverviewProvider.OverviewState state, String id) {
+        NetworkDefinition network = state.network();
+        if (network == null) return null;
+        Map<String, NetworkOverviewProvider.ServerView> servers = new HashMap<>();
+        state.servers().forEach(server -> servers.put(server.id(), server));
+        List<NetworkPluginForwarding.Member> members = network.members().stream().map(member -> {
+            NetworkOverviewProvider.ServerView server = servers.get(member.instanceId());
+            String serverId = server == null ? "" : server.serverId();
+            return new NetworkPluginForwarding.Member(serverId.isBlank() ? member.instanceId() : serverId, member.routeName(), member.hostScope(), member.address(), member.port(), member.isProxy(),
+                    !member.isManaged() || serverId.isBlank() ? null : hostedPluginConnection(serverId, server.name(), server.port()));
+        }).toList();
+        return new NetworkPluginForwarding.Network(network.networkId(), network.revision(), id, members, true);
+    }
+
+    @Override
     public StandardOutputStateParser createStandardOutputParser(Object value) {
-        return value instanceof Instance instance ? new JvmStandardOutputStateParser(instance) : null;
+        return value instanceof Instance instance && isLocalInstance(instance) ? new JvmStandardOutputStateParser(instance) : null;
     }
 
     @Override
@@ -2755,21 +3252,22 @@ public final class DesktopServerHost implements ServerScreenHost {
             String identifier = restudioIdentifier(instance);
             ReStudio studio = ReStudio.getInstance();
             if (identifier.isBlank() || studio == null || !studio.isAuthenticated()) {
-                return Async.completed(statusFromInstance(instance));
+                return Async.failed(new IllegalStateException("Sign In To Read The Server State"));
             }
-            return JvmAsyncBridge.fromFuture(studio.getApi().getServerStatus(identifier))
-                    .thenApply(observed -> observed == null ? statusFromInstance(instance) : observed)
-                    .exceptionally(ignored -> statusFromInstance(instance));
+            return JvmAsyncBridge.fromFuture(studio.getApi().getServerStatus(identifier)).thenApply(observed -> {
+                if (observed == null) throw new IllegalStateException("Server State Is Unavailable");
+                return observed;
+            });
         }
         if (instance.getBackend() != null && instance.getBackend().getExecution() != null) {
             return JvmAsyncBridge.fromFuture(instance.getBackend().getExecution().getStatus())
                     .thenApply(observed -> {
                         ServerModels.ServerStatus status = new ServerModels.ServerStatus();
-                        status.currentState = observed == null || observed.state() == null ? "offline" : observed.state().name().toLowerCase(Locale.ROOT);
+                        if (observed == null || observed.state() == null) throw new IllegalStateException("Server State Is Unavailable");
+                        status.currentState = observed.state().name().toLowerCase(Locale.ROOT);
                         status.installing = "installing".equalsIgnoreCase(status.currentState);
                         return status;
-                    })
-                    .exceptionally(ignored -> statusFromInstance(instance));
+                    });
         }
         return Async.completed(statusFromInstance(instance));
     }
@@ -3000,11 +3498,13 @@ public final class DesktopServerHost implements ServerScreenHost {
     @Override
     public void deleteServer(Screen current, ServerModels.ClientServerView server) {
         Instance instance = resolve(server);
-        if (!canDeleteStandalone(instance)) {
+        if (!serverActionAvailability(server, Action.DELETE_SERVER).available()) {
             unavailable(Action.DELETE_SERVER);
             return;
         }
-        Rebase.get().getInstanceManager().removeInstanceAsync(instance).whenComplete((ignored, failure) -> application().execute(() -> {
+        Async<Void> deletion = isReStudioTarget(server) ? serverAction(server, "delete")
+                : JvmAsyncBridge.fromFuture(Rebase.get().getInstanceManager().removeInstanceAsync(instance));
+        deletion.whenComplete((ignored, failure) -> application().execute(() -> {
             if (failure != null) {
                 application().notify("Delete Server", failure.getMessage(), ReSyncNotificationLevel.ERROR);
                 return;
@@ -3063,7 +3563,10 @@ public final class DesktopServerHost implements ServerScreenHost {
         return switch (action) {
             case DUPLICATE_SERVER -> canMutateStandalone(instance)
                     ? ActionAvailability.enabled() : ActionAvailability.disabled("Server Duplication Is Unavailable");
-            case DELETE_SERVER -> canDeleteStandalone(instance)
+            case DELETE_SERVER -> (isReStudioTarget(server)
+                    ? authenticated() && !restudioIdentifier(server).isBlank() && server.name != null && !server.name.isBlank()
+                            && !identity(server).installing()
+                    : canDeleteStandalone(instance))
                     ? ActionAvailability.enabled() : ActionAvailability.disabled("Server Deletion Is Unavailable");
             default -> ServerScreenHost.super.serverActionAvailability(server, action);
         };
@@ -3446,6 +3949,7 @@ public final class DesktopServerHost implements ServerScreenHost {
     }
 
     private void clearRestudioBridge() {
+        clearPluginForwarding();
         restudioRequestGeneration.incrementAndGet();
         restudioBridgeInstances.clear();
         restudioBridgeViews.clear();

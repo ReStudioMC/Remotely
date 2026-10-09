@@ -113,6 +113,10 @@ public final class ServerPulseTitleExtension extends ExpandableWindowTitleWidget
     private volatile long nextRefreshAt;
     private volatile long nextDiscoveryAt;
     private DesktopNetworkManager networkManager;
+    private boolean expandedContentVisible;
+    private float expandedContentWidth;
+    private float expandedContentHeight;
+    private float expandedContentOpacity = 1f;
 
     public ServerPulseTitleExtension() {
         this(null);
@@ -122,6 +126,7 @@ public final class ServerPulseTitleExtension extends ExpandableWindowTitleWidget
         super(WindowTitleBarRenderer.BUTTON_WIDTH, WindowTitleBarRenderer.BUTTON_HEIGHT);
         this.networkManager = networkManager;
         if (networkManager != null) networkManager.addRuntimeEventListener(networkEventListener);
+        emptyRow.entranceAnimationEnabled = false;
         selectable = true;
         setSelected(true);
     }
@@ -180,7 +185,19 @@ public final class ServerPulseTitleExtension extends ExpandableWindowTitleWidget
         settlePlayerSnapshots(now);
         requestRefresh(now);
         if (isExpanded()) {
-            drawExpandedContent(context, mouseX, mouseY);
+            expandedContentVisible = true;
+            expandedContentWidth = renderWidth();
+            expandedContentHeight = renderHeight();
+            expandedContentOpacity = 1f;
+        } else if (getWidth() == getRestingWidth(now) && getHeight() == getRestingHeight(now)) {
+            expandedContentVisible = false;
+        }
+        if (expandedContentVisible) {
+            float distance = Math.max(Math.abs(expandedContentWidth - targetWidth), Math.abs(expandedContentHeight - targetHeight));
+            float remaining = Math.max(Math.abs(renderWidth() - targetWidth), Math.abs(renderHeight() - targetHeight));
+            float opacity = isExpanded() ? 1f : distance == 0f ? 0f : Math.clamp((remaining / distance - 0.25f) / 0.75f, 0f, 1f);
+            expandedContentOpacity = Math.min(expandedContentOpacity, opacity);
+            if (expandedContentOpacity > 0f) drawExpandedContent(context, mouseX, mouseY, expandedContentOpacity);
             return;
         }
         List<PlayerEvent> events = currentEvents(now);
@@ -639,16 +656,19 @@ public final class ServerPulseTitleExtension extends ExpandableWindowTitleWidget
                 + formatMemory(server.memoryBytes(), server.memoryLimitBytes()) + " • " + formatPlayers(server.players());
     }
 
-    private void drawExpandedContent(IDrawContext context, int mouseX, int mouseY) {
+    private void drawExpandedContent(IDrawContext context, int mouseX, int mouseY, float opacity) {
         List<ServerSnapshot> current = snapshots.stream().limit(8).toList();
         synchronizeRows(current);
         context.pushScissorState();
         context.enableScissor(getX() + 2, getY() + 2, getX() + getWidth() - 2, getY() + getHeight() - 2);
+        int rowX = getX() + 5;
+        int rowWidth = Math.max(1, Math.round(expandedContentWidth) - 10);
         int rowY = getY() + 5;
         if (current.isEmpty()) {
             emptyRow.setActive(false);
-            emptyRow.setPosition(getX() + 5, rowY);
-            emptyRow.setSize(getWidth() - 10, 28);
+            emptyRow.setPosition(rowX, rowY);
+            emptyRow.setSize(rowWidth, 28);
+            emptyRow.setOpacity(opacity);
             emptyRow.render(context, mouseX, mouseY, 0f);
         } else {
             for (ServerSnapshot server : current) {
@@ -656,8 +676,9 @@ public final class ServerPulseTitleExtension extends ExpandableWindowTitleWidget
                 row.setName(server.instance().getName());
                 row.setDescription(serverDescription(server));
                 row.setAccent(ThemeManager.getDefaultAccent());
-                row.setPosition(getX() + 5, rowY);
-                row.setSize(getWidth() - 10, 28);
+                row.setPosition(rowX, rowY);
+                row.setSize(rowWidth, 28);
+                row.setOpacity(opacity);
                 row.render(context, mouseX, mouseY, 0f);
                 rowY += 31;
             }
@@ -674,6 +695,7 @@ public final class ServerPulseTitleExtension extends ExpandableWindowTitleWidget
                 MountableButtonWidget row = new MountableButtonWidget.Builder(server.instance().getName())
                         .icon(quickIcon == null ? Identifier.icon("server.png") : quickIcon)
                         .onClick(() -> openServerDetails(server.instance())).build();
+                row.entranceAnimationEnabled = false;
                 iconManager.loadIconIdAsync(server.instance(), row::setIcon);
                 iconManager.loadRemoteIconAsync(server.instance(), () -> iconManager.loadIconIdAsync(server.instance(), row::setIcon));
                 return row;

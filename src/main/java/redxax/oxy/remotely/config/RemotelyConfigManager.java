@@ -68,7 +68,7 @@ public class RemotelyConfigManager extends DesktopRebaseConfigManager implements
     }
 
     private Path pendingNetworkFile(String key) {
-        if (configFile == null || key == null || !key.matches("remotely\\.network\\.pending\\.[A-Za-z0-9_-]+")) {
+        if (configFile == null || key == null || !key.matches("remotely\\.network\\.pending\\.[A-Za-z0-9_-]+(?:\\.attach\\.[A-Za-z0-9_-]+)?")) {
             throw new IllegalArgumentException("Pending Network Identity Is Invalid");
         }
         return configFile.getParent().resolve("network-pending").resolve(key);

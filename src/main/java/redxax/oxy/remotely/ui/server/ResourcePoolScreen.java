@@ -2,9 +2,12 @@ package redxax.oxy.remotely.ui.server;
 
 import redxax.oxy.remotely.RemotelyClient;
 import restudio.rebase.resource.ResourcePoolModels;
+import restudio.rebase.ui.widgets.ExternalLinkActions;
+import restudio.rebase.ui.screens.feedback.CreateFeedbackPopup;
 import restudio.rebase.resource.marketplace.HostedModpackSelection;
 import restudio.rebase.restudio.api.models.ServerModels;
 import restudio.rescreen.platform.TaskScheduler;
+import restudio.rescreen.platform.Async;
 import restudio.rescreen.theme.Accent;
 import restudio.rescreen.theme.ThemeManager;
 import restudio.rescreen.ui.core.Screen;
@@ -15,6 +18,7 @@ import restudio.rescreen.ui.rescreen.layout.ManagedLayout;
 import restudio.rescreen.ui.settings.Setting;
 import restudio.rescreen.ui.widgets.AnimatedButton;
 import restudio.rescreen.ui.widgets.AnimatedWidget;
+import restudio.rescreen.ui.widgets.DeletionPopup;
 import restudio.rescreen.ui.widgets.DoubleSliderWidget;
 import restudio.rescreen.ui.widgets.IconButton;
 import restudio.rescreen.ui.widgets.MountableButtonWidget;
@@ -79,6 +83,7 @@ public final class ResourcePoolScreen extends ReScreen {
     private boolean handoff;
     private boolean closed;
     private String expandedServerId = "";
+    private final Map<String, ResourcePoolModels.Allocation> editorAllocations = new HashMap<>();
     private String highlightedServerId;
     private Accent highlightedOriginal;
     private ResourcePoolController.Snapshot displayed;
@@ -86,6 +91,15 @@ public final class ResourcePoolScreen extends ReScreen {
     private boolean createRequested;
     private String layoutStamp;
     private ResourcePurchaseFlow purchaseFlow;
+    private final Map<UUID, PoolBoard> poolBoards = new HashMap<>();
+    private final Map<UUID, IconButton> purchaseRows = new HashMap<>();
+    private final Map<String, IconButton> pageButtons = new HashMap<>();
+    private final Map<String, AnimatedButton> summaries = new HashMap<>();
+    private final Map<AnimatedWidget, PopupWidget.PopupRow> settingRows = new HashMap<>();
+    private final List<AnimatedWidget> nextWidgets = new ArrayList<>();
+    private Setting purchaseHistory;
+    private IconButton buyResources;
+    private PurchaseView purchaseView;
 
     private static final class PendingChange {
         private final UUID poolId;
@@ -169,7 +183,7 @@ public final class ResourcePoolScreen extends ReScreen {
     }
 
     private String accountId() {
-        return host().accountIdentity().subjectId();
+        return host().accountIdentity().authenticated() ? host().hostedNetworkAccount() : "";
     }
 
     ResourcePoolController controller() {
@@ -250,7 +264,7 @@ public final class ResourcePoolScreen extends ReScreen {
         handoff = false;
         closed = false;
         ServerScreenHost.AccountIdentity identity = host().accountIdentity();
-        observedAccount = identity.subjectId();
+        observedAccount = accountId();
         observedAuthenticated = identity.authenticated();
         applyChanges = new IconButton.Builder().size(18, 18)
                 .imagePath("checkmark.png").hint("Apply All Previewed Server Changes")
@@ -263,7 +277,7 @@ public final class ResourcePoolScreen extends ReScreen {
                 .addRight("reload.png", controller::refresh, "Refresh")
                 .build();
         updateChangeActions();
-        content = createContainer("resource_pools", 6, 38, width - 12, Math.max(80, height - 44))
+        content = createContainer("resource_pools", 6, 38, width - 12, Math.max(1, height - 44))
                 .columns(1).padding(4).verticalSpacing(4).layout(new ManagedLayout()).scrolling(true).backgroundDrawing(true);
         layoutStamp = null;
         displayed = null;
@@ -294,9 +308,9 @@ public final class ResourcePoolScreen extends ReScreen {
         if (closed) return;
         display(controller.snapshot());
         ServerScreenHost.AccountIdentity identity = host().accountIdentity();
-        if (observedAuthenticated != identity.authenticated() || !observedAccount.equals(identity.subjectId())) {
+        if (observedAuthenticated != identity.authenticated() || !observedAccount.equals(accountId())) {
             if (purchaseFlow != null) purchaseFlow.close();
-            observedAccount = identity.subjectId();
+            observedAccount = accountId();
             observedAuthenticated = identity.authenticated();
             controller.refresh();
         }
@@ -314,6 +328,7 @@ public final class ResourcePoolScreen extends ReScreen {
         if (closed || content == null) return;
         List<ResourcePoolModels.Rate> rates = controller.rates();
         if (displayed == snapshot && displayedRates.equals(rates)) return;
+        if (purchaseView != null) purchaseView.update(snapshot);
         if (!sameContent(displayed, snapshot) || !displayedRates.equals(rates)) render(snapshot);
         displayed = snapshot;
         displayedRates = rates;
@@ -326,9 +341,22 @@ public final class ResourcePoolScreen extends ReScreen {
             return;
         }
         if (!shownAccount.equals(snapshot.accountId())) {
+            if (purchaseView != null) {
+                purchaseView.dispose();
+                purchaseView = null;
+            }
             remotelyClient.storageBreakdownIndex().retainAccount(snapshot.accountId());
             editors.clear();
+            poolBoards.clear();
+            purchaseRows.clear();
+            pageButtons.clear();
+            summaries.clear();
+            settingRows.clear();
+            purchaseHistory = null;
+            buyResources = null;
             serverRows.clear();
+            expandedServerId = "";
+            editorAllocations.clear();
             poolBars.clear();
             editorSync.clear();
             editorValidity.clear();
@@ -345,51 +373,54 @@ public final class ResourcePoolScreen extends ReScreen {
         }
         if (!snapshot.loading()) {
             editors.keySet().removeIf(id -> snapshot.pools().stream().noneMatch(view -> view.pool().id().equals(id)));
+            poolBoards.keySet().retainAll(editors.keySet());
+            poolBars.keySet().retainAll(editors.keySet());
         }
         String nextLayout = layoutStamp(snapshot);
         if (nextLayout.equals(layoutStamp)) {
             refreshExisting(snapshot);
             return;
         }
-        content.clearWidgets();
-        accentHover.clear();
-        highlightedServerId = null;
-        highlightedOriginal = null;
-        serverRows.clear();
-        poolBars.clear();
-        editorSync.clear();
-        editorValidity.clear();
-        draftRows.clear();
+        nextWidgets.clear();
+        refreshExisting(snapshot);
         if ((snapshot.generation() == 0 || snapshot.loading()) && snapshot.pools().isEmpty()) {
-            content.addWidget(summary("Loading Resource Pools", "Checking Available Resources And Servers", "calm"));
-            layoutStamp = nextLayout;
+            addContent(summary("Loading Resource Pools", "Checking Available Resources And Servers", "calm"));
+            finishLayout(nextLayout);
             return;
         }
         if (!snapshot.message().isBlank()) {
-            content.addWidget(summary(snapshot.pools().isEmpty() ? "Resource Pools Unavailable" : "Resources Need Attention",
+            addContent(summary(snapshot.pools().isEmpty() ? "Resource Pools Unavailable" : "Resources Need Attention",
                     snapshot.message(), "danger"));
             if (snapshot.pools().isEmpty()) {
-                layoutStamp = nextLayout;
+                renderPurchases(snapshot);
+                finishLayout(nextLayout);
                 return;
             }
         }
         if (!snapshot.loading() && !snapshot.offers().isEmpty() && !controller.rates().isEmpty()) {
-            content.addWidget(new IconButton.Builder().size(rowWidth(), 18).label("Buy Resources").imagePath("Reactor.png")
+            if (buyResources == null) buyResources = new IconButton.Builder().size(rowWidth(), 18).label("Buy Resources").imagePath("Reactor.png")
                     .accentType(ThemeManager.getAccent("danger")).enableGradient(true)
-                    .onClick(() -> showOffers(snapshot.offers(), null)).build());
+                    .onClick(() -> showOffers(controller.snapshot().offers(), null)).build();
+            addContent(buyResources);
         }
-        renderPurchases(snapshot);
         if (snapshot.pools().isEmpty()) {
-            content.addWidget(summary("No Resource Pools", "Capacity Appears After Payment And Review", "warning"));
-            renderPageAction("Resource Pools", "Load More Pools", snapshot.poolPages(), controller::loadMorePools);
-            layoutStamp = nextLayout;
-            return;
-        }
-        for (ResourcePoolController.PoolView view : snapshot.pools()) {
-            renderPool(view);
+            addContent(summary("No Resource Pools", "Capacity Appears After Payment And Review", "warning"));
+        } else {
+            for (ResourcePoolController.PoolView view : snapshot.pools()) renderPool(view);
         }
         renderPageAction("Resource Pools", "Load More Pools", snapshot.poolPages(), controller::loadMorePools);
-        layoutStamp = nextLayout;
+        renderPurchases(snapshot);
+        finishLayout(nextLayout);
+    }
+
+    private void addContent(AnimatedWidget widget) {
+        widget.setWidth(rowWidth());
+        nextWidgets.add(widget);
+    }
+
+    private void finishLayout(String stamp) {
+        content.replaceWidgets(nextWidgets, true);
+        layoutStamp = stamp;
     }
 
     private String layoutStamp(ResourcePoolController.Snapshot snapshot) {
@@ -444,31 +475,47 @@ public final class ResourcePoolScreen extends ReScreen {
                         ? () -> showDraftReview(draft) : null);
             }
         }
+        for (ResourcePoolModels.PurchaseStatus purchase : snapshot.purchases()) updatePurchase(purchase);
         updateServerLabels();
     }
 
     private void renderPurchases(ResourcePoolController.Snapshot snapshot) {
-        if (snapshot.purchases().isEmpty()) {
-            renderPageAction("Resource Purchases", "Load More Purchases", snapshot.purchasePages(),
-                    controller::loadMorePurchases);
-            return;
-        }
-        content.addWidget(summary("Resource Purchases", "Payment And Review Do Not Reserve Capacity", "calm"));
+        List<PopupWidget.PopupRow> historyRows = new ArrayList<>();
+        boolean attention = snapshot.purchases().stream().anyMatch(ResourcePoolScreen::purchaseNeedsAttention);
+        if (attention) addContent(summary("Purchases Need Attention", "Complete Checkout Or Review Before Capacity Becomes Available", "warning"));
         for (ResourcePoolModels.PurchaseStatus purchase : snapshot.purchases()) {
-            ResourcePoolModels.Offer offer = offer(snapshot.offers(), purchase.offerId());
-            String label = offer == null ? "Resource Purchase" : offer.label();
-            String hint = purchaseHint(purchase);
-            IconButton.Builder row = new IconButton.Builder().size(rowWidth(), 28)
-                    .label(label + " • " + title(purchase.status().name())).hint(hint).imagePath("Reactor.png");
-            if (purchase.checkoutUrl() != null && !purchase.checkoutUrl().isBlank()
-                    && (purchase.status() == ResourcePoolModels.PurchaseState.PENDING
-                    || purchase.status() == ResourcePoolModels.PurchaseState.NEEDS_REVIEW)) {
-                row.onClick(() -> showPurchase(purchase, offer));
-            }
-            content.addWidget(row.build());
+            IconButton row = updatePurchase(purchase);
+            if (purchaseNeedsAttention(purchase)) addContent(row);
+            else historyRows.add(settingRow(row, 30));
         }
-        renderPageAction("Resource Purchases", "Load More Purchases", snapshot.purchasePages(),
-                controller::loadMorePurchases);
+        if (purchaseHistory == null) {
+            purchaseHistory = new Setting.Builder("Purchase History").build();
+            purchaseHistory.collapse(true);
+        }
+        ResourcePoolController.PageState pages = snapshot.purchasePages();
+        if (pages.hasMore() || !pages.message().isBlank()) {
+            IconButton more = pageButton("purchase-history", "Load More History", pages, controller::loadMorePurchases);
+            historyRows.add(settingRow(more, 24));
+        }
+        purchaseHistory.setRows(historyRows);
+        purchaseHistory.fitContentHeight();
+        if (!historyRows.isEmpty()) addContent(purchaseHistory);
+    }
+
+    private static boolean purchaseNeedsAttention(ResourcePoolModels.PurchaseStatus purchase) {
+        return purchase.status() == ResourcePoolModels.PurchaseState.PENDING
+                || purchase.status() == ResourcePoolModels.PurchaseState.NEEDS_REVIEW
+                || purchase.status() == ResourcePoolModels.PurchaseState.PAYMENT_FAILED;
+    }
+
+    private IconButton updatePurchase(ResourcePoolModels.PurchaseStatus purchase) {
+        ResourcePoolModels.Offer offer = offer(controller.snapshot().offers(), purchase.offerId());
+        IconButton row = purchaseRows.computeIfAbsent(purchase.purchaseId(), ignored -> new IconButton.Builder()
+                .size(rowWidth(), 28).imagePath("Reactor.png").build());
+        row.setMessage((offer == null ? "Resource Purchase" : offer.label()) + " • " + title(purchase.status().name()));
+        row.setHint(purchaseHint(purchase));
+        row.setOnClick(() -> showPurchase(purchase, offer));
+        return row;
     }
 
     private static String purchaseHint(ResourcePoolModels.PurchaseStatus purchase) {
@@ -485,116 +532,113 @@ public final class ResourcePoolScreen extends ReScreen {
     }
 
     private void renderPool(ResourcePoolController.PoolView view) {
-        ResourcePoolModels.Pool pool = view.pool();
-        PoolAllocationEditor editor = editors.computeIfAbsent(pool.id(), ignored -> new PoolAllocationEditor());
+        PoolAllocationEditor editor = editors.computeIfAbsent(view.pool().id(), ignored -> new PoolAllocationEditor());
         editor.accept(view);
-        renderPoolBoard(editor);
-        List<ResourcePoolModels.Offer> matching = controller.snapshot().offers().stream()
-                .filter(offer -> offer.location().equals(pool.domain().location())
-                        && offer.cpuClass().equals(pool.domain().cpuClass()))
-                .toList();
-        if (!controller.snapshot().loading() && !matching.isEmpty() && !controller.rates().isEmpty()) {
-            MountableButtonWidget expand = ResourcePurchaseFlow.information("Expand Pool", "Choose Your New Resource Capacity", "Reactor.png");
-            expand.setSize(rowWidth(), 30);
-            expand.setCursorHoverReactive(true);
-            expand.setOnClick(() -> showOffers(matching, pool.id()));
-            content.addWidget(expand);
+        PoolBoard board = poolBoards.computeIfAbsent(view.pool().id(), ignored -> new PoolBoard(editor));
+        board.accept(view);
+        addContent(board.capacity);
+        addContent(board.servers);
+        if (!board.inactive.getRows().isEmpty()) addContent(board.inactive);
+        if (!controller.snapshot().loading() && !controller.snapshot().offers().isEmpty() && !controller.rates().isEmpty()) {
+            addContent(board.expand);
         }
-        List<ResourcePoolModels.Draft> pendingDrafts = view.drafts().stream()
-                .filter(draft -> draft.state() != ResourcePoolModels.DraftState.ACTIVE).toList();
-        if (!pendingDrafts.isEmpty()) {
-            Setting drafts = new Setting.Builder("Server Drafts").build();
-            for (ResourcePoolModels.Draft draft : pendingDrafts) {
-                IconButton row = draftRow(draft);
-                draftRows.put(draft.id(), row);
-                addSettingRow(drafts, row);
-            }
-            drafts.fitContentHeight();
-            content.addWidget(drafts);
-        }
-        renderPageAction("Server Drafts", "Load More Drafts", view.draftPages(),
-                () -> controller.loadMoreDrafts(pool.id()));
-        renderPageAction("Pool Servers", "Load More Servers", view.allocationPages(),
-                () -> controller.loadMoreAllocations(pool.id()));
+        if (!board.drafts.getRows().isEmpty()) addContent(board.drafts);
+        renderPageAction(view.pool().id() + "-drafts", "Server Drafts", "Load More Drafts", view.draftPages(),
+                () -> controller.loadMoreDrafts(view.pool().id()));
+        renderPageAction(view.pool().id() + "-servers", "Pool Servers", "Load More Servers", view.allocationPages(),
+                () -> controller.loadMoreAllocations(view.pool().id()));
     }
 
-    private void renderPoolBoard(PoolAllocationEditor editor) {
-        ResourcePoolController.PoolView view = editor.view();
-        List<ResourcePoolModels.Allocation> active = new ArrayList<>();
-        List<ResourcePoolModels.Allocation> inactive = new ArrayList<>();
-        for (ResourcePoolModels.Allocation allocation : visibleAllocations(view.allocations())) {
-            if (allocation.state() == ResourcePoolModels.AllocationState.DISABLED) inactive.add(allocation);
-            else active.add(allocation);
-        }
-        active.sort(Comparator.comparing(allocation -> serverName(allocation.serverId()), String.CASE_INSENSITIVE_ORDER));
-        List<ResourcePoolModels.Allocation> barAllocations = orderedAllocations(visibleAllocations(view.allocations()));
-        Setting capacity = new Setting.Builder("Resource Pool").build();
-        ResourceAllocationBarWidget ramBar = new ResourceAllocationBarWidget(editor, PoolAllocationEditor.Resource.RAM, barAllocations, this::serverName);
-        ResourceAllocationBarWidget cpuBar = new ResourceAllocationBarWidget(editor, PoolAllocationEditor.Resource.CPU, barAllocations, this::serverName);
-        ResourceAllocationBarWidget diskBar = new ResourceAllocationBarWidget(editor, PoolAllocationEditor.Resource.DISK, barAllocations, this::serverName);
-        for (ResourceAllocationBarWidget bar : List.of(ramBar, cpuBar, diskBar)) {
-            bar.onHover(hover -> highlightServer(bar, hover));
-            bar.onChange(() -> barEdited(editor));
-        }
-        poolBars.put(view.pool().id(), List.of(ramBar, cpuBar, diskBar));
-        Runnable refreshBars = () -> { ramBar.refresh(); cpuBar.refresh(); diskBar.refresh(); updateAllocationRows(editor); };
-        addAllocationBar(capacity, ramBar);
-        addAllocationBar(capacity, cpuBar);
-        addAllocationBar(capacity, diskBar);
-        addSettingRow(capacity, new MountableButtonWidget.Builder("Allocation Key")
-                .description("Hover For Capacity • Hatched: Disabled Disk • *: Stop Or Restart To Free RAM")
-                .build());
-        capacity.fitContentHeight();
-        content.addWidget(capacity);
+    private PopupWidget.PopupRow settingRow(AnimatedWidget widget, int height) {
+        return settingRows.computeIfAbsent(widget, ignored -> {
+            widget.setHeight(height);
+            widget.entranceAnimationEnabled = false;
+            return new PopupWidget.PopupRow.Builder("", widget).minHeight(height).build();
+        });
+    }
 
-        Setting.Builder serverBuilder = new Setting.Builder("Servers");
-        serverBuilder.setExpandWithDropdowns(true);
-        Setting servers = serverBuilder.build();
-        if (active.isEmpty()) {
-            addSettingRow(servers, new MountableButtonWidget.Builder("No Active Servers")
-                    .description("Create A Server To Allocate Resources").build());
-        }
-        for (ResourcePoolModels.Allocation allocation : active) {
-            String serverName = serverName(allocation.serverId());
-            MountableButtonWidget row = new MountableButtonWidget.Builder(serverName)
-                    .description(serverSummary(editor, allocation))
-                    .icon(serverIcons.getOrDefault(allocation.serverId(), Identifier.icon("server.png")))
-                    .onClick(() -> selectServer(editor, allocation.serverId())).build();
-            row.setHint("Adjust " + serverName + " Resources");
-            serverRows.put(allocation.serverId(), row);
-            if (allocation.serverId().equals(expandedServerId) && editor.selected() != null
-                    && editor.selected().serverId().equals(allocation.serverId())) {
-                row.setEmbeddedBody(editorRows(editor, refreshBars), true);
+    private static Setting serverSetting(String title) {
+        Setting.Builder builder = new Setting.Builder(title);
+        builder.setExpandWithDropdowns(true);
+        return builder.build();
+    }
+
+    private final class PoolBoard {
+        private final PoolAllocationEditor editor;
+        private final Setting capacity = new Setting.Builder("Resource Pool").build();
+        private final Setting servers = serverSetting("Servers");
+        private final Setting inactive = serverSetting("Disabled Servers");
+        private final Setting drafts = new Setting.Builder("Server Drafts").build();
+        private final MountableButtonWidget expand;
+        private final MountableButtonWidget create;
+        private final MountableButtonWidget empty;
+        private final List<ResourceAllocationBarWidget> bars;
+
+        private PoolBoard(PoolAllocationEditor editor) {
+            this.editor = editor;
+            UUID poolId = editor.view().pool().id();
+            bars = List.of(new ResourceAllocationBarWidget(editor, PoolAllocationEditor.Resource.RAM, List.of(), ResourcePoolScreen.this::serverName),
+                    new ResourceAllocationBarWidget(editor, PoolAllocationEditor.Resource.CPU, List.of(), ResourcePoolScreen.this::serverName),
+                    new ResourceAllocationBarWidget(editor, PoolAllocationEditor.Resource.DISK, List.of(), ResourcePoolScreen.this::serverName));
+            for (ResourceAllocationBarWidget bar : bars) {
+                bar.onHover(hover -> highlightServer(bar, hover));
+                bar.onChange(() -> barEdited(editor));
+                addAllocationBar(capacity, bar);
             }
-            addSettingRow(servers, row);
+            poolBars.put(poolId, bars);
+            addSettingRow(capacity, new MountableButtonWidget.Builder("Allocation Key")
+                    .description("Hover For Capacity • Hatched: Disabled Disk • *: Stop Or Restart To Free RAM").build());
+            capacity.fitContentHeight();
+            create = new MountableButtonWidget.Builder(modpack == null ? "Create Server" : "Create Modpack Server")
+                    .description(modpack == null ? "Allocate Resources From This Pool" : modpack.name()).onClick(() -> create(poolId)).build();
+            empty = new MountableButtonWidget.Builder("No Active Servers").description("Create A Server To Allocate Resources").build();
+            expand = ResourcePurchaseFlow.information("Expand Pool", "Choose Your New Resource Capacity", "Reactor.png");
+            expand.setCursorHoverReactive(true);
+            expand.setOnClick(() -> showOffers(controller.snapshot().offers().stream()
+                    .filter(offer -> offer.location().equals(editor.view().pool().domain().location())
+                            && offer.cpuClass().equals(editor.view().pool().domain().cpuClass())).toList(), poolId));
+            inactive.collapse(true);
         }
-        addSettingRow(servers, new MountableButtonWidget.Builder(modpack == null ? "Create Server" : "Create Modpack Server")
-                .description(modpack == null ? "Allocate Resources From This Pool" : modpack.name())
-                .onClick(() -> create(view.pool().id())).build());
-        servers.fitContentHeight();
-        content.addWidget(servers);
 
-        if (!inactive.isEmpty()) {
-            Setting.Builder inactiveBuilder = new Setting.Builder("Disabled Servers (" + inactive.size() + ")");
-            inactiveBuilder.setExpandWithDropdowns(true);
-            Setting inactiveGroup = inactiveBuilder.build();
-            for (ResourcePoolModels.Allocation allocation : inactive) {
-                String name = serverNames.getOrDefault(allocation.serverId(),
-                        "Unlinked Allocation " + allocation.serverId().substring(0, Math.min(8, allocation.serverId().length())));
-                MountableButtonWidget row = new MountableButtonWidget.Builder(name)
-                        .description(serverSummary(editor, allocation))
-                        .icon(serverIcons.getOrDefault(allocation.serverId(), Identifier.icon("server.png")))
-                        .onClick(() -> selectServer(editor, allocation.serverId())).build();
-                serverRows.put(allocation.serverId(), row);
+        private void accept(ResourcePoolController.PoolView view) {
+            List<ResourcePoolModels.Allocation> allocations = orderedAllocations(visibleAllocations(view.allocations()));
+            bars.forEach(bar -> bar.setAllocations(allocations));
+            List<PopupWidget.PopupRow> activeRows = new ArrayList<>();
+            List<PopupWidget.PopupRow> disabledRows = new ArrayList<>();
+            for (ResourcePoolModels.Allocation allocation : allocations) {
+                MountableButtonWidget row = serverRows.computeIfAbsent(allocation.serverId(), ignored -> new MountableButtonWidget.Builder(serverName(allocation.serverId()))
+                        .onClick(() -> selectServer(editor, allocation.serverId())).build());
+                row.setName(serverName(allocation.serverId()));
+                row.setDescription(serverSummary(editor, allocation));
+                row.setIcon(serverIcons.getOrDefault(allocation.serverId(), Identifier.icon("server.png")));
+                row.setHint(cleanupPending(allocation) ? "Backups Awaiting Cleanup" : "Adjust " + serverName(allocation.serverId()) + " Resources");
                 if (allocation.serverId().equals(expandedServerId) && editor.selected() != null
-                        && editor.selected().serverId().equals(allocation.serverId())) {
-                    row.setEmbeddedBody(editorRows(editor, refreshBars), true);
+                        && editor.selected().serverId().equals(allocation.serverId()) && !row.hasEmbeddedBody()) {
+                    setServerExpanded(editor, allocation.serverId(), true);
                 }
-                addSettingRow(inactiveGroup, row);
+                (allocation.state() == ResourcePoolModels.AllocationState.DISABLED ? disabledRows : activeRows).add(settingRow(row, 30));
             }
-            inactiveGroup.fitContentHeight();
-            inactiveGroup.collapse(!inactive.stream().anyMatch(value -> value.serverId().equals(expandedServerId)));
-            content.addWidget(inactiveGroup);
+            if (activeRows.isEmpty()) activeRows.add(settingRow(empty, 30));
+            activeRows.add(settingRow(create, 30));
+            servers.setRows(servers.getRows().stream().filter(activeRows::contains).toList());
+            inactive.setRows(inactive.getRows().stream().filter(disabledRows::contains).toList());
+            servers.setRows(activeRows);
+            servers.fitContentHeight();
+            inactive.setTitle("Disabled Servers (" + disabledRows.size() + ")");
+            inactive.setRows(disabledRows);
+            inactive.fitContentHeight();
+            List<PopupWidget.PopupRow> pendingRows = new ArrayList<>();
+            for (ResourcePoolModels.Draft draft : view.drafts()) {
+                if (draft.state() == ResourcePoolModels.DraftState.ACTIVE) continue;
+                IconButton row = draftRows.computeIfAbsent(draft.id(), ignored -> draftRow(draft));
+                row.setMessage(draft.metadata().name() + " • " + (draft.state() == ResourcePoolModels.DraftState.UNKNOWN ? "Activation Needs Review" : title(draft.state().name())));
+                row.setHint(draftHint(draft));
+                row.setOnClick(draft.state() == ResourcePoolModels.DraftState.DRAFT ? () -> showDraftActivation(draft)
+                        : draft.state() == ResourcePoolModels.DraftState.UNKNOWN ? () -> showDraftReview(draft) : null);
+                pendingRows.add(settingRow(row, 30));
+            }
+            drafts.setRows(pendingRows);
+            drafts.fitContentHeight();
         }
     }
 
@@ -615,9 +659,19 @@ public final class ResourcePoolScreen extends ReScreen {
                 && PoolAllocationEditor.number(allocation.retained().backupMiB()).signum() == 0;
     }
 
+    private static boolean cleanupPending(ResourcePoolModels.Allocation allocation) {
+        return allocation.state() == ResourcePoolModels.AllocationState.DISABLED
+                && PoolAllocationEditor.number(allocation.retained().diskMiB()).signum() == 0
+                && PoolAllocationEditor.number(allocation.retained().backupMiB()).signum() > 0;
+    }
+
     private List<AnimatedWidget> editorRows(PoolAllocationEditor editor, Runnable refreshBars) {
         ResourcePoolModels.Allocation selected = editor.selected();
         if (selected == null) return List.of();
+        if (cleanupPending(selected)) {
+            return List.of(new MountableButtonWidget.Builder("Backups Awaiting Cleanup")
+                    .description("Retained Backups Remain Visible Until Cleanup Is Confirmed").build());
+        }
         List<AnimatedWidget> rows = new ArrayList<>();
         if (editor.limit(PoolAllocationEditor.Resource.RAM).signum() > 0
                     && editor.limit(PoolAllocationEditor.Resource.CPU).signum() > 0
@@ -755,7 +809,8 @@ public final class ResourcePoolScreen extends ReScreen {
     }
 
     private static void updateActions(PoolAllocationEditor editor, IconButton disable) {
-        if (disable != null) disable.setActive(!editor.locked() && !editor.busy() && !editor.submitted() && !editor.changed());
+        if (disable != null) disable.setActive(editor.selected() != null && editor.selected().state() == ResourcePoolModels.AllocationState.ACTIVE
+                && !editor.locked() && !editor.busy() && !editor.submitted() && !editor.changed());
     }
 
     private static void addSettingRow(Setting setting, AnimatedWidget row) {
@@ -775,29 +830,34 @@ public final class ResourcePoolScreen extends ReScreen {
     }
 
     private void selectServer(PoolAllocationEditor editor, String serverId) {
-        if (editor.selected() != null && editor.selected().serverId().equals(serverId)) {
-            expandedServerId = serverId.equals(expandedServerId) ? "" : serverId;
-            setServerExpanded(editor, serverId, !expandedServerId.isEmpty());
-            return;
-        }
+        if (editor.allocation(serverId) == null) return;
+        boolean expanded = !serverId.equals(expandedServerId);
         MountableButtonWidget previous = serverRows.get(expandedServerId);
-        if (previous != null) previous.setEmbeddedBody(null, false);
-        editorValidity.remove(expandedServerId);
-        editorSync.remove(expandedServerId);
+        if (previous != null && expanded) previous.setEmbeddedBody(null, false);
         editor.select(serverId);
-        expandedServerId = serverId;
-        setServerExpanded(editor, serverId, true);
+        expandedServerId = expanded ? serverId : "";
+        setServerExpanded(editor, serverId, expanded);
     }
 
     private void setServerExpanded(PoolAllocationEditor editor, String serverId, boolean expanded) {
         MountableButtonWidget row = serverRows.get(serverId);
         if (row == null) return;
         if (expanded) {
-            if (!row.hasEmbeddedBody()) row.setEmbeddedBody(editorRows(editor, () -> refreshBars(editor.view().pool().id())), true);
+            ResourcePoolModels.Allocation allocation = editor.allocation(serverId);
+            ResourcePoolModels.Allocation previous = editorAllocations.get(serverId);
+            if (allocation == null) return;
+            if (!row.hasEmbeddedBody() || previous == null || previous.state() != allocation.state()
+                    || cleanupPending(previous) != cleanupPending(allocation)) {
+                editorSync.remove(serverId);
+                editorValidity.remove(serverId);
+                row.setEmbeddedBody(editorRows(editor, () -> refreshBars(editor.view().pool().id())), true);
+            } else {
+                row.setEmbeddedBody(null, true);
+                if (previous != null && !previous.equals(allocation)) syncEditor(serverId);
+            }
+            editorAllocations.put(serverId, allocation);
         } else {
             row.setEmbeddedBody(null, false);
-            editorValidity.remove(serverId);
-            editorSync.remove(serverId);
         }
     }
 
@@ -808,19 +868,27 @@ public final class ResourcePoolScreen extends ReScreen {
     private void updateAllocationRows(PoolAllocationEditor editor) {
         for (ResourcePoolModels.Allocation allocation : editor.view().allocations()) {
             MountableButtonWidget row = serverRows.get(allocation.serverId());
-            if (row != null) row.setDescription(serverSummary(editor, allocation));
+            if (row != null) {
+                row.setDescription(serverSummary(editor, allocation));
+                ResourcePoolModels.Allocation previous = editorAllocations.get(allocation.serverId());
+                if (allocation.serverId().equals(expandedServerId) && previous != null && row.hasEmbeddedBody()
+                        && (previous.state() != allocation.state() || cleanupPending(previous) != cleanupPending(allocation))) {
+                    setServerExpanded(editor, allocation.serverId(), true);
+                }
+            }
         }
         updateChangeActions();
     }
 
     private static String serverSummary(PoolAllocationEditor editor, ResourcePoolModels.Allocation allocation) {
         String id = allocation.serverId();
+        if (cleanupPending(allocation)) return "Backups Awaiting Cleanup  •  RAM And CPU Released";
         if (allocation.state() == ResourcePoolModels.AllocationState.DISABLED && !editor.changed(id)) {
             BigInteger disk = PoolAllocationEditor.number(allocation.retained().diskMiB());
             BigInteger backup = PoolAllocationEditor.number(allocation.retained().backupMiB());
             String retained = disk.signum() == 0 ? "No Disk Retained" : disk + " MiB Disk Retained";
             return "Disabled  •  RAM And CPU Released  •  " + retained
-                    + (backup.signum() == 0 ? "" : "  •  Backup Storage Retained");
+                    + (backup.signum() == 0 ? "" : "  •  Backups Retained Within Disk");
         }
         String status = editor.busy(id) ? "  •  Applying"
                 : editor.submitted(id) || allocation.state() == ResourcePoolModels.AllocationState.PENDING ? "  •  Updating"
@@ -845,8 +913,6 @@ public final class ResourcePoolScreen extends ReScreen {
         if (!serverId.equals(expandedServerId)) {
             MountableButtonWidget previous = serverRows.get(expandedServerId);
             if (previous != null) previous.setEmbeddedBody(null, false);
-            editorValidity.remove(expandedServerId);
-            editorSync.remove(expandedServerId);
             expandedServerId = serverId;
         }
         setServerExpanded(editor, serverId, true);
@@ -884,7 +950,7 @@ public final class ResourcePoolScreen extends ReScreen {
                 if (row == null) continue;
                 String name = serverName(allocation.serverId());
                 row.setName(name);
-                row.setHint("Adjust " + name + " Resources");
+                row.setHint(cleanupPending(allocation) ? "Backups Awaiting Cleanup" : "Adjust " + name + " Resources");
                 Identifier icon = serverIcons.get(allocation.serverId());
                 if (icon != null && !icon.equals(row.getIconId())) row.setIcon(icon);
             }
@@ -901,19 +967,22 @@ public final class ResourcePoolScreen extends ReScreen {
     }
 
     private void renderPageAction(String name, String label, ResourcePoolController.PageState pages, Runnable action) {
-        if (!pages.message().isBlank()) {
-            content.addWidget(summary(name + " Need Attention", pages.message(), "danger"));
-        }
-        if (!pages.hasMore()) {
-            return;
-        }
-        if (pages.loading()) {
-            return;
-        }
-        content.addWidget(new IconButton.Builder().size(rowWidth(), 24)
-                .label(label).hint(label)
-                .imagePath("down.png").accentType(ThemeManager.getAccent("calm"))
-                .onClick(action).build());
+        renderPageAction(name, name, label, pages, action);
+    }
+
+    private void renderPageAction(String key, String name, String label, ResourcePoolController.PageState pages, Runnable action) {
+        if (!pages.message().isBlank()) addContent(summary(name + " Need Attention", pages.message(), "danger"));
+        if (pages.hasMore()) addContent(pageButton(key, label, pages, action));
+    }
+
+    private IconButton pageButton(String key, String label, ResourcePoolController.PageState pages, Runnable action) {
+        IconButton button = pageButtons.computeIfAbsent(key, ignored -> new IconButton.Builder().size(rowWidth(), 24)
+                .imagePath("down.png").accentType(ThemeManager.getAccent("calm")).build());
+        button.setMessage(pages.loading() ? "Loading" : pages.message().isBlank() ? label : "Retry Loading");
+        button.setHint(pages.message().isBlank() ? label : pages.message());
+        button.setActive(!pages.loading());
+        button.setOnClick(action);
+        return button;
     }
 
     private static String specs(ResourcePoolModels.Resources resources) {
@@ -1071,31 +1140,182 @@ public final class ResourcePoolScreen extends ReScreen {
         notice.update().message(message).description(description).type(type).loading(false).autoSlideOut(true).commit();
         if (purchase.checkoutUrl() != null && !purchase.checkoutUrl().isBlank()
                 && (purchase.state() == ResourcePoolModels.PurchaseState.PENDING
-                || purchase.state() == ResourcePoolModels.PurchaseState.NEEDS_REVIEW)) {
+                || purchase.state() == ResourcePoolModels.PurchaseState.PAYMENT_FAILED)) {
             showCheckoutLink(purchase.checkoutUrl(), offer, title(purchase.state().name()), quote);
         }
         controller.refresh();
     }
 
-    private void showPurchase(ResourcePoolModels.PurchaseStatus purchase, ResourcePoolModels.Offer offer) {
-        String label = offer == null ? "Resource Purchase" : offer.label();
-        showCheckoutLink(purchase.checkoutUrl(), offer, label + " • " + title(purchase.status().name()), null);
+    private void showPurchase(ResourcePoolModels.PurchaseStatus purchase, ResourcePoolModels.Offer ignored) {
+        ResourcePoolModels.PurchaseStatus latest = controller.snapshot().purchases().stream()
+                .filter(value -> value.purchaseId().equals(purchase.purchaseId())).findFirst().orElse(null);
+        if (latest == null || !accountId().equals(controller.snapshot().accountId())) return;
+        if (purchaseView == null || !purchaseView.id.equals(latest.purchaseId()) || !purchaseView.account.equals(accountId())) {
+            if (purchaseView != null) purchaseView.dispose();
+            purchaseView = new PurchaseView(latest);
+        }
+        purchaseView.update(controller.snapshot());
+        purchaseView.popup.centerOnOwner();
+        purchaseView.popup.show();
+    }
+
+    private final class PurchaseView {
+        private final UUID id;
+        private final String account;
+        private final PopupWidget.Builder builder;
+        private PopupWidget popup;
+        private final MountableButtonWidget status;
+        private final AnimatedButton refresh;
+        private final AnimatedButton manage;
+        private final AnimatedButton retry;
+        private final AnimatedButton recover;
+        private final AnimatedButton release;
+        private boolean busy;
+        private boolean disposed;
+        private ResourcePoolModels.PurchaseStatus purchase;
+        private String link = "";
+
+        private PurchaseView(ResourcePoolModels.PurchaseStatus purchase) {
+            this.purchase = purchase;
+            id = purchase.purchaseId();
+            account = accountId();
+            builder = new PopupWidget.Builder("Resource Purchase").size(Math.min(460, Math.max(1, width - 24)),
+                            Math.min(320, Math.max(1, height - 40))).setMinSize(1, 1).padding(6).rowGap(5);
+            status = ResourcePurchaseFlow.information("Resource Purchase", purchaseHint(purchase), "Reactor.png");
+            builder.addRow("", status);
+            builder.addRow("Reference", new TextInputWidget.Builder().text(id.toString()).size(250, 20).build());
+            refresh = new AnimatedButton.Builder().label("Refresh Status").onClick(() -> {
+                if (current()) controller.refresh();
+            }).build();
+            builder.addRow("", refresh);
+            manage = new AnimatedButton.Builder().label("Manage Pool").onClick(() -> {
+                if (!current()) return;
+                PoolBoard board = poolBoards.get(this.purchase.poolId());
+                if (board == null) return;
+                popup.hide();
+                content.scrollToWidget(board.capacity);
+            }).build();
+            builder.addRow("purchase-manage", "", manage);
+            retry = new AnimatedButton.Builder().label("Review New Purchase").onClick(() -> {
+                if (!current() || !retryAvailable()) return;
+                popup.hide();
+                showOffers(controller.snapshot().offers(), poolView(this.purchase.poolId()) == null ? null : this.purchase.poolId());
+            }).build();
+            builder.addRow("purchase-retry", "", retry);
+            recover = new AnimatedButton.Builder().label("Recover Checkout").onClick(() -> {
+                if (current() && recoveryAvailable() && !busy) perform(controller.recoverPurchase(this.purchase), false);
+            }).build();
+            builder.addRow("purchase-recover", "", recover);
+            release = new AnimatedButton.Builder().label("Release Unpaid Reservation").onClick(this::confirmRelease).build();
+            builder.addRow("purchase-release", "", release);
+            builder.addRow("", new AnimatedButton.Builder().label("Contact Support").onClick(() -> {
+                if (!current()) return;
+                popup.hide();
+                CreateFeedbackPopup support = new CreateFeedbackPopup("Reactor", true, List.of(), post -> {});
+                addDrawableChild(support);
+                support.centerOnOwner();
+            }).build());
+            popup = builder.build();
+            addDrawableChild(popup);
+        }
+
+        private boolean current() {
+            return !disposed && !closed && !account.isBlank() && account.equals(accountId()) && account.equals(controller.snapshot().accountId());
+        }
+
+        private boolean retryAvailable() {
+            return offer(controller.snapshot().offers(), purchase.offerId()) != null
+                    && (purchase.status() == ResourcePoolModels.PurchaseState.EXPIRED || purchase.status() == ResourcePoolModels.PurchaseState.CANCELLED);
+        }
+
+        private void update(ResourcePoolController.Snapshot snapshot) {
+            if (!current()) {
+                popup.hide();
+                return;
+            }
+            ResourcePoolModels.PurchaseStatus latest = snapshot.purchases().stream().filter(value -> value.purchaseId().equals(id)).findFirst().orElse(null);
+            if (latest == null) return;
+            purchase = latest;
+            ResourcePoolModels.Offer offer = offer(snapshot.offers(), purchase.offerId());
+            status.setName((offer == null ? "Resource Purchase" : offer.label()) + " • " + title(purchase.status().name()));
+            status.setDescription(purchaseHint(purchase));
+            refresh.active = !snapshot.loading() && !busy;
+            recover.active = release.active = !busy;
+            popup.setTitleBadge(busy ? "Updating Purchase" : "");
+            popup.setRowVisibility("purchase-recover", recoveryAvailable());
+            popup.setRowVisibility("purchase-release", recoveryAvailable());
+            refresh.setMessage(snapshot.loading() ? "Checking Status" : "Refresh Status");
+            popup.setRowVisibility("purchase-manage", poolBoards.containsKey(purchase.poolId()));
+            popup.setRowVisibility("purchase-retry", retryAvailable());
+            String url = text(purchase.checkoutUrl(), "");
+            if (!url.equals(link)) {
+                popup.removeRow("external-status");
+                popup.removeRow("external-url");
+                popup.removeRow("external-actions");
+                link = url;
+                if (!url.isBlank()) ExternalLinkActions.add(builder, url, () -> current() && url.equals(purchase.checkoutUrl()) && checkoutAvailable(),
+                        host()::openExternal, "Open Secure Checkout");
+            }
+            boolean checkout = checkoutAvailable();
+            popup.setRowVisibility("external-status", checkout);
+            popup.setRowVisibility("external-url", checkout);
+            popup.setRowVisibility("external-actions", checkout);
+        }
+
+        private boolean checkoutAvailable() {
+            return purchase.status() == ResourcePoolModels.PurchaseState.PENDING || purchase.status() == ResourcePoolModels.PurchaseState.PAYMENT_FAILED;
+        }
+
+        private boolean recoveryAvailable() {
+            return purchase.status() == ResourcePoolModels.PurchaseState.NEEDS_REVIEW && text(purchase.checkoutUrl(), "").isBlank();
+        }
+
+        private void confirmRelease() {
+            if (!current() || !recoveryAvailable() || busy) return;
+            PopupWidget[] confirmation = new PopupWidget[1];
+            PopupWidget.Builder dialog = new PopupWidget.Builder("Release Unpaid Reservation").width(Math.min(380, Math.max(1, width - 24)))
+                    .setMinSize(1, 1).setResizable(false);
+            dialog.addMarkdown("", "Only Unpaid Held Capacity Is Released. This Does Not Refund Or Cancel A Payment. The Purchase May Still Need Support Review.");
+            dialog.addTitleAction("Release Reservation", () -> {
+                confirmation[0].hide();
+                if (current() && recoveryAvailable() && !busy) perform(controller.releasePurchase(purchase), true);
+            }, PopupWidget.TitleActionRole.DESTRUCTIVE);
+            confirmation[0] = show(dialog.build());
+        }
+
+        private void perform(Async<ResourcePoolModels.PurchaseStatus> operation, boolean released) {
+            busy = true;
+            update(controller.snapshot());
+            operation.whenComplete((updated, failure) -> host().application().execute(() -> {
+                if (!current()) return;
+                busy = false;
+                update(controller.snapshot());
+                if (failure != null) new Notification("Purchase Needs Attention", ResourcePoolController.message(failure), Notification.Type.ERROR);
+                else new Notification("Purchase Updated", released ? "Unpaid Reservation Released. Check Review Status"
+                        : "Checkout Recovery Checked. Review Your Purchase Status", Notification.Type.INFO);
+            }));
+        }
+
+        private void dispose() {
+            disposed = true;
+            popup.hide();
+            remove(popup);
+        }
     }
 
     private void showCheckoutLink(String url, ResourcePoolModels.Offer offer, String state, ResourcePoolModels.Quote quote) {
         PopupWidget[] popup = new PopupWidget[1];
-        PopupWidget.Builder builder = new PopupWidget.Builder("Reactor • Secure Checkout").width(480).padding(10).rowGap(8)
+        PopupWidget.Builder builder = new PopupWidget.Builder("Secure Checkout").size(Math.min(480, Math.max(1, width - 24)), Math.min(300, Math.max(1, height - 40)))
+                .setMinSize(1, 1).padding(8).rowGap(6)
                 .onClose(() -> popup[0].hide());
         String value = quote == null ? "Continue Your Purchase" : money(quote.price().currency(), quote.dueCents());
         builder.addRow(new PopupWidget.PopupRow.Builder("", ResourcePurchaseFlow.information(
                 "Whop Checkout • " + value, state, "Reactor.png")).build());
         if (quote != null) builder.addRow(new PopupWidget.PopupRow.Builder("", ResourcePurchaseFlow.information(
                 "Resources", ResourcePurchaseFlow.specs(quote.price().resources()), "pool.png")).build());
-        builder.addRow(new PopupWidget.PopupRow.Builder("", new AnimatedButton.Builder().size(300, 18)
-                .label("Open Secure Checkout").onClick(() -> {
-                    popup[0].hide();
-                    host().openExternal(url);
-                }).build()).build());
+        String checkoutAccount = accountId();
+        ExternalLinkActions.add(builder, url, () -> !closed && checkoutAccount.equals(accountId())
+                        && checkoutAccount.equals(controller.snapshot().accountId()), host()::openExternal, "Open Secure Checkout");
         popup[0] = show(builder.build());
     }
 
@@ -1386,7 +1606,7 @@ public final class ResourcePoolScreen extends ReScreen {
         builder.addRow(new PopupWidget.PopupRow.Builder("Server CPU", resources.control(3))
                 .description("CPU Available While The Server Runs").build());
         builder.addRow(new PopupWidget.PopupRow.Builder("Disk", resources.control(4))
-                .description("Storage For Server Files").build());
+                .description("Server Files And Backups Share This Limit").build());
         popup[0] = show(builder.build());
     }
 
@@ -1411,15 +1631,26 @@ public final class ResourcePoolScreen extends ReScreen {
             return;
         }
         String accountId = controller.snapshot().accountId();
-        PopupWidget[] popup = new PopupWidget[1];
         TextInputWidget confirmation = new TextInputWidget.Builder().placeholder(name).size(300, 20).build();
-        PopupWidget.Builder builder = new PopupWidget.Builder("Delete " + name).width(400)
-                .addTitleAction("Delete Permanently", () -> {
-                    if (!name.equals(confirmation.getText()) || !accountId.equals(controller.snapshot().accountId())) {
+        IconButton entry = new IconButton.Builder().label(name)
+                .identifier(serverIcons.getOrDefault(serverId, Identifier.icon("server.png")))
+                .iconSize(24).size(0, 30).build();
+        entry.setActive(false);
+        DeletionPopup.show(this, List.of(entry,
+                DeletionPopup.entry("All Server Files And Worlds Will Be Deleted", "explorer.png"),
+                DeletionPopup.entry("Enter The Server Name To Confirm", "edit.png"), confirmation),
+                DeletionPopup.Action.permanent(popup -> {
+                    if (closed || !accountId.equals(controller.snapshot().accountId()) || !accountId.equals(accountId())) return;
+                    if (!name.equals(confirmation.getText())) {
                         new Notification("Name Does Not Match", "Enter The Server Name Exactly To Delete It", Notification.Type.WARN);
                         return;
                     }
-                    popup[0].hide();
+                    if (!pendingChanges.isEmpty() || editors.values().stream().anyMatch(PoolAllocationEditor::hasChanges)
+                            || deletingServers.contains(serverId)) {
+                        new Notification("Apply Resource Changes First", "Finish Or Discard Pending Changes Before Deleting A Server", Notification.Type.WARN);
+                        return;
+                    }
+                    popup.hide();
                     deletingServers.add(serverId);
                     Notification notice = operationNotice("Deleting Server", name);
                     remotelyClient.getApiClient().deleteServer(serverId, name).whenComplete((ignored, failure) ->
@@ -1437,13 +1668,7 @@ public final class ResourcePoolScreen extends ReScreen {
                                 controller.refresh();
                                 loadServerNames(accountId);
                             }));
-                }, "Delete Server And Files", PopupWidget.TitleActionRole.DESTRUCTIVE)
-                .onClose(() -> popup[0].hide());
-        builder.addRow(detail("Server", name));
-        builder.addRow(detail("Files", "All Server Files And Worlds Will Be Deleted"));
-        builder.addRow(new PopupWidget.PopupRow.Builder("Enter Server Name", confirmation)
-                .description("Type The Exact Server Name To Confirm Permanent Deletion").build());
-        popup[0] = show(builder.build());
+                }));
     }
 
     private void finishActivation(Notification notice, ResourcePoolModels.Draft draft, Throwable failure) {
@@ -1502,12 +1727,14 @@ public final class ResourcePoolScreen extends ReScreen {
     }
 
     private AnimatedButton summary(String label, String hint, String accent) {
-        Accent color = ThemeManager.getAccent(accent);
-        return new AnimatedButton.Builder().size(rowWidth(), 22).label(label).hint(hint).accentType(color).build();
+        AnimatedButton button = summaries.computeIfAbsent(label, ignored -> new AnimatedButton.Builder().size(rowWidth(), 22)
+                .label(label).accentType(ThemeManager.getAccent(accent)).build());
+        button.setHint(hint);
+        return button;
     }
 
     private int rowWidth() {
-        return Math.max(220, width - 24);
+        return Math.max(1, width - 24);
     }
 
     private static boolean zero(ResourcePoolModels.Resources resources) {
@@ -1586,9 +1813,9 @@ public final class ResourcePoolScreen extends ReScreen {
         private final ResourcePoolModels.Draft draft;
         private final BigInteger installerRam;
         private final BigInteger installerCpu;
-        private final BigInteger[] capacity = new BigInteger[4];
-        private final BigInteger[] selected = new BigInteger[6];
-        private final DoubleSliderWidget[] sliders = new DoubleSliderWidget[6];
+        private final BigInteger[] capacity = new BigInteger[3];
+        private final BigInteger[] selected = new BigInteger[5];
+        private final DoubleSliderWidget[] sliders = new DoubleSliderWidget[5];
 
         private DraftResources(ResourcePoolController.PoolView view, ResourcePoolModels.Draft draft,
                                ResourcePoolModels.DraftOptions options) {
@@ -1601,13 +1828,11 @@ public final class ResourcePoolScreen extends ReScreen {
             capacity[0] = number(free.ramMiB()).add(number(held == null ? null : held.ramMiB()));
             capacity[1] = number(free.cpuQuotaPercent()).add(number(held == null ? null : held.cpuQuotaPercent()));
             capacity[2] = number(free.diskMiB()).add(number(storage == null ? null : storage.diskMiB()));
-            capacity[3] = number(free.backupMiB()).add(number(storage == null ? null : storage.backupMiB()));
             selected[0] = initial(draft.installer() == null ? null : draft.installer().ramMiB(), capacity[0], 2048).max(installerRam).min(capacity[0]);
             selected[1] = initial(draft.installer() == null ? null : draft.installer().cpuQuotaPercent(), capacity[1], 200).max(installerCpu).min(capacity[1]);
             selected[2] = initial(draft.runtime() == null ? null : draft.runtime().ramMiB(), capacity[0], 2048);
             selected[3] = initial(draft.runtime() == null ? null : draft.runtime().cpuQuotaPercent(), capacity[1], 200);
             selected[4] = initial(storage == null ? null : storage.diskMiB(), capacity[2], 10240);
-            selected[5] = number(storage == null ? null : storage.backupMiB()).min(capacity[3]);
         }
 
         private boolean canActivate() {
@@ -1628,7 +1853,7 @@ public final class ResourcePoolScreen extends ReScreen {
                 case 0, 2 -> "RAM";
                 case 1, 3 -> "CPU";
                 case 4 -> "Disk";
-                default -> "Backup Storage";
+                default -> throw new IllegalArgumentException("Unknown Server Resource");
             };
             DoubleSliderWidget slider = new DoubleSliderWidget.Builder().size(230, 20)
                     .value(fraction(index)).label(label(index))
@@ -1676,7 +1901,7 @@ public final class ResourcePoolScreen extends ReScreen {
 
         private static String format(BigInteger value, int index) {
             if (index == 1 || index == 3) return value + "%";
-            if ((index == 4 || index == 5) && value.mod(BigInteger.valueOf(1024)).signum() == 0) {
+            if (index == 4 && value.mod(BigInteger.valueOf(1024)).signum() == 0) {
                 return value.divide(BigInteger.valueOf(1024)) + " GiB";
             }
             return value + " MiB";
@@ -1690,7 +1915,6 @@ public final class ResourcePoolScreen extends ReScreen {
             return switch (index) {
                 case 0 -> installerRam;
                 case 1 -> installerCpu;
-                case 5 -> BigInteger.ZERO;
                 default -> BigInteger.ONE;
             };
         }
@@ -1707,7 +1931,7 @@ public final class ResourcePoolScreen extends ReScreen {
         private ServerScreenHost.PoolResources values() {
             return new ServerScreenHost.PoolResources(draft.metadata().gameId(), draft.metadata().profileId(),
                     selected[0].toString(), selected[1].toString(), selected[2].toString(), selected[3].toString(),
-                    selected[4].toString(), selected[5].toString());
+                    selected[4].toString(), "0");
         }
     }
 }

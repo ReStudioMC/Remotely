@@ -1,9 +1,19 @@
 package redxax.oxy.remotely.ui.server;
 
+import restudio.rebase.platform.ExternalOpenResult;
+
+import redxax.oxy.remotely.servers.ReProxyTarget;
+import restudio.rebase.reproxy.ReProxyModels.AddressSpec;
+import restudio.rebase.reproxy.ReProxyModels.Connection;
+import restudio.rebase.reproxy.ReProxyModels.Suffix;
+import restudio.rebase.ui.screens.resources.ResourceContainerItem;
+import restudio.rebase.ui.screens.resources.ResourceForwarding;
+
 import redxax.oxy.remotely.host.ApplicationHost;
 import redxax.oxy.remotely.network.NetworkAdoptionReport;
 import redxax.oxy.remotely.network.NetworkCreationMember;
 import redxax.oxy.remotely.network.HostedNetworkPendingStore;
+import redxax.oxy.remotely.network.protocol.NetworkOperationStatus;
 import redxax.oxy.remotely.RemotelyClient;
 import redxax.oxy.remotely.RemotelyServerApi;
 import redxax.oxy.remotely.config.RemotelyRecentItem;
@@ -112,6 +122,21 @@ public interface ServerScreenHost {
 
     default String reProxyAddress(Object target) {
         return "";
+    }
+
+    default ResourceForwarding serverResourceForwarding(Object target) {
+        return ResourceForwarding.none();
+    }
+
+    default Async<List<ResourceContainerItem>> serverResources(Object target) {
+        return Async.completed(List.of());
+    }
+
+    default Async<Void> reconcileServerResources(Object target) {
+        return serverResourceForwarding(target).reconcile();
+    }
+
+    default void openServerReProxySettings(Screen current, Object target) {
     }
 
     default boolean localPortOpen(Object target) {
@@ -312,7 +337,23 @@ public interface ServerScreenHost {
                                boolean restudioBackend, boolean restudioCreation, String serverIdentifier,
                                String preselectedPlanName, boolean resourcePoolCreation,
                                ResourcePoolModels.DraftOptions poolOptions,
-                               ResourcePoolController.PoolView poolView) {
+                               ResourcePoolController.PoolView poolView, int poolShares, PoolCreationPreview poolPreview) {
+        public ConfigurationState(Object original, Object draft, HostView remoteHost, boolean editMode,
+                                  boolean restudioBackend, boolean restudioCreation, String serverIdentifier,
+                                  String preselectedPlanName, boolean resourcePoolCreation,
+                                  ResourcePoolModels.DraftOptions poolOptions, ResourcePoolController.PoolView poolView, int poolShares) {
+            this(original, draft, remoteHost, editMode, restudioBackend, restudioCreation, serverIdentifier,
+                    preselectedPlanName, resourcePoolCreation, poolOptions, poolView, poolShares, null);
+        }
+
+        public ConfigurationState(Object original, Object draft, HostView remoteHost, boolean editMode,
+                                  boolean restudioBackend, boolean restudioCreation, String serverIdentifier,
+                                  String preselectedPlanName, boolean resourcePoolCreation,
+                                  ResourcePoolModels.DraftOptions poolOptions, ResourcePoolController.PoolView poolView) {
+            this(original, draft, remoteHost, editMode, restudioBackend, restudioCreation, serverIdentifier,
+                    preselectedPlanName, resourcePoolCreation, poolOptions, poolView, 1);
+        }
+
         public ConfigurationState(Object original, Object draft, HostView remoteHost, boolean editMode,
                                   boolean restudioBackend, boolean restudioCreation, String serverIdentifier,
                                   String preselectedPlanName, boolean resourcePoolCreation,
@@ -339,6 +380,7 @@ public interface ServerScreenHost {
             serverIdentifier = serverIdentifier == null ? "" : serverIdentifier;
             preselectedPlanName = preselectedPlanName == null ? "" : preselectedPlanName;
             poolOptions = poolOptions == null ? new ResourcePoolModels.DraftOptions(List.of()) : poolOptions;
+            poolShares = Math.max(1, poolShares);
         }
     }
 
@@ -359,7 +401,15 @@ public interface ServerScreenHost {
     record ConfigurationUi(Map<String, Supplier<List<Setting>>> settings,
                            Runnable cleanup, String title, Supplier<String> planName,
                            Supplier<String> subdomain, Supplier<ServerModels.CustomPlanRequest> customPlan,
-                           Supplier<String> localLocation, Supplier<PoolResources> poolResources, Runnable startupLoaded) {
+                           Supplier<String> localLocation, Supplier<PoolResources> poolResources, Runnable startupLoaded,
+                           Supplier<AddressSpec> reProxyAddress) {
+        public ConfigurationUi(Map<String, Supplier<List<Setting>>> settings,
+                               Runnable cleanup, String title, Supplier<String> planName,
+                               Supplier<String> subdomain, Supplier<ServerModels.CustomPlanRequest> customPlan,
+                               Supplier<String> localLocation, Supplier<PoolResources> poolResources, Runnable startupLoaded) {
+            this(settings, cleanup, title, planName, subdomain, customPlan, localLocation, poolResources, startupLoaded, null);
+        }
+
         public ConfigurationUi(Map<String, Supplier<List<Setting>>> settings,
                                Runnable cleanup, String title, Supplier<String> planName,
                                Supplier<String> subdomain, Supplier<ServerModels.CustomPlanRequest> customPlan,
@@ -386,6 +436,7 @@ public interface ServerScreenHost {
             poolResources = poolResources == null
                     ? () -> new PoolResources("", "", "", "", "", "", "", "") : poolResources;
             startupLoaded = startupLoaded == null ? () -> {} : startupLoaded;
+            reProxyAddress = reProxyAddress == null ? () -> null : reProxyAddress;
         }
     }
 
@@ -468,10 +519,8 @@ public interface ServerScreenHost {
     default void configureRemoteTarget(ServerConfigurationTarget target, HostView host, ServerConfigurationTarget source) {
     }
 
-    default void openExternal(String url) {
-        if (url != null && !url.isBlank()) {
-            application().notify("Open Link", url, ReSyncNotificationLevel.INFO);
-        }
+    default Async<ExternalOpenResult> openExternal(String url) {
+        return ExternalOpenResult.open(() -> ScreenManager.getInstance().hostActions().openBrowserAsync(url));
     }
 
     default ConfigurationState createConfigurationState(Object original, Object remoteHost, Object preset,
@@ -611,8 +660,55 @@ public interface ServerScreenHost {
         return false;
     }
 
+    default ReProxyTarget reProxyTarget(Object target) {
+        return null;
+    }
+
+    enum NetworkRole { NONE, MEMBER, PROXY }
+
+    default NetworkRole networkRole(Object target) {
+        return NetworkRole.NONE;
+    }
+
+    default ServerModels.ClientServerView reProxyNetworkServer(String proxyId) {
+        return null;
+    }
+
+    default Async<ReProxyTarget> loadReProxyTarget(Object target) {
+        return Async.completed(reProxyTarget(target));
+    }
+
+    default Async<Void> saveReProxyConnection(Object target, Connection connection) {
+        return Async.completed(null);
+    }
+
     default boolean supportsReProxy(Object target) {
-        return isLocal(target);
+        return reProxyTarget(target) != null;
+    }
+
+    default String authenticationSession() {
+        return "";
+    }
+
+    default ActionAvailability reProxyCreationAvailability(HostView host) {
+        return ActionAvailability.disabled("Local Server Addresses Are Unavailable On This Host");
+    }
+
+    default Async<List<Suffix>> reProxyCreationSuffixes() {
+        return Async.failed(new UnsupportedOperationException(reProxyCreationAvailability(null).reason()));
+    }
+
+    default Async<Void> prepareReProxyCreation(Object target, AddressSpec address, String requestId) {
+        return address == null ? Async.completed(null)
+                : Async.failed(new UnsupportedOperationException(reProxyCreationAvailability(null).reason()));
+    }
+
+    default boolean pendingReProxyCreation(Object target) {
+        return false;
+    }
+
+    default Async<Void> resumeReProxyCreation(Object target) {
+        return Async.completed(null);
     }
 
     default void refreshReProxy(Object target, Runnable onComplete) {
@@ -861,12 +957,48 @@ public interface ServerScreenHost {
         return createNetwork(name, proxyId, entryPort, backends, installReSync);
     }
 
+    default Async<Void> createNetwork(String name, String proxyId, int entryPort, List<NetworkCreationMember> backends,
+                                     boolean installReSync, boolean firewallVerified, AddressSpec reProxyAddress, String requestId) {
+        if (reProxyAddress != null) {
+            return Async.failed(new UnsupportedOperationException(reProxyCreationAvailability(null).reason()));
+        }
+        return createNetwork(name, proxyId, entryPort, backends, installReSync, firewallVerified);
+    }
+
+    default Async<Void> createNetwork(String name, String proxyId, int entryPort, List<NetworkCreationMember> backends,
+                                     boolean installReSync, boolean firewallVerified, AddressSpec reProxyAddress, String requestId,
+                                     BooleanSupplier admitted) {
+        if (!admitted.getAsBoolean()) return Async.failed(new Async.Cancellation());
+        return createNetwork(name, proxyId, entryPort, backends, installReSync, firewallVerified, reProxyAddress, requestId);
+    }
+
+    default BooleanSupplier networkCreationAdmission(NetworkCreationPlan plan) {
+        return () -> true;
+    }
+
+    final class NetworkCreationFailure extends IllegalStateException {
+        private final String networkId;
+
+        public NetworkCreationFailure(String networkId, Throwable cause) {
+            super("Network Created. Its Address Needs Recovery. Open The Network To Continue", cause);
+            this.networkId = Objects.requireNonNull(networkId, "Network Identity Is Required");
+        }
+
+        public String networkId() {
+            return networkId;
+        }
+    }
+
     default ResourcePoolClient resourcePools() {
         return new ResourcePoolClient((method, path, body) -> Async.failed(new UnsupportedOperationException("Resource Pools Are Unavailable")));
     }
 
     default Async<String> createHostedNetwork(NetworkCreationPlan plan) {
         return Async.failed(new UnsupportedOperationException("Hosted Networks Are Unavailable"));
+    }
+
+    default Async<String> createHostedNetwork(NetworkCreationPlan plan, Consumer<NetworkOperationStatus> progress) {
+        return createHostedNetwork(plan);
     }
 
     default String hostedNetworkViewId(String networkId) {
@@ -877,17 +1009,42 @@ public interface ServerScreenHost {
         return null;
     }
 
+    default HostedNetworkPendingStore hostedNetworkPendingStore() {
+        return null;
+    }
+
+    default String hostedNetworkAccount() {
+        return "";
+    }
+
     default Async<String> resumeHostedNetwork() {
         return Async.failed(new UnsupportedOperationException("Hosted Network Resume Is Unavailable"));
+    }
+
+    default Async<String> resumeHostedNetwork(Consumer<NetworkOperationStatus> progress) {
+        return resumeHostedNetwork();
+    }
+
+    default void discardHostedNetwork(String requestId, String networkId) {
+        throw new UnsupportedOperationException("Saved Network Discard Is Unavailable");
     }
 
     default void acknowledgeHostedNetwork(String requestId, String networkId) {
         throw new UnsupportedOperationException("Hosted Network Recovery Is Unavailable");
     }
 
+    default Async<String> createNetwork(NetworkCreationPlan plan, Consumer<NetworkOperationStatus> progress) {
+        Objects.requireNonNull(plan, "Network Creation Plan Is Required");
+        return plan.hosted() ? createHostedNetwork(plan, progress) : createNetwork(plan);
+    }
+
     default Async<String> createNetwork(NetworkCreationPlan plan) {
         Objects.requireNonNull(plan, "Network creation plan is required");
         if (plan.hosted()) return createHostedNetwork(plan);
+        if (plan.reProxyAddress() != null && !reProxyCreationAvailability(
+                plan.servers().stream().filter(NetworkCreationPlan.Server::proxy).findFirst().map(NetworkCreationPlan.Server::host).orElse(null)).available()) {
+            return Async.failed(new UnsupportedOperationException("Choose A Local Proxy To Create A ReProxy Address"));
+        }
         List<NetworkCreationPlan.Server> proxies = plan.servers().stream().filter(NetworkCreationPlan.Server::proxy).toList();
         List<NetworkCreationPlan.Server> backends = plan.servers().stream().filter(server -> !server.proxy()).toList();
         if (plan.name().isBlank()) return Async.failed(new IllegalArgumentException("Network Name Is Required"));
@@ -911,33 +1068,42 @@ public interface ServerScreenHost {
         }
         Map<NetworkCreationPlan.Server, Object> resolved = new LinkedHashMap<>();
         Async<Void> creation;
+        BooleanSupplier admitted;
         try {
+            admitted = Objects.requireNonNull(networkCreationAdmission(plan), "Network Creation Ownership Is Required");
+            if (!admitted.getAsBoolean()) return Async.failed(new Async.Cancellation());
             creation = Objects.requireNonNull(validateNetworkCreationPlan(plan), "Network validation result is required");
         } catch (RuntimeException error) {
-            creation = Async.failed(error);
+            return Async.failed(error);
         }
         for (NetworkCreationPlan.Server server : plan.servers()) {
             if (server.existing()) continue;
-            creation = creation.thenCompose(ignored -> createNetworkServer(server).thenCompose(value -> {
-                if (value == null) return Async.failed(new IllegalStateException("Created Server Is Unavailable"));
-                resolved.put(server, value);
-                try {
-                    return Objects.requireNonNull(saveInstanceConfiguration(value, server.settings()), "Server configuration save result is required");
-                } catch (RuntimeException error) {
-                    return Async.failed(error);
-                }
-            }));
+            creation = creation.thenCompose(ignored -> {
+                if (!admitted.getAsBoolean()) return Async.failed(new Async.Cancellation());
+                return createNetworkServer(server).thenCompose(value -> {
+                    if (value == null) return Async.failed(new IllegalStateException("Created Server Is Unavailable"));
+                    resolved.put(server, value);
+                    try {
+                        if (!admitted.getAsBoolean()) return Async.failed(new Async.Cancellation());
+                        return Objects.requireNonNull(saveInstanceConfiguration(value, server.settings()), "Server configuration save result is required");
+                    } catch (RuntimeException error) {
+                        return Async.failed(error);
+                    }
+                });
+            });
         }
         Async<String> transaction = creation.thenCompose(ignored -> {
+            if (!admitted.getAsBoolean()) return Async.failed(new Async.Cancellation());
             String proxyId = networkServerId(proxies.getFirst(), resolved);
             List<NetworkCreationMember> members = backends.stream().map(server -> new NetworkCreationMember(
                 networkServerId(server, resolved), server.route(), server.role(), server.address(), server.preferredPort(), server.capacity(),
                 server.reSync(), server.management())).toList();
-            return createNetwork(plan.name(), proxyId, plan.entryPort(), members, proxies.getFirst().reSync(), plan.firewallVerified())
+            return createNetwork(plan.name(), proxyId, plan.entryPort(), members, proxies.getFirst().reSync(), plan.firewallVerified(),
+                    plan.reProxyAddress(), plan.requestId().toString(), admitted)
                 .thenApply(completed -> proxyId);
         });
-        return transaction.exceptionallyCompose(failure -> rollbackNetworkServers(resolved, failure)
-            .thenCompose(ignored -> Async.failed(failure)));
+        return transaction.exceptionallyCompose(failure -> failure instanceof NetworkCreationFailure ? Async.failed(failure)
+                : rollbackNetworkServers(resolved, failure).thenCompose(ignored -> Async.failed(failure)));
     }
 
     default Async<Void> validateNetworkCreationPlan(NetworkCreationPlan plan) {

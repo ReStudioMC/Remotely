@@ -855,6 +855,7 @@ public interface DesktopServerUiCapabilities extends ServerUiCapabilityProvider 
         public Async<List<RemotelyServerApi.Player>> players(Instance instance) {
             PlayerManagementFeature players = instance.getBackend().getFeature(PlayerManagementFeature.class)
                     .orElseThrow(() -> new UnsupportedOperationException("Player Management Is Unavailable"));
+            if (!players.supportsOnlinePlayers()) return Async.completed(List.of());
             return JvmAsyncBridge.fromFuture(players.getOnlinePlayers().thenApply(values -> values.stream()
                     .map(player -> new RemotelyServerApi.Player(player.uuid(), player.name(), true, false, -1, ""))
                     .toList()));

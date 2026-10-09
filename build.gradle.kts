@@ -207,6 +207,8 @@ val browserCanonicalRoots = linkedSetOf(
     "redxax.oxy.remotely.host.ApplicationHost",
     "redxax.oxy.remotely.host.ApplicationHostRegistry",
     "redxax.oxy.remotely.data.flow.FlowManager",
+    "redxax.oxy.remotely.network.NetworkRuntimeMonitor",
+    "redxax.oxy.remotely.network.ReSyncNetworkFrameTransport",
     "redxax.oxy.remotely.flow.ui.FlowEditorScreen",
     "redxax.oxy.remotely.flow.ui.studio.StudioScreen",
     "redxax.oxy.remotely.flow.ui.marketplace.ReSyncMarketplaceApi",
@@ -249,7 +251,7 @@ require(missingBrowserSources.isEmpty()) {
 val browserDesktopOnlyClasses = setOf(
     "redxax.oxy.remotely.servers.QuickServerSyncManager",
     "redxax.oxy.remotely.servers.ReProxyAutoStartService",
-    "redxax.oxy.remotely.servers.ReProxyManager",
+    "redxax.oxy.remotely.servers.JvmReProxyConnectorCapability",
     "redxax.oxy.remotely.servers.ReverseProxyManager",
     "redxax.oxy.remotely.flow.ui.BoundedAssetLoadQueue",
     "redxax.oxy.remotely.flow.ui.BoundedImageDecoder"
@@ -264,6 +266,7 @@ val browser by sourceSets.creating {
 }
 
 dependencies {
+    implementation("dev.restudio:reproxy-connector:2.0.0")
     add(browser.implementationConfigurationName, "com.google.code.gson:gson:2.10.1")
     add(browser.implementationConfigurationName, files(
         "../ReScreen/build/libs/ReScreen-1.0-browser.jar",

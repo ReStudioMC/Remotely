@@ -9,8 +9,8 @@ import restudio.rescreen.platform.TaskScheduler;
 import restudio.rescreen.util.JsonTreeParser;
 
 import java.time.Duration;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -96,7 +96,7 @@ class HostedNetworkClientTest {
 
         Async<NetworkOperationStatus> result = client.execute(command, scheduler, () -> true);
         assertFalse(result.isDone());
-        assertEquals(1, scheduler.pending());
+        assertEquals(2, scheduler.pending());
         scheduler.runNext();
         assertFalse(result.isDone());
         scheduler.runNext();
@@ -104,6 +104,29 @@ class HostedNetworkClientTest {
         assertEquals("SUCCEEDED", result.join().state().name());
         assertEquals(List.of("POST /hosted-networks/commands",
                 "GET /hosted-networks/network-1/operations/" + command.requestId(),
+                "GET /hosted-networks/network-1/operations/" + command.requestId()), requests);
+        assertEquals(0, scheduler.pending());
+
+        requests.clear();
+        List<String> progress = new ArrayList<>();
+        HostedNetworkClient lifecycle = new HostedNetworkClient((method, path, body) -> {
+            requests.add(method + " " + path);
+            return Async.completed(status(command.requestId(), command.networkId(), "LIFECYCLE", "1",
+                    requests.size() == 1 ? "RUNNING" : "SUCCEEDED", ""));
+        });
+        Async<NetworkOperationStatus> observed = lifecycle.observe(command.networkId(),
+                JsonTreeParser.parse(status(command.requestId(), command.networkId(), "LIFECYCLE", "1")).getAsJsonObject(),
+                scheduler, () -> true, value -> progress.add(value.state().name()));
+        assertFalse(observed.isDone());
+        assertTrue(requests.isEmpty());
+        scheduler.runNext();
+        assertFalse(observed.isDone());
+        scheduler.runNext();
+
+        assertEquals(NetworkCommand.Type.LIFECYCLE, observed.join().command());
+        assertEquals("SUCCEEDED", observed.join().state().name());
+        assertEquals(List.of("ADMITTED", "RUNNING", "SUCCEEDED"), progress);
+        assertEquals(List.of("GET /hosted-networks/network-1/operations/" + command.requestId(),
                 "GET /hosted-networks/network-1/operations/" + command.requestId()), requests);
         assertEquals(0, scheduler.pending());
     }
@@ -152,7 +175,7 @@ class HostedNetworkClientTest {
     }
 
     @Test
-    void ambiguousSubmissionFailureDoesNotRetryOrPoll() {
+    void requestFailuresDoNotLeaveTheObservationPending() {
         NetworkCommand.Create command = command();
         QueueScheduler scheduler = new QueueScheduler();
         List<String> requests = new ArrayList<>();
@@ -166,6 +189,16 @@ class HostedNetworkClientTest {
         assertEquals("Connection Lost After Submit", result.failure().getMessage());
         assertEquals(List.of("POST /hosted-networks/commands"), requests);
         assertEquals(0, scheduler.pending());
+
+        HostedNetworkClient polling = new HostedNetworkClient((method, path, body) -> {
+            if ("POST".equals(method)) return Async.completed(status(command.requestId(), command.networkId(), "CREATE", "1"));
+            throw new IllegalStateException("Status Check Failed");
+        });
+        Async<NetworkOperationStatus> observed = polling.execute(command, scheduler, () -> true);
+        scheduler.runNext();
+
+        assertTrue(observed.isDone());
+        assertEquals("Status Check Failed", observed.failure().getMessage());
     }
 
     private static NetworkCommand.Create command() {
@@ -187,7 +220,8 @@ class HostedNetworkClientTest {
     }
 
     private static final class QueueScheduler implements TaskScheduler {
-        private final ArrayDeque<Runnable> tasks = new ArrayDeque<>();
+        private final List<Queued> tasks = new ArrayList<>();
+        private long now;
 
         @Override
         public void execute(Runnable task) {
@@ -196,14 +230,15 @@ class HostedNetworkClientTest {
 
         @Override
         public ScheduledTask schedule(Runnable task, Duration delay) {
-            tasks.add(task);
+            Queued queued = new Queued(task, now + delay.toMillis());
+            tasks.add(queued);
             return new ScheduledTask() {
                 private boolean cancelled;
 
                 @Override
                 public boolean cancel() {
                     cancelled = true;
-                    return tasks.remove(task);
+                    return tasks.remove(queued);
                 }
 
                 @Override
@@ -223,7 +258,13 @@ class HostedNetworkClientTest {
         }
 
         void runNext() {
-            tasks.removeFirst().run();
+            Queued queued = tasks.stream().min(Comparator.comparingLong(Queued::at)).orElseThrow();
+            tasks.remove(queued);
+            now = queued.at();
+            queued.task().run();
+        }
+
+        private record Queued(Runnable task, long at) {
         }
     }
 }

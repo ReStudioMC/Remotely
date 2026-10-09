@@ -5,6 +5,7 @@ import redxax.oxy.remotely.network.NetworkSharedDataPolicy;
 import redxax.oxy.remotely.network.RoutingGroup;
 import redxax.oxy.remotely.network.SyncRealm;
 import redxax.oxy.remotely.ui.server.NetworkOverviewProvider.SaveRequest;
+import restudio.rescreen.util.Identifier;
 
 import com.google.gson.JsonElement;
 import com.google.gson.JsonArray;
@@ -114,7 +115,12 @@ public final class HostedNetworkJson {
     static List<NetworkOverviewProvider.ServerView> servers(JsonObject value) {
         return objects(value, "servers").stream().map(item -> new NetworkOverviewProvider.ServerView(string(item, "id"), string(item, "name"),
                 bool(item, "proxy", false), bool(item, "managed", true), string(item, "hostScope"), string(item, "address"),
-                integer(item, "port", 0), string(item, "state"), string(item, "icon"))).toList();
+                integer(item, "port", 0), string(item, "state"), icon(string(item, "icon")),
+                string(item, "serverId", string(item, "id")))).toList();
+    }
+
+    private static Identifier icon(String value) {
+        return value == null || value.isBlank() ? null : value.contains(":") ? Identifier.of(value) : Identifier.icon(value);
     }
 
     static String string(JsonObject value, String key) { return string(value, key, ""); }

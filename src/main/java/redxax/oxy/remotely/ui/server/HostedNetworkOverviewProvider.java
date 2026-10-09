@@ -1,6 +1,13 @@
 package redxax.oxy.remotely.ui.server;
 
+import redxax.oxy.remotely.RemotelyClient;
+import redxax.oxy.remotely.RemotelyServerApi;
 import redxax.oxy.remotely.network.ForwardingMode;
+import redxax.oxy.remotely.network.HostedNetworkClient;
+import redxax.oxy.remotely.network.HostedNetworkPendingStore;
+import redxax.oxy.remotely.network.protocol.NetworkCommand;
+import redxax.oxy.remotely.network.protocol.NetworkMemberSource;
+import restudio.rebase.restudio.api.models.ServerModels;
 import redxax.oxy.remotely.network.NetworkConfigDocumentKey;
 import redxax.oxy.remotely.network.NetworkDefinition;
 import redxax.oxy.remotely.network.NetworkDesiredState;
@@ -46,10 +53,12 @@ import redxax.oxy.remotely.network.RoutingStrategy;
 import redxax.oxy.remotely.network.SyncDataFamily;
 import redxax.oxy.remotely.network.SyncLocationPolicy;
 import redxax.oxy.remotely.network.SyncRealm;
+import redxax.oxy.remotely.network.protocol.NetworkOperationStatus;
 import redxax.oxy.remotely.util.TaskSchedulers;
 import restudio.rescreen.platform.Async;
 import restudio.rescreen.platform.TaskScheduler;
 import restudio.rescreen.ui.core.Screen;
+import restudio.rescreen.util.Identifier;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonElement;
@@ -67,6 +76,8 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 public class HostedNetworkOverviewProvider implements NetworkOverviewProvider {
@@ -134,15 +145,108 @@ public class HostedNetworkOverviewProvider implements NetworkOverviewProvider {
             Map.entry(NetworkPreflightStatus.RUNNING, enumValues(NetworkPreflightStatus.RUNNING, NetworkPreflightStatus.SUCCEEDED,
                     NetworkPreflightStatus.FAILED)));
     private final Transport adapter;
+    private final RemotelyClient client;
+    private ServerScreenHost authorityHost;
     private final List<Consumer<OverviewState>> listeners = new ArrayList<>();
     private final List<Consumer<NetworkRuntimeSnapshot>> runtimeListeners = new ArrayList<>();
     private volatile String loadedNetworkId = "";
     private volatile OverviewState loadedState;
+    private BooleanSupplier loadedAdmission = () -> false;
+    private long loadGeneration;
     private TaskScheduler.ScheduledTask pollingTask;
     private boolean refreshInFlight;
 
     public HostedNetworkOverviewProvider(Transport adapter) {
+        this(adapter, null);
+    }
+
+    public HostedNetworkOverviewProvider(Transport adapter, RemotelyClient client) {
         this.adapter = Objects.requireNonNull(adapter, "adapter");
+        this.client = client;
+    }
+
+    @Override
+    public NetworkCapability resourcesCapability() {
+        return NetworkOverviewProvider.resourcesCapability(client);
+    }
+
+    @Override
+    public NetworkCapability connectionKeyCapability() {
+        return client != null && client.getApiClient() != null && adapter.authenticated()
+                ? NetworkCapability.supported("connectionKey", "hosted-network")
+                : NetworkCapability.unavailable("connectionKey", "Sign In To Read The Proxy Connection Key", "hosted-network");
+    }
+
+    @Override
+    public BooleanSupplier connectionKeyAdmission() {
+        if (!connectionKeyCapability().supported()) return () -> false;
+        RemotelyServerApi api = client.getApiClient();
+        ServerScreenHost host = authorityHost();
+        ServerScreenHost.AccountIdentity account = host == null ? null : host.accountIdentity();
+        return () -> {
+            if (client.getApiClient() != api || !adapter.authenticated()) return false;
+            if (host == null) return true;
+            ServerScreenHost.AccountIdentity currentAccount = host.accountIdentity();
+            return account.authenticated() && currentAccount.authenticated()
+                    && Objects.equals(account.subjectId(), currentAccount.subjectId());
+        };
+    }
+
+    private ServerScreenHost authorityHost() {
+        if (authorityHost == null && client != null && client.getHost() != null) authorityHost = client.getHost().serverScreenHost(client);
+        return authorityHost;
+    }
+
+    @Override
+    public void addAuthStateListener(Runnable listener) {
+        ServerScreenHost host = authorityHost();
+        if (host != null) host.addAuthStateListener(listener);
+    }
+
+    @Override
+    public void removeAuthStateListener(Runnable listener) {
+        if (authorityHost != null) authorityHost.removeAuthStateListener(listener);
+    }
+
+    @Override
+    public Async<String> connectionKey(String networkId) {
+        NetworkCapability capability = connectionKeyCapability();
+        if (!capability.supported()) return NetworkOverviewProvider.unavailable(capability.reason());
+        BooleanSupplier current = connectionKeyAdmission();
+        RemotelyServerApi api = client.getApiClient();
+        if (!current.getAsBoolean()) return NetworkOverviewProvider.unavailable("Account Changed. Reopen The Network");
+        return load(networkId).thenCompose(state -> {
+            if (!current.getAsBoolean()) throw new IllegalStateException("Account Changed. Reopen The Network");
+            if (state.network() == null || !networkId.equals(state.network().networkId())
+                    || state.network().forwarding().mode() != ForwardingMode.MODERN) {
+                throw new IllegalStateException("A Modern Forwarding Network Is Required");
+            }
+            ServerView proxy = state.servers().stream()
+                    .filter(server -> server.id().equals(state.network().proxyInstanceId()) && server.proxy() && server.managed())
+                    .findFirst().orElseThrow(() -> new IllegalStateException("The Network Proxy Is Unavailable"));
+            if (proxy.serverId().isBlank()) throw new IllegalStateException("The Network Proxy Is Awaiting Provisioning");
+            return api.getFileContent(proxy.serverId(), "forwarding.secret").thenApply(value -> {
+                if (!current.getAsBoolean()) throw new IllegalStateException("Account Changed. Reopen The Network");
+                String key = value == null ? "" : value.trim();
+                if (key.isBlank()) throw new IllegalStateException("The Proxy Connection Key Is Unavailable. Finish Network Setup First");
+                return key;
+            });
+        });
+    }
+
+    @Override
+    public Async<Void> openResources(Screen current, String networkId, String nodeId, BooleanSupplier admission) {
+        OverviewState state = currentState(networkId);
+        Async<OverviewState> source = state != null && state.network() != null && networkId.equals(state.network().networkId()) ? Async.completed(state) : load(networkId);
+        return source.thenCompose(value -> NetworkOverviewProvider.openResources(client, value.network(), nodeId, admission));
+    }
+
+
+    @Override
+    public Async<Void> openResources(Screen current, String networkId, String nodeId, String serverId, String apiKey, BooleanSupplier admission) {
+        OverviewState state = currentState(networkId);
+        Async<OverviewState> source = state != null && state.network() != null && networkId.equals(state.network().networkId()) ? Async.completed(state) : load(networkId);
+        return source.thenCompose(value -> NetworkOverviewProvider.openResources(client, value.network(), nodeId, serverId, apiKey, admission));
     }
 
     public static List<ServerScreenHost.NetworkView> views(JsonElement response) {
@@ -161,14 +265,47 @@ public class HostedNetworkOverviewProvider implements NetworkOverviewProvider {
 
     @Override
     public Async<OverviewState> load(String networkId) {
+        long generation;
+        BooleanSupplier current = client == null ? adapter::authenticated : connectionKeyAdmission();
+        synchronized (this) {
+            if (!networkId.equals(loadedNetworkId)) {
+                loadGeneration++;
+                loadedNetworkId = networkId;
+                loadedState = null;
+                loadedAdmission = () -> false;
+            }
+            generation = loadGeneration;
+        }
         return adapter.request("GET", "/networks/" + segment(networkId), null)
                 .thenApply(value -> {
                     OverviewState result = state(value);
-                    loadedNetworkId = result.network() == null || result.network().networkId().isBlank()
-                            ? networkId : result.network().networkId();
-                    loadedState = result;
+                    synchronized (this) {
+                        if (generation != loadGeneration || !current.getAsBoolean()) {
+                            throw new IllegalStateException("Network Changed. Refresh Your Servers");
+                        }
+                        if (result.network() == null || !networkId.equals(result.network().networkId())) {
+                            throw new IllegalStateException("Network Response Does Not Match");
+                        }
+                        loadedState = result;
+                        loadedAdmission = current;
+                    }
                     return result;
                 });
+    }
+
+    @Override
+    public String inventoryNetworkId(String networkId) {
+        ServerScreenHost host = authorityHost();
+        return host == null ? networkId : host.hostedNetworkViewId(networkId);
+    }
+
+    @Override
+    public BooleanSupplier mutationAdmission() {
+        return NetworkOverviewProvider.mutationAdmission(client);
+    }
+
+    private synchronized OverviewState currentState(String networkId) {
+        return loadedState != null && networkId.equals(loadedNetworkId) && loadedAdmission.getAsBoolean() ? loadedState : null;
     }
 
     @Override
@@ -279,28 +416,39 @@ public class HostedNetworkOverviewProvider implements NetworkOverviewProvider {
 
     @Override
     public Async<NetworkDefinition> save(String networkId, SaveRequest request) {
-        return load(networkId).thenCompose(state -> requireCapability(state, "save")
+        return observeMutation(networkId, () -> load(networkId).thenCompose(state -> requireCapability(state, "save")
                 .thenCompose(ignored -> adapter.request("PUT", "/networks/" + segment(networkId),
-                        withRevision(HostedNetworkJson.save(request), state.network().revision()))))
-                .thenApply(value -> definition(object(value, "network")));
+                        withRevision(HostedNetworkJson.save(request), state.network().revision())))), null)
+                .thenCompose(ignored -> load(networkId)).thenApply(OverviewState::network);
     }
 
     @Override
     public Async<NetworkLifecycleJob> lifecycle(String networkId, NetworkLifecycleOperation operation) {
-        return lifecycleRequest(networkId, "/lifecycle", Map.of("operation", enumName(operation, NetworkLifecycleOperation.START)))
-                .thenApply(HostedNetworkOverviewProvider::lifecycleJob);
+        return lifecycle(networkId, operation, null);
+    }
+
+    @Override
+    public Async<NetworkLifecycleJob> lifecycle(String networkId, NetworkLifecycleOperation operation,
+                                               Consumer<NetworkOperationStatus> progress) {
+        return lifecycleRequest(networkId, "/lifecycle", Map.of("operation", enumName(operation, NetworkLifecycleOperation.START)), progress);
     }
 
     @Override
     public Async<NetworkLifecycleJob> memberLifecycle(String networkId, String memberId,
                                                        NetworkLifecycleOperation operation) {
-        return load(networkId).thenCompose(state -> requireCapability(state, "memberLifecycle")
+        return memberLifecycle(networkId, memberId, operation, null);
+    }
+
+    @Override
+    public Async<NetworkLifecycleJob> memberLifecycle(String networkId, String memberId,
+                                                      NetworkLifecycleOperation operation, Consumer<NetworkOperationStatus> progress) {
+        return observeMutation(networkId, () -> load(networkId).thenCompose(state -> requireCapability(state, "memberLifecycle")
                 .thenCompose(ignored -> {
                     String instanceId = instanceId(state, memberId);
                     if (instanceId.isBlank()) return Async.failed(new IllegalArgumentException("Network Member Is Unavailable"));
                     return adapter.request("POST", networkPath(networkId, "/members/" + segment(instanceId) + "/lifecycle"),
                             withRevision(Map.of("operation", enumName(operation, NetworkLifecycleOperation.START)), state.network().revision()));
-                })).thenApply(value -> lifecycleJob(object(value, "job")));
+                })), progress).thenApply(HostedNetworkOverviewProvider::completedLifecycle);
     }
 
     @Override
@@ -332,18 +480,29 @@ public class HostedNetworkOverviewProvider implements NetworkOverviewProvider {
 
     @Override
     public Async<NetworkJob> detach(String networkId, String memberId) {
-        return load(networkId).thenCompose(state -> requireCapability(state, "membership")
+        return observeMutation(networkId, () -> load(networkId).thenCompose(state -> requireCapability(state, "membership")
                 .thenCompose(ignored -> {
                     String instanceId = instanceId(state, memberId);
                     if (instanceId.isBlank()) return Async.failed(new IllegalArgumentException("Network Member Is Unavailable"));
                     return adapter.request("POST", networkPath(networkId, "/members/" + segment(instanceId) + "/detach"),
                             withRevision(Map.of(), state.network().revision()));
-                })).thenApply(value -> networkJob(object(value, "job")));
+                })), null).thenApply(HostedNetworkOverviewProvider::completedJob);
     }
 
     @Override
     public Async<NetworkJob> dissolve(String networkId) {
-        return jobRequest(networkId, "/dissolve", Map.of());
+        return jobRequest(networkId, "/dissolve", Map.of()).thenApply(job -> {
+            if (job.status() != NetworkJobStatus.SUCCEEDED) throw new IllegalStateException(job.message());
+            synchronized (this) {
+                if (networkId.equals(loadedNetworkId)) {
+                    loadGeneration++;
+                    loadedNetworkId = "";
+                    loadedState = null;
+                    loadedAdmission = () -> false;
+                }
+            }
+            return job;
+        });
     }
 
     @Override
@@ -376,8 +535,12 @@ public class HostedNetworkOverviewProvider implements NetworkOverviewProvider {
 
     @Override
     public Async<NetworkLifecycleJob> resumeLifecycle(String networkId, String jobId) {
-        return lifecycleRequest(networkId, "/lifecycle-jobs/" + segment(jobId) + "/resume", Map.of())
-                .thenApply(HostedNetworkOverviewProvider::lifecycleJob);
+        return resumeLifecycle(networkId, jobId, null);
+    }
+
+    @Override
+    public Async<NetworkLifecycleJob> resumeLifecycle(String networkId, String jobId, Consumer<NetworkOperationStatus> progress) {
+        return lifecycleRequest(networkId, "/lifecycle-jobs/" + segment(jobId) + "/resume", Map.of(), progress);
     }
 
     @Override
@@ -409,11 +572,94 @@ public class HostedNetworkOverviewProvider implements NetworkOverviewProvider {
     }
 
     @Override
+    public Async<NetworkCreationContext> serverCreationContext(String networkId) {
+        return adapter.authenticated() ? Async.completed(new NetworkCreationContext(true, null))
+                : NetworkOverviewProvider.unavailable("Sign In To Add Reactor Servers");
+    }
+
+    @Override
+    public boolean reactorNetwork() {
+        return true;
+    }
+
+    @Override
     public Async<List<ServerView>> availableServers(String networkId) {
-        return load(networkId).thenApply(value -> {
-            Set<String> attached = value.network().members().stream().map(NetworkMember::instanceId).collect(Collectors.toSet());
-            return value.servers().stream().filter(server -> !server.proxy() && !attached.contains(server.id())).toList();
-        });
+        ServerScreenHost host = authorityHost();
+        if (host == null) return NetworkOverviewProvider.unavailable("Reactor Servers Are Unavailable");
+        BooleanSupplier current = connectionKeyAdmission();
+        return adapter.networks().thenCompose(networks -> host.restudioServers().thenApply(servers -> {
+            if (!current.getAsBoolean()) throw new IllegalStateException("Account Changed. Reopen The Network");
+            Set<String> attached = networks.stream().flatMap(value -> value.members().stream()).collect(Collectors.toSet());
+            return servers.stream().filter(server -> server != null && !server.isInstalling && !server.isSuspended)
+                    .filter(server -> !reactorServerId(server).isBlank() && !attached.contains(reactorServerId(server)))
+                    .filter(server -> supportedBackend(server.software == null || server.software.isBlank() ? server.loader : server.software))
+                    .map(server -> new ServerView(reactorServerId(server), server.name, false, true, "Reactor", server.ip,
+                            server.port, "", (Identifier) null, reactorServerId(server))).toList();
+        }));
+    }
+
+    private static String reactorServerId(ServerModels.ClientServerView server) {
+        return server.identifier == null || server.identifier.isBlank() ? server.uuid == null ? "" : server.uuid : server.identifier;
+    }
+
+    private static boolean supportedBackend(String software) {
+        return switch (software == null ? "" : software.trim().toUpperCase(Locale.ROOT)) {
+            case "PAPER", "FOLIA", "PURPUR", "LEAF", "PUFFERFISH", "CANVAS", "ASPAPER", "DIVINEMC" -> true;
+            default -> false;
+        };
+    }
+
+    @Override
+    public ServerScreenHost.ActionAvailability serverDraftAvailability(String networkId, ServerConfigurationTarget target, NetworkMemberSource.Draft source) {
+        return source != null && supportedBackend(source.metadata().settings().get("SOFTWARE"))
+                ? ServerScreenHost.ActionAvailability.enabled()
+                : ServerScreenHost.ActionAvailability.disabled("Choose Paper Or A Supported Paper Server For This Reactor Network");
+    }
+
+    @Override
+    public Async<Void> addServer(String networkId, AttachRequest request, Consumer<NetworkOperationStatus> progress) {
+        try {
+            ServerScreenHost host = authorityHost();
+            if (host == null) return NetworkOverviewProvider.unavailable("Reactor Servers Are Unavailable");
+            BooleanSupplier current = connectionKeyAdmission();
+            String account = host.hostedNetworkAccount();
+            HostedNetworkPendingStore store = host.hostedNetworkPendingStore();
+            HostedNetworkPendingStore.PendingAttach saved = store.attachment(account, networkId);
+            Async<HostedNetworkPendingStore.PendingAttach> prepared;
+            if (saved != null) prepared = Async.completed(saved);
+            else if (request == null) return NetworkOverviewProvider.unavailable("Saved Server Request Is Unavailable");
+            else prepared = load(networkId).thenCompose(state -> requireCapability(state, "membership").thenApply(ignored -> {
+                if (!current.getAsBoolean() || !account.equals(host.hostedNetworkAccount())) throw new IllegalStateException("Account Changed. Reopen The Network");
+                if (state.servers().stream().anyMatch(server -> server.managed() && !stoppedServer(server.state()))) {
+                    throw new IllegalStateException("Stop Network Servers Before Adding A Server");
+                }
+                NetworkMemberSource source = request.source() == null ? new NetworkMemberSource.ExistingServer(request.serverId()) : request.source();
+                String name = request.name().isBlank() ? "Backend" : request.name();
+                String route = name.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_-]+", "-").replaceAll("^-+|-+$", "");
+                if (route.isBlank()) route = "backend";
+                Set<String> routes = state.network().members().stream().map(NetworkMember::routeName).collect(Collectors.toSet());
+                String selected = route;
+                for (int index = 2; routes.contains(selected); index++) selected = route + "-" + index;
+                NetworkCommand.Member member = new NetworkCommand.Member(source, selected, NetworkMemberRole.GAMEPLAY, 0, 0, request.installReSync());
+                NetworkCommand.Attach command = new NetworkCommand.Attach(NetworkCommand.CURRENT_SCHEMA_VERSION, UUID.randomUUID().toString(),
+                        networkId, state.network().revision(), member);
+                return store.admitAttachment(account, command);
+            }));
+            RemotelyServerApi api = client.getApiClient();
+            return prepared.thenCompose(pending -> api.hostedNetworks().execute(pending.command(), pending.body(), client.getComposition().scheduler(),
+                    () -> current.getAsBoolean() && account.equals(host.hostedNetworkAccount()), progress).whenComplete((status, error) -> {
+                if (status != null) store.clearAttachment(account, pending.command().requestId(), networkId);
+                else if (error instanceof HostedNetworkClient.OperationFailure terminal) {
+                    store.markAttachmentTerminal(account, pending.command().requestId(), networkId, terminal.status().state());
+                }
+            })).thenApply(status -> null);
+        } catch (Throwable failure) {
+            return Async.failed(failure);
+        }
+    }
+
+    private static boolean stoppedServer(String state) {
+        return "OFFLINE".equalsIgnoreCase(state) || "STOPPED".equalsIgnoreCase(state);
     }
 
     @Override
@@ -426,18 +672,42 @@ public class HostedNetworkOverviewProvider implements NetworkOverviewProvider {
         adapter.openServer(current, serverId);
     }
 
-    private Async<JsonObject> lifecycleRequest(String networkId, String suffix, Object body) {
-        return load(networkId).thenCompose(state -> requireCapability(state, lifecycleCapability(suffix))
+    private Async<NetworkLifecycleJob> lifecycleRequest(String networkId, String suffix, Object body, Consumer<NetworkOperationStatus> progress) {
+        return observeMutation(networkId, () -> load(networkId).thenCompose(state -> requireCapability(state, lifecycleCapability(suffix))
                 .thenCompose(ignored -> adapter.request("POST", networkPath(networkId, suffix),
-                        withRevision(body, state.network().revision()))))
-                .thenApply(value -> object(value, "job"));
+                        withRevision(body, state.network().revision())))), progress)
+                .thenApply(HostedNetworkOverviewProvider::completedLifecycle);
     }
 
     private Async<NetworkJob> jobRequest(String networkId, String suffix, Object body) {
-        return load(networkId).thenCompose(state -> requireCapability(state, jobCapability(suffix))
+        return observeMutation(networkId, () -> load(networkId).thenCompose(state -> requireCapability(state, jobCapability(suffix))
                 .thenCompose(ignored -> adapter.request("POST", networkPath(networkId, suffix),
-                        withRevision(body, state.network().revision()))))
-                .thenApply(value -> networkJob(object(value, "job")));
+                        withRevision(body, state.network().revision())))), null)
+                .thenApply(HostedNetworkOverviewProvider::completedJob);
+    }
+
+    private Async<NetworkOperationStatus> observeMutation(String networkId, Supplier<Async<JsonObject>> admission,
+                                                          Consumer<NetworkOperationStatus> progress) {
+        try {
+            if (client == null || client.getApiClient() == null) return Async.failed(new IllegalStateException("Network Progress Is Unavailable"));
+            BooleanSupplier current = connectionKeyAdmission();
+            if (!current.getAsBoolean()) return Async.failed(new IllegalStateException("Account Changed. Reopen The Network"));
+            HostedNetworkClient observer = client.getApiClient().hostedNetworks();
+            return admission.get().thenCompose(value -> observer.observe(networkId, object(value, "operation"),
+                    client.getComposition().scheduler(), current, progress));
+        } catch (Throwable failure) {
+            return Async.failed(failure);
+        }
+    }
+
+    private static NetworkLifecycleJob completedLifecycle(NetworkOperationStatus status) {
+        if (status.lifecycleJob() == null) throw new IllegalStateException("Completed Network Lifecycle Result Is Unavailable");
+        return status.lifecycleJob();
+    }
+
+    private static NetworkJob completedJob(NetworkOperationStatus status) {
+        if (status.job() == null) throw new IllegalStateException("Completed Network Result Is Unavailable");
+        return status.job();
     }
 
     private static Async<Void> requireCapability(OverviewState state, String operation) {

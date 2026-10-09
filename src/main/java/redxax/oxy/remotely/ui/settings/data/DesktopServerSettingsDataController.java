@@ -8,6 +8,7 @@ import restudio.rebase.api.RebaseApiFactory;
 import restudio.rebase.instance.Instance;
 import restudio.rebase.platform.jvm.JvmAsyncBridge;
 import restudio.rescreen.platform.Async;
+import restudio.rescreen.ui.core.ScreenManager;
 
 import java.nio.file.Path;
 import java.util.Collection;
@@ -43,7 +44,7 @@ public class DesktopServerSettingsDataController extends ServerSettingsDocumentD
     private DesktopServerSettingsDataController(Instance instance, ServerSettingsSnapshot snapshot, RebaseAPI api,
                                                 ServerSettingsCatalogService.View catalogs, boolean newServer) {
         super(target(instance), snapshot, newServer ? emptyStore() : store(instance, api), false,
-                new DesktopStructuredDocumentParser(), catalogs);
+                new DesktopStructuredDocumentParser(), catalogs, newServer ? ScreenManager.getInstance()::execute : null);
         source = instance;
         sourcePath = normalizedPath(instance.getPath());
         sourceApi = api;

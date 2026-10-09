@@ -1,5 +1,6 @@
 package redxax.oxy.remotely.network;
 
+import redxax.oxy.remotely.data.flow.ReSyncFrameTransport;
 import restudio.rescreen.platform.Async;
 
 import java.util.Collection;
@@ -60,6 +61,10 @@ public interface NetworkManager<T, R> extends AutoCloseable {
     default Async<NetworkJob> runPreparedSecretRotation(NetworkSecretRotationPreparedPlan rotationPrepared, Collection<T> instances, String initiator) { return unsupported(); }
     default Async<Void> recoverCompletedJobs(Collection<T> instances) { return unsupported(); }
     default List<NetworkValidationIssue> reconcileInstanceBindings(Collection<T> instances) { return List.of(); }
+    default boolean editorConfigurable() { return false; }
+    default Async<Void> configureEditor(String networkId, NetworkEditorConnection connection) { return unsupported(); }
+    default boolean editorAvailable() { return false; }
+    default ReSyncFrameTransport editorTransport(String networkId, String nodeId) { return unsupported(); }
     default NetworkRuntimeSnapshot getRuntimeSnapshot(String networkId) { return unsupported(); }
     default List<NetworkIncident> getIncidents(String networkId) { return List.of(); }
     default int getOpenIncidentCount(String networkId) { return 0; }

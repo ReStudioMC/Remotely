@@ -33,3 +33,5 @@ includeBuild("../ReSync") {
         substitute(module("restudio.resync:ReSyncCore")).using(project(":ReSyncCore"))
     }
 }
+
+includeBuild("../ReProxy/java")

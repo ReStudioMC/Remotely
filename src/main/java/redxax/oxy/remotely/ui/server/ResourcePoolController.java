@@ -13,6 +13,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
@@ -247,9 +248,18 @@ public final class ResourcePoolController {
     private volatile List<ResourcePoolModels.Rate> rates = List.of();
     private volatile List<ResourcePoolModels.Availability> availability = List.of();
     private long generation;
+    private long accountGeneration;
+    private final Map<UUID, PurchaseAction> purchaseActions = new LinkedHashMap<>();
+
+    private record PurchaseAction(boolean release, Async<ResourcePoolModels.PurchaseStatus> result) {}
     private int polls;
     private boolean refreshQueued;
     private boolean disposed;
+    private ServerScreenHost optionsHost;
+    private String optionsAccount = "";
+    private ResourcePoolModels.DraftOptions draftOptions;
+    private Async<ResourcePoolModels.DraftOptions> optionsRead;
+    private long optionsGeneration;
 
     public ResourcePoolController(RemotelyServerApi serverApi, TaskScheduler scheduler, Supplier<String> account) {
         this(Objects.requireNonNull(serverApi, "serverApi").resourcePools(), scheduler, account);
@@ -268,6 +278,53 @@ public final class ResourcePoolController {
 
     public Snapshot snapshot() {
         return snapshot;
+    }
+
+    public synchronized Async<ResourcePoolModels.DraftOptions> draftOptions(ServerScreenHost host) {
+        Objects.requireNonNull(host, "host");
+        String namespace = host.hostedNetworkAccount();
+        if (disposed || !host.accountIdentity().authenticated() || namespace.isBlank() || host.resourcePools() != api) {
+            return Async.failed(new IllegalStateException("Resource Pool Session Changed"));
+        }
+        if (optionsHost != host || !namespace.equals(optionsAccount)) {
+            invalidateOptions();
+            optionsHost = host;
+            optionsAccount = namespace;
+        }
+        if (draftOptions != null) return Async.completed(draftOptions);
+        if (optionsRead != null) return optionsRead;
+        long request = ++optionsGeneration;
+        Async<ResourcePoolModels.DraftOptions> result = Async.pending();
+        optionsRead = result;
+        Async<ResourcePoolModels.DraftOptions> read;
+        try {
+            read = timed(api.getDraftOptions());
+        } catch (RuntimeException failure) {
+            read = Async.failed(failure);
+        }
+        read.whenComplete((value, failure) -> {
+            synchronized (this) {
+                if (disposed || request != optionsGeneration || optionsRead != result || optionsHost != host
+                        || !namespace.equals(host.hostedNetworkAccount()) || host.resourcePools() != api || !host.accountIdentity().authenticated()) {
+                    result.fail(new IllegalStateException("Resource Pool Session Changed"));
+                    return;
+                }
+                optionsRead = null;
+                if (failure == null && value != null) {
+                    draftOptions = value;
+                    result.complete(value);
+                } else result.fail(failure == null ? new IllegalStateException("Server Images Are Unavailable") : failure);
+            }
+        });
+        return result;
+    }
+
+    private synchronized void invalidateOptions() {
+        optionsGeneration++;
+        draftOptions = null;
+        Async<ResourcePoolModels.DraftOptions> previous = optionsRead;
+        optionsRead = null;
+        if (previous != null) previous.fail(new IllegalStateException("Server Images Changed. Refresh To Try Again"));
     }
 
     public List<ResourcePoolModels.Rate> rates() {
@@ -292,6 +349,7 @@ public final class ResourcePoolController {
 
     public void refresh() {
         polls = 0;
+        invalidateOptions();
         refresh(true);
     }
 
@@ -324,6 +382,10 @@ public final class ResourcePoolController {
         boolean sameAccount = accountId.equals(snapshot.accountId());
         boolean resetPages = visibleLoading || !sameAccount;
         if (!sameAccount) {
+            invalidateOptions();
+            accountGeneration++;
+            purchaseActions.values().forEach(action -> action.result().cancel());
+            purchaseActions.clear();
             mutations.values().removeIf(request -> !request.accountId.equals(accountId));
             activationIds.clear();
             purchaseOffers.clear();
@@ -469,7 +531,8 @@ public final class ResourcePoolController {
 
     private Snapshot refreshSnapshot(String accountId, LoadedRefresh loaded, boolean resetPages, long ticket) {
         List<PoolView> pools = validatePools(loaded.pools);
-        List<ResourcePoolModels.PurchaseStatus> purchases = validatePurchases(loaded.purchases.items());
+        List<ResourcePoolModels.PurchaseStatus> purchases = validatePurchases(loaded.purchases.items().stream().map(candidate -> latestPurchase(
+                snapshot.purchases().stream().filter(previous -> previous.purchaseRequestId().equals(candidate.purchaseRequestId())).findFirst().orElse(null), candidate)).toList());
         PageState poolPages = loaded.poolPages;
         PageState purchasePages = loaded.purchasePages;
         if (!resetPages) {
@@ -616,14 +679,21 @@ public final class ResourcePoolController {
             ResourcePoolModels.PurchaseStatus previous = existing.stream()
                     .filter(value -> value.purchaseRequestId().equals(purchase.purchaseRequestId()))
                     .findFirst().orElse(null);
-            if (previous != null && (!previous.purchaseId().equals(purchase.purchaseId())
-                    || !previous.offerId().equals(purchase.offerId()))) {
-                throw new IllegalStateException("Purchase Identity Changed During Refresh");
-            }
-            merged.put(purchase.purchaseRequestId(), purchase);
+            merged.put(purchase.purchaseRequestId(), latestPurchase(previous, purchase));
         }
         existing.forEach(purchase -> merged.putIfAbsent(purchase.purchaseRequestId(), purchase));
         return validatePurchases(List.copyOf(merged.values()));
+    }
+
+    private static ResourcePoolModels.PurchaseStatus latestPurchase(ResourcePoolModels.PurchaseStatus previous, ResourcePoolModels.PurchaseStatus candidate) {
+        if (previous == null) return candidate;
+        if (previous.equals(candidate)) return previous;
+        if (!previous.offerId().equals(candidate.offerId())) throw new IllegalStateException("Purchase Offer Identity Does Not Match");
+        if (!previous.purchaseId().equals(candidate.purchaseId()) || !previous.purchaseRequestId().equals(candidate.purchaseRequestId())
+                || !previous.poolId().equals(candidate.poolId())) {
+            throw new IllegalStateException("Purchase Identity Changed During Refresh");
+        }
+        return Instant.parse(previous.updatedAt()).isAfter(Instant.parse(candidate.updatedAt())) ? previous : candidate;
     }
 
     private static List<ResourcePoolModels.PurchaseStatus> appendPurchases(
@@ -1067,6 +1137,65 @@ public final class ResourcePoolController {
         });
     }
 
+    public Async<ResourcePoolModels.PurchaseStatus> recoverPurchase(ResourcePoolModels.PurchaseStatus purchase) {
+        return purchaseAction(purchase, false);
+    }
+
+    public Async<ResourcePoolModels.PurchaseStatus> releasePurchase(ResourcePoolModels.PurchaseStatus purchase) {
+        return purchaseAction(purchase, true);
+    }
+
+    private Async<ResourcePoolModels.PurchaseStatus> purchaseAction(ResourcePoolModels.PurchaseStatus purchase, boolean release) {
+        String accountId = currentAccount();
+        if (disposed || accountId.isBlank() || !accountId.equals(snapshot.accountId()) || purchase == null
+                || purchase.status() != ResourcePoolModels.PurchaseState.NEEDS_REVIEW) {
+            return Async.failed(new IllegalStateException("Refresh Purchases Before Continuing"));
+        }
+        PurchaseAction existing = purchaseActions.get(purchase.purchaseRequestId());
+        if (existing != null) return existing.release() == release ? existing.result()
+                : Async.failed(new IllegalStateException("Wait For The Current Purchase Update"));
+        long epoch = accountGeneration;
+        Async<ResourcePoolModels.PurchaseStatus> result = Async.pending();
+        PurchaseAction action = new PurchaseAction(release, result);
+        purchaseActions.put(purchase.purchaseRequestId(), action);
+        Async<ResourcePoolModels.PurchaseStatus> request;
+        try {
+            request = timed(release ? api.releasePurchase(purchase.purchaseRequestId()) : api.recoverPurchase(purchase.purchaseRequestId()));
+        } catch (RuntimeException failure) {
+            purchaseActions.remove(purchase.purchaseRequestId(), action);
+            result.fail(failure);
+            return result;
+        }
+        request.whenComplete((updated, failure) -> {
+            purchaseActions.remove(purchase.purchaseRequestId(), action);
+            if (disposed || epoch != accountGeneration || !accountId.equals(currentAccount()) || !accountId.equals(snapshot.accountId())) {
+                result.fail(new IllegalStateException("Account Changed During Purchase Update"));
+                return;
+            }
+            if (failure != null) {
+                result.fail(failure);
+                refresh(false);
+                return;
+            }
+            if (updated == null || !purchase.purchaseId().equals(updated.purchaseId()) || !purchase.poolId().equals(updated.poolId())
+                    || !purchase.offerId().equals(updated.offerId())) {
+                result.fail(new IllegalStateException("Purchase Identity Does Not Match"));
+                return;
+            }
+            ResourcePoolModels.PurchaseStatus previous = snapshot.purchases().stream()
+                    .filter(value -> value.purchaseId().equals(updated.purchaseId())).findFirst().orElse(null);
+            ResourcePoolModels.PurchaseStatus admitted = latestPurchase(previous, updated);
+            List<ResourcePoolModels.PurchaseStatus> purchases = new ArrayList<>(snapshot.purchases());
+            purchases.removeIf(value -> value.purchaseId().equals(admitted.purchaseId()));
+            purchases.add(0, admitted);
+            publish(new Snapshot(accountId, snapshot.pools(), snapshot.offers(), purchases, snapshot.poolPages(), snapshot.purchasePages(),
+                    snapshot.loading(), snapshot.message(), snapshot.generation()));
+            result.complete(admitted);
+            refresh(false);
+        });
+        return result;
+    }
+
     public Async<PurchaseResult> checkout(PurchaseIntent intent) {
         Objects.requireNonNull(intent, "intent");
         String accountId = currentAccount();
@@ -1198,11 +1327,23 @@ public final class ResourcePoolController {
                                                        Map<String, String> settings,
                                                        Map<String, String> initialFiles,
                                                        ResourcePoolModels.DraftModpack modpack) {
+        return createDraft(creation, name, resources, settings, initialFiles, modpack, "");
+    }
+
+    public Async<ResourcePoolModels.Draft> createDraft(Creation creation, String name,
+                                                       ServerScreenHost.PoolResources resources,
+                                                       Map<String, String> settings,
+                                                       Map<String, String> initialFiles,
+                                                       ResourcePoolModels.DraftModpack modpack, String subdomain) {
         Objects.requireNonNull(creation, "creation");
         validate(resources);
+        String label = subdomain == null ? "" : subdomain.strip().toLowerCase(Locale.ROOT);
+        if (!label.isBlank() && (!label.matches("[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])") || label.contains("--"))) {
+            throw new IllegalArgumentException("Subdomain Must Use 3 To 63 Letters, Numbers, Or Hyphens");
+        }
         ResourcePoolModels.CreateDraftRequest request = new ResourcePoolModels.CreateDraftRequest(
                 creation.createRequestId(), creation.draftId(), name, resources.gameId(), resources.profileId(),
-                settings == null ? Map.of() : settings, initialFiles == null ? Map.of() : initialFiles, modpack);
+                settings == null ? Map.of() : settings, initialFiles == null ? Map.of() : initialFiles, modpack, label.isBlank() ? null : label);
         Async<ResourcePoolModels.Draft> result = Async.pending();
         String accountId = currentAccount();
         timed(api.createDraft(creation.poolId(), request)).whenComplete((admission, failure) -> {
@@ -1225,7 +1366,7 @@ public final class ResourcePoolController {
                     return;
                 }
                 if (!draft.metadata().equals(new ResourcePoolModels.DraftMetadata(request.name(), request.gameId(),
-                        request.profileId(), request.settings(), request.initialFiles(), request.modpack()))) {
+                        request.profileId(), request.settings(), request.initialFiles(), request.modpack(), request.subdomain()))) {
                     result.fail(new IllegalStateException("Server Draft Identity Does Not Match"));
                     return;
                 }
@@ -1487,7 +1628,11 @@ public final class ResourcePoolController {
             return;
         }
         disposed = true;
+        invalidateOptions();
         generation++;
+        accountGeneration++;
+        purchaseActions.values().forEach(action -> action.result().cancel());
+        purchaseActions.clear();
         refreshQueued = false;
         cancelPoll();
         cancelPageReads();

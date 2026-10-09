@@ -1,5 +1,7 @@
 package redxax.oxy.remotely.host;
 
+import redxax.oxy.remotely.RemotelyInit;
+
 import redxax.oxy.remotely.config.RemotelyConfigManager;
 import redxax.oxy.remotely.RemotelyClient;
 import redxax.oxy.remotely.discord.DiscordRpcBridge;
@@ -335,6 +337,8 @@ public class ReScreenApplicationHost implements ApplicationHost {
 
     @Override
     public void shutdownDesktopIntegrations() {
+        if (serverScreenHost != null) serverScreenHost.closePluginForwarding();
+        RemotelyInit.closeReProxy();
         DiscordRpcBridge.shutdown();
     }
 
