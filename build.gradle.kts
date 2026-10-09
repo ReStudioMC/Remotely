@@ -45,7 +45,9 @@ val releaseRequiredClasses = listOf(
     "restudio/rescreen/config/UiConfigStore.class",
     "restudio/rebase/Rebase.class",
     "redxax/restudio/Remodel/Main.class",
-    "restudio/resync/network/NetworkFrame.class"
+    "restudio/resync/network/NetworkFrame.class",
+    "restudio/reproxy/connector/ReProxyConnector.class",
+    "restudio/reproxy/connector/ReProxyConnector\$Listener.class"
 )
 
 fun requireReleaseClasses(archives: Collection<File>, artifactName: String) {
@@ -620,13 +622,14 @@ tasks.register<Jar>("fatJar") {
     group = "build"
     dependsOn(reStudioReleaseJarTasks)
     dependsOn(":NetworkCore:jar")
+    dependsOn(configurations.runtimeClasspath)
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     isPreserveFileTimestamps = false
     isReproducibleFileOrder = true
     archiveFileName.set("Remotely-Fat.jar")
     from(sourceSets.main.get().output)
     from({
-        configurations.runtimeClasspath.get().filter { it.exists() }.map {
+        configurations.runtimeClasspath.get().map {
             if (it.isDirectory) it else zipTree(it)
         }
     })
