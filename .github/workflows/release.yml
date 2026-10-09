@@ -64,6 +64,7 @@ jobs:
       rebase_ref: ${{ steps.dependencies.outputs.rebase }}
       recast_ref: ${{ steps.dependencies.outputs.recast }}
       resync_ref: ${{ steps.dependencies.outputs.resync }}
+      reproxy_ref: ${{ steps.dependencies.outputs.reproxy }}
     steps:
       - id: release
         shell: bash
@@ -138,6 +139,7 @@ jobs:
           resolve RedxAx/Rebase rebase
           resolve RedxAx/Recast recast
           resolve RedxAx/ReSync resync
+          resolve RedxAx/ReProxy reproxy
 
   jar:
     needs: prepare
@@ -181,12 +183,18 @@ jobs:
           token: ${{ secrets.REPROJECTS_PAT }}
           path: ReProjects/ReSync
           ref: ${{ needs.prepare.outputs.resync_ref }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: RedxAx/ReProxy
+          token: ${{ secrets.REPROJECTS_PAT }}
+          path: ReProjects/ReProxy
+          ref: ${{ needs.prepare.outputs.reproxy_ref }}
       - name: Build Remotely Jar And Linux AppImage
         working-directory: ReProjects/Remotely
         shell: bash
         run: |
           chmod +x gradlew
-          flock /var/lock/restudio-release-build.lock ./gradlew "-Premotely.version=$RELEASE_VERSION" fatJar createLinuxAppImage --no-daemon --stacktrace
+          flock /var/lock/restudio-release-build.lock ./gradlew "-Premotely.version=$RELEASE_VERSION" fatJar createLinuxAppImage --no-daemon --max-workers=2 --no-parallel --stacktrace
           install -d release-artifacts
           cp build/libs/Remotely-Fat.jar "release-artifacts/Remotely-$RELEASE_VERSION.jar"
           app_dir=build/app-image/Remotely
@@ -252,6 +260,12 @@ jobs:
           token: ${{ secrets.REPROJECTS_PAT }}
           path: ReProjects/ReSync
           ref: ${{ needs.prepare.outputs.resync_ref }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: RedxAx/ReProxy
+          token: ${{ secrets.REPROJECTS_PAT }}
+          path: ReProjects/ReProxy
+          ref: ${{ needs.prepare.outputs.reproxy_ref }}
       - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95
         with:
           distribution: temurin
@@ -261,7 +275,7 @@ jobs:
         working-directory: ReProjects/Remotely
         shell: pwsh
         run: |
-          .\gradlew.bat "-Premotely.version=$env:RELEASE_VERSION" "-Premotely.releaseInstallerBuild=true" createInstaller --no-daemon --stacktrace
+          .\gradlew.bat "-Premotely.version=$env:RELEASE_VERSION" "-Premotely.releaseInstallerBuild=true" createInstaller --no-daemon --max-workers=2 --no-parallel --stacktrace
           New-Item -ItemType Directory -Force -Path release-artifacts | Out-Null
           $installer = Get-ChildItem -LiteralPath build/dist -Filter '*.exe' | Select-Object -First 1
           if ($null -eq $installer) { throw 'Remotely Installer Was Not Created' }
@@ -322,6 +336,12 @@ jobs:
           token: ${{ secrets.REPROJECTS_PAT }}
           path: ReProjects/ReSync
           ref: ${{ needs.prepare.outputs.resync_ref }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: RedxAx/ReProxy
+          token: ${{ secrets.REPROJECTS_PAT }}
+          path: ReProjects/ReProxy
+          ref: ${{ needs.prepare.outputs.reproxy_ref }}
       - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95
         with:
           distribution: temurin
@@ -339,7 +359,7 @@ jobs:
           done
           iconutil --convert icns "$iconset" --output build/Remotely.icns
           chmod +x gradlew
-          ./gradlew "-Premotely.version=$RELEASE_VERSION" -Premotely.packageIcon="$PWD/build/Remotely.icns" createMacDmg --no-daemon --stacktrace
+          ./gradlew "-Premotely.version=$RELEASE_VERSION" -Premotely.packageIcon="$PWD/build/Remotely.icns" createMacDmg --no-daemon --max-workers=2 --no-parallel --stacktrace
           disk_image=$(find build/dist-macos -maxdepth 1 -type f -name '*.dmg' -print -quit)
           [[ -n "$disk_image" ]] || { printf 'Remotely Disk Image Was Not Created\n' >&2; exit 1; }
           mount_point=$(mktemp -d)
@@ -522,6 +542,12 @@ jobs:
           token: ${{ secrets.REPROJECTS_PAT }}
           path: ReProjects/ReSync
           ref: ${{ needs.prepare.outputs.resync_ref }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: RedxAx/ReProxy
+          token: ${{ secrets.REPROJECTS_PAT }}
+          path: ReProjects/ReProxy
+          ref: ${{ needs.prepare.outputs.reproxy_ref }}
       - name: Set Up JDK 21
         uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9
         with:
@@ -540,9 +566,9 @@ jobs:
         shell: bash
         run: |
           chmod +x gradlew RemotelyMod/gradlew
-          flock /var/lock/restudio-release-build.lock ./gradlew jar --no-daemon --stacktrace
+          flock /var/lock/restudio-release-build.lock ./gradlew jar --no-daemon --max-workers=2 --no-parallel --stacktrace
           cd RemotelyMod
-          flock /var/lock/restudio-release-build.lock ./gradlew "-Premotely.version=$RELEASE_VERSION" buildAllVersions --no-daemon --stacktrace
+          flock /var/lock/restudio-release-build.lock ./gradlew "-Premotely.version=$RELEASE_VERSION" buildAllVersions --no-daemon --max-workers=2 --no-parallel --stacktrace
           mapfile -t jars < <(find build/versions -maxdepth 1 -type f -name "Remotely-$RELEASE_VERSION+*.jar" -print | sort)
           [[ ${#jars[@]} -gt 0 ]] || { printf 'No RemotelyMod Jars Were Produced\n' >&2; exit 1; }
       - name: Retain RemotelyMod Bundle
