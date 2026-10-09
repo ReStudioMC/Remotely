@@ -202,8 +202,8 @@ jobs:
           ln -s bin/Remotely "$app_dir/AppRun"
           cp packaging/Remotely.png "$app_dir/remotely.png"
           printf '[Desktop Entry]\nType=Application\nName=Remotely\nComment=Minecraft Server IDE\nExec=Remotely\nIcon=remotely\nCategories=Development;\nTerminal=false\n' > "$app_dir/remotely.desktop"
-          curl --fail --location --retry 3 --output appimagetool.AppImage https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
-          printf 'a6d71e2b6cd66f8e8d16c37ad164658985e0cf5fcaa950c90a482890cb9d13e0  appimagetool.AppImage\n' | sha256sum --check
+          curl --fail --location --retry 3 --output appimagetool.AppImage https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          printf 'ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  appimagetool.AppImage\n' | sha256sum --check
           chmod +x appimagetool.AppImage
           APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 ./appimagetool.AppImage "$app_dir" "release-artifacts/Remotely-$RELEASE_VERSION.AppImage"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
