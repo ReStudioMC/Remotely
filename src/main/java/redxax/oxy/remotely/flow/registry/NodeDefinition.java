@@ -239,8 +239,8 @@ public class NodeDefinition {
         this.id = builder.id;
         this.displayName = builder.displayName;
         this.category = builder.category;
-        this.inputs = builder.inputs;
-        this.outputs = builder.outputs;
+        this.inputs = List.copyOf(builder.inputs);
+        this.outputs = List.copyOf(builder.outputs);
         this.color = builder.color;
         this.priority = builder.priority;
         this.hidden = builder.hidden;
@@ -737,14 +737,14 @@ public class NodeDefinition {
             this.typeRef = typeRef;
             this.repeatable = repeatable;
             this.widgetType = widgetType;
-            this.options = options != null ? options : Collections.emptyList();
+            this.options = options != null ? List.copyOf(options) : Collections.emptyList();
             this.optionsSource = optionsSource;
             this.optionSourceRef = optionSourceRef;
             this.defaultValue = defaultValue;
             this.typedDefault = typedDefault;
             this.typedType = typedType;
             this.constraints = constraints;
-            this.visibleWhen = visibleWhen != null ? visibleWhen : Collections.emptyMap();
+            this.visibleWhen = visibleWhen != null ? Map.copyOf(visibleWhen) : Collections.emptyMap();
             this.description = description;
             this.optional = optional;
         }

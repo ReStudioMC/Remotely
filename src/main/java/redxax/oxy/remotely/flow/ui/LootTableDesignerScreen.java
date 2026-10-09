@@ -4,6 +4,8 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import redxax.oxy.remotely.flow.data.ReSyncResourceDragPayload;
+import redxax.oxy.remotely.flow.data.FlowGraph;
+import redxax.oxy.remotely.flow.data.FlowDataType;
 import redxax.oxy.remotely.flow.ui.studio.StudioScreen;
 import restudio.rescreen.platform.IDrawContext;
 import restudio.rescreen.platform.input.ReScrollEvent;
@@ -86,6 +88,68 @@ public class LootTableDesignerScreen extends FocusedJsonResourceDesignerScreen i
     @Override
     protected List<String> editorFields() {
         return lootTableFields();
+    }
+
+    @Override
+    protected CompactBindingSupport.FunctionShape runtimeFunctionShape(String functionBase) {
+        return new CompactBindingSupport.FunctionShape(List.of(
+            new FlowGraph.FunctionParameter("player", FlowDataType.PLAYER),
+            new FlowGraph.FunctionParameter("entity", FlowDataType.ENTITY),
+            new FlowGraph.FunctionParameter("location", FlowDataType.LOCATION),
+            new FlowGraph.FunctionParameter("lootTable", FlowDataType.STRING),
+            new FlowGraph.FunctionParameter("items", FlowDataType.LIST)
+        ), List.of());
+    }
+
+    @Override
+    protected String defaultFunctionInputContext() {
+        return "loot";
+    }
+
+    @Override
+    protected String functionInputContextDefault(String field, FlowGraph.FunctionParameter input) {
+        String name = input != null ? input.getName() : "";
+        if (name != null && List.of("player", "entity", "location", "lootTable", "items").contains(name)) {
+            return "$" + name;
+        }
+        return super.functionInputContextDefault(field, input);
+    }
+
+    @Override
+    protected List<String> functionInputOptions(String field, FlowGraph.FunctionParameter input) {
+        LinkedHashSet<String> options = new LinkedHashSet<>();
+        String value = functionInputContextDefault(field, input);
+        if (!value.isBlank()) {
+            options.add(value);
+        }
+        options.addAll(super.functionInputOptions(field, input));
+        return List.copyOf(options);
+    }
+
+    @Override
+    protected void putFunctionIdPathText(String field, String value) {
+        if (deferResourceMutation(() -> putFunctionIdPathText(field, value))) {
+            return;
+        }
+        super.putFunctionIdPathText(field, value);
+        if (!field.startsWith("hooks.") || value == null || value.isBlank() || "none".equalsIgnoreCase(value) || "No Function".equals(value)) {
+            return;
+        }
+        FlowGraph function = selectedFunctionById(value);
+        if (function == null || function.getFunctionInputs() == null) {
+            return;
+        }
+        String base = field.substring(0, field.length() - ".functionId".length());
+        for (FlowGraph.FunctionParameter input : function.getFunctionInputs()) {
+            if (input == null || input.getName() == null) {
+                continue;
+            }
+            String path = base + ".inputs." + input.getName();
+            String context = functionInputContextDefault(path, input);
+            if (!jsonPathHas(path) && !context.isBlank()) {
+                putJsonText(path, context);
+            }
+        }
     }
 
     @Override
@@ -327,9 +391,9 @@ public class LootTableDesignerScreen extends FocusedJsonResourceDesignerScreen i
             case "trigger.entity" -> "Entity type that must be hit for this loot table to run.\nChoose None to match every entity type.";
             case "trigger.overrideDrops" -> "Remove the event's original drops before applying this table's drops.\nApplies to block breaks and entity deaths.";
             case "pools.0.rolls" -> "Number of times this pool selects an entry.\nEach roll returns at most one entry.\nSet to 0 to disable the pool.";
-            case "hooks.beforeRollFlow" -> "Flow run before this loot table is rolled.\nReceives the loot table id and available roll context.";
-            case "hooks.afterRollFlow" -> "Flow run after this loot table is rolled.\nReceives the generated items and available roll context.";
-            case "hooks.deniedRollFlow" -> "Flow run when a roll is requested for this disabled table.\nReceives the request context and no generated items.";
+            case "hooks.beforeRollAction" -> "Function run before this loot table is rolled.\nReceives the loot table id and available roll context.";
+            case "hooks.afterRollAction" -> "Function run after this loot table is rolled.\nReceives the generated items and available roll context.";
+            case "hooks.deniedRollAction" -> "Function run when a roll is requested for this disabled table.\nReceives the request context and no generated items.";
             default -> super.jsonResourceDescription(field, label);
         };
     }
@@ -759,7 +823,7 @@ public class LootTableDesignerScreen extends FocusedJsonResourceDesignerScreen i
                 lootEntryField(index, "components")
             ));
         }
-        fields.addAll(List.of("hooks.beforeRollFlow", "hooks.afterRollFlow", "hooks.deniedRollFlow"));
+        fields.addAll(List.of("hooks.beforeRollAction", "hooks.afterRollAction", "hooks.deniedRollAction"));
         return fields;
     }
 

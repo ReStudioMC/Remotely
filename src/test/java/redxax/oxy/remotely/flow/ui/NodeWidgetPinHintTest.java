@@ -14,6 +14,8 @@ import restudio.rescreen.platform.IMatrixStack;
 import restudio.rescreen.render.TextRenderer;
 import restudio.rescreen.theme.ThemeColor;
 import restudio.rescreen.theme.ThemeManager;
+import restudio.rescreen.ui.core.Screen;
+import restudio.rescreen.ui.core.ScreenManager;
 import restudio.rescreen.ui.core.Widget;
 import restudio.rescreen.ui.widgets.AnimatedWidget;
 import restudio.rescreen.util.Identifier;
@@ -51,6 +53,11 @@ class NodeWidgetPinHintTest {
     @Test
     void describedPinLabelsGlowAndRenderHintsWithoutAffectingBlankLabels() {
         boolean animations = Config.animationsEnabled;
+        Screen previousScreen = ScreenManager.currentScreen;
+        Screen screen = new Screen();
+        screen.width = 1200;
+        screen.height = 800;
+        ScreenManager.currentScreen = screen;
         Config.animationsEnabled = false;
         try {
             NodeDefinition definition = new NodeDefinition.Builder("pin-hints", "Pin Hints", NodeDefinition.NodeCategory.FLOW)
@@ -83,6 +90,13 @@ class NodeWidgetPinHintTest {
             context.clearText();
             widget.renderHintOverlay(context);
             assertTrue(context.hasText("Describes the input value."));
+            float originalBottom = context.scissorBottom;
+            widget.renderHintOverlay(context, 200f, 150f, 2f);
+            float labelWidth = TextRenderer.tr.getWidth("Input Value");
+            assertEquals(context.inputLabelX * 2 + labelWidth + 200, context.scissorCenter, 1f);
+            assertEquals(context.inputLabelY * 2 + 150 - 5, context.scissorBottom, 1f);
+            widget.renderHintOverlay(context);
+            assertEquals(originalBottom, context.scissorBottom, 0.001f);
 
             double[] blankBounds = widget.getPinBounds("blank", false);
             assertNotNull(blankBounds);
@@ -108,6 +122,7 @@ class NodeWidgetPinHintTest {
             assertEquals(ThemeManager.getColor(ThemeColor.textDark), context.color("Output Value"));
         } finally {
             Config.animationsEnabled = animations;
+            ScreenManager.currentScreen = previousScreen;
         }
     }
 
@@ -220,6 +235,10 @@ class NodeWidgetPinHintTest {
 
     private static final class RecordingDrawContext implements IDrawContext {
         private final Map<String, Integer> textColors = new LinkedHashMap<>();
+        private float scissorCenter;
+        private float scissorBottom;
+        private int inputLabelX;
+        private int inputLabelY;
         private final IMatrixStack matrices = new IMatrixStack() {
             @Override
             public void push() {
@@ -279,6 +298,8 @@ class NodeWidgetPinHintTest {
 
         @Override
         public void enableScissor(float x1, float y1, float x2, float y2) {
+            scissorCenter = (x1 + x2) / 2;
+            scissorBottom = y2;
         }
 
         @Override
@@ -314,6 +335,10 @@ class NodeWidgetPinHintTest {
         @Override
         public void drawText(String text, int x, int y, int color, boolean shadow) {
             textColors.put(text, color);
+            if ("Input Value".equals(text)) {
+                inputLabelX = x;
+                inputLabelY = y;
+            }
         }
 
         @Override

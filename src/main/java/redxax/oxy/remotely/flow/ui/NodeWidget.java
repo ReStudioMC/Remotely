@@ -347,6 +347,9 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
     private long childLayoutOperationCount;
     private ChildLayoutKey appliedChildLayout;
     private AnimatedWidget hintOverlayCandidate;
+    private float hintOffsetX;
+    private float hintOffsetY;
+    private float hintScale = 1f;
     private ReSyncGenericDescriptorProjection.Inspector inspector = ReSyncGenericDescriptorProjection.Inspector.empty();
     private CoreGraphUiProjection.InspectorProjection inspectorProjection;
     private InspectorMutationHandler inspectorMutationHandler;
@@ -3874,28 +3877,44 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
             super.renderHintOverlay(context);
         }
         if (hintOverlayCandidate != null) {
-            hintOverlayCandidate.renderHintOverlay(context);
+            hintOverlayCandidate.renderHintOverlayTransformed(context, hintOffsetX, hintOffsetY, hintScale);
+        }
+    }
+
+    public void renderHintOverlay(IDrawContext context, float offsetX, float offsetY, float scale) {
+        float previousX = hintOffsetX;
+        float previousY = hintOffsetY;
+        float previousScale = hintScale;
+        hintOffsetX = offsetX;
+        hintOffsetY = offsetY;
+        hintScale = scale;
+        try {
+            renderHintOverlay(context);
+        } finally {
+            hintOffsetX = previousX;
+            hintOffsetY = previousY;
+            hintScale = previousScale;
         }
     }
 
     @Override
     protected float hintAnchorX() {
-        return pinHint.owned ? pinHint.x : super.hintAnchorX();
+        return (pinHint.owned ? pinHint.x : super.hintAnchorX()) * hintScale + hintOffsetX;
     }
 
     @Override
     protected float hintAnchorY() {
-        return pinHint.owned ? pinHint.y : super.hintAnchorY();
+        return (pinHint.owned ? pinHint.y : super.hintAnchorY()) * hintScale + hintOffsetY;
     }
 
     @Override
     protected float hintAnchorWidth() {
-        return pinHint.owned ? pinHint.width : super.hintAnchorWidth();
+        return (pinHint.owned ? pinHint.width : super.hintAnchorWidth()) * hintScale;
     }
 
     @Override
     protected float hintAnchorHeight() {
-        return pinHint.owned ? pinHint.height : super.hintAnchorHeight();
+        return (pinHint.owned ? pinHint.height : super.hintAnchorHeight()) * hintScale;
     }
 
     private void beginPinHintFrame() {

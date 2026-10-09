@@ -9,6 +9,7 @@ import redxax.oxy.remotely.flow.data.FlowNode;
 import redxax.oxy.remotely.flow.registry.NodeDefinition;
 import redxax.oxy.remotely.flow.ui.FlowNodeWidget.FunctionBoundaryCatalog;
 import redxax.oxy.remotely.test.TestDrawContext;
+import redxax.oxy.remotely.util.BrowserSafeState.BooleanValue;
 import restudio.rescreen.platform.IDrawContext;
 import restudio.rescreen.platform.input.ReModifierState;
 import restudio.rescreen.platform.input.ReMouseButton;
@@ -24,7 +25,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.LockSupport;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -180,7 +180,7 @@ class GraphEditorWireHitSafetyTest {
 
         private void prepare(boolean indexReady) throws Exception {
             if (!indexReady) {
-                AtomicBoolean workerQueued = (AtomicBoolean) field("graphRenderWorkerQueued");
+                BooleanValue workerQueued = (BooleanValue) field("graphRenderWorkerQueued");
                 long workerDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3L);
                 while (workerQueued.get() && System.nanoTime() < workerDeadline) {
                     LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1L));

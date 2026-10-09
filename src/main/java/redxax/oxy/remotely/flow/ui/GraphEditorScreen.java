@@ -2481,8 +2481,8 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
     public GraphEditorScreen(FlowGraph graph, String serverId, Screen parent, ClientServerView startupServer, String loaderHint, String serverTitle) {
         super();
-        this.zoomLevel = INITIAL_VIEWPORT_MAX_ZOOM;
-        this.targetZoomLevel = INITIAL_VIEWPORT_START_ZOOM;
+        this.zoomLevel = graphZoom(INITIAL_VIEWPORT_MAX_ZOOM, false);
+        this.targetZoomLevel = graphZoom(INITIAL_VIEWPORT_START_ZOOM, false);
         this.graph = graph;
         this.serverId = serverId;
         this.ownerScreen = parent;
@@ -7548,8 +7548,8 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             }
             initialViewportFitPending = false;
             initialViewportFittedKeys.add(viewportFitKey);
-            zoomLevel = INITIAL_VIEWPORT_MAX_ZOOM;
-            targetZoomLevel = INITIAL_VIEWPORT_MAX_ZOOM;
+            zoomLevel = graphZoom(INITIAL_VIEWPORT_MAX_ZOOM, false);
+            targetZoomLevel = zoomLevel;
             panX = 0.0F;
             panY = 0.0F;
             targetPanX = 0.0F;
@@ -7660,7 +7660,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         int contentWidth = Math.max(1, maxX - minX);
         int contentHeight = Math.max(1, maxY - minY);
         float fitZoom = Math.min(viewportWidth / (float) contentWidth, viewportHeight / (float) contentHeight);
-        fitZoom = Math.clamp(fitZoom, minZoom, Math.min(maxZoom, INITIAL_VIEWPORT_MAX_ZOOM));
+        fitZoom = graphZoom(Math.min(fitZoom, INITIAL_VIEWPORT_MAX_ZOOM), true);
         float centerX = (minX + maxX) / 2.0F;
         float centerY = (minY + maxY) / 2.0F;
         float viewportCenterX = viewportFitLeft() + viewportFitWidth() / 2.0F;
@@ -9608,7 +9608,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         }
         StudioViewportState viewport = activeStudioDocument.viewport();
         viewport.zoomLevel = zoomLevel;
-        viewport.targetZoomLevel = targetZoomLevel;
+        viewport.targetZoomLevel = graphZoom(targetZoomLevel, false);
         viewport.panX = panX;
         viewport.panY = panY;
         viewport.targetPanX = targetPanX;
@@ -9620,7 +9620,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             return;
         }
         zoomLevel = viewport.zoomLevel;
-        targetZoomLevel = viewport.targetZoomLevel;
+        targetZoomLevel = graphZoom(viewport.targetZoomLevel, false);
         panX = viewport.panX;
         panY = viewport.panY;
         targetPanX = viewport.targetPanX;
@@ -13660,8 +13660,8 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             panX = (zoomAnchorScreenX - width / 2.0) / zoom - zoomAnchorWorldX + width / 2.0;
             panY = (zoomAnchorScreenY - height / 2.0) / zoom - zoomAnchorWorldY + height / 2.0;
         }
-        double worldX = (screenX - width / 2.0) / zoom + width / 2.0 - panX;
-        double worldY = (screenY - height / 2.0) / zoom + height / 2.0 - panY;
+        double worldX = (screenX - graphOffset(width / 2.0, panX, zoom)) / zoom;
+        double worldY = (screenY - graphOffset(height / 2.0, panY, zoom)) / zoom;
         return new double[] { worldX, worldY };
     }
 
@@ -14960,6 +14960,100 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         return colors[Math.floorMod(Objects.hashCode(sessionId), colors.length)];
     }
 
+    private float graphPixelScale() {
+        return Math.max(1f, ScreenManager.getInstance().getRenderPixelScale());
+    }
+
+    private float graphZoom(float zoom, boolean fit) {
+        float pixels = graphPixelScale();
+        int minimum = Math.max(1, (int) Math.ceil(minZoom * pixels));
+        int maximum = Math.max(minimum, (int) Math.floor(maxZoom * pixels));
+        int scale = fit ? (int) Math.floor(zoom * pixels) : Math.round(zoom * pixels);
+        return Math.clamp(scale, minimum, maximum) / pixels;
+    }
+
+    private float graphOffset(double center, double pan, double zoom) {
+        float pixels = graphPixelScale();
+        return (float) (Math.round((center * (1.0 - zoom) + pan * zoom) * pixels) / (double) pixels);
+    }
+
+    @Override
+    public void setZoomLevel(float zoom) {
+        targetZoomLevel = graphZoom(zoom, false);
+        isZoomingToMouse = false;
+    }
+
+    @Override
+    protected boolean zoomFromScroll(double screenX, double screenY, double amount, float zoomStep) {
+        if (!allowZoom || amount == 0.0) {
+            return false;
+        }
+        float pixels = graphPixelScale();
+        int steps = (amount > 0 ? 1 : -1) * Math.max(1, (int) Math.round(Math.abs(amount)));
+        float next = graphZoom(targetZoomLevel + steps / pixels, false);
+        if (next == targetZoomLevel) {
+            return true;
+        }
+        double[] world = screenToWorld(screenX, screenY);
+        targetZoomLevel = next;
+        zoomAnchorScreenX = screenX;
+        zoomAnchorScreenY = screenY;
+        zoomAnchorWorldX = world[0];
+        zoomAnchorWorldY = world[1];
+        targetPanX = (float) ((screenX - width / 2.0) / next - world[0] + width / 2.0);
+        targetPanY = (float) ((screenY - height / 2.0) / next - world[1] + height / 2.0);
+        isZoomingToMouse = true;
+        return true;
+    }
+
+    @Override
+    protected void updateTransforms(float delta) {
+        targetZoomLevel = graphZoom(targetZoomLevel, false);
+        float elapsed = Float.isFinite(delta) ? Math.max(0f, delta) : 0f;
+        float zoomBlend = Config.animationsEnabled ? Math.min(1f, zoomSpeed * elapsed) : 1f;
+        float panBlend = Config.animationsEnabled ? Math.min(1f, panSpeed * elapsed) : 1f;
+        zoomLevel = approachGraphView(zoomLevel, targetZoomLevel, zoomBlend);
+        if (isZoomingToMouse) {
+            panX = (float) ((zoomAnchorScreenX - width / 2.0) / zoomLevel - zoomAnchorWorldX + width / 2.0);
+            panY = (float) ((zoomAnchorScreenY - height / 2.0) / zoomLevel - zoomAnchorWorldY + height / 2.0);
+            targetPanX = (float) ((zoomAnchorScreenX - width / 2.0) / targetZoomLevel - zoomAnchorWorldX + width / 2.0);
+            targetPanY = (float) ((zoomAnchorScreenY - height / 2.0) / targetZoomLevel - zoomAnchorWorldY + height / 2.0);
+            if (zoomLevel == targetZoomLevel) {
+                isZoomingToMouse = false;
+            }
+        } else {
+            panX = approachGraphView(panX, targetPanX, panBlend);
+            panY = approachGraphView(panY, targetPanY, panBlend);
+        }
+    }
+
+    private float approachGraphView(float current, float target, float blend) {
+        float next = current + (target - current) * blend;
+        return Math.abs(next - target) < 0.001f ? target : next;
+    }
+
+    @Override
+    protected double[] screenToWorld(double screenX, double screenY) {
+        return new double[] {
+            (screenX - graphOffset(width / 2.0, panX, zoomLevel)) / zoomLevel,
+            (screenY - graphOffset(height / 2.0, panY, zoomLevel)) / zoomLevel
+        };
+    }
+
+    @Override
+    protected double[] worldToScreen(double worldX, double worldY) {
+        return new double[] {
+            worldX * zoomLevel + graphOffset(width / 2.0, panX, zoomLevel),
+            worldY * zoomLevel + graphOffset(height / 2.0, panY, zoomLevel)
+        };
+    }
+
+    @Override
+    protected IDrawContext createWorldDrawContext(IDrawContext context) {
+        return new TransformedScissorDrawContext(context, graphOffset(width / 2.0, panX, zoomLevel),
+            graphOffset(height / 2.0, panY, zoomLevel), zoomLevel);
+    }
+
     @Override
     public void renderHandler(IDrawContext context, int mouseX, int mouseY, float delta) {
         long frameStartedAtNanos = ReSyncFlowClient.TEMP_LIFECYCLE_DEBUG ? System.nanoTime() : 0L;
@@ -15019,9 +15113,8 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         long workspaceFinishedAtNanos = ReSyncFlowClient.TEMP_LIFECYCLE_DEBUG ? System.nanoTime() : 0L;
 
         context.getMatrices().push();
-        context.getMatrices().translate(getWidth() / 2.0f, getHeight() / 2.0f, 0);
+        context.getMatrices().translate(graphOffset(width / 2.0, panX, zoomLevel), graphOffset(height / 2.0, panY, zoomLevel), 0);
         context.getMatrices().scale(zoomLevel, zoomLevel, 1.0f);
-        context.getMatrices().translate(-getWidth() / 2.0f + panX, -getHeight() / 2.0f + panY, 0);
 
         double[] worldMouse = screenToWorld(undistortedMouseX, undistortedMouseY);
         int worldMouseX = (int) worldMouse[0];
@@ -15093,11 +15186,13 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         }
         renderWorkspaceNodeLabels(worldContext);
         renderDebugNodeOverlay(worldContext);
-        for (FlowNodeWidget flowNodeWidget : visibleNodes) {
-            flowNodeWidget.renderHintOverlay(worldContext);
-        }
         long nodesFinishedAtNanos = ReSyncFlowClient.TEMP_LIFECYCLE_DEBUG ? System.nanoTime() : 0L;
         context.getMatrices().pop();
+        float hintOffsetX = graphOffset(width / 2.0, panX, zoomLevel);
+        float hintOffsetY = graphOffset(height / 2.0, panY, zoomLevel);
+        for (FlowNodeWidget flowNodeWidget : visibleNodes) {
+            flowNodeWidget.renderHintOverlay(context, hintOffsetX, hintOffsetY, zoomLevel);
+        }
 
         renderCoreWidgetPublicationFailure(context);
         renderWorkspaceSelectors(context);
