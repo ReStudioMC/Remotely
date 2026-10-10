@@ -10,9 +10,13 @@ import restudio.resync.flow.cache.CatalogCachePublication;
 import restudio.resync.flow.cache.CatalogCachePublicationCodec;
 import restudio.resync.flow.identity.CatalogBinding;
 import restudio.resync.flow.identity.ContentHash;
+import restudio.resync.flow.identity.ContractRef;
+import restudio.resync.flow.identity.InspectorFieldId;
 import restudio.resync.flow.identity.ServerId;
 
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -28,6 +32,10 @@ public final class ReSyncCatalogAuthoringProjection {
     private final ServerId expectedServerId;
     private final String identityDiagnostic;
     private final BrowserSafeState.ReferenceValue<Snapshot> active = new BrowserSafeState.ReferenceValue<>();
+    private final Map<ContractRef<InspectorFieldId>, AdvertisedOptionSourceResolver.Resolved> optionSources = new HashMap<>();
+    private CatalogCacheKey optionKey;
+    private long optionRevision;
+    private ContentHash optionChecksum;
 
     public ReSyncCatalogAuthoringProjection(ServerId expectedServerId) {
         this(Objects.requireNonNull(expectedServerId, "Expected server ID is required"), null);
@@ -63,6 +71,24 @@ public final class ReSyncCatalogAuthoringProjection {
 
     public synchronized Optional<Snapshot> active() {
         return Optional.ofNullable(active.get());
+    }
+
+    synchronized Optional<AdvertisedOptionSourceResolver.Resolved> optionSource(Snapshot snapshot,
+                                                                               ContractRef<InspectorFieldId> reference) {
+        Snapshot current = active.get();
+        if (current == null || snapshot == null || reference == null || !current.key().equals(snapshot.key())
+            || current.revision() != snapshot.revision() || !current.checksum().equals(snapshot.checksum())) {
+            return Optional.empty();
+        }
+        if (!current.key().equals(optionKey) || current.revision() != optionRevision
+            || !current.checksum().equals(optionChecksum)) {
+            optionSources.clear();
+            optionKey = current.key();
+            optionRevision = current.revision();
+            optionChecksum = current.checksum();
+        }
+        return Optional.ofNullable(optionSources.computeIfAbsent(reference,
+            source -> AdvertisedOptionSourceResolver.resolve(current.publication(), source).orElse(null)));
     }
 
     public synchronized Optional<CatalogAuthoringPublication> activePublication() {
@@ -175,7 +201,7 @@ public final class ReSyncCatalogAuthoringProjection {
 
     public synchronized void restore(Snapshot snapshot) {
         if (snapshot == null) {
-            active.set(null);
+            clear();
             return;
         }
         if (validate(snapshot.key(), snapshot.revision(), snapshot.publication(), snapshot.canonicalBytes()) == null) {
@@ -186,6 +212,9 @@ public final class ReSyncCatalogAuthoringProjection {
 
     public synchronized void clear() {
         active.set(null);
+        optionSources.clear();
+        optionKey = null;
+        optionChecksum = null;
     }
 
     public static ContentHash checksum(byte[] canonicalBytes) {

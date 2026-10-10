@@ -39,6 +39,43 @@ public final class OptionCatalogSelector {
         return () -> request(requestSupplier).ifPresent(OptionCatalogLoader::refresh);
     }
 
+    public static ItemSelectorWidget.AsyncItemSource coreSource(Supplier<OptionCatalogLoader.CoreSnapshot> catalogSupplier,
+        Supplier<TypedValue> selectedSupplier, Consumer<TypedValue> onSelected, String emptyMessage) {
+        return new ItemSelectorWidget.AsyncItemSource() {
+            private OptionCatalogCache.CoreKey key;
+            private OptionCatalogCache.CompletedCoreCatalog catalog;
+            private boolean loading;
+            private String status;
+            private String diagnostic;
+            private TypedValue selected;
+            private ItemSelectorWidget.AsyncItemSnapshot resident;
+
+            @Override
+            public ItemSelectorWidget.AsyncItemSnapshot snapshot() {
+                OptionCatalogLoader.CoreSnapshot next = catalogSupplier.get();
+                OptionCatalogCache.CoreKey nextKey = next != null && next.request() != null ? next.request().key() : null;
+                OptionCatalogCache.CompletedCoreCatalog nextCatalog = next != null ? next.catalog() : null;
+                boolean nextLoading = next != null && next.loading();
+                String nextStatus = next != null ? next.status() : "unavailable";
+                String nextDiagnostic = next != null ? next.diagnostic() : "Options Unavailable";
+                TypedValue nextSelected = selectedSupplier != null ? selectedSupplier.get() : null;
+                if (resident == null || !Objects.equals(key, nextKey) || !Objects.equals(catalog, nextCatalog)
+                    || loading != nextLoading || !Objects.equals(status, nextStatus)
+                    || !Objects.equals(diagnostic, nextDiagnostic) || !Objects.equals(selected, nextSelected)) {
+                    resident = next == null ? new ItemSelectorWidget.AsyncItemSnapshot(List.of(), false, nextDiagnostic)
+                        : OptionCatalogSelector.snapshot(next, () -> nextSelected, onSelected, emptyMessage);
+                    key = nextKey;
+                    catalog = nextCatalog;
+                    loading = nextLoading;
+                    status = nextStatus;
+                    diagnostic = nextDiagnostic;
+                    selected = nextSelected;
+                }
+                return resident;
+            }
+        };
+    }
+
     public static ItemSelectorWidget.AsyncItemSource legacySource(String serverId, String source,
         Supplier<? extends Collection<String>> fallbackSupplier, Supplier<String> selectedSupplier,
         Consumer<String> onSelected, String emptyMessage) {

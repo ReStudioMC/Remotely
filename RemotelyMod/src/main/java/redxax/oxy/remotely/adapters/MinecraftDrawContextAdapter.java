@@ -163,6 +163,11 @@ public class MinecraftDrawContextAdapter implements IDrawContext {
     }
 
     @Override
+    public boolean beginLayer() {
+        return ctx instanceof RematrixContext mc && mc.beginLayer();
+    }
+
+    @Override
     public void fill(int x1, int y1, int x2, int y2, int argb) {
         if (ctx instanceof RematrixContext mc) {
             mc.fill(x1, y1, x2, y2, argb);

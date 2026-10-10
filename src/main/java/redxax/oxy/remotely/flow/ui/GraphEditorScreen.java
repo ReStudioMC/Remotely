@@ -221,7 +221,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     private final ArrayDeque<CoreDeferredSave> coreDeferredSaves = new ArrayDeque<>();
     private boolean coreProjectionRefreshQueued;
     private final BrowserSafeState.ReferenceValue<CoreProjectionRequest> coreProjectionPendingBuild = new BrowserSafeState.ReferenceValue<>();
-    private final java.util.Queue<CoreProjectionBuildResult> coreProjectionBuildResults = BrowserSafeState.queue();
+    private final Queue<CoreProjectionBuildResult> coreProjectionBuildResults = BrowserSafeState.queue();
     private final BrowserSafeState.BooleanValue coreProjectionWorkerQueued = new BrowserSafeState.BooleanValue();
     private StudioDocument.EditorReadiness coreEditorReadiness = StudioDocument.EditorReadiness.unavailable();
     private CoreWidgetPublicationFailure coreWidgetPublicationFailure;
@@ -434,6 +434,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     private long lastWorkspaceAwarenessAt;
     private long lastWorkspaceAwarenessCaptureAt;
     private String lastWorkspaceAwareness = "";
+    private JsonObject lastWorkspaceAwarenessState;
     private long workspaceAwarenessPointerVersion;
     private long workspaceAwarenessSurfaceVersion = 1L;
     private long workspacePublishedAwarenessPointerVersion = -1L;
@@ -1819,11 +1820,12 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
     private record WorkspaceAwarenessPublicationJob(long generation, String type, String resourceId,
                                                      long pointerVersion, long surfaceVersion, JsonObject state,
-                                                     String previousSignature, boolean keepalive, ReSyncFlowClient client) {
+                                                     JsonObject previousState, String previousSignature, boolean keepalive,
+                                                     ReSyncFlowClient client) {
     }
 
     private record WorkspaceAwarenessPublicationResult(long generation, String type, String resourceId,
-                                                        long pointerVersion, long surfaceVersion, String signature,
+                                                        long pointerVersion, long surfaceVersion, JsonObject state, String signature,
                                                         boolean published, boolean failed) {
     }
 
@@ -4727,7 +4729,8 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         FlowNode source = result.graph().getNodes().get(nodeId);
         FlowNode target = graph.getNodes().get(nodeId);
         FlowNodeWidget widget = widgetCache.get(nodeId);
-        if (source == null || target == null || widget == null) {
+        GraphNode candidateNode = coreNode(session, nodeId);
+        if (source == null || target == null || widget == null || candidateNode == null) {
             return false;
         }
         coreProjectionChecksum = result.documentChecksum();
@@ -4738,8 +4741,8 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         graph.setResourceMutationId(result.graph().getResourceMutationId());
         target.setInputValues(source.getInputValues() != null
             ? new LinkedHashMap<>(source.getInputValues()) : new LinkedHashMap<>());
+        widget.configureCoreOptions(session.resource(), candidateNode.values());
         if (preview.elementId() != null) {
-            GraphNode candidateNode = coreNode(mutation.candidate(), nodeId);
             ReSyncGenericWidgetCapabilities.WidgetDefinition generic = genericWidgetDefinition(source.getType());
             CoreRepeatableUiProjection.Projection repeatables = candidateNode != null && generic != null
                 ? CoreRepeatableUiProjection.project(candidateNode, generic.definition())
@@ -13467,7 +13470,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         addDesignerWorkspaceAwareness(state, screen, editor, selector, mouseX, mouseY, graphPointer, workspaceWidgetStates);
         WorkspaceAwarenessPublicationJob job = new WorkspaceAwarenessPublicationJob(workspacePublicationGeneration,
             workspaceType, workspaceResourceId, workspaceAwarenessPointerVersion, workspaceAwarenessSurfaceVersion,
-            state, lastWorkspaceAwareness, keepalive, client);
+            state, lastWorkspaceAwarenessState, lastWorkspaceAwareness, keepalive, client);
         workspaceAwarenessPublicationInFlight = true;
         try {
             WORKSPACE_PUBLICATIONS.execute(() -> prepareWorkspaceAwarenessPublication(job));
@@ -13619,20 +13622,27 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         }
         WorkspaceAwarenessPublicationResult result;
         try {
-            String signature = GSON.toJson(job.state());
+            String signature = workspaceAwarenessSignature(job.state(), job.previousState(), job.previousSignature());
             boolean publish = job.keepalive() || !signature.equals(job.previousSignature());
             if (publish) {
+                if (job.generation() != workspacePublicationGeneration) {
+                    return;
+                }
                 job.client().publishWorkspaceAwareness(job.type(), job.resourceId(), job.state());
             }
             result = new WorkspaceAwarenessPublicationResult(job.generation(), job.type(), job.resourceId(),
-                job.pointerVersion(), job.surfaceVersion(), signature, publish, false);
+                job.pointerVersion(), job.surfaceVersion(), job.state(), signature, publish, false);
         } catch (RuntimeException exception) {
             result = new WorkspaceAwarenessPublicationResult(job.generation(), job.type(), job.resourceId(),
-                job.pointerVersion(), job.surfaceVersion(), job.previousSignature(), false, true);
+                job.pointerVersion(), job.surfaceVersion(), job.previousState(), job.previousSignature(), false, true);
         }
         if (job.generation() == workspacePublicationGeneration) {
             workspaceAwarenessPublicationResult.compareAndSet(null, result);
         }
+    }
+
+    static String workspaceAwarenessSignature(JsonObject state, JsonObject previous, String signature) {
+        return previous != null && previous.equals(state) ? signature : GSON.toJson(state);
     }
 
     private void applyWorkspaceAwarenessPublicationResult() {
@@ -13646,8 +13656,9 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         }
         workspacePublishedAwarenessPointerVersion = result.pointerVersion();
         workspacePublishedAwarenessSurfaceVersion = result.surfaceVersion();
+        lastWorkspaceAwarenessState = result.state();
+        lastWorkspaceAwareness = result.signature();
         if (result.published()) {
-            lastWorkspaceAwareness = result.signature();
             lastWorkspaceAwarenessAt = System.currentTimeMillis();
         }
     }
@@ -14379,6 +14390,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         workspacePublishedSelectorSnapshot = null;
         workspaceWidgetStatesSelector = null;
         lastWorkspaceAwareness = "";
+        lastWorkspaceAwarenessState = null;
         lastWorkspaceAwarenessAt = 0L;
         lastWorkspaceAwarenessCaptureAt = 0L;
         workspacePublishedAwarenessPointerVersion = -1L;
@@ -15179,7 +15191,13 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             int previousY = flowNodeWidget.getY();
             int previousWidth = flowNodeWidget.getWidth();
             int previousHeight = flowNodeWidget.getHeight();
-            flowNodeWidget.render(worldContext, worldMouseX, worldMouseY, delta);
+            worldContext.getMatrices().push();
+            try {
+                worldContext.beginLayer();
+                flowNodeWidget.render(worldContext, worldMouseX, worldMouseY, delta);
+            } finally {
+                worldContext.getMatrices().pop();
+            }
             queueGraphRenderGeometryIfBoundsChanged(graphRenderGeometryDirtyNodeIds, nodeId, previousX, previousY,
                 previousWidth, previousHeight, flowNodeWidget.getX(), flowNodeWidget.getY(), flowNodeWidget.getWidth(),
                 flowNodeWidget.getHeight());

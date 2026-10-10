@@ -53,6 +53,10 @@ class ScriptedReSyncTransport implements ReSyncFrameTransport {
         return open;
     }
 
+    void reopen() {
+        open = true;
+    }
+
     void receiveHandshake(String capabilities) {
         byte[] capabilityBytes = capabilities.getBytes(StandardCharsets.UTF_8);
         ByteBuffer payload = ByteBuffer.allocate(1 + Integer.BYTES * 7 + capabilityBytes.length);

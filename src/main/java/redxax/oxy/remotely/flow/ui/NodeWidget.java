@@ -1094,6 +1094,11 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
         }
         List<OptionCatalogLoader.Request> requests = new ArrayList<>();
         for (NodeDefinition.PinDefinition input : inputs) {
+            if (input.getOptionSourceRef() != null) {
+                coreOptionSelection(input.getOptionSourceRef()).ifPresent(selection ->
+                    OptionCatalogLoader.snapshot(selection.client(), selection.request()));
+                continue;
+            }
             String source = input != null ? input.getOptionsSource() : null;
             if (source == null || source.isBlank()) {
                 continue;
@@ -1399,8 +1404,8 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
             selector.set(new ItemSelectorWidget.Builder(screen)
                 .size(180, 220)
                 .dismissOnSelect(true)
-                .asyncItems(() -> refreshCoreOption(input.getOptionSourceRef()),
-                    () -> coreOptionSnapshot(input.getOptionSourceRef(), () -> corePinValue(input), value -> {
+                .asyncItems(null, OptionCatalogSelector.coreSource(
+                    () -> coreOptionCatalog(input.getOptionSourceRef()), () -> corePinValue(input), value -> {
                         CoreOptionSelection selection = coreOptionSelection(input.getOptionSourceRef()).orElse(null);
                         if (selection == null || !validCoreOption(input, selection.request(), value)) {
                             new Notification("Options", "Typed Option Is Incompatible", Notification.Type.ERROR);
@@ -1408,7 +1413,7 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
                         }
                         button.setMessage(typedValueLabel(value));
                         applyCoreTypedNodeValue(input, value);
-                    }))
+                    }, "No Options"))
                 .onClose(() -> screen.remove(selector.get()))
                 .build());
             selector.get().setSelectedItem(typedValueLabel(corePinValue(input)));
@@ -1438,8 +1443,7 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
             selector.set(new ItemSelectorWidget.Builder(screen)
                 .size(220, 240)
                 .dismissOnSelect(true)
-                .asyncItems(() -> refreshCoreOption(field.optionSource()),
-                    () -> coreOptionSnapshot(field.optionSource(),
+                .asyncItems(null, OptionCatalogSelector.coreSource(() -> coreOptionCatalog(field.optionSource()),
                         () -> exactValue.get() != null ? exactValue.get() : original.typedValue(), value -> {
                         CoreOptionSelection selection = coreOptionSelection(field.optionSource()).orElse(null);
                         if (selection == null || !validCoreOption(original.type(), selection.request(), value)) {
@@ -1450,7 +1454,7 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
                         state.set(null);
                         dirty.set(true);
                         button.setMessage(typedValueLabel(value));
-                    }))
+                    }, "No Options"))
                 .onClose(() -> screen.remove(selector.get()))
                 .build());
             selector.get().setSelectedItem(typedValueLabel(original.typedValue()));
@@ -1474,18 +1478,10 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
             });
     }
 
-    private void refreshCoreOption(ContractRef<InspectorFieldId> source) {
-        coreOptionSelection(source).ifPresent(selection ->
-            OptionCatalogLoader.refresh(selection.client(), selection.request()));
-    }
-
-    private ItemSelectorWidget.AsyncItemSnapshot coreOptionSnapshot(ContractRef<InspectorFieldId> source,
-        Supplier<TypedValue> selectedSupplier, Consumer<TypedValue> onSelected) {
+    private OptionCatalogLoader.CoreSnapshot coreOptionCatalog(ContractRef<InspectorFieldId> source) {
         CoreOptionSelection selection = coreOptionSelection(source).orElse(null);
         return selection == null
-            ? new ItemSelectorWidget.AsyncItemSnapshot(List.of(), false, "Options Unavailable")
-            : OptionCatalogSelector.snapshot(OptionCatalogLoader.snapshot(selection.client(), selection.request()),
-                selectedSupplier, onSelected, "No Options");
+            ? null : OptionCatalogLoader.snapshot(selection.client(), selection.request());
     }
 
     private OptionCatalogLoader.CoreQueryValues coreOptionQueryValues(InspectorOptionSource source) {
@@ -1551,6 +1547,11 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
 
     private TypedValue corePinValue(NodeDefinition.PinDefinition input) {
         CoreRepeatableUiProjection.PinEndpoint endpoint = input != null ? corePinEndpoint(pinId(input)) : null;
+        NodeValueMutation preview = endpoint != null
+            ? inputValuePreviews.get(coreMutationKey(endpoint.pinId(), endpoint.elementId())) : null;
+        if (preview != null && (preview.remove() || preview.exactValue() != null)) {
+            return preview.remove() ? null : preview.exactValue();
+        }
         PinValue value = endpoint == null ? null : endpoint.elementId() == null ? corePinValues.get(endpoint.pinId())
             : coreRepeatableGroup(endpoint).flatMap(group -> group.element(endpoint.elementId()))
                 .flatMap(element -> element.value(endpoint.pinId())).orElse(null);

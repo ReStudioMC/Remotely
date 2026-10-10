@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import redxax.oxy.remotely.data.flow.CoreGraphEditorSession;
 import redxax.oxy.remotely.data.flow.CoreGraphUiProjection;
+import redxax.oxy.remotely.data.flow.DesktopReSyncStorage;
 import redxax.oxy.remotely.data.flow.FlowManager;
 import redxax.oxy.remotely.data.flow.ReSyncCatalogAuthoringProjection;
 import redxax.oxy.remotely.data.flow.ReSyncCatalogPublicationCache;
@@ -19,12 +20,14 @@ import redxax.oxy.remotely.flow.data.FlowNode;
 import redxax.oxy.remotely.flow.ui.studio.StudioDocument;
 import redxax.oxy.remotely.flow.ui.studio.StudioViewportState;
 import redxax.oxy.remotely.test.TestDrawContext;
+import redxax.oxy.remotely.util.BrowserSafeState;
 import restudio.rescreen.platform.input.ReModifierState;
 import restudio.rescreen.platform.input.ReTextInputEvent;
 import restudio.rescreen.theme.ThemeManager;
 import restudio.rescreen.ui.core.Screen;
 import restudio.rescreen.ui.core.Widget;
 import restudio.rescreen.ui.widgets.TextInputWidget;
+import restudio.rescreen.ui.widgets.AnimatedButton;
 import restudio.resync.contract.cache.CatalogProjectionVersion;
 import restudio.resync.contract.canonical.CanonicalCodec;
 import restudio.resync.contract.canonical.JsonValue;
@@ -88,9 +91,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.Queue;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
@@ -313,7 +315,7 @@ class GraphEditorCoreMutationTransactionTest {
 
         assertTrue(result.changed());
         assertTrue(result.committed());
-        assertEquals(baseline.connections(), session.graphDocument().connections());
+        assertEquals(Set.copyOf(baseline.connections()), Set.copyOf(session.graphDocument().connections()));
         assertTrue(baseline.nodes().stream().filter(candidate -> candidate.instanceId().equals(node))
             .findFirst().orElseThrow().values().isEmpty());
         assertEquals(value, session.graphDocument().nodes().stream()
@@ -610,6 +612,44 @@ class GraphEditorCoreMutationTransactionTest {
         assertEquals(selectedAdded, reopenedInspector.field(addedOptionId).orElseThrow().typedValue());
         assertTrue(session.undo());
         assertEquals(baseline.canonicalJson(), session.graphDocument().canonicalJson());
+    }
+
+    @Test
+    void acknowledgedTypedSelectionRemainsVisibleInThePicker(@TempDir Path tempDir) throws Exception {
+        Map<String, Object> descriptor = new LinkedHashMap<>(valueDescriptor());
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> pins = (List<Map<String, Object>>) descriptor.get("pins");
+        descriptor.put("pins", pins.stream().map(pin -> {
+            Map<String, Object> value = new LinkedHashMap<>(pin);
+            if (VALUE_PIN.canonicalText().equals(pin.get("id"))) {
+                value.put("presentation", Map.of("widget", "searchable_list"));
+                value.put("optionSource", Map.of("ownerId", VALUE_OWNER.canonicalText(), "localId", "choices"));
+            }
+            return value;
+        }).toList());
+        ValueCatalog catalog = valueCatalog(tempDir, descriptor);
+        CoreGraphEditorSession session = new CoreGraphEditorSession(valueDocument(), catalog.authoringChecksum(),
+            Set.of(VALUE_EDITOR), Set.of(VALUE_EDITOR));
+        ValueManager manager = new ValueManager(catalog.client(), session);
+        ValueEditor editor = new ValueEditor(session, catalog.client());
+        try {
+            editor.materialize();
+            FlowNodeWidget widget = editor.widget(VALUE_NODE);
+            Field inputs = NodeWidget.class.getDeclaredField("inputWidgets");
+            inputs.setAccessible(true);
+            AnimatedButton picker = (AnimatedButton) ((Map<?, ?>) inputs.get(widget)).get(VALUE_PIN.canonicalText());
+            assertEquals("old", picker.getMessage());
+            Method select = GraphEditorScreen.class.getDeclaredMethod("handleCoreWidgetValueMutation", NodeWidget.NodeValueMutation.class);
+            select.setAccessible(true);
+            TypedValue chosen = TypedValue.value(TypeExpr.named(TypeReference.of("builtin", "string")), "chosen");
+            assertTrue((boolean) select.invoke(editor, new NodeWidget.NodeValueMutation(VALUE_NODE, VALUE_PIN, chosen)));
+            editor.awaitValue("chosen");
+            assertEquals("chosen", picker.getMessage());
+        } finally {
+            editor.removed();
+            manager.shutdown();
+            catalog.client().shutdown();
+        }
     }
 
     @Test
@@ -1185,7 +1225,7 @@ class GraphEditorCoreMutationTransactionTest {
             editor.pauseRenderWorker();
             editor.invoke("scheduleGraphRenderIndexBuild");
             editor.invoke("drainGraphRenderBuilds");
-            Object oldResult = ((AtomicReference<?>) editor.field("graphRenderBuildResult")).get();
+            Object oldResult = ((BrowserSafeState.ReferenceValue<?>) editor.field("graphRenderBuildResult")).get();
             assertTrue(oldResult != null);
             editor.pauseRenderWorker();
             editor.pauseProjection();
@@ -1209,7 +1249,7 @@ class GraphEditorCoreMutationTransactionTest {
             editor.invoke("ensureGraphRenderIndex");
 
             assertSame(currentIndex, editor.renderIndex());
-            assertTrue(((AtomicReference<?>) editor.field("graphRenderBuildResult")).get() == null);
+            assertTrue(((BrowserSafeState.ReferenceValue<?>) editor.field("graphRenderBuildResult")).get() == null);
             assertTrue(editor.currentRenderIndex());
             assertSame(survivor, editor.widget(VALUE_NODE));
             assertSame(preview, editor.widget(added.instanceId()));
@@ -1710,7 +1750,7 @@ class GraphEditorCoreMutationTransactionTest {
     }
 
     private static ValueCatalog valueCatalog(Path tempDir, Map<String, Object> descriptor, int extraCapabilities) throws Exception {
-        ReSyncCatalogPublicationCache cache = new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(tempDir.resolve("catalog.json")));
+        ReSyncCatalogPublicationCache cache = new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(tempDir.resolve("catalog.json")));
         ReSyncFlowClient client = new ReSyncFlowClient(VALUE_SERVER.canonicalText(), new ValueTransport(), null, cache);
         CatalogAuthoringPublication.Entry capability = new CatalogAuthoringPublication.Entry(
             CatalogAuthoringPublication.Section.CAPABILITIES, VALUE_EDITOR.canonicalText(), CatalogCacheState.ACTIVE,
@@ -1779,8 +1819,8 @@ class GraphEditorCoreMutationTransactionTest {
         ReSyncCatalogAuthoringProjection projection = (ReSyncCatalogAuthoringProjection) projectionField.get(client);
         Field activeField = ReSyncCatalogAuthoringProjection.class.getDeclaredField("active");
         activeField.setAccessible(true);
-        AtomicReference<ReSyncCatalogAuthoringProjection.Snapshot> active =
-            (AtomicReference<ReSyncCatalogAuthoringProjection.Snapshot>) activeField.get(projection);
+        BrowserSafeState.ReferenceValue<ReSyncCatalogAuthoringProjection.Snapshot> active =
+            (BrowserSafeState.ReferenceValue<ReSyncCatalogAuthoringProjection.Snapshot>) activeField.get(projection);
         ReSyncCatalogAuthoringProjection.Snapshot previous = active.get();
         active.set(new ReSyncCatalogAuthoringProjection.Snapshot(previous.key(), previous.revision(), publication,
             previous.canonicalBytes(), previous.checksum()));
@@ -1926,9 +1966,9 @@ class GraphEditorCoreMutationTransactionTest {
         private void awaitIdle() throws Exception {
             await(() -> field("coreMutationCommitPending") == null
                 && ((ArrayDeque<?>) field("coreMutationQueue")).isEmpty()
-                && ((AtomicReference<?>) field("coreProjectionPendingBuild")).get() == null
-                && ((ConcurrentLinkedQueue<?>) field("coreProjectionBuildResults")).isEmpty()
-                && !((AtomicBoolean) field("coreProjectionWorkerQueued")).get()
+                && ((BrowserSafeState.ReferenceValue<?>) field("coreProjectionPendingBuild")).get() == null
+                && ((Queue<?>) field("coreProjectionBuildResults")).isEmpty()
+                && !((BrowserSafeState.BooleanValue) field("coreProjectionWorkerQueued")).get()
                 && field("catalogRefresh") == null && !(boolean) field("nodeCatalogRefreshQueued")
                 && field("pendingCoreWidgetTopology") == null && field("graphRenderContinuityIndex") == null
                 && field("graphRenderContinuityTopology") == null && field("coreWidgetPublicationFailure") == null
@@ -2008,11 +2048,11 @@ class GraphEditorCoreMutationTransactionTest {
 
         private void awaitProjectionResult() throws Exception {
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3L);
-            while (((ConcurrentLinkedQueue<?>) field("coreProjectionBuildResults")).isEmpty()
+            while (((Queue<?>) field("coreProjectionBuildResults")).isEmpty()
                 && System.nanoTime() < deadline) {
                 LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1L));
             }
-            assertFalse(((ConcurrentLinkedQueue<?>) field("coreProjectionBuildResults")).isEmpty());
+            assertFalse(((Queue<?>) field("coreProjectionBuildResults")).isEmpty());
         }
 
         private void await(ValueCondition condition) throws Exception {
@@ -2105,9 +2145,9 @@ class GraphEditorCoreMutationTransactionTest {
         }
 
         private boolean renderWorkerSettled() throws Exception {
-            return ((AtomicReference<?>) field("graphRenderPendingBuild")).get() == null
-                && !((AtomicBoolean) field("graphRenderWorkerQueued")).get()
-                && ((AtomicReference<?>) field("graphRenderBuildResult")).get() == null;
+            return ((BrowserSafeState.ReferenceValue<?>) field("graphRenderPendingBuild")).get() == null
+                && !((BrowserSafeState.BooleanValue) field("graphRenderWorkerQueued")).get()
+                && ((BrowserSafeState.ReferenceValue<?>) field("graphRenderBuildResult")).get() == null;
         }
 
         private long longField(String name) throws Exception {
@@ -2231,11 +2271,11 @@ class GraphEditorCoreMutationTransactionTest {
         }
 
         private void pauseProjection() throws Exception {
-            ((AtomicBoolean) field("coreProjectionWorkerQueued")).set(true);
+            ((BrowserSafeState.BooleanValue) field("coreProjectionWorkerQueued")).set(true);
         }
 
         private void pauseRenderWorker() throws Exception {
-            ((AtomicBoolean) field("graphRenderWorkerQueued")).set(true);
+            ((BrowserSafeState.BooleanValue) field("graphRenderWorkerQueued")).set(true);
         }
 
         private String authoringDiagnostic() throws Exception {

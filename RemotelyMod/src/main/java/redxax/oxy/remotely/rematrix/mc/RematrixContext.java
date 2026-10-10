@@ -2709,6 +2709,15 @@ public final class RematrixContext implements ReContext {
         //#endif
     }
 
+    public boolean beginLayer() {
+        //#if MC >= 1.21.6 || MC >= 26.1
+        graphics.nextStratum();
+        return true;
+        //#else
+        //$$ return false;
+        //#endif
+    }
+
     public void advanceRenderLayer() {
         //#if MC >= 1.21.6 || MC >= 26.1
         graphics.nextStratum();

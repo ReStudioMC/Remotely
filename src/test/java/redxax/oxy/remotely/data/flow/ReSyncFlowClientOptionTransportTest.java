@@ -3,6 +3,11 @@ package redxax.oxy.remotely.data.flow;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterEach;
+import redxax.oxy.remotely.util.TaskSchedulers;
+import restudio.rebase.platform.jvm.JvmTaskScheduler;
+import restudio.rescreen.platform.TaskScheduler;
 import org.junit.jupiter.api.io.TempDir;
 import restudio.resync.contract.cache.CatalogProjectionVersion;
 import restudio.resync.flow.cache.CatalogAuthoringPublication;
@@ -70,12 +75,28 @@ class ReSyncFlowClientOptionTransportTest {
     private static final CatalogBinding BINDING = new CatalogBinding(7L,
         new ContentHash("4".repeat(64)), new ContentHash("5".repeat(64)));
 
+    private TaskScheduler previousScheduler;
+    private JvmTaskScheduler scheduler;
+
+    @BeforeEach
+    void installScheduler() {
+        previousScheduler = TaskSchedulers.current();
+        scheduler = new JvmTaskScheduler();
+        TaskSchedulers.configure(scheduler);
+    }
+
+    @AfterEach
+    void restoreScheduler() {
+        TaskSchedulers.configure(previousScheduler);
+        scheduler.close();
+    }
+
     @Test
     void automaticDocumentRequestDropsResourceForEmptyContextAndSendsOptionQuery(@TempDir Path tempDirectory)
         throws Exception {
         ScriptedReSyncTransport transport = new ScriptedReSyncTransport();
         ReSyncFlowClient client = new ReSyncFlowClient(SERVER.canonicalText(), transport, null,
-            new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(tempDirectory.resolve("catalog-publication-cache.json"))));
+            new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(tempDirectory.resolve("catalog-publication-cache.json"))));
         CatalogCachePublication publication = publication();
         ContractRef<InspectorFieldId> source = ContractRef.of(OWNER, InspectorFieldId.of("resources"));
         ServerResourceLocator document = new ServerResourceLocator(SERVER,
@@ -134,7 +155,7 @@ class ReSyncFlowClientOptionTransportTest {
         throws Exception {
         ScriptedReSyncTransport transport = new ScriptedReSyncTransport();
         ReSyncFlowClient client = new ReSyncFlowClient(SERVER.canonicalText(), transport, null,
-            new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(tempDirectory.resolve("option-version-cache.json"))));
+            new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(tempDirectory.resolve("option-version-cache.json"))));
         CatalogCachePublication publication = publication();
         try {
             client.connect().join();
@@ -182,7 +203,7 @@ class ReSyncFlowClientOptionTransportTest {
     void qualifiedOnlyOptionQueryCapabilityIsNotAccepted(@TempDir Path tempDirectory) throws Exception {
         ScriptedReSyncTransport transport = new ScriptedReSyncTransport();
         ReSyncFlowClient client = new ReSyncFlowClient(SERVER.canonicalText(), transport, null,
-            new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(tempDirectory.resolve("qualified-option-query-cache.json"))));
+            new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(tempDirectory.resolve("qualified-option-query-cache.json"))));
         try {
             client.connect().join();
             transport.receiveHandshake(qualifiedOnlyCapabilities(publication().key()));
@@ -328,10 +349,19 @@ class ReSyncFlowClientOptionTransportTest {
             assertFalse(OptionCatalogCache.getInstance().coreSnapshot(request.key()).loading());
 
             assertTrue(client.requestCoreOptionCatalog(request, true));
+            ProtocolEnvelope<Map<String, Object>> unsupportedRequest = lastEnvelope(transport);
+            transport.receiveEnvelope(rejection(unsupportedRequest, request.authorityEpoch(),
+                ProtocolRejectionCode.UNSUPPORTED_GENERATION), 4);
+            ReSyncFlowClientTestHarness.drain(client);
+            assertEquals("unavailable", OptionCatalogLoader.snapshot(client, request).status());
+            assertEquals("unavailable", OptionCatalogLoader.snapshot(client, request).status());
+            assertEquals(unsupportedRequest, lastEnvelope(transport));
+
+            assertTrue(client.requestCoreOptionCatalog(request, true));
             ProtocolEnvelope<Map<String, Object>> wrongAuthorityRequest = lastEnvelope(transport);
             transport.receiveEnvelope(response(wrongAuthorityRequest,
                 page(request, "wrong-authority", null, true, 1L, request.source().invalidationKey()),
-                request.authorityEpoch() + 1L), 4);
+                request.authorityEpoch() + 1L), 5);
             ReSyncFlowClientTestHarness.drain(client);
             assertEquals("unavailable", OptionCatalogCache.getInstance().coreSnapshot(request.key()).status());
         } finally {
@@ -365,7 +395,7 @@ class ReSyncFlowClientOptionTransportTest {
     }
 
     @Test
-    void disconnectRetainsCompletedPageAsStaleAndFailsRefresh(@TempDir Path tempDirectory) throws Exception {
+    void reconnectRetriesRetiredRefreshAndIgnoresOldResponse(@TempDir Path tempDirectory) throws Exception {
         ScriptedReSyncTransport transport = new ScriptedReSyncTransport();
         ReSyncFlowClient client = connected(transport, publication(), tempDirectory.resolve("disconnect-cache.json"));
         try {
@@ -384,7 +414,8 @@ class ReSyncFlowClientOptionTransportTest {
             transport.close();
             OptionCatalogCache.CoreCatalogSnapshot snapshot = OptionCatalogCache.getInstance().coreSnapshot(request.key());
             assertSame(retained, snapshot.catalog());
-            assertEquals("unavailable", snapshot.status());
+            assertEquals("stale", snapshot.status());
+            assertEquals("unavailable", OptionCatalogLoader.snapshot(client, request).status());
             transport.receiveEnvelope(response(refreshRequest,
                 page(request, "stale-generation", null, true, 3L, request.source().invalidationKey()),
                 request.authorityEpoch()), 4);
@@ -392,7 +423,24 @@ class ReSyncFlowClientOptionTransportTest {
             OptionCatalogCache.CoreCatalogSnapshot afterLateResponse = OptionCatalogCache.getInstance()
                 .coreSnapshot(request.key());
             assertSame(retained, afterLateResponse.catalog());
-            assertEquals("unavailable", afterLateResponse.status());
+            assertEquals("stale", afterLateResponse.status());
+
+            transport.reopen();
+            client.connect().join();
+            transport.receiveHandshake(capabilities(publication().key()));
+            transport.receiveCatalogPublication(new CatalogCachePublicationCodec().encodeBytes(publication()), 2);
+            awaitAuthoring(client);
+            OptionCatalogLoader.CoreRequest reconnected = automaticRequest(client, "resources");
+            assertEquals(request.key(), reconnected.key());
+            assertTrue(OptionCatalogLoader.snapshot(client, reconnected).loading());
+            ProtocolEnvelope<Map<String, Object>> freshRequest = lastEnvelope(transport);
+            assertNotEquals(refreshRequest.requestId(), freshRequest.requestId());
+            transport.receiveEnvelope(response(freshRequest,
+                page(reconnected, "reconnected", null, true, 3L, reconnected.source().invalidationKey()),
+                reconnected.authorityEpoch()), 3);
+            ReSyncFlowClientTestHarness.drain(client);
+            assertEquals("reconnected", OptionCatalogLoader.snapshot(client, reconnected).items().getFirst().label());
+            assertEquals("available", OptionCatalogLoader.snapshot(client, reconnected).status());
         } finally {
             client.shutdown();
         }
@@ -628,7 +676,7 @@ class ReSyncFlowClientOptionTransportTest {
     private static ReSyncFlowClient connected(ScriptedReSyncTransport transport,
                                                CatalogCachePublication publication, Path cachePath) throws Exception {
         ReSyncFlowClient client = new ReSyncFlowClient(SERVER.canonicalText(), transport, null,
-            new ReSyncCatalogPublicationCache(redxax.oxy.remotely.data.flow.DesktopReSyncStorage.fromKey(cachePath)));
+            new ReSyncCatalogPublicationCache(DesktopReSyncStorage.fromKey(cachePath)));
         try {
             client.connect().join();
             transport.receiveHandshake(capabilities(publication.key()));
@@ -694,8 +742,13 @@ class ReSyncFlowClientOptionTransportTest {
 
     private static ProtocolEnvelope<Map<String, Object>> rejection(ProtocolEnvelope<Map<String, Object>> request,
                                                                     long authorityEpoch) {
+        return rejection(request, authorityEpoch, ProtocolRejectionCode.RESOURCE_READ_UNAVAILABLE);
+    }
+
+    private static ProtocolEnvelope<Map<String, Object>> rejection(ProtocolEnvelope<Map<String, Object>> request,
+                                                                    long authorityEpoch, ProtocolRejectionCode code) {
         Map<String, Object> values = Map.of(
-            "rejectionCode", ProtocolRejectionCode.RESOURCE_READ_UNAVAILABLE.wireValue(),
+            "rejectionCode", code.wireValue(),
             "rejectionMessage", "Category catalog unavailable",
             "requestId", request.requestId().toString(),
             "correlationId", request.correlationId().toString(),

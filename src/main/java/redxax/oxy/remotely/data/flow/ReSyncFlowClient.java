@@ -1343,7 +1343,7 @@ public class ReSyncFlowClient {
         }
         try {
             return activeAuthoringSnapshot().flatMap(snapshot ->
-                AdvertisedOptionSourceResolver.resolve(snapshot.publication(), sourceReference)
+                catalogAuthoringProjection.optionSource(snapshot, sourceReference)
                     .map(AdvertisedOptionSourceResolver.Resolved::source));
         } catch (RuntimeException exception) {
             logger().operation("Option Source").with("source", sourceReference.canonicalText())
@@ -1387,8 +1387,8 @@ public class ReSyncFlowClient {
             }
             ReSyncCatalogAuthoringProjection.Snapshot snapshot = active.orElseThrow();
             try {
-                AdvertisedOptionSourceResolver.Resolved resolved = AdvertisedOptionSourceResolver
-                    .resolve(snapshot.publication(), sourceReference).orElse(null);
+                AdvertisedOptionSourceResolver.Resolved resolved = catalogAuthoringProjection
+                    .optionSource(snapshot, sourceReference).orElse(null);
                 if (resolved == null) {
                     return Optional.empty();
                 }
@@ -1474,7 +1474,7 @@ public class ReSyncFlowClient {
                 return false;
             }
             try {
-                return AdvertisedOptionSourceResolver.resolve(snapshot.publication(), request.sourceReference())
+                return catalogAuthoringProjection.optionSource(snapshot, request.sourceReference())
                     .filter(resolved -> resolved.source().equals(request.source()))
                     .isPresent();
             } catch (RuntimeException exception) {
@@ -1931,8 +1931,7 @@ public class ReSyncFlowClient {
         cancelNodeRegistryRetry();
         List<PendingCoreOptionRequest> retired;
         synchronized (coreOptionDispatchLock) {
-            retired = retirePendingCoreOptionRequests(
-                "The catalog publication changed before the option query completed");
+            retired = retirePendingCoreOptionRequests();
             coreOptionInvalidationSequences.clear();
             synchronized (catalogLifecycleLock) {
                 catalogAuthoringProjection.expectedServerId()
@@ -4283,7 +4282,7 @@ public class ReSyncFlowClient {
             return false;
         }
         try {
-            return AdvertisedOptionSourceResolver.resolve(snapshot.publication(), invalidation.sourceRef())
+            return catalogAuthoringProjection.optionSource(snapshot, invalidation.sourceRef())
                 .filter(resolved -> resolved.source().capability().equals(invalidation.query()))
                 .isPresent();
         } catch (RuntimeException exception) {
@@ -4372,7 +4371,9 @@ public class ReSyncFlowClient {
                 return;
             }
             String diagnostic = rejectionMessage(envelope);
-            boolean retryable = rejectionRetryable(envelope);
+            ProtocolRejectionCode code = rejectionCode(envelope);
+            boolean retryable = code != ProtocolRejectionCode.UNSUPPORTED_GENERATION
+                && code.retryability() != ProtocolRetryability.NEVER;
             logger().operation("Option Query").with("source", pending.request().sourceReference().canonicalText())
                 .with("requestId", pending.requestId()).with("retryable", retryable)
                 .with("reason", diagnostic).warn("Option catalog query was rejected");
@@ -4422,12 +4423,12 @@ public class ReSyncFlowClient {
         }
     }
 
-    private List<PendingCoreOptionRequest> retirePendingCoreOptionRequests(String diagnostic) {
+    private List<PendingCoreOptionRequest> retirePendingCoreOptionRequests() {
         List<PendingCoreOptionRequest> retired = new ArrayList<>();
         OptionCatalogCache cache = OptionCatalogCache.getInstance();
         for (PendingCoreOptionRequest pending : List.copyOf(pendingCoreOptionRequests.values())) {
             if (pendingCoreOptionRequests.remove(pending.requestId(), pending)) {
-                cache.fail(pending.request().key(), diagnostic);
+                cache.retry(pending.request().key());
                 retired.add(pending);
             }
         }
@@ -4435,7 +4436,7 @@ public class ReSyncFlowClient {
     }
 
     private List<PendingCoreOptionRequest> retirePendingCoreOptionRequestsExcept(
-        ReSyncCatalogAuthoringProjection.Snapshot publication, long authorityEpoch, String diagnostic) {
+        ReSyncCatalogAuthoringProjection.Snapshot publication, long authorityEpoch) {
         List<PendingCoreOptionRequest> retired = new ArrayList<>();
         OptionCatalogCache cache = OptionCatalogCache.getInstance();
         for (PendingCoreOptionRequest pending : List.copyOf(pendingCoreOptionRequests.values())) {
@@ -4445,7 +4446,7 @@ public class ReSyncFlowClient {
                 && key.publicationChecksum().equals(publication.checksum())
                 && key.publicationRevision() == publication.revision() && key.authorityEpoch() == authorityEpoch;
             if (!current && pendingCoreOptionRequests.remove(pending.requestId(), pending)) {
-                cache.fail(key, diagnostic);
+                cache.retry(key);
                 retired.add(pending);
             }
         }
@@ -4607,6 +4608,10 @@ public class ReSyncFlowClient {
     }
 
     private boolean rejectionRetryable(ProtocolEnvelope<Map<String, Object>> envelope) {
+        return rejectionCode(envelope).retryability() != ProtocolRetryability.NEVER;
+    }
+
+    private ProtocolRejectionCode rejectionCode(ProtocolEnvelope<Map<String, Object>> envelope) {
         Object value = null;
         if (envelope.body() instanceof ProtocolBody.ControlResponse response) {
             value = response.values().get("rejectionCode");
@@ -4615,12 +4620,12 @@ public class ReSyncFlowClient {
             value = envelope.unknown().get("rejectionCode");
         }
         if (!(value instanceof String text) || text.isBlank()) {
-            return false;
+            return ProtocolRejectionCode.UNKNOWN_STATUS;
         }
         try {
-            return ProtocolRejectionCode.fromWire(text).retryability() != ProtocolRetryability.NEVER;
+            return ProtocolRejectionCode.fromWire(text);
         } catch (IllegalArgumentException exception) {
-            return false;
+            return ProtocolRejectionCode.UNKNOWN_STATUS;
         }
     }
 
@@ -9100,14 +9105,12 @@ public class ReSyncFlowClient {
                         .orElse(null);
                     if (installedAuthoring != null) {
                         retiredOptionRequests = retirePendingCoreOptionRequestsExcept(installedAuthoring,
-                            admission.authorityEpoch(),
-                            "The catalog publication changed before the option query completed");
+                            admission.authorityEpoch());
                         OptionCatalogCache.getInstance().retainCorePublication(admission.expectedServer(),
                             installedAuthoring.publication().binding(), installedAuthoring.publication().contractVersion(),
                             installedAuthoring.checksum(), installedAuthoring.revision(), admission.authorityEpoch());
                     } else {
-                        retiredOptionRequests = retirePendingCoreOptionRequests(
-                            "The catalog publication no longer provides option queries");
+                        retiredOptionRequests = retirePendingCoreOptionRequests();
                         OptionCatalogCache.getInstance().purgeCoreServer(admission.expectedServer());
                     }
                     if (optionAuthorityChanged) {

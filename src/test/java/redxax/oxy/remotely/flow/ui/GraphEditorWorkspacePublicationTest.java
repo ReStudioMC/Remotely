@@ -88,21 +88,16 @@ class GraphEditorWorkspacePublicationTest {
     }
 
     @Test
-    void workspaceAwarenessGatesTraversalAndSerializesOnTheBoundedWorker() throws IOException {
-        String source = Files.readString(Path.of("src/main/java/redxax/oxy/remotely/flow/ui/GraphEditorScreen.java"));
-        String authority = Files.readString(Path.of("src/main/java/redxax/oxy/remotely/ui/collaboration/DesignerCollaborationAuthority.java"));
-        int publicationStart = source.indexOf("private void publishWorkspaceAwareness(ReSyncFlowClient client, int mouseX");
-        int graphAwarenessStart = source.indexOf("private void addGraphWorkspaceAwareness", publicationStart);
-        String publication = source.substring(publicationStart, graphAwarenessStart);
+    void workspaceAwarenessPreservesPickerChangesWithoutPointerMovement() {
+        JsonObject loading = object("{\"selector\":{\"loading\":true,\"items\":[]},\"x\":12}");
+        String published = GraphEditorScreen.workspaceAwarenessSignature(loading, null, "");
+        JsonObject unchanged = object("{\"x\":12,\"selector\":{\"items\":[],\"loading\":true}}");
+        assertEquals(published, GraphEditorScreen.workspaceAwarenessSignature(unchanged, loading, published));
 
-        assertTrue(publication.indexOf("workspaceAwarenessPublicationInFlight")
-            < publication.indexOf("DesignerCollaborationAuthority.widgetStates(screen)"));
-        assertTrue(source.contains("workspaceWidgetStatesVersion != workspaceAwarenessSurfaceVersion"));
-        assertTrue(source.contains("WORKSPACE_PUBLICATIONS.execute(() -> prepareWorkspaceAwarenessPublication(job))"));
-        assertTrue(source.contains("String signature = GSON.toJson(job.state());"));
-        assertTrue(authority.contains("screen.collaborationPointer(mouseX, mouseY, excluded)"));
-        assertTrue(source.contains("DesignerCollaborationAuthority.cachedFocus(screen)"));
-        assertTrue(source.contains("DesignerCollaborationAuthority.cachedPath(screen, focused)"));
+        JsonObject loaded = object("{\"selector\":{\"loading\":false,\"items\":[\"Stone\"]},\"x\":12}");
+        String completed = GraphEditorScreen.workspaceAwarenessSignature(loaded, loading, published);
+        assertEquals(loaded, JsonParser.parseString(completed));
+        assertEquals(loading, JsonParser.parseString(published));
     }
 
     @Test

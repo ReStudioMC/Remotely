@@ -21,6 +21,8 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoreOptionCatalogSelectorTest {
     @Test
@@ -45,12 +47,20 @@ class CoreOptionCatalogSelectorTest {
             completed.items(), false, "available", "");
         AtomicReference<TypedValue> selected = new AtomicReference<>();
 
-        ItemSelectorWidget.AsyncItemSnapshot snapshot = OptionCatalogSelector.snapshot(catalog, () -> null,
+        AtomicReference<OptionCatalogLoader.CoreSnapshot> current = new AtomicReference<>(catalog);
+        ItemSelectorWidget.AsyncItemSource sourceItems = OptionCatalogSelector.coreSource(current::get, () -> null,
             selected::set, "No Resources");
+        ItemSelectorWidget.AsyncItemSnapshot snapshot = sourceItems.snapshot();
         snapshot.items().getFirst().action().run();
 
         assertSame(availableValue, selected.get());
         assertNull(snapshot.items().getLast().action());
+        assertSame(snapshot, sourceItems.snapshot());
+        current.set(new OptionCatalogLoader.CoreSnapshot(null, completed, completed.items(), false,
+            "unavailable", "Disconnected"));
+        assertEquals("Disconnected", sourceItems.snapshot().emptyMessage());
+        current.set(null);
+        assertTrue(sourceItems.snapshot().items().isEmpty());
     }
 
 }
