@@ -89,8 +89,22 @@ public class MinecraftDrawContextAdapter implements IDrawContext {
     @Override public void clearScissor() { ctx.scissors().clear(); }
 
     @Override
+    public boolean scissorFollowsMatrices() {
+        return true;
+    }
+
+    @Override
     public void enableScissor(float x1, float y1, float x2, float y2) {
-        ctx.scissors().enable(x1, y1, x2, y2);
+        float ax = transform.m00() * x1 + transform.m10() * y1 + transform.m30();
+        float ay = transform.m01() * x1 + transform.m11() * y1 + transform.m31();
+        float bx = transform.m00() * x2 + transform.m10() * y1 + transform.m30();
+        float by = transform.m01() * x2 + transform.m11() * y1 + transform.m31();
+        float cx = transform.m00() * x2 + transform.m10() * y2 + transform.m30();
+        float cy = transform.m01() * x2 + transform.m11() * y2 + transform.m31();
+        float dx = transform.m00() * x1 + transform.m10() * y2 + transform.m30();
+        float dy = transform.m01() * x1 + transform.m11() * y2 + transform.m31();
+        ctx.scissors().enable(Math.min(Math.min(ax, bx), Math.min(cx, dx)), Math.min(Math.min(ay, by), Math.min(cy, dy)),
+            Math.max(Math.max(ax, bx), Math.max(cx, dx)), Math.max(Math.max(ay, by), Math.max(cy, dy)));
     }
 
     @Override
