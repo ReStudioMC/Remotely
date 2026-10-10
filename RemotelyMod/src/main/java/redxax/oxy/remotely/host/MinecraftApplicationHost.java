@@ -1,5 +1,6 @@
 package redxax.oxy.remotely.host;
 
+import net.minecraft.SharedConstants;
 import net.minecraft.client.Minecraft;
 //#if MC >= 1.21.11 || MC >= 26.1
 import static net.minecraft.resources.Identifier.fromNamespaceAndPath;
@@ -299,7 +300,11 @@ public class MinecraftApplicationHost extends ReScreenApplicationHost {
 
     @Override
     public String getGameVersion() {
-        return Minecraft.getInstance().getLaunchedVersion();
+        //#if MC >= 1.21.6 || MC >= 26.1
+        return SharedConstants.getCurrentVersion().name();
+        //#else
+        //$$ return SharedConstants.getCurrentVersion().getName();
+        //#endif
     }
 
     @Override
