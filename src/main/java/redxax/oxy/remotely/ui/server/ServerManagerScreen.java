@@ -895,7 +895,10 @@ public class ServerManagerScreen extends DesktopShellScreen {
             return false;
         }
         String key = getWidgetKey(instance);
-        for (AnimatedWidget widget : activeTab.getContainer().getWidgets()) {
+        List<AnimatedWidget> icons = activeTab.getContainer().getWidgets().stream()
+                .<AnimatedWidget>flatMap(widget -> widget instanceof DesktopGroupWidget<?> group ? group.getMembers().stream() : Stream.of(widget))
+                .toList();
+        for (AnimatedWidget widget : icons) {
             if (!(widget instanceof DesktopIconWidget<?> rawWidget) || !(rawWidget.getItem() instanceof ServerModels.ClientServerView item)) {
                 continue;
             }
@@ -907,9 +910,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
             contextMenuRequestGeneration++;
             desktopIcon.setItem(instance);
             desktopIcon.accentType = getDesktopIconAccent(instance, false);
-            Object iconValue = iconTarget(instance);
-            iconManager.loadIconIdAsync(iconValue, desktopIcon::setIcon);
-            iconManager.loadRemoteIconAsync(iconValue, () -> iconManager.loadIconIdAsync(iconValue, desktopIcon::setIcon));
+            refreshServerIcon(desktopIcon);
             return true;
         }
         return false;
@@ -1093,6 +1094,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
                 existing.setMessage(serverDisplayLabel(server));
                 existing.setHint(serverDisplayHint(server));
                 existing.accentType = getDesktopIconAccent(server, false);
+                refreshServerIcon(existing);
                 toKeep.add(existing);
                 existingWidgets.remove(getWidgetKey(server));
             } else {
@@ -1269,15 +1271,10 @@ public class ServerManagerScreen extends DesktopShellScreen {
         String label = isCreate || info == null ? "Create" : serverDisplayLabel(info);
         Object iconValue = isCreate || info == null ? null : iconTarget(info);
         Identifier iconId = iconValue == null ? null : iconManager.getQuickIconId(iconValue);
-        DesktopIconWidget.Builder<ServerModels.ClientServerView> builder = iconId != null
-            ? new DesktopIconWidget.Builder<>(info, iconId, label)
-            : new DesktopIconWidget.Builder<>(info, (Identifier) null, label);
-        DesktopIconWidget<ServerModels.ClientServerView> widget = builder
+        DesktopIconWidget<ServerModels.ClientServerView> widget = new DesktopIconWidget.Builder<>(info, (Identifier) null, label)
             .onClick(this::onDesktopIconClick)
             .build();
-        if (iconId == null) {
-            widget.setIcon(serverIcon);
-        }
+        widget.setGeneratedIcon(iconId == null ? serverIcon : iconId);
         widget.accentType = getDesktopIconAccent(info, isCreate);
         if (isCreate || info == null) {
             return widget;
@@ -1307,9 +1304,26 @@ public class ServerManagerScreen extends DesktopShellScreen {
         widget.addTileAction(() -> "Server Settings", () -> settingsIcon,
                 () -> !serverHost().isPanel(widget.getItem()) && serverHost().serverActionAvailability(widget.getItem(), ServerScreenHost.Action.SERVER_CONFIGURATION).available(),
                 () -> serverHost().openServerConfiguration(this, widget.getItem()));
-        iconManager.loadIconIdAsync(iconValue, widget::setIcon);
-        iconManager.loadRemoteIconAsync(iconValue, () -> iconManager.loadIconIdAsync(iconValue, widget::setIcon));
+        refreshServerIcon(widget);
         return widget;
+    }
+
+    private void refreshServerIcon(DesktopIconWidget<ServerModels.ClientServerView> widget) {
+        ServerModels.ClientServerView server = widget.getItem();
+        Object target = iconTarget(server);
+        String key = getWidgetKey(server);
+        long generation = callbackGeneration;
+        BooleanSupplier current = () -> generation == callbackGeneration && widget.getIconId() != null
+                && widget.getItem() != null && key.equals(getWidgetKey(widget.getItem()));
+        Consumer<Identifier> loaded = icon -> {
+            if (!current.getAsBoolean()) return;
+            Identifier resolved = icon == null ? serverIcon : icon;
+            if (!Objects.equals(widget.getIconId(), resolved)) widget.setGeneratedIcon(resolved);
+        };
+        iconManager.loadIconIdAsync(target, loaded);
+        iconManager.loadRemoteIconAsync(target, () -> {
+            if (current.getAsBoolean()) iconManager.loadIconIdAsync(target, loaded);
+        });
     }
 
     private Object iconTarget(ServerModels.ClientServerView server) {
