@@ -25,6 +25,11 @@ public final class MinecraftHostActionHandler implements DesktopFileActionHandle
     }
 
     @Override
+    public boolean openExplorer(String path) {
+        return desktop.openExplorer(path);
+    }
+
+    @Override
     public Async<Boolean> downloadAsync(String name, String contentType, byte[] content) {
         return desktop.downloadAsync(name, contentType, content);
     }
