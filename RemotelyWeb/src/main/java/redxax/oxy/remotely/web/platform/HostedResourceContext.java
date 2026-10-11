@@ -384,7 +384,7 @@ final class HostedResourceContext implements ResourceBrowserContext {
     private boolean matchesServer(ResourceMarketplaceProvider.Version candidate, ResourceType type) {
         if (candidate == null) return false;
         ResourceType resolvedType = type == null ? ResourceType.MODPACK : type;
-        return ResourceCompatibilityTokens.matches(toOnlineVersion(candidate), providerLoaderTokens(resolvedType), versionId(), resolvedType);
+        return ResourceCompatibilityTokens.matches(toOnlineVersion(candidate), providerLoaderTokens(resolvedType), minecraftVersion(), resolvedType);
     }
 
     private static OnlineResourceVersion toOnlineVersion(ResourceMarketplaceProvider.Version source) {
