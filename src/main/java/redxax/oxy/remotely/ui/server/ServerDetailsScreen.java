@@ -871,7 +871,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         boolean developmentAvailable = development != null || server && screenHost().supportsDevelopment(context.instance);
         header().setButtonVisible("steve.png", server && !screenHost().collaborationResourceId(context.instance).isBlank());
         header().setButtonVisible("explorer.png", server);
-        header().setButtonVisible("edit.png", server && !panel);
+        header().setButtonVisible("edit.png", server);
         header().setButtonVisible("merge.png", !panel && developmentAvailable);
         bindCapabilityListener(context, server ? screenHost().serverView(context.instance) : null);
         ReProxyTarget reProxyTarget = server ? screenHost().reProxyTarget(context.instance) : null;
@@ -2477,7 +2477,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
 
     public void openInstanceSettings(){
         Object target = ensureSidecar();
-        if (target != null) screenHost().openServerConfiguration(this, screenHost().serverView(target));
+        if (target != null) screenHost().openServerConfiguration(this, target);
     }
 
     private boolean isPteroInstance(Object instance){

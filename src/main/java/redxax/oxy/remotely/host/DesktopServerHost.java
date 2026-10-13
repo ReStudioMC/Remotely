@@ -109,6 +109,7 @@ import restudio.rebase.backend.TerminalSessionProvider;
 import restudio.rebase.backend.ExecutionProvider;
 import restudio.rebase.backend.impl.LocalBackend;
 import restudio.rebase.backend.impl.PteroBackend;
+import restudio.rebase.backend.feature.ServerSettingsFeature;
 import restudio.rebase.backend.impl.ReStudioBackend;
 import restudio.rebase.backend.feature.ModpackManagementFeature;
 import restudio.rebase.backend.feature.ResourceUsageFeature;
@@ -1070,6 +1071,18 @@ public final class DesktopServerHost implements ServerScreenHost {
     }
 
     @Override
+    public ServerSettingsFeature providerSettings(Object value) {
+        Instance instance = instance(value);
+        return instance == null || instance.getBackend() == null ? null : instance.getBackend().getFeature(ServerSettingsFeature.class).orElse(null);
+    }
+
+    @Override
+    public ServerSettingsFeature.Access configurationAccess(Object value) {
+        Instance instance = instance(value);
+        return instance == null || instance.getBackend() == null ? ServerSettingsFeature.Access.NONE : instance.getBackend().configurationAccess();
+    }
+
+    @Override
     public ServerUiCapabilityProvider capabilities(ServerModels.ClientServerView server) {
         Instance instance = resolve(server);
         return instance == null ? DesktopServerUiCapabilities.desktop() : DesktopServerUiCapabilities.desktop(instance);
@@ -1298,6 +1311,9 @@ public final class DesktopServerHost implements ServerScreenHost {
             : client.getFlowManager().currentServerConnectionToken(value.getInstanceId());
         var view = catalogs == null ? null : catalogs.open(value.getInstanceId(), token == null ? 0L : token.generation(),
             value.getVersionId());
+        if (configurationAccess(value) == ServerSettingsFeature.Access.PROVIDER) {
+            return DesktopServerSettingsDataController.forProvider(value, snapshot, RebaseApiFactory.get(value), view);
+        }
         return new ServerSettingsController(value, snapshot, RebaseApiFactory.get(value), view);
     }
 
@@ -3410,7 +3426,7 @@ public final class DesktopServerHost implements ServerScreenHost {
     @Override
     public void openServerConfiguration(Screen current, ServerModels.ClientServerView server) {
         Instance instance = resolve(server);
-        if (instance != null) {
+        if (instance != null && configurationAccess(instance) != ServerSettingsFeature.Access.NONE) {
             application().setScreen(new ServerConfigurationScreen(current, instance, findHost(instance), client));
             return;
         }
@@ -3430,7 +3446,7 @@ public final class DesktopServerHost implements ServerScreenHost {
     }
 
     public void openServerConfiguration(Screen current, Instance instance) {
-        if (instance == null) {
+        if (instance == null || configurationAccess(instance) == ServerSettingsFeature.Access.NONE) {
             unavailable(Action.SERVER_CONFIGURATION);
             return;
         }
@@ -3561,6 +3577,8 @@ public final class DesktopServerHost implements ServerScreenHost {
     public ActionAvailability serverActionAvailability(ServerModels.ClientServerView server, Action action) {
         Instance instance = resolve(server);
         return switch (action) {
+            case SERVER_CONFIGURATION -> configurationAccess(instance) == ServerSettingsFeature.Access.NONE
+                    ? ActionAvailability.disabled("Server Settings Are Unavailable") : ActionAvailability.enabled();
             case DUPLICATE_SERVER -> canMutateStandalone(instance)
                     ? ActionAvailability.enabled() : ActionAvailability.disabled("Server Duplication Is Unavailable");
             case DELETE_SERVER -> (isReStudioTarget(server)

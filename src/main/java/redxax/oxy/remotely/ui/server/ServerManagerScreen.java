@@ -1302,7 +1302,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
                 () -> serverHost().serverActionAvailability(widget.getItem(), ServerScreenHost.Action.FILE_EXPLORER).available(),
                 () -> serverHost().openFileExplorer(this, widget.getItem()));
         widget.addTileAction(() -> "Server Settings", () -> settingsIcon,
-                () -> !serverHost().isPanel(widget.getItem()) && serverHost().serverActionAvailability(widget.getItem(), ServerScreenHost.Action.SERVER_CONFIGURATION).available(),
+                () -> serverHost().serverActionAvailability(widget.getItem(), ServerScreenHost.Action.SERVER_CONFIGURATION).available(),
                 () -> serverHost().openServerConfiguration(this, widget.getItem()));
         refreshServerIcon(widget);
         return widget;
@@ -1583,7 +1583,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
         if (!identity.local() && !isPanel) {
             builder.addHeaderButton("merge.png", () -> host.openDevelopment(this, server), "Development");
         }
-        if (!isPanel) {
+        if (host.serverActionAvailability(server, ServerScreenHost.Action.SERVER_CONFIGURATION).available()) {
             builder.addHeaderButton("edit.png", () -> host.openServerConfiguration(this, server), "Edit Server's Settings");
         }
         builder.addHeaderButton("explorer.png", () -> host.openFileExplorer(this, server), "Open Server's Files");

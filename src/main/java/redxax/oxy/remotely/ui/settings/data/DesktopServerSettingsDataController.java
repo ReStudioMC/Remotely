@@ -33,17 +33,22 @@ public class DesktopServerSettingsDataController extends ServerSettingsDocumentD
 
     public DesktopServerSettingsDataController(Instance instance, ServerSettingsSnapshot snapshot, RebaseAPI api,
                                                ServerSettingsCatalogService.View catalogs) {
-        this(instance, snapshot, api, catalogs, false);
+        this(instance, snapshot, api, catalogs, false, false);
     }
 
     public static DesktopServerSettingsDataController forNewServer(Instance instance, ServerSettingsSnapshot snapshot,
                                                                     ServerSettingsCatalogService.View catalogs) {
-        return new DesktopServerSettingsDataController(instance, snapshot, null, catalogs, true);
+        return new DesktopServerSettingsDataController(instance, snapshot, null, catalogs, true, false);
+    }
+
+    public static DesktopServerSettingsDataController forProvider(Instance instance, ServerSettingsSnapshot snapshot,
+                                                                  RebaseAPI api, ServerSettingsCatalogService.View catalogs) {
+        return new DesktopServerSettingsDataController(instance, snapshot, api, catalogs, false, true);
     }
 
     private DesktopServerSettingsDataController(Instance instance, ServerSettingsSnapshot snapshot, RebaseAPI api,
-                                                ServerSettingsCatalogService.View catalogs, boolean newServer) {
-        super(target(instance), snapshot, newServer ? emptyStore() : store(instance, api), false,
+                                                ServerSettingsCatalogService.View catalogs, boolean newServer, boolean writeProperties) {
+        super(target(instance), snapshot, newServer ? emptyStore() : store(instance, api), writeProperties,
                 new DesktopStructuredDocumentParser(), catalogs, newServer ? ScreenManager.getInstance()::execute : null);
         source = instance;
         sourcePath = normalizedPath(instance.getPath());

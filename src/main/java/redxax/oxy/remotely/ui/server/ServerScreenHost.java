@@ -25,6 +25,7 @@ import restudio.rescreen.platform.Async;
 import restudio.rescreen.platform.http.HttpTransport;
 import restudio.rebase.api.unified.internal.StandardOutputStateParser;
 import restudio.rebase.backend.TerminalSessionProvider;
+import restudio.rebase.backend.feature.ServerSettingsFeature;
 import restudio.rebase.backend.RemoteFileSystemProvider;
 import restudio.rebase.backend.RemotePath;
 import restudio.rebase.storage.StorageBreakdownIndex;
@@ -650,6 +651,14 @@ public interface ServerScreenHost {
 
     default boolean isPanel(Object target) {
         return "PTERO".equalsIgnoreCase(identity(target).backendType()) || "CALAGOPUS".equalsIgnoreCase(identity(target).backendType());
+    }
+
+    default ServerSettingsFeature providerSettings(Object target) {
+        return null;
+    }
+
+    default ServerSettingsFeature.Access configurationAccess(Object target) {
+        return ServerSettingsFeature.Access.NONE;
     }
 
     default boolean isQuickServer(Object target) {

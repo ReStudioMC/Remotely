@@ -414,6 +414,29 @@ class ServerSettingsDataControllerTest {
     }
 
     @Test
+    void providerDocumentStorePersistsServerProperties() {
+        Path root = Path.of("settings-source-" + UUID.randomUUID()).toAbsolutePath();
+        MemoryFiles files = new MemoryFiles();
+        Path path = root.resolve("server.properties");
+        files.put(path, "motd=Before\nexternal=keep\n");
+        Instance instance = velocity(root);
+        ServerSettingsField field = new ServerSettingsField("motd", "motd", ServerSettingsFieldType.TEXT, "Server",
+                "Configuration", "Message", "Server Message", "", null, null, List.of());
+        ServerSettingsDocument document = new ServerSettingsDocument("server.properties", ServerSettingsFormat.PROPERTIES, true, false, List.of(field));
+        ServerSettingsPack pack = new ServerSettingsPack("settings", "Settings", "Settings", 0, List.of("velocity"), List.of(document));
+        ServerSettingsDataController controller = DesktopServerSettingsDataController.forProvider(instance,
+                new ServerSettingsSnapshot(List.of(pack)), new MemoryApi(files), null);
+        controller.load().join();
+        ConfigOption<String> option = textOption(controller, "Server");
+        option.set("After");
+        option.apply();
+        controller.save(instance).join();
+        assertTrue(files.read(path).join().contains("motd=After"));
+        assertTrue(files.read(path).join().contains("external=keep"));
+        controller.close();
+    }
+
+    @Test
     void retriesOnlyDocumentsThatDidNotFinishWriting() {
         Path root = Path.of("settings-source-" + UUID.randomUUID()).toAbsolutePath();
         MemoryFiles files = new MemoryFiles();

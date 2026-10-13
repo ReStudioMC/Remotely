@@ -81,6 +81,7 @@ import restudio.rebase.backend.TransferSink;
 import restudio.rebase.backend.TransferSource;
 import restudio.rebase.backend.feature.AsyncServerScheduleFeature;
 import restudio.rescreen.platform.Async;
+import restudio.rebase.backend.feature.ServerSettingsFeature;
 import restudio.rescreen.platform.Clock;
 import restudio.rescreen.platform.TaskScheduler;
 import restudio.rescreen.platform.http.HttpTransport;
@@ -1536,6 +1537,11 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
             return;
         }
         application.setScreen(new ServerConfigurationScreen(current, server, null, remotelyClient));
+    }
+
+    @Override
+    public ServerSettingsFeature.Access configurationAccess(Object value) {
+        return serverView(value) == null ? ServerSettingsFeature.Access.NONE : ServerSettingsFeature.Access.FILES;
     }
 
     @Override

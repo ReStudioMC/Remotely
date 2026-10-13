@@ -43,6 +43,8 @@ import java.math.BigInteger;
 import java.time.Duration;
 import java.util.*;
 import restudio.rescreen.platform.Async;
+import redxax.oxy.remotely.ui.settings.controllers.ProviderSettingsController;
+import restudio.rebase.backend.feature.ServerSettingsFeature;
 import redxax.oxy.remotely.util.AsyncTools;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -100,6 +102,7 @@ public class ServerConfigurationScreen extends ReScreen {
     private SettingsScreen settingsScreen;
     private Map<String, Supplier<List<Setting>>> fixedSettingsSuppliers = Map.of();
     private ServerScreenHost.ConfigurationUi configurationUi;
+    private ProviderSettingsController providerSettings;
     private Consumer<ServerSettingsSnapshot> settingsRegistryListener;
     private final BrowserSafeState.LongValue settingsReloadRevision = new BrowserSafeState.LongValue();
     private final BrowserSafeState.LongValue configurationLoadRevision = new BrowserSafeState.LongValue();
@@ -408,6 +411,15 @@ public class ServerConfigurationScreen extends ReScreen {
                 propertyCategories);
         if (!isEditMode) return;
 
+        if (providerSettings != null) {
+            providerSettings.load();
+            settingsController.load().whenComplete((ignored, failure) -> ScreenManager.getInstance().execute(() -> {
+                if (!acceptConfigurationLoad(revision, "Server Settings", failure)) return;
+                refreshConfigurationCategories(settingsController.tabNames());
+            }));
+            return;
+        }
+
         if (host.usesInstanceMetadataReloads()) {
             observeConfigurationLoad(revision, "Server Settings",
                     host.configurationLoad("Server Settings", host.reloadInstanceSettings(tempInstance.raw(), remote), () -> null),
@@ -487,8 +499,17 @@ public class ServerConfigurationScreen extends ReScreen {
                 isEditMode, isReStudioBackend, isReStudioCreation, serverIdentifier, preselectedPlanName,
                 poolCreation != null, poolOptions, parent instanceof ResourcePoolScreen resources && poolCreation != null
                 ? resources.poolView(poolCreation.poolId()) : null);
-        configurationUi = screenHost().createConfigurationUi(this, state, settingsController, remoteVariables, extraFiles,
-                this::reloadDataDrivenSettings, () -> allowServerSoftwareChange(null));
+        ServerSettingsFeature provider = isEditMode ? screenHost().providerSettings(originalInstance.raw()) : null;
+        if (isEditMode && screenHost().configurationAccess(originalInstance.raw()) == ServerSettingsFeature.Access.PROVIDER) {
+            if (provider == null) throw new IllegalStateException("Server Settings Provider Is Unavailable");
+            providerSettings = new ProviderSettingsController(provider,
+                    () -> { if (!screenClosed && settingsScreen != null) settingsScreen.refreshTab("Panel"); });
+            configurationUi = new ServerScreenHost.ConfigurationUi(Map.of("Panel", providerSettings::settings), providerSettings::close,
+                    "Server Configuration", () -> "", () -> "", () -> null, () -> "");
+        } else {
+            configurationUi = screenHost().createConfigurationUi(this, state, settingsController, remoteVariables, extraFiles,
+                    this::reloadDataDrivenSettings, () -> allowServerSoftwareChange(null));
+        }
         Map<String, Supplier<List<Setting>>> settingsByTab = new LinkedHashMap<>(configurationUi.settings());
         if (isEditMode) settingsByTab.put(STORAGE_TAB, this::storageSettings);
         List<Runnable> cleanupActions = new ArrayList<>();
@@ -517,7 +538,7 @@ public class ServerConfigurationScreen extends ReScreen {
             settingsReloadRevision.incrementAndGet();
             ServerSettingsRegistry.getInstance().removeListener(settingsRegistryListener);
             if (configurationUi != null) {
-                configurationUi.cleanup();
+                configurationUi.cleanup().run();
             }
             closeSettingsControllers();
         });
@@ -1081,6 +1102,21 @@ public class ServerConfigurationScreen extends ReScreen {
 
     private void editServer(boolean stopConfirmed) {
         if (editInFlight) return;
+        if (providerSettings != null) {
+            editInFlight = true;
+            settingsController.save(originalInstance.raw())
+                    .whenComplete((ignored, failure) -> ScreenManager.getInstance().execute(() -> {
+                        editInFlight = false;
+                        if (screenClosed) return;
+                        if (failure != null) new Notification("Save Failed", configurationFailureMessage(failure), Notification.Type.ERROR);
+                        else {
+                            new Notification("Server Settings Saved", Notification.Type.SUCCESS);
+                            ServerScreenHost.HostView host = resolveRemoteHostForOriginalInstance();
+                            if (host != null) screenHost().refreshRemoteInstance(host);
+                        }
+                    }));
+            return;
+        }
         String newName = tempInstance.name();
         Object oldLoader = originalInstance.modLoader();
         String oldVersion = originalInstance.version();
