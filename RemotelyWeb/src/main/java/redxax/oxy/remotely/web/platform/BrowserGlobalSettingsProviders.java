@@ -55,7 +55,7 @@ final class BrowserGlobalSettingsProviders {
     private BrowserGlobalSettingsProviders() {
     }
 
-    static GlobalSettingsProviders create(ReScreen parent, BrowserRemotelyConfigStore config, BrowserRemotelyServerApi api) {
+    static GlobalSettingsProviders create(ReScreen parent, BrowserRemotelyConfigStore config, BrowserRemotelyServerApi api, BrowserServerScreenHost host) {
         Objects.requireNonNull(parent, "parent");
         Objects.requireNonNull(config, "config");
         BrowserSettingsRuntime runtime = new BrowserSettingsRuntime(parent);
@@ -76,6 +76,7 @@ final class BrowserGlobalSettingsProviders {
                 "The Browser Always Uses The Integrated File Explorer.",
                 BackupSettingsProvider.unavailable(true, "Backup Storage Requires Local Filesystem Access."),
                 browserPresetSettings(),
+                new BrowserResourceSettingsProvider(host),
                 browserAccountSettings(runtime),
                 new CollaborationSettingsProvider() {
                     public boolean available(String control) { return false; }

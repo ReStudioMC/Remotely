@@ -259,7 +259,15 @@ public class InstanceResourceWidget extends ResourceWidget<ResourceContainerItem
 
         @Override
         public String version(ResourceContainerItem resource) {
-            return resource.getVersion();
+            String status = resource.getMetadataStatus();
+            if (status == null || status.isBlank()) return resource.getVersion();
+            return switch (status) {
+                case "pending" -> "Identifying";
+                case "unmatched" -> "Not Identified";
+                case "failed" -> "Identification Failed";
+                case "resolved", "embedded" -> resource.getVersion();
+                default -> status;
+            };
         }
 
         @Override

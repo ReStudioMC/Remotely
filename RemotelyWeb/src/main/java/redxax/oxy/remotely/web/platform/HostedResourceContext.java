@@ -11,6 +11,7 @@ import redxax.oxy.remotely.RemotelyServerApi;
 import restudio.rescreen.platform.Async;
 import restudio.rescreen.platform.TaskScheduler;
 import restudio.rebase.resource.ResourceIndexOrchestrator;
+import restudio.rebase.resource.ResourceIdentifier;
 import restudio.rebase.resource.ResourceIndexEntries;
 import restudio.rebase.resource.ResourceIndexRequests;
 import restudio.rebase.resource.ResourceType;
@@ -66,6 +67,9 @@ final class HostedResourceContext implements ResourceBrowserContext {
     private final RemotelyConfigStore configStore;
     private final Consumer<ModpackSelection> modpackSelection;
     private final ResourceIndexOrchestrator resourceIndex = new ResourceIndexOrchestrator();
+    private final ResourceIdentifier identifier;
+    private boolean maintainingIndex;
+    private Async<Void> indexMaintenance;
     private final List<Consumer<ResourceBrowserContext.ResourceChange>> resourceListeners = new ArrayList<>();
     private final List<Consumer<CanonicalResourceInventory>> canonicalInventoryListeners = new ArrayList<>();
     private final Map<String, BrowserRemotelyServerApi.HostedModpackCapabilities> modpackCapabilities = new LinkedHashMap<>();
@@ -117,6 +121,7 @@ final class HostedResourceContext implements ResourceBrowserContext {
         this.loader = loader;
         this.remoteHost = remoteHost;
         this.configStore = configStore;
+        this.identifier = remoteHost instanceof BrowserServerScreenHost host ? host.resourceIdentifier() : new ResourceIdentifier(configStore);
         this.modpackSelection = modpackSelection;
         this.cacheKey = resourceCacheKey();
         this.dataCache = new ResourceDataCache(cacheKey);
@@ -424,6 +429,7 @@ final class HostedResourceContext implements ResourceBrowserContext {
 
     @Override
     public String lastProvider(String key) {
+        if (configStore != null && !configStore.isResourceRememberProvider()) return preferredProvider();
         if (selectedProvider != null && marketplace.providers().contains(selectedProvider)) return selectedProvider;
         if (configStore != null) {
             String remembered = configStore.getResourceBrowserLastProvider(key);
@@ -432,7 +438,8 @@ final class HostedResourceContext implements ResourceBrowserContext {
                 return remembered;
             }
         }
-        selectedProvider = marketplace.providers().stream().findFirst().orElse(null);
+        selectedProvider = marketplace.providers().contains(preferredProvider()) ? preferredProvider()
+                : marketplace.providers().stream().findFirst().orElse(null);
         return selectedProvider;
     }
 
@@ -440,7 +447,7 @@ final class HostedResourceContext implements ResourceBrowserContext {
     public void saveLastProvider(String key, String provider) {
         if (provider == null || provider.isBlank() || !marketplace.providers().contains(provider)) return;
         selectedProvider = provider;
-        if (configStore == null) return;
+        if (configStore == null || !configStore.isResourceRememberProvider()) return;
         configStore.setResourceBrowserLastProvider(key, provider);
         configStore.save();
     }
@@ -482,13 +489,22 @@ final class HostedResourceContext implements ResourceBrowserContext {
     private ResourceIndexLoad loadResourceIndex(boolean force, OperationFence fence) {
         if (!hasInstance()) return new ResourceIndexLoad(dataCache, dataCache.resourceIndexGeneration,
                 Async.completed(new ResourceIndexOrchestrator.Result(List.of(), Map.of())));
-        if (!force && dataCache.canonicalResourceRequest != null && isDataCurrent(fence)) {
+        String preferred = preferredProvider();
+        String stamp = preferred + ":" + (configStore == null || configStore.isResourceAutoIdentification())
+                + ":" + (configStore == null || configStore.isResourceProviderFallback());
+        boolean preferenceChanged = !Objects.equals(dataCache.preferredProvider, stamp);
+        if (preferenceChanged) force = true;
+        if ((!force || maintainingIndex) && dataCache.canonicalResourceRequest != null && isDataCurrent(fence)) {
             if (!dataCache.canonicalResourceRequest.isDone() || dataCache.canonicalResourceResult == null) {
                 return new ResourceIndexLoad(dataCache, dataCache.resourceIndexGeneration, view(dataCache.canonicalResourceRequest));
             }
             return new ResourceIndexLoad(dataCache, dataCache.resourceIndexGeneration, Async.completed(dataCache.canonicalResourceResult));
         }
         ResourceDataCache cache = dataCache;
+        cache.preferredProvider = stamp;
+        if (preferenceChanged) cache.indexedResources = cache.indexedResources.stream().map(entry ->
+                new ResourceIndexOrchestrator.ResolvedEntry(entry.directoryPath(), entry.fileName(), entry.size(), entry.mtime(), entry.enabled(),
+                        entry.hash(), entry.murmur2(), null)).toList();
         long generation = ++cache.resourceIndexGeneration;
         cancel(cache.canonicalResourceRequest);
         cancel(cache.resourceDirectoriesRequest);
@@ -558,7 +574,18 @@ final class HostedResourceContext implements ResourceBrowserContext {
                 if (!isInventoryCurrent(fence, cache, generation)) return staleOperation();
                 return listResourceDirectory(directory, fence, cache, generation).thenApply(entries -> {
                     if (!isInventoryCurrent(fence, cache, generation)) throw new Async.Cancellation();
-                    List<ResourceIndexOrchestrator.Entry> mapped = ResourceIndexEntries.fromFiles(directory, entries);
+                    Map<String, ResourceIndexOrchestrator.ResolvedEntry> previous = new LinkedHashMap<>();
+                    cache.indexedResources.forEach(entry -> previous.put(entry.path(), entry));
+                    List<ResourceIndexOrchestrator.Entry> mapped = ResourceIndexEntries.fromFiles(directory, entries).stream()
+                            .map(entry -> autoIdentification() || maintainingIndex ? ResourceIndexEntries.forIdentification(entry) : entry).map(entry -> {
+                        ResourceIndexOrchestrator.ResolvedEntry physical = new ResourceIndexOrchestrator.ResolvedEntry(entry.directoryPath(), entry.fileName(),
+                                entry.size(), entry.mtime(), entry.enabled(), entry.hash(), entry.murmur2(), entry.metadata());
+                        ResourceIndexOrchestrator.ResolvedEntry retained = retainMetadata(previous.get(physical.path()), physical);
+                        ResourceIndexOrchestrator.ResolvedMetadata metadata = retained.metadata();
+                        if (metadata != null && "Identification Failed".equals(metadata.status())) metadata = entry.metadata();
+                        return new ResourceIndexOrchestrator.Entry(entry.directoryPath(), entry.fileName(), entry.size(), entry.mtime(), entry.enabled(),
+                                retained.hash(), retained.murmur2(), metadata);
+                    }).toList();
                     cache.resourceDirectorySnapshots.put(directory, mapped);
                     recordResourceFailure(directory, null);
                     return mapped;
@@ -621,43 +648,94 @@ final class HostedResourceContext implements ResourceBrowserContext {
     }
 
 
+    private boolean autoIdentification() {
+        return configStore == null || configStore.isResourceAutoIdentification();
+    }
+
     private void scheduleResourceHydration(ResourceIndexOrchestrator.Result physical, OperationFence fence) {
-        if (physical == null || !isCurrent(fence)) return;
+        if (physical == null || !isCurrent(fence) || maintainingIndex || !autoIdentification()) return;
         ResourceDataCache cache = dataCache;
         long inventoryGeneration = cache.resourceIndexGeneration;
-        cancel(cache.resourceHydrationRequest);
-        cache.resourceHydrationRequest = null;
         long generation = ++cache.resourceHydrationGeneration;
         cache.resourceHydrationScheduled = true;
         scheduler.execute(() -> {
             if (!isInventoryCurrent(fence, cache, inventoryGeneration) || cache.resourceHydrationGeneration != generation) return;
             cache.resourceHydrationScheduled = false;
-            Async<ResourceIndexOrchestrator.Result> hydration = resourceIndex.hydrate(physical, resourceSource(fence, cache, inventoryGeneration),
-                    this::resolveMetadata);
-            cache.resourceHydrationRequest = hydration;
-            hydration.whenComplete((result, failure) -> {
-                if (cache.resourceHydrationRequest != hydration || cache.resourceHydrationGeneration != generation
-                        || !isInventoryCurrent(fence, cache, inventoryGeneration)) return;
-                cache.resourceHydrationRequest = null;
-                if (failure != null) {
-                    if (isCancellation(failure)) {
-                        dataCache.resourceFailureMessages.remove("providers");
-                    } else {
-                        dataCache.resourceFailureMessages.put("providers", failureMessage(failure, "Resource Provider Resolution Failed"));
-                    }
-                    notifyResourceListeners(fence);
-                    return;
-                }
-                if (result == null) return;
-                List<ResourceIndexOrchestrator.ResolvedEntry> resources = preserveLastGoodMetadata(result.resources());
-                dataCache.indexedResources = resources;
-                dataCache.canonicalResourceResult = new ResourceIndexOrchestrator.Result(resources, result.failures());
-                dataCache.resourceFailureMessages.keySet().removeIf(path -> "providers".equals(path)
-                        || path.startsWith("provider:"));
-                mergeResourceFailures(result.failures());
+            hydrateResources(physical, fence, cache, inventoryGeneration);
+        });
+    }
+
+    private Async<ResourceIndexOrchestrator.Result> hydrateResources(ResourceIndexOrchestrator.Result physical, OperationFence fence,
+                                                                     ResourceDataCache cache, long inventoryGeneration) {
+        cancel(cache.resourceHydrationRequest);
+        long generation = ++cache.resourceHydrationGeneration;
+        ResourceIndexOrchestrator.MetadataResolver resolver = new ResourceIndexOrchestrator.MetadataResolver() {
+            @Override
+            public Async<ResourceIndexOrchestrator.MetadataResolution> resolve(List<String> hashes, List<Long> fingerprints) {
+                return resolveMetadata(hashes, fingerprints);
+            }
+
+            @Override
+            public Async<ResourceIndexOrchestrator.MetadataResolution> resolveEntries(List<ResourceIndexOrchestrator.Entry> entries) {
+                return identifyResources(entries);
+            }
+        };
+        Async<ResourceIndexOrchestrator.Result> hydration = resourceIndex.hydrate(physical, resourceSource(fence, cache, inventoryGeneration), resolver);
+        cache.resourceHydrationRequest = hydration;
+        return hydration.handle((result, failure) -> {
+            if (cache.resourceHydrationRequest != hydration || cache.resourceHydrationGeneration != generation
+                    || !isInventoryCurrent(fence, cache, inventoryGeneration)) throw new Async.Cancellation();
+            cache.resourceHydrationRequest = null;
+            if (failure != null) {
+                if (!isCancellation(failure)) cache.resourceFailureMessages.put("providers", failureMessage(failure, "Resource Provider Resolution Failed"));
                 notifyResourceListeners(fence);
+                throw rethrow(failure);
+            }
+            List<ResourceIndexOrchestrator.ResolvedEntry> resources = preserveLastGoodMetadata(result.resources());
+            cache.indexedResources = resources;
+            cache.canonicalResourceResult = new ResourceIndexOrchestrator.Result(resources, result.failures());
+            cache.resourceFailureMessages.keySet().removeIf(path -> "providers".equals(path) || path.startsWith("provider:"));
+            mergeResourceFailures(result.failures());
+            notifyResourceListeners(fence);
+            return cache.canonicalResourceResult;
+        });
+    }
+
+    String instanceId() {
+        return serverId;
+    }
+
+    boolean activeInventory() {
+        return !canonicalInventoryListeners.isEmpty() || !resourceListeners.isEmpty();
+    }
+
+    RemotelyConfigStore resourceConfig() {
+        return configStore;
+    }
+
+    Async<Void> maintainIndex(boolean purge) {
+        if (indexMaintenance != null && !indexMaintenance.isDone()) return indexMaintenance;
+        clearInventoryCache();
+        maintainingIndex = true;
+        OperationFence fence = captureFence();
+        ResourceDataCache cache = dataCache;
+        Async<Void> request = canonicalResourceInventory(true).thenCompose(inventory -> {
+            if (!isCurrent(fence)) return Async.failed(new Async.Cancellation());
+            List<ResourceIndexOrchestrator.Entry> files = inventory.entries().stream().map(entry -> new ResourceIndexOrchestrator.Entry(
+                    entry.directoryPath(), entry.fileName(), entry.size(), entry.mtime(), entry.enabled(), entry.hash(), entry.murmur2())).toList();
+            return identifier.maintain(files, purge, new BrowserTaskScheduler()).thenCompose(ignored -> {
+                if (!isCurrent(fence)) return Async.failed(new Async.Cancellation());
+                return hydrateResources(cache.canonicalResourceResult, fence, cache, cache.resourceIndexGeneration).thenCompose(result ->
+                        result.failures().isEmpty() ? Async.completed(null) : Async.failed(new IllegalStateException(String.join("\n", result.failures().values()))));
             });
         });
+        indexMaintenance = request;
+        request.whenComplete((ignored, failure) -> {
+            if (indexMaintenance != request) return;
+            indexMaintenance = null;
+            maintainingIndex = false;
+        });
+        return request;
     }
 
     private List<ResourceIndexOrchestrator.ResolvedEntry> preserveLastGoodMetadata(
@@ -686,58 +764,75 @@ final class HostedResourceContext implements ResourceBrowserContext {
                 current.mtime(), current.enabled(), hash, murmur2, metadata);
     }
 
-    private Async<ResourceIndexOrchestrator.MetadataResolution> resolveMetadata(List<String> hashes,
-                                                                                        List<Long> fingerprints) {
-        Map<String, ResourceIndexMatch> matches = new LinkedHashMap<>();
-        Map<String, String> lookupFailures = new LinkedHashMap<>();
-        Async<Void> lookups = Async.completed(null);
-        for (String provider : inventoryProviders()) {
-            lookups = lookups.thenCompose(ignored -> resolveProvider(provider, hashes, fingerprints, matches,
-                    lookupFailures));
-        }
-        return lookups.thenCompose(ignored -> resolveMetadata(matches, lookupFailures));
+    private String preferredProvider() {
+        return configStore == null ? "Modrinth" : configStore.getPreferredResourceProvider();
     }
 
-    private Async<Void> resolveProvider(String provider, List<String> hashes, List<Long> fingerprints,
-                                               Map<String, ResourceIndexMatch> matches, Map<String, String> failures) {
-        AsyncResourceProvider source;
-        try {
-            source = marketplace.source(provider);
-        } catch (Throwable failure) {
-            recordProviderLookupFailure(failures, provider, failure);
-            return Async.completed(null);
-        }
-        if (source == null) {
-            recordProviderLookupFailure(failures, provider, new IllegalStateException("Provider Is Unavailable"));
-            return Async.completed(null);
-        }
-        Async<Map<String, OnlineResourceVersion>> hashLookup;
-        try {
-            hashLookup = source.supportsHashLookup() && hashes != null && !hashes.isEmpty()
-                    ? Objects.requireNonNull(marketplace.searchByHashes(provider, hashes), "Resource Hash Lookup Request")
-                    : Async.completed(Map.of());
-        } catch (Throwable failure) {
-            hashLookup = Async.failed(failure);
-        }
-        return hashLookup.handle((found, failure) -> {
-            if (failure == null) mergeProviderMatches(matches, provider, found, false);
-            else recordProviderLookupFailure(failures, provider, failure);
-            return (Void) null;
-        }).thenCompose(ignored -> {
-            Async<Map<String, OnlineResourceVersion>> fingerprintLookup;
-            try {
-                fingerprintLookup = source.supportsFingerprintLookup() && fingerprints != null && !fingerprints.isEmpty()
-                        ? Objects.requireNonNull(marketplace.searchByFingerprints(provider, fingerprints),
-                        "Resource Fingerprint Lookup Request") : Async.completed(Map.of());
-            } catch (Throwable failure) {
-                fingerprintLookup = Async.failed(failure);
+    private Async<ResourceIndexOrchestrator.MetadataResolution> resolveMetadata(List<String> hashes, List<Long> fingerprints) {
+        List<ResourceIndexOrchestrator.Entry> entries = new ArrayList<>();
+        if (hashes != null) hashes.forEach(hash -> entries.add(new ResourceIndexOrchestrator.Entry("", hash, 0, 0, true, hash, null)));
+        if (fingerprints != null) fingerprints.forEach(value -> entries.add(new ResourceIndexOrchestrator.Entry("", "fingerprint:" + value, 0, 0, true, null, value)));
+        return identifyResources(entries);
+    }
+
+    private Async<ResourceIndexOrchestrator.MetadataResolution> identifyResources(List<ResourceIndexOrchestrator.Entry> entries) {
+        String preferred = preferredProvider();
+        boolean fallback = configStore == null || configStore.isResourceProviderFallback();
+        ResourceIdentifier.Lookup lookup = new ResourceIdentifier.Lookup() {
+            @Override
+            public List<String> providers() {
+                return prioritizeProvider(marketplace.providers(), preferred);
             }
-            return fingerprintLookup.handle((found, failure) -> {
-                if (failure == null) mergeProviderMatches(matches, provider, found, true);
-                else recordProviderLookupFailure(failures, provider, failure);
-                return (Void) null;
+
+            @Override
+            public Async<Map<String, OnlineResourceVersion>> hashes(String provider, List<String> hashes) {
+                AsyncResourceProvider source = marketplace.source(provider);
+                if (source == null) return Async.failed(new IllegalStateException("Resource Provider Is Unavailable"));
+                return source.supportsHashLookup() ? marketplace.searchByHashes(provider, hashes) : Async.completed(Map.of());
+            }
+
+            @Override
+            public Async<Map<String, OnlineResourceVersion>> fingerprints(String provider, List<Long> fingerprints) {
+                AsyncResourceProvider source = marketplace.source(provider);
+                if (source == null) return Async.failed(new IllegalStateException("Resource Provider Is Unavailable"));
+                return source.supportsFingerprintLookup() ? marketplace.searchByFingerprints(provider, fingerprints) : Async.completed(Map.of());
+            }
+        };
+        return identifier.identify(entries, lookup).thenCompose(outcomes -> {
+            if (!preferred.equals(preferredProvider())) return Async.failed(new Async.Cancellation());
+            if (fallback != (configStore == null || configStore.isResourceProviderFallback())) return Async.failed(new Async.Cancellation());
+            Map<String, ResourceIndexMatch> matches = new LinkedHashMap<>();
+            Map<String, String> failures = new LinkedHashMap<>();
+            Map<String, ResourceIndexOrchestrator.ResolvedMetadata> unresolved = new LinkedHashMap<>();
+            for (ResourceIndexOrchestrator.Entry entry : entries) {
+                ResourceIdentifier.Outcome outcome = outcomes.get(ResourceIdentifier.path(entry));
+                failures.putAll(outcome.failures());
+                ResourceIdentifier.Match match = outcome.preferred(preferred, fallback);
+                if (match != null) {
+                    if (entry.hash() != null && !entry.hash().isBlank()) {
+                        mergeProviderMatches(matches, match.provider(), Map.of(entry.hash(), match.version()), false);
+                    }
+                    if (entry.murmur2() != null) {
+                        mergeProviderMatches(matches, match.provider(), Map.of(entry.murmur2().toString(), match.version()), true);
+                    }
+                } else {
+                    ResourceIndexOrchestrator.ResolvedMetadata value = new ResourceIndexOrchestrator.ResolvedMetadata(null, null, null, null,
+                            null, null, List.of(), null, null, null, null, outcome.failures().isEmpty() ? "Not Identified" : "Identification Failed");
+                    if (entry.hash() != null && !entry.hash().isBlank()) unresolved.put(ResourceIndexOrchestrator.hashKey(entry.hash()), value);
+                    if (entry.murmur2() != null) unresolved.putIfAbsent(ResourceIndexOrchestrator.fingerprintKey(entry.murmur2()), value);
+                }
+            }
+            return resolveMetadata(matches, failures).thenApply(result -> {
+                if (!preferred.equals(preferredProvider())) throw new Async.Cancellation();
+                if (fallback != (configStore == null || configStore.isResourceProviderFallback())) throw new Async.Cancellation();
+                unresolved.putAll(result.metadata());
+                return new ResourceIndexOrchestrator.MetadataResolution(unresolved, result.failures());
             });
         });
+    }
+
+    Async<Void> retryIdentification(List<ResourceContainerItem> resources) {
+        return maintainIndex(false);
     }
 
     private Async<ResourceIndexOrchestrator.MetadataResolution> resolveMetadata(
@@ -771,15 +866,18 @@ final class HostedResourceContext implements ResourceBrowserContext {
                         ResourceMarketplaceProvider.Version latest = available == null ? null : available.stream()
                                 .filter(candidate -> matchesServer(candidate, type)).max(Comparator.comparing(HostedResourceContext::publishedAt))
                                 .orElse(null);
-                        OnlineResourceVersion update = latest == null || Objects.equals(latest.id(), match.version().id)
-                                ? null : latestVersion(latest, match.version());
-                        ResourceIndexOrchestrator.ResolvedMetadata metadata = new ResourceIndexOrchestrator.ResolvedMetadata(
-                                match.provider(), match.version().projectId, match.version().id, match.version().versionNumber,
-                                card == null ? match.version().name : card.title(),
-                                card == null ? null : card.description(), card == null ? List.of() : card.authors(),
-                                card == null || card.gameVersions() == null ? null : String.join(", ", card.gameVersions()),
-                                card == null ? null : card.iconUrl(), update);
-                        projectKeys.getOrDefault(projectKey, List.of()).forEach(key -> resolved.put(key, metadata));
+                        for (String key : projectKeys.getOrDefault(projectKey, List.of())) {
+                            ResourceIndexMatch exact = matches.get(key);
+                            OnlineResourceVersion update = latest == null || Objects.equals(latest.id(), exact.version().id)
+                                    ? null : latestVersion(latest, exact.version());
+                            ResourceIndexOrchestrator.ResolvedMetadata metadata = new ResourceIndexOrchestrator.ResolvedMetadata(
+                                    exact.provider(), exact.version().projectId, exact.version().id, exact.version().versionNumber,
+                                    card == null ? exact.version().name : card.title(),
+                                    card == null ? null : card.description(), card == null ? List.of() : card.authors(),
+                                    card == null || card.gameVersions() == null ? null : String.join(", ", card.gameVersions()),
+                                    card == null ? null : card.iconUrl(), update);
+                            resolved.put(key, metadata);
+                        }
                         String failure = metadataFailure(result);
                         if (failure != null) failures.put("provider:" + projectKey, failure);
                         return null;
@@ -821,7 +919,7 @@ final class HostedResourceContext implements ResourceBrowserContext {
                 : "Versions: " + failureMessage(result.versions().failure(), "Unavailable");
         if (detailsFailure == null) return versionsFailure;
         if (versionsFailure == null) return detailsFailure;
-        return detailsFailure + "; " + versionsFailure;
+        return detailsFailure + ". " + versionsFailure;
     }
 
     private void mergeResourceFailures(Map<String, String> failures) {
@@ -834,12 +932,6 @@ final class HostedResourceContext implements ResourceBrowserContext {
 
     @JSBody(params = {"message"}, script = "if(window.console&&console.log)console.log(message);")
     private static native void consoleLog(String message);
-
-    private static void recordProviderLookupFailure(Map<String, String> failures, String provider, Throwable failure) {
-        if (failures == null) return;
-        String key = "provider:" + Objects.requireNonNullElse(provider, "") + ":lookup";
-        failures.putIfAbsent(key, "Lookup: " + failureMessage(failure, "Unavailable"));
-    }
 
     static void mergeProviderMatches(Map<String, ResourceIndexMatch> matches, String provider,
                                      Map<String, OnlineResourceVersion> values, boolean fingerprint) {
@@ -1816,11 +1908,6 @@ final class HostedResourceContext implements ResourceBrowserContext {
         }
     }
 
-    private List<String> inventoryProviders() {
-        List<String> providers = marketplace.providers() == null ? List.of() : List.copyOf(marketplace.providers());
-        return prioritizeProvider(providers, lastProvider(providerPreferenceKey()));
-    }
-
     static List<String> prioritizeProvider(List<String> providers, String preferred) {
         if (providers == null || providers.isEmpty()) return List.of();
         if (preferred == null || !providers.contains(preferred) || Objects.equals(providers.getFirst(), preferred)) return List.copyOf(providers);
@@ -1828,11 +1915,6 @@ final class HostedResourceContext implements ResourceBrowserContext {
         ordered.add(preferred);
         providers.stream().filter(provider -> !Objects.equals(provider, preferred)).forEach(ordered::add);
         return List.copyOf(ordered);
-    }
-
-    private String providerPreferenceKey() {
-        if (loader != null && !loader.isBlank()) return loader.toLowerCase(Locale.ROOT);
-        return isServer() ? "server" : "default";
     }
 
     private boolean hasInstalled(ResourceMarketplaceProvider.Card resource) {
@@ -2095,6 +2177,9 @@ final class HostedResourceContext implements ResourceBrowserContext {
     }
 
     private void retireResourceWork() {
+        cancel(indexMaintenance);
+        indexMaintenance = null;
+        maintainingIndex = false;
         cancelPendingResourceNotification();
         scheduler.cancelAll();
         clearDataCache(dataCache);
@@ -2211,6 +2296,7 @@ final class HostedResourceContext implements ResourceBrowserContext {
     private static final class ResourceDataCache {
         private final ResourceCacheKey key;
         private List<ResourceIndexOrchestrator.ResolvedEntry> indexedResources = List.of();
+        private String preferredProvider;
         private final Map<String, String> resourceFailureMessages = new LinkedHashMap<>();
         private final Map<String, List<ResourceIndexOrchestrator.Entry>> resourceDirectorySnapshots = new LinkedHashMap<>();
         private final Map<String, Async<List<ServerModels.PteroFileObjectAttributes>>> resourceDirectoryRequests = new LinkedHashMap<>();

@@ -86,6 +86,7 @@ import restudio.rescreen.platform.Clock;
 import restudio.rescreen.platform.TaskScheduler;
 import restudio.rescreen.platform.http.HttpTransport;
 import restudio.rebase.resource.ResourceType;
+import restudio.rebase.resource.ResourceIdentifier;
 import restudio.rebase.resource.marketplace.ResourceBrowserContext;
 import restudio.rebase.resource.marketplace.ResourceMarketplaceProviderAdapter;
 import restudio.rebase.resource.marketplace.ResourceMarketplaceProviderAdapter.VersionContext;
@@ -192,6 +193,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     private String pluginAuthority = "";
     private final Runnable pluginNetworkChanged = () -> networkPluginForwarding.values().forEach(NetworkPluginForwarding::invalidate);
     private boolean pluginNetworkListening;
+    private ResourceIdentifier resourceIdentifier;
     private final Set<HostedResourceContext> resourceContexts = Collections.newSetFromMap(new IdentityHashMap<>());
     private final Consumer<BrowserRemotelyServerApi.ManagerSnapshot> browserInstanceChangeListener = this::handleBrowserInstanceChange;
     private final Consumer<BrowserRemotelyServerApi.ManagerSnapshot> browserNetworkChangeListener = this::handleBrowserNetworkChange;
@@ -2221,7 +2223,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
             return;
         }
         application.setScreen(SettingsScreenFactory.createGlobalSettingsScreen(parent, config,
-                BrowserGlobalSettingsProviders.create(parent, config, browserApi()), initialTab));
+                BrowserGlobalSettingsProviders.create(parent, config, browserApi(), this), initialTab));
     }
 
     @Override
@@ -2727,6 +2729,51 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         if (resourceAuthGeneration <= 0) resourceAuthGeneration = 1L;
     }
 
+    ResourceIdentifier resourceIdentifier() {
+        if (resourceIdentifier == null) resourceIdentifier = new ResourceIdentifier(configStore());
+        return resourceIdentifier;
+    }
+
+    Async<Void> maintainResourceIndexes(String instanceId, boolean purge) {
+        HostContext owner = captureContext();
+        return restudioServers().thenCompose(servers -> {
+            if (!isCurrent(owner)) return Async.failed(new Async.Cancellation());
+            List<ServerModels.ClientServerView> targets = servers.stream()
+                    .filter(server -> instanceId.isBlank() || instanceId.equals(serverId(server))).toList();
+            if (!instanceId.isBlank() && targets.isEmpty()) return Async.failed(new IllegalStateException("Instance Is No Longer Available"));
+            Async<Void> sequence = instanceId.isBlank()
+                    ? resourceIdentifier().maintain(null, purge, new BrowserTaskScheduler()) : Async.completed(null);
+            List<String> failures = new ArrayList<>();
+            for (ServerModels.ClientServerView server : targets) {
+                sequence = sequence.thenCompose(ignored -> {
+                    if (!isCurrent(owner)) return Async.failed(new Async.Cancellation());
+                    List<HostedResourceContext> contexts;
+                    synchronized (resourceContexts) {
+                        contexts = resourceContexts.stream().filter(context -> serverId(server).equals(context.instanceId()) && context.activeInventory()).toList();
+                    }
+                    boolean temporary = contexts.isEmpty();
+                    if (temporary) contexts = List.of(new HostedResourceContext(resourceMarketplace(), browserApi(), serverId(server), server.version,
+                            server.loader, this, configStore(), capabilities(server), server));
+                    Async<Void> refresh = Async.completed(null);
+                    for (HostedResourceContext context : contexts) {
+                        refresh = refresh.thenCompose(value -> context.maintainIndex(purge && !instanceId.isBlank())).whenComplete((value, failure) -> {
+                            if (temporary) {
+                                context.invalidate();
+                                synchronized (resourceContexts) { resourceContexts.remove(context); }
+                            }
+                        });
+                    }
+                    return refresh;
+                }).handle((ignored, failure) -> {
+                    if (failure != null) failures.add(server.name + ": " + failureMessage(failure));
+                    return (Void) null;
+                });
+            }
+            return sequence.thenCompose(ignored -> failures.isEmpty() ? Async.completed(null)
+                    : Async.failed(new IllegalStateException(String.join("\n", failures))));
+        });
+    }
+
     void registerResourceContext(HostedResourceContext context) {
         if (context == null || closed) return;
         synchronized (resourceContexts) {
@@ -2866,7 +2913,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         return serverId(server);
     }
 
-    private static String serverId(ServerModels.ClientServerView server) {
+    static String serverId(ServerModels.ClientServerView server) {
         if (server == null) return "";
         if (server.identifier != null && !server.identifier.isBlank()) return server.identifier;
         return server.uuid == null ? "" : server.uuid;

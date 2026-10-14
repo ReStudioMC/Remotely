@@ -123,7 +123,7 @@ public class RemotelyManager implements IRebaseManager {
                 new SpigetProvider()
         );
 
-        this.instanceResourceManager = new InstanceResourceManager(resourceMetadataManager, cacheManager, resourceProviders, resourceStateManager);
+        this.instanceResourceManager = new InstanceResourceManager(resourceMetadataManager, cacheManager, resourceProviders, resourceStateManager, configManager);
         this.updateManager = new UpdateManager(applicationDir);
         this.versionsDir = DesktopRemotelyPaths.minecraftVersionsDir();
         try { Files.createDirectories(this.versionsDir); } catch (IOException ignored) {}

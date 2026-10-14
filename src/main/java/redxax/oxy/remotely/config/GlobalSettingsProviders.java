@@ -13,6 +13,7 @@ import restudio.rebase.settings.controllers.LogSettingsProvider;
 import restudio.rebase.settings.controllers.LspSettingsProvider;
 import restudio.rebase.settings.controllers.MinecraftAssetsSettingsProvider;
 import restudio.rebase.settings.controllers.PresetSettingsProvider;
+import restudio.rebase.settings.controllers.ResourceSettingsProvider;
 import restudio.rebase.settings.controllers.ReStudioAccountSettingsProvider;
 import restudio.rebase.settings.controllers.SettingsActionCapability;
 import restudio.rebase.settings.controllers.ThemeSettingsProvider;
@@ -37,6 +38,7 @@ public record GlobalSettingsProviders(
         String explorerUnavailableReason,
         BackupSettingsProvider backups,
         PresetSettingsProvider presets,
+        ResourceSettingsProvider resources,
         ReStudioAccountSettingsProvider account,
         CollaborationSettingsProvider collaboration,
         LogSettingsProvider logs,

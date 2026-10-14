@@ -2,6 +2,8 @@ package redxax.oxy.remotely.web.platform;
 
 import restudio.rescreen.theme.ThemeManager;
 import org.teavm.jso.JSBody;
+import com.google.gson.JsonElement;
+import restudio.rescreen.util.JsonTreeParser;
 import redxax.oxy.remotely.config.RemotelyGroup;
 import redxax.oxy.remotely.config.RemotelyConfigStore;
 import redxax.oxy.remotely.config.RemotelyViewStateStore;
@@ -151,6 +153,19 @@ public final class BrowserRemotelyConfigStore implements RemotelyConfigStore, Re
             erase(PREFIX + key);
         }
         return value == null ? fallback : value;
+    }
+
+    @Override
+    public List<String> keys(String prefix) {
+        String suffix = "." + accountScope();
+        List<String> keys = new ArrayList<>();
+        for (String key : storage.keys(PREFIX + prefix)) {
+            String logical = key.substring(PREFIX.length());
+            boolean scoped = accountScoped(logical) || logical.startsWith(HIDDEN_SERVERS_KEY + ".");
+            if (scoped && !logical.endsWith(suffix)) continue;
+            keys.add(scoped ? logical.substring(0, logical.length() - suffix.length()) : logical);
+        }
+        return keys.stream().sorted().toList();
     }
 
     public void set(String key, String value) {
@@ -590,6 +605,10 @@ public final class BrowserRemotelyConfigStore implements RemotelyConfigStore, Re
         boolean write(String key, String value);
 
         boolean erase(String key);
+
+        default List<String> keys(String prefix) {
+            throw new UnsupportedOperationException("Browser Storage Keys Are Unavailable");
+        }
     }
 
     private static final class NativeStorage implements Storage {
@@ -607,6 +626,13 @@ public final class BrowserRemotelyConfigStore implements RemotelyConfigStore, Re
         public boolean erase(String key) {
             return eraseNative(key);
         }
+
+        @Override
+        public List<String> keys(String prefix) {
+            List<String> keys = new ArrayList<>();
+            for (JsonElement key : JsonTreeParser.parse(keysNative(prefix)).getAsJsonArray()) keys.add(key.getAsString());
+            return List.copyOf(keys);
+        }
     }
 
     private void write(String key, String value) {
@@ -616,6 +642,9 @@ public final class BrowserRemotelyConfigStore implements RemotelyConfigStore, Re
     private void erase(String key) {
         if (!storage.erase(key)) throw new IllegalStateException("Browser Storage Removal Failed");
     }
+
+    @JSBody(params = "prefix", script = "var keys=[]; for(var i=0;i<window.localStorage.length;i++){var key=window.localStorage.key(i);if(key&&key.indexOf(prefix)===0)keys.push(key);}return JSON.stringify(keys);")
+    private static native String keysNative(String prefix);
 
     @JSBody(params = "key", script = "return window.localStorage.getItem(key);")
     private static native String readNative(String key);

@@ -14,6 +14,7 @@ import restudio.rebase.settings.controllers.LogSettingsController;
 import restudio.rebase.settings.controllers.LspSettingsController;
 import restudio.rebase.settings.controllers.MinecraftAssetsSettingsController;
 import restudio.rebase.settings.controllers.PresetSettingsController;
+import restudio.rebase.settings.controllers.ResourceSettingsController;
 import restudio.rebase.settings.controllers.ReStudioAccountSettingsController;
 import restudio.rebase.settings.controllers.SoundSettingsController;
 import restudio.rebase.settings.controllers.ThemeController;
@@ -59,6 +60,7 @@ public final class SettingsScreenFactory {
                 : new ExplorerSettingsController(config, providers.explorerUnavailableReason());
         BackupSettingsController backups = new BackupSettingsController(parent, providers.backups());
         PresetSettingsController presets = new PresetSettingsController(parent, providers.presets());
+        ResourceSettingsController resources = new ResourceSettingsController(config, providers.resources());
         ReStudioAccountSettingsController account = new ReStudioAccountSettingsController(providers.account());
         CollaborationSettingsController collaboration = new CollaborationSettingsController(config, providers.collaboration());
         LogSettingsController logs = new LogSettingsController(providers.logs());
@@ -82,6 +84,7 @@ public final class SettingsScreenFactory {
         settingsByTab.put("File Explorer", explorer::getSettings);
         settingsByTab.put("Backups", backups::getSettings);
         settingsByTab.put("Presets", presets::getSettings);
+        settingsByTab.put("Resources", resources::getSettings);
         settingsByTab.put("Account", () -> {
             List<Setting> settings = new ArrayList<>(account.getAccountSettings());
             settings.addAll(collaboration.getSettings());
@@ -100,6 +103,7 @@ public final class SettingsScreenFactory {
             if (active[0]) {
                 active[0] = false;
                 backups.cleanup();
+                resources.cleanup();
                 account.cleanup();
                 reProxy.cleanup();
                 runtime.cleanup();
@@ -121,6 +125,7 @@ public final class SettingsScreenFactory {
                 super.onDisplayed();
                 if (!active[0]) {
                     active[0] = true;
+                    resources.activate();
                     reProxy.activate();
                     runtime.opened();
                     runtime.displayed(this);

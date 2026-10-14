@@ -10,6 +10,7 @@ import restudio.rebase.resource.marketplace.ResourceMarketplaceProviderAdapter;
 import restudio.rebase.resource.provider.OnlineResourceVersion;
 import restudio.rebase.restudio.api.models.ServerModels;
 import restudio.rebase.ui.screens.resources.ResourceContainerProvider;
+import restudio.rebase.config.RebaseConfigStore;
 import restudio.rebase.ui.screens.resources.ResourceDependencies;
 import restudio.rebase.ui.screens.resources.ResourceForwarding;
 import restudio.rebase.ui.screens.resources.ResourceContainerItem;
@@ -70,8 +71,18 @@ final class HostedResourceContainerProvider implements ResourceContainerProvider
     }
 
     @Override
+    public RebaseConfigStore resourceSettings() {
+        return resourceContext.resourceConfig();
+    }
+
+    @Override
     public Async<List<ResourceContainerItem>> load(boolean force) {
         return resourceContext.canonicalResourceInventory(force).thenApply(this::resourceSnapshot);
+    }
+
+    @Override
+    public Async<Void> retryIdentification(List<ResourceContainerItem> resources) {
+        return resourceContext.retryIdentification(resources);
     }
 
     @Override
@@ -332,6 +343,7 @@ final class HostedResourceContainerProvider implements ResourceContainerProvider
         if (CAPABILITY_TOGGLE.equals(id)) return fileCapability("resources.toggle");
         if (CAPABILITY_DELETE.equals(id)) return fileCapability("files.delete");
         if (CAPABILITY_OPEN.equals(id)) return CapabilityDescriptor.supported(id);
+        if (CAPABILITY_IDENTIFY.equals(id)) return fileCapability("files.list");
         return resourceContext.capability(id);
     }
 

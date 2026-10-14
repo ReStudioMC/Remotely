@@ -17,6 +17,7 @@ import restudio.rebase.platform.jvm.JvmLogSettingsProvider;
 import restudio.rebase.platform.jvm.JvmLspSettingsProvider;
 import restudio.rebase.platform.jvm.JvmMinecraftAssetsSettingsProvider;
 import restudio.rebase.platform.jvm.JvmPresetSettingsProvider;
+import restudio.rebase.platform.jvm.JvmResourceSettingsProvider;
 import restudio.rebase.platform.jvm.JvmReStudioAccountSettingsProvider;
 import restudio.rebase.platform.jvm.JvmThemeSettingsProvider;
 import restudio.rebase.settings.controllers.SettingsActionCapability;
@@ -86,6 +87,7 @@ public final class DesktopSettingsScreenFactory {
                 null,
                 new JvmBackupSettingsProvider(parent, null),
                 new JvmPresetSettingsProvider(),
+                new JvmResourceSettingsProvider(),
                 new JvmReStudioAccountSettingsProvider(),
                 new CollaborationSettingsProvider() {},
                 new JvmLogSettingsProvider(),
