@@ -14916,13 +14916,14 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
             String sessionId = awareness.authorSessionId();
             activeSessions.add(sessionId);
             WorkspaceSelectionSnapshot current = workspaceSelectionSnapshots.get(sessionId);
-            if (current != null && current.updatedAt() == awareness.updatedAt()) {
+            int color = workspaceColor(sessionId);
+            if (current != null && current.updatedAt() == awareness.updatedAt() && current.color() == color) {
                 continue;
             }
             JsonObject state = awareness.state();
             JsonArray selected = state != null && state.has("selectedNodeIds") && state.get("selectedNodeIds").isJsonArray()
                 ? state.getAsJsonArray("selectedNodeIds") : null;
-            WorkspaceSelectionSnapshot next = workspaceSelectionSnapshot(current, awareness.updatedAt(), workspaceColor(sessionId), selected);
+            WorkspaceSelectionSnapshot next = workspaceSelectionSnapshot(current, awareness.updatedAt(), color, selected);
             if (next != current) {
                 workspaceSelectionSnapshots.put(sessionId, next);
             }
@@ -14949,7 +14950,7 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     static WorkspaceSelectionSnapshot workspaceSelectionSnapshot(WorkspaceSelectionSnapshot current, long updatedAt, int color,
                                                                   JsonArray selected) {
         if (current != null && current.updatedAt() == updatedAt) {
-            return current;
+            return current.color() == color ? current : new WorkspaceSelectionSnapshot(updatedAt, color, current.nodeIds());
         }
         Set<String> selectedNodeIds = new HashSet<>();
         if (selected != null) {
@@ -14966,10 +14967,9 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         FlowManager manager = FlowManager.getInstance();
         if (manager != null) {
             ReSyncFlowClient client = manager.existingFlowClient(serverId);
-            for (var presence : client != null ? client.collaboration().snapshot() : List.<ReSyncCollaborationClient.Presence>of()) {
-                if (Objects.equals(sessionId, presence.sessionId())) {
-                    return collaborationColor(presence);
-                }
+            ReSyncCollaborationClient.Presence presence = client != null ? client.collaboration().presence(sessionId) : null;
+            if (presence != null) {
+                return collaborationColor(presence);
             }
         }
         int[] colors = {0xFF4E8CFF, 0xFFFF5B8A, 0xFF42CFA5, 0xFFFFA94D, 0xFFB277FF, 0xFF39BCEB};

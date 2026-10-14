@@ -78,9 +78,7 @@ final class BrowserGlobalSettingsProviders {
                 browserPresetSettings(),
                 new BrowserResourceSettingsProvider(host),
                 browserAccountSettings(runtime),
-                new CollaborationSettingsProvider() {
-                    public boolean available(String control) { return false; }
-                },
+                new CollaborationSettingsProvider() {},
                 browserLogSettings(config),
                 new BrowserConnectionSettings(api)::getSettings,
                 runtime);

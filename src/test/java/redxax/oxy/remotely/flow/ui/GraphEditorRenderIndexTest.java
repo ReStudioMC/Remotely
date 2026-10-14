@@ -230,13 +230,17 @@ class GraphEditorRenderIndexTest {
         JsonArray ignoredSelection = new JsonArray();
         ignoredSelection.add("ignored");
 
-        GraphEditorScreen.WorkspaceSelectionSnapshot cached = GraphEditorScreen.workspaceSelectionSnapshot(first, 10L, 0xFF445566,
+        GraphEditorScreen.WorkspaceSelectionSnapshot cached = GraphEditorScreen.workspaceSelectionSnapshot(first, 10L, 0xFF112233,
+            ignoredSelection);
+        GraphEditorScreen.WorkspaceSelectionSnapshot recolored = GraphEditorScreen.workspaceSelectionSnapshot(first, 10L, 0xFF445566,
             ignoredSelection);
         GraphEditorScreen.WorkspaceSelectionSnapshot updated = GraphEditorScreen.workspaceSelectionSnapshot(first, 11L, 0xFF445566,
             ignoredSelection);
 
         assertSame(first, cached);
         assertEquals(Set.of("first"), cached.nodeIds());
+        assertEquals(Set.of("first"), recolored.nodeIds());
+        assertEquals(0xFF445566, recolored.color());
         assertEquals(Set.of("ignored"), updated.nodeIds());
     }
 

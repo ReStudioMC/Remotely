@@ -111,8 +111,8 @@ public final class BrowserRemotelyConfigStore implements RemotelyConfigStore, Re
             Map.entry(SERVERS_QUICK_AUTO_RESTART, CapabilityDescriptor.unavailable(SERVERS_QUICK_AUTO_RESTART, "Quick Servers Are Unavailable In Browser")),
             Map.entry(SERVERS_QUICK_MIRROR_MODS, CapabilityDescriptor.unavailable(SERVERS_QUICK_MIRROR_MODS, "Quick Servers Are Unavailable In Browser")),
             Map.entry(SERVERS_LOCAL_REMOTE_HIDDEN, CapabilityDescriptor.unavailable(SERVERS_LOCAL_REMOTE_HIDDEN, "Local And SSH Server Storage Is Unavailable In Browser")),
-            Map.entry(ABOUT_COLLABORATION_OVERRIDE, CapabilityDescriptor.unavailable(ABOUT_COLLABORATION_OVERRIDE, "Collaboration Color Overrides Are Unavailable In Browser")),
-            Map.entry(ABOUT_COLLABORATION_COLOR, CapabilityDescriptor.unavailable(ABOUT_COLLABORATION_COLOR, "Collaboration Color Overrides Are Unavailable In Browser")));
+            Map.entry(ABOUT_COLLABORATION_OVERRIDE, CapabilityDescriptor.supported(ABOUT_COLLABORATION_OVERRIDE)),
+            Map.entry(ABOUT_COLLABORATION_COLOR, CapabilityDescriptor.supported(ABOUT_COLLABORATION_COLOR)));
 
     @Override
     public Map<String, CapabilityDescriptor> settingsCapabilities() {
