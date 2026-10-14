@@ -87,7 +87,7 @@ public class GuiDesignerScreen extends StudioScreen implements DesktopWindowBeha
     private static final int PLAYER_INVENTORY_SLOTS = 36;
     private static final int PLAYER_INVENTORY_ROWS = 4;
     private static final int TITLE_COLOR = 0xFF404040;
-    private static final String MATERIAL_OPTIONS_SOURCE = "server:minecraft:material";
+    private static final String MATERIAL_OPTIONS_SOURCE = ItemOptionCatalog.SOURCE;
     private static final Set<GuiDesignerScreen> OPEN_SCREENS = BrowserSafeState.set();
     private static final List<String> ACTION_MODE_OPTIONS = List.of("None", "Run Flow", "Run Function", "Run Command", "Menu");
 

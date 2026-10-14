@@ -174,7 +174,7 @@ public final class ReSyncGenericDescriptorProjection {
                 Field field = qualifiedResourceType(type) && optionSource != null
                     ? new Field("pin:" + id, text(pin.get("displayName")), text(pin.get("description")),
                         EditorKind.SELECT, CanonicalJson.canonicalize(type), capability(pin.get("editor")), true, "")
-                    : scalarSelector(type, optionSource, widget, capability(pin.get("editor")))
+                    : catalogSelector(type, optionSource, widget, capability(pin.get("editor")))
                     ? new Field("pin:" + id, text(pin.get("displayName")), text(pin.get("description")),
                         EditorKind.SELECT, CanonicalJson.canonicalize(type), capability(pin.get("editor")), true, "")
                     : field("pin:" + id, text(pin.get("displayName")), text(pin.get("description")),
@@ -190,7 +190,7 @@ public final class ReSyncGenericDescriptorProjection {
         return List.copyOf(result);
     }
 
-    private static boolean scalarSelector(Object type, ContractRef<InspectorFieldId> optionSource, String widget,
+    private static boolean catalogSelector(Object type, ContractRef<InspectorFieldId> optionSource, String widget,
                                           String editor) {
         if (optionSource == null || !editor.endsWith("/generic-editor")
             || !Set.of("dropdown", "searchable_list").contains(widget.toLowerCase(Locale.ROOT))
@@ -205,7 +205,7 @@ public final class ReSyncGenericDescriptorProjection {
         }
         Map<String, Object> identity = readMap(reference);
         return "builtin".equals(text(identity.get("ownerId")))
-            && Set.of("material", "sound", "potion_effect", "entity_type", "network_scope")
+            && Set.of("material", "sound", "potion_effect", "entity_type", "network_scope", "itemstack")
                 .contains(text(identity.get("localId")));
     }
 

@@ -1320,7 +1320,11 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
     private Widget focusedNodeChild;
     private FlowNodeWidget pointerOwnerNode;
     private Widget pointerOwnerChild;
+    private NodeDropdown nodeDropdown;
     private boolean movingSelectedNodes = false;
+
+    private record NodeDropdown(FlowNodeWidget owner, DropDownWidget<?> widget) {
+    }
 
     private String pendingSourceNodeId;
     private String pendingSourcePin;
@@ -17179,6 +17183,9 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         if (handlePopupWidgetMouseClicked(event)) {
             return true;
         }
+        if (handleNodeDropdownMouseClicked(event)) {
+            return true;
+        }
         double[] headerCoords = unDistortMouse(mouseX, mouseY);
         if (handleHeaderButtonsClick(event, (int) headerCoords[0], (int) headerCoords[1])) {
             return true;
@@ -17282,6 +17289,9 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
                 }
                 widget.setLastScreenMouse((int) headerCoords[0], (int) headerCoords[1]);
                 boolean childHandled = Widget.dispatchMouseClicked(inputWidget, event.retarget(inputWidget, wx, wy));
+                if (inputWidget instanceof DropDownWidget<?> dropdown) {
+                    nodeDropdown = dropdown.isExpanded() ? new NodeDropdown(widget, dropdown) : null;
+                }
                 if (childHandled) {
                     capturePointerOwner(widget, inputWidget);
                 }
@@ -17532,6 +17542,40 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         pointerOwnerChild = child;
     }
 
+    private void dismissNodeDropdown() {
+        if (nodeDropdown != null) {
+            nodeDropdown.widget().dismissScreenOverlay();
+            nodeDropdown = null;
+        }
+    }
+
+    private boolean handleNodeDropdownMouseClicked(ReMouseEvent event) {
+        if (nodeDropdown == null) {
+            return false;
+        }
+        double[] point = unDistortMouse(event.x(), event.y());
+        double[] world = screenToWorld(point[0], point[1]);
+        NodeDropdown overlay = nodeDropdown;
+        if (overlay.widget().isMouseOverScreenOverlay(world[0], world[1])) {
+            try {
+                boolean handled = overlay.widget().screenOverlayMouseClicked(event.retarget(overlay.widget(), world[0], world[1]));
+                if (handled) {
+                    capturePointerOwner(overlay.owner(), overlay.widget());
+                }
+                if (!overlay.widget().isExpanded()) {
+                    nodeDropdown = null;
+                }
+                return handled;
+            } finally {
+                completeWorkspaceInteraction();
+            }
+        }
+        if (!overlay.widget().ownsScreenOverlayInteraction(world[0], world[1])) {
+            dismissNodeDropdown();
+        }
+        return false;
+    }
+
     private void clearPointerOwner() {
         pointerOwnerNode = null;
         pointerOwnerChild = null;
@@ -17556,6 +17600,10 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
 
     private boolean validateNodeChildAuthority() {
         boolean valid = true;
+        if (nodeDropdown != null && (!nodeDropdown.widget().isExpanded()
+            || !nodeDropdown.owner().ownsInteractionChild(nodeDropdown.widget()) || !isEditableWidget(nodeDropdown.owner()))) {
+            dismissNodeDropdown();
+        }
         if (focusedNodeChildOwner == null || focusedNodeChild == null) {
             clearFocusedNodeChild();
         } else if (getFocusedWidget() != focusedNodeChild) {
@@ -21036,6 +21084,15 @@ public class GraphEditorScreen extends StudioScreen implements StudioHeaderProvi
         }
         if (handlePopupWidgetMouseScrolled(event)) {
             return true;
+        }
+        if (nodeDropdown != null) {
+            double[] point = unDistortMouse(mouseX, mouseY);
+            double[] world = screenToWorld(point[0], point[1]);
+            DropDownWidget<?> dropdown = nodeDropdown.widget();
+            if (dropdown.isMouseOverScreenOverlay(world[0], world[1])) {
+                dropdown.screenOverlayMouseScrolled(event.retarget(dropdown, world[0], world[1]));
+                return true;
+            }
         }
         if (itemComponentEditor != null && itemComponentEditor.isOpen()
             && itemComponentEditor.sidePanel().mouseScrolled(event.retarget(itemComponentEditor.sidePanel(), mouseX, mouseY))) {

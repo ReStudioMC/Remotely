@@ -201,7 +201,7 @@ public final class ItemIconPreview {
         return null;
     }
 
-    private static Preview fromMetadata(Map<String, Object> metadata) {
+    public static Preview fromMetadata(Map<String, Object> metadata) {
         if (metadata == null || metadata.isEmpty()) {
             return null;
         }

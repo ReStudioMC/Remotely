@@ -135,9 +135,13 @@ public final class OptionCatalogSelector {
                 hint = hint.isBlank() ? item.reason() : hint + " | " + item.reason();
             }
             Runnable action = item.available() && onSelected != null ? () -> onSelected.accept(value) : null;
-            items.add(new ItemSelectorWidget.AsyncItem(item.label(), "", hint,
-                item.label() + " " + item.description() + " " + identity, 0,
-                item.available() ? "" : "Unavailable", "", action));
+            String icon = String.valueOf(item.presentation().getOrDefault("icon", ""));
+            String group = String.valueOf(item.presentation().getOrDefault("group", ""));
+            String terms = value.value() instanceof Map<?, ?> snapshot && "paper-item-v1".equals(snapshot.get("format"))
+                ? String.valueOf(snapshot.get("material")) : identity;
+            items.add(new ItemSelectorWidget.AsyncItem(item.label(), icon, hint,
+                item.label() + " " + item.description() + " " + group + " " + terms, 0,
+                item.available() ? "" : "Unavailable", group, action));
         }
         boolean loading = catalog != null && catalog.loading();
         TypedValue selected = selectedSupplier != null ? selectedSupplier.get() : null;
@@ -304,7 +308,9 @@ public final class OptionCatalogSelector {
         return value.locator() != null ? value.locator().id() : switch (value.state()) {
             case ABSENT -> "Absent";
             case NULL -> "Null";
-            case VALUE -> value.value() instanceof String text ? text : String.valueOf(value.value());
+            case VALUE -> value.value() instanceof String text ? text
+                : value.value() instanceof Map<?, ?> snapshot && "paper-item-v1".equals(snapshot.get("format"))
+                    ? String.valueOf(snapshot.get("material")) : String.valueOf(value.value());
             case OPAQUE -> "Unavailable";
             case LOCATOR -> value.locator().id();
         };

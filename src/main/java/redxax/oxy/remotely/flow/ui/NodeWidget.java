@@ -24,6 +24,7 @@ import redxax.oxy.remotely.flow.registry.NodeDefinition;
 import redxax.oxy.remotely.flow.registry.NodeRegistry;
 import redxax.oxy.remotely.flow.sync.FlowOptionSourceMetadata;
 import restudio.resync.flow.graph.PinValue;
+import restudio.resync.flow.protocol.OptionItem;
 import restudio.resync.flow.graph.StringTemplatePins;
 import restudio.resync.flow.identity.NodeInstanceId;
 import restudio.resync.flow.identity.NodeId;
@@ -65,6 +66,7 @@ import restudio.rescreen.ui.widgets.ColorFieldWidget;
 import restudio.rescreen.ui.widgets.ContextMenuWidget;
 import restudio.rescreen.ui.widgets.DropDownWidget;
 import restudio.rescreen.ui.widgets.ItemSelectorWidget;
+import restudio.rescreen.ui.widgets.IconButton;
 import restudio.rescreen.ui.widgets.PopupWidget;
 import restudio.rescreen.ui.widgets.SliderWidget;
 import restudio.rebase.ui.widgets.editor.TextAreaWidget;
@@ -1390,12 +1392,13 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
     }
 
     private Widget buildCoreSearchableSelector(NodeDefinition.PinDefinition input) {
-        AnimatedButton button = new AnimatedButton.Builder()
-            .label(typedValueLabel(corePinValue(input)))
-            .size(INPUT_WIDGET_WIDTH, INPUT_WIDGET_HEIGHT)
-            .entranceAnimation(false)
-            .build();
-        button.setAction(() -> {
+        AnimatedWidget button = input.getDataType() == FlowDataType.ITEMSTACK
+            ? new IconButton.Builder().label(typedValueLabel(corePinValue(input)))
+                .size(INPUT_WIDGET_WIDTH, INPUT_WIDGET_HEIGHT).entranceAnimation(false).build()
+            : new AnimatedButton.Builder().label(typedValueLabel(corePinValue(input)))
+                .size(INPUT_WIDGET_WIDTH, INPUT_WIDGET_HEIGHT).entranceAnimation(false).build();
+        updateCoreSelectorButton(button, input, corePinValue(input));
+        Runnable open = () -> {
             var screen = ScreenManager.getInstance().getCurrentScreen();
             if (screen == null) {
                 return;
@@ -1411,18 +1414,50 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
                             new Notification("Options", "Typed Option Is Incompatible", Notification.Type.ERROR);
                             return;
                         }
-                        button.setMessage(typedValueLabel(value));
-                        applyCoreTypedNodeValue(input, value);
+                        if (applyCoreTypedNodeValue(input, value)) {
+                            updateCoreSelectorButton(button, input, value);
+                        }
                     }, "No Options"))
                 .onClose(() -> screen.remove(selector.get()))
                 .build());
-            selector.get().setSelectedItem(typedValueLabel(corePinValue(input)));
+            selector.get().setSelectedItem(button.getMessage());
             screen.addDrawableChild(selector.get());
             int selectorX = hasLastScreenMouse ? lastScreenX : button.getX();
             int selectorY = hasLastScreenMouse ? lastScreenY : button.getY() + button.getHeight();
             selector.get().show(selectorX, selectorY);
-        });
+        };
+        if (button instanceof IconButton itemButton) {
+            itemButton.setOnClick(open);
+        } else if (button instanceof AnimatedButton textButton) {
+            textButton.setAction(open);
+        }
         return button;
+    }
+
+    private void updateCoreSelectorButton(AnimatedWidget button, NodeDefinition.PinDefinition input, TypedValue value) {
+        OptionCatalogLoader.CoreSnapshot snapshot = coreOptionCatalog(input.getOptionSourceRef());
+        OptionItem option = snapshot != null && snapshot.catalog() != null
+            ? snapshot.catalog().items().stream().filter(item -> item.value().equals(value)).findFirst().orElse(null) : null;
+        button.setMessage(option != null ? option.label() : typedValueLabel(value));
+        if (!(button instanceof IconButton itemButton)) {
+            return;
+        }
+        itemButton.setItemIcon(null);
+        if (option != null && option.presentation().get("metadata") instanceof Map<?, ?> metadata) {
+            Map<String, Object> preview = new LinkedHashMap<>();
+            metadata.forEach((key, field) -> {
+                if (key instanceof String name) {
+                    preview.put(name, field);
+                }
+            });
+            ItemIconPreview.Preview item = ItemIconPreview.fromMetadata(preview);
+            if (item != null) {
+                itemButton.setMinecraftItem(item.toRenderItem(option.label()));
+            }
+        } else if (value != null && value.value() instanceof Map<?, ?> item && "paper-item-v1".equals(item.get("format"))) {
+            itemButton.setMinecraftItem(new ItemIconPreview.Preview(String.valueOf(item.get("material")), null, Map.of())
+                .toRenderItem(button.getMessage()));
+        }
     }
 
     private Widget buildCoreInspectorSelector(ReSyncGenericDescriptorProjection.InspectorField field,
@@ -1565,7 +1600,9 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
         return switch (value.state()) {
             case ABSENT -> "Absent";
             case NULL -> "Null";
-            case VALUE -> value.value() instanceof String text ? text : CanonicalJson.canonicalize(value.value());
+            case VALUE -> value.value() instanceof String text ? text
+                : value.value() instanceof Map<?, ?> snapshot && "paper-item-v1".equals(snapshot.get("format"))
+                    ? String.valueOf(snapshot.get("material")) : CanonicalJson.canonicalize(value.value());
             case LOCATOR -> value.locator().id();
             case OPAQUE -> "Unavailable";
         };
@@ -2369,10 +2406,12 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
                 if (!field.getColor().equals(color)) field.setColor(color);
             } else if (widget instanceof DropDownWidget<?> dropdown) {
                 reconcileDropdown(input, dropdown, value);
+            } else if (widget instanceof IconButton button && input.getOptionSourceRef() != null) {
+                updateCoreSelectorButton(button, input, corePinValue(input));
             } else if (widget instanceof AnimatedButton button && (resourceReferenceInput(input)
                 || resolveWidgetType(input) == NodeDefinition.WidgetType.SEARCHABLE_LIST)) {
                 if (input.getOptionSourceRef() != null) {
-                    button.setMessage(typedValueLabel(corePinValue(input)));
+                    updateCoreSelectorButton(button, input, corePinValue(input));
                 } else {
                     String selected = resourceId(value);
                     searchableSelectorValues.put(pin, selected);
@@ -4193,7 +4232,8 @@ public class NodeWidget extends AnimatedWidget implements AutoCloseable, WidgetC
 
     private Widget getExpandedInputWidgetAt(int wx, int wy) {
         for (Widget widget : inputWidgets.values()) {
-            if (widget instanceof DropDownWidget<?> dropdown && dropdown.isExpanded() && widget.isVisible() && widget.isMouseOver(wx, wy)) {
+            if (widget instanceof DropDownWidget<?> dropdown && dropdown.isExpanded() && widget.isVisible()
+                && dropdown.ownsScreenOverlayInteraction(wx, wy)) {
                 return widget;
             }
         }

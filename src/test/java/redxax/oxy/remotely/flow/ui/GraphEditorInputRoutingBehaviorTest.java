@@ -28,6 +28,7 @@ import restudio.rescreen.ui.rescreen.SidePanel;
 import restudio.rescreen.ui.rescreen.TabsManager;
 import restudio.rescreen.ui.widgets.AnimatedWidget;
 import restudio.rescreen.ui.widgets.ContextMenuWidget;
+import restudio.rescreen.ui.widgets.DropDownWidget;
 import restudio.rescreen.ui.widgets.TextInputWidget;
 import restudio.resync.flow.canonical.CanonicalJson;
 import restudio.resync.flow.catalog.CatalogCanonicalizer;
@@ -309,6 +310,55 @@ class GraphEditorInputRoutingBehaviorTest {
             assertTrue(editor.mouseClicked(leftMouse(editor, ReMouseEvent.Action.PRESSED,
                 click[0], click[1], 0, 0)));
             assertNull(editor.focusedWidget());
+        } finally {
+            restoreNodeRegistry(previous);
+        }
+    }
+
+    @Test
+    void expandedNodeDropdownSelectsBeyondItsClippedBoundsUnderPanAndZoom() throws Exception {
+        String serverId = "dropdown-routing";
+        String nodeId = NodeInstanceId.deterministic("dropdown-routing-node").canonicalText();
+        NodeDefinition.PinDefinition input = new NodeDefinition.PinBuilder("frame", NodeDefinition.PinType.DATA,
+            NodeDefinition.PinDirection.INPUT, FlowDataType.STRING).widget(NodeDefinition.WidgetType.DROPDOWN)
+            .options(List.of("Task", "Goal", "Challenge")).defaultValue("Task").build();
+        NodeDefinition definition = new NodeDefinition.Builder("toast", "Toast", NodeDefinition.NodeCategory.VISUAL)
+            .owner("test").input(input).build();
+        NodeRegistry previous = NodeRegistry.getInstance();
+        try {
+            NodeRegistry registry = new NodeRegistry();
+            assertTrue(registry.applySnapshot(serverId, canonicalSnapshot(serverId, definition)));
+            FlowGraph graph = graph("dropdown-route");
+            graph.setResourceType("test");
+            FlowNode node = new FlowNode("test:toast", 120, 110, new LinkedHashMap<>(Map.of("frame", "Task")));
+            graph.setNodes(new LinkedHashMap<>(Map.of(nodeId, node)));
+            RoutingEditor editor = new RoutingEditor(graph, serverId);
+            editor.width = 800;
+            editor.height = 500;
+            editor.setViewport(1.65F, 73F, -41F);
+            FlowNodeWidget widget = new FlowNodeWidget(120, 110, node, graph, nodeId, serverId, null, null,
+                FlowNodeWidget.FunctionBoundaryCatalog.unavailable(), definition, false, false);
+            widget.render(new TestDrawContext(), 0, 0, 0F);
+            DropDownWidget<?> dropdown = (DropDownWidget<?>) inputWidget(widget, "frame");
+            dropdown.setScissorRegion(widget.getX(), widget.getY(), widget.getX() + widget.getWidth(), widget.getY() + widget.getHeight());
+            editor.installNode(nodeId, widget);
+
+            double[] header = editor.screenPoint(dropdown.getX() + 3, dropdown.getY() + 3);
+            assertTrue(editor.mouseClicked(leftMouse(editor, ReMouseEvent.Action.PRESSED, header[0], header[1], 0, 0)));
+            assertTrue(dropdown.isExpanded());
+            Field animation = DropDownWidget.class.getDeclaredField("dropdownAnimationProgress");
+            animation.setAccessible(true);
+            animation.setFloat(dropdown, 1F);
+            int rowY = dropdown.getY() + dropdown.getHeight() + 2 * 14 + 7;
+            assertTrue(rowY > widget.getY() + widget.getHeight());
+            double[] row = editor.screenPoint(dropdown.getX() + 6, rowY);
+            assertTrue(editor.mouseClicked(leftMouse(editor, ReMouseEvent.Action.PRESSED, row[0], row[1], 0, 0)));
+
+            assertEquals("Challenge", dropdown.getSelectedItem());
+            assertEquals("Challenge", node.getInputValues().get("frame"));
+            assertFalse(dropdown.isExpanded());
+            assertFalse(editor.nodeDragging());
+            assertEquals(0, editor.workspacePresses.get());
         } finally {
             restoreNodeRegistry(previous);
         }
