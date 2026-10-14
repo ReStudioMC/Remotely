@@ -1,6 +1,18 @@
 package redxax.oxy.remotely.ui.server;
 
 import restudio.rebase.instance.InstanceState;
+import restudio.rebase.backend.DeveloperCapabilityProviders;
+import restudio.rebase.backend.DeveloperCapabilityProvider;
+import restudio.rebase.backend.FileExplorerProviders;
+import restudio.rebase.backend.RemotePath;
+import restudio.rebase.developer.search.WorkspaceFileIndex;
+import restudio.rebase.developer.search.WorkspaceFileCatalog;
+import restudio.rebase.developer.search.LogStartSearch;
+import restudio.rebase.developer.search.BackupStartSearch;
+import restudio.rebase.resource.marketplace.ResourceStartSearch;
+import restudio.rebase.resource.marketplace.ResourceMarketplaceProvider;
+import restudio.rebase.resource.marketplace.ResourceBrowserContext;
+import restudio.rebase.ui.screens.explorer.FileExplorerScreen;
 import restudio.rebase.ui.widgets.LifecycleButtonWidget;
 import redxax.oxy.remotely.network.NetworkAdoptionReport;
 import redxax.oxy.remotely.network.HostedNetworkClient;
@@ -8,6 +20,8 @@ import redxax.oxy.remotely.RemotelyClient;
 import redxax.oxy.remotely.RemotelyComposition;
 import redxax.oxy.remotely.config.RemotelyConfigStore;
 import redxax.oxy.remotely.config.RemotelyRecentItem;
+import redxax.oxy.remotely.settings.server.ServerSettingsRegistry;
+import redxax.oxy.remotely.settings.server.ServerSettingsSnapshot;
 import redxax.oxy.remotely.discord.DiscordRpcBridge;
 import redxax.oxy.remotely.network.NetworkDefinition;
 import redxax.oxy.remotely.network.NetworkGroupAttachmentTransaction;
@@ -38,6 +52,9 @@ import restudio.rescreen.ui.desktop.DesktopIconWidget;
 import restudio.rescreen.ui.desktop.DesktopMetrics;
 import restudio.rescreen.ui.desktop.DesktopShellScreen;
 import restudio.rescreen.ui.desktop.DesktopTaskbarHelper;
+import restudio.rescreen.ui.desktop.StartEntry;
+import restudio.rescreen.ui.desktop.StartMenuWidget;
+import restudio.rescreen.ui.desktop.StartHistory;
 import restudio.rescreen.ui.rescreen.Container;
 import restudio.rescreen.ui.rescreen.TabsManager;
 import restudio.rescreen.ui.rescreen.layout.DesktopLayout;
@@ -48,6 +65,7 @@ import restudio.rescreen.util.Notification;
 import restudio.rescreen.util.Sound;
 
 import java.util.*;
+import java.nio.charset.StandardCharsets;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
@@ -86,6 +104,62 @@ public class ServerManagerScreen extends DesktopShellScreen {
     private final Object parent;
     private IconButton userButton;
     private boolean serverManagerContextMenuPressed;
+    private WorkspaceFileCatalog startFileIndex;
+    private ResourceStartSearch startResourceSearch;
+    private LogStartSearch startLogSearch;
+    private BackupStartSearch startBackupSearch;
+    private ServerStartActions startServerActions;
+    private final Map<String, StartBackupBinding> startBackups = new LinkedHashMap<>();
+    private List<StartEntry> startLogEntries = List.of();
+    private List<StartEntry> startBackupEntries = List.of();
+    private List<StartEntry> startActionEntries = List.of();
+    private String startLogStatus = "";
+    private String startBackupStatus = "";
+    private boolean startResourceLoading;
+    private boolean startLogLoading;
+    private boolean startBackupLoading;
+    private long startSpecialRevision;
+    private long startPublishedSpecial = -1;
+    private long startBoundSpecial = -1;
+    private final Map<String, StartMarketBinding> startMarkets = new LinkedHashMap<>();
+    private ResourceStartSearch.Target startGlobalMarket;
+    private List<StartEntry> startResourceEntries = List.of();
+    private String startResourceStatus = "";
+    private StartMenuWidget.Search startSearch = new StartMenuWidget.Search("", "", null, "", false);
+    private long startBoundResources = -1;
+    private long startResourceRevision;
+    private long startPublishedResources = -1;
+    private final Map<String, StartFileRows> startFileRows = new LinkedHashMap<>();
+    private Map<String, ServerModels.ClientServerView> startServers = Map.of();
+    private List<StartEntry> startCatalog = List.of();
+    private boolean startCatalogDirty = true;
+    private String startAuthority = "";
+    private String startScope = "";
+    private String startHistoryAccount;
+    private RemotelyConfigStore startHistoryConfig;
+    private final Map<String, StartFileBinding> startBindings = new LinkedHashMap<>();
+    private long startCatalogRevision;
+    private long startBoundCatalog = -1;
+    private long startPublishedCatalog = -1;
+    private long startPublishedIndex = -1;
+    private long startNavigationGeneration;
+    private Object startApi;
+    private boolean startSettingsListening;
+    private final Consumer<ServerSettingsSnapshot> startSettingsChanged = ignored -> ScreenManager.getInstance().execute(() -> {
+        if (this.reactiveRefreshEnabled) startCatalogDirty = true;
+    });
+
+    private record StartFileBinding(String backend, String path, Map<String, String> credentials, Object owner, ServerScreenHost.StorageFiles files, DeveloperCapabilityProvider.FileWatch watcher) {
+        private StartFileBinding {
+            credentials = Map.copyOf(credentials);
+        }
+    }
+
+    private record StartBackupBinding(StartFileBinding stamp, BackupStartSearch.Backend backend) {}
+    private record StartMarketStamp(StartFileBinding source, String version, String loader) {}
+    private record StartMarketBinding(StartMarketStamp stamp, ResourceStartSearch.Target target) {}
+    private record StartFileRows(StartFileBinding source, WorkspaceFileCatalog.Result result, String name, Identifier icon, List<StartEntry> entries) {}
+
     private boolean networkOperationInFlight;
     private final Set<String> deletingServers = new HashSet<>();
 
@@ -151,7 +225,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
     private long lastPersistentLocalProcessPollMs;
     private volatile boolean persistentLocalProcessPollInFlight;
     private static final long PERSISTENT_LOCAL_PROCESS_POLL_MS = 2000;
-    private final Runnable instanceChangeListener = this::queueServerRefresh;
+    private final Runnable instanceChangeListener = this::queueStartSourceRefresh;
     private final Runnable networkChangeListener = this::queueServerRefresh;
     private final Runnable runtimeChangeListener = this::queueServerRefresh;
     private final Runnable authStateListener = this::refreshForAuthStateChange;
@@ -261,6 +335,10 @@ public class ServerManagerScreen extends DesktopShellScreen {
     public void init() {
         super.init();
         reactiveRefreshEnabled = true;
+        if (!startSettingsListening) {
+            ServerSettingsRegistry.getInstance().addListener(startSettingsChanged);
+            startSettingsListening = true;
+        }
         if (!authStateListenerRegistered) {
             serverHost().addAuthStateListener(authStateListener);
             authStateListenerRegistered = true;
@@ -271,6 +349,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
             registerNetworkChangeListener();
             registerRuntimeChangeListener();
             initNoServersOverlay();
+            if (Config.desktopMode) addDesktopControls();
             if (Config.desktopMode && taskbarHelper != null) {
                 taskbarHelper.attach();
             }
@@ -352,9 +431,10 @@ public class ServerManagerScreen extends DesktopShellScreen {
         }
         if (serverHost().supports(ServerScreenHost.Action.GLOBAL_TERMINAL)) headerBuilder.addLeft(terminalButton);
         if (serverHost().supports(ServerScreenHost.Action.FILE_EXPLORER)) headerBuilder.addLeft(fileExplorerButton);
-        if (serverHost().supports(ServerScreenHost.Action.HOST_SETTINGS)) headerBuilder.addLeft(settingsButton);
+        if (!Config.desktopMode && serverHost().supports(ServerScreenHost.Action.HOST_SETTINGS)) headerBuilder.addLeft(settingsButton);
         if (serverHost().supports(ServerScreenHost.Action.SIGN_IN) || serverHost().supports(ServerScreenHost.Action.SIGN_OUT)) headerBuilder.addLeft(userButton);
         headerBuilder.build();
+        if (Config.desktopMode) addDesktopControls();
         refreshAccountAvatar();
 
         if (Config.desktopMode) {
@@ -364,9 +444,6 @@ public class ServerManagerScreen extends DesktopShellScreen {
             }
             if (serverHost().supports(ServerScreenHost.Action.FILE_EXPLORER)) {
                 taskbarHelper.pinApp("file-explorer", fileExplorerButton, this::openFileExplorer, "File Explorer");
-            }
-            if (serverHost().supports(ServerScreenHost.Action.HOST_SETTINGS)) {
-                taskbarHelper.pinApp("global-settings", settingsButton, () -> serverHost().openSettings(this), "Settings");
             }
             taskbarHelper.attach();
         } else {
@@ -598,6 +675,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
     }
 
     private void refreshForAuthStateChange() {
+        resetStartSearch();
         if (!reactiveRefreshEnabled) {
             return;
         }
@@ -689,7 +767,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
 
     private void loadIcons() {
         try {
-            serverIcon = Identifier.icon("server.png");
+            serverIcon = Identifier.icon("reverse.png");
             unknown = Identifier.icon("unknown.png");
             paper = Identifier.icon("paper.png");
             vanilla = Identifier.icon("vanilla.png");
@@ -867,6 +945,14 @@ public class ServerManagerScreen extends DesktopShellScreen {
         });
     }
 
+    private void queueStartSourceRefresh() {
+        ScreenManager.getInstance().execute(() -> {
+            if (!reactiveRefreshEnabled) return;
+            startCatalogDirty = true;
+            queueServerRefresh();
+        });
+    }
+
     private void registerInstanceChangeListener() {
         if (instanceChangeListenerRegistered) {
             return;
@@ -1011,6 +1097,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
 
         if (tab == tabs().getActiveTab()) {
             currentServerViews = List.copyOf(instances);
+            startCatalogDirty = true;
         }
 
         String context = "local";
@@ -1274,7 +1361,8 @@ public class ServerManagerScreen extends DesktopShellScreen {
         DesktopIconWidget<ServerModels.ClientServerView> widget = new DesktopIconWidget.Builder<>(info, (Identifier) null, label)
             .onClick(this::onDesktopIconClick)
             .build();
-        widget.setGeneratedIcon(iconId == null ? serverIcon : iconId);
+        Identifier fallback = isCreate || info == null ? Identifier.icon("server.png") : serverIcon;
+        widget.setGeneratedIcon(iconId == null ? fallback : iconId);
         widget.accentType = getDesktopIconAccent(info, isCreate);
         if (isCreate || info == null) {
             return widget;
@@ -1318,7 +1406,10 @@ public class ServerManagerScreen extends DesktopShellScreen {
         Consumer<Identifier> loaded = icon -> {
             if (!current.getAsBoolean()) return;
             Identifier resolved = icon == null ? serverIcon : icon;
-            if (!Objects.equals(widget.getIconId(), resolved)) widget.setGeneratedIcon(resolved);
+            if (!Objects.equals(widget.getIconId(), resolved)) {
+                widget.setGeneratedIcon(resolved);
+                startCatalogDirty = true;
+            }
         };
         iconManager.loadIconIdAsync(target, loaded);
         iconManager.loadRemoteIconAsync(target, () -> {
@@ -1390,6 +1481,9 @@ public class ServerManagerScreen extends DesktopShellScreen {
     }
 
     private void onHostTabSelected(TabsManager.Tab tab) {
+        startCatalogDirty = true;
+        startNavigationGeneration++;
+        currentServerViews = List.of();
         contextMenuRequestGeneration++;
         int selectionToken = ++remoteHostSelectionToken;
         remotelyClient.saveTabIndex(tabs().getActiveTabIndex());
@@ -2277,6 +2371,531 @@ public class ServerManagerScreen extends DesktopShellScreen {
         serverHost().openGlobalFileExplorer(this);
     }
 
+    @Override
+    protected void refreshStartEntries() {
+        setStartCategories(EnumSet.of(StartEntry.Category.SETTINGS, StartEntry.Category.FILES, StartEntry.Category.ACTIONS,
+                StartEntry.Category.SERVERS, StartEntry.Category.RESOURCES, StartEntry.Category.THEMES, StartEntry.Category.LOGS,
+                StartEntry.Category.BACKUPS, StartEntry.Category.UPDATES, StartEntry.Category.CALCULATOR));
+        String authority = currentStartAuthority();
+        Object api = remotelyClient.getApiClient();
+        if (!authority.equals(startAuthority) || api != startApi) {
+            resetStartSearch();
+            startAuthority = authority;
+            startApi = api;
+        }
+        bindStartHistory();
+        if (startCatalogDirty) {
+            List<StartEntry> entries = new ArrayList<>(ServerStartEntries.global(this, serverHost()));
+            Map<String, ServerModels.ClientServerView> servers = new LinkedHashMap<>();
+            String context = browserHostKey(tabs().getActiveTab() == null ? null : tabs().getActiveTab().getData());
+            for (ServerModels.ClientServerView server : getCurrentServers()) {
+                String key = context + ":" + serverHost().serverOrderKey(server);
+                if (servers.putIfAbsent(key, server) != null) continue;
+                String name = serverName(server);
+                entries.add(new StartEntry("server:" + key, name, "Open Server", StartEntry.Category.SERVERS,
+                        startServerIcon(server), () -> openStartServer(key), List.of(name, "terminal", "console")).withScope(key, name));
+                entries.add(new StartEntry("server:" + key + ":terminal", "Terminal", name + " Console", StartEntry.Category.ACTIONS,
+                        Identifier.icon("terminal.png"), () -> openStartServer(key), List.of("console", "commands")).withScope(key, name).withBadge(startServerIcon(server)));
+                entries.addAll(ServerStartEntries.server(this, serverHost(), server, "server:" + key).stream()
+                        .map(entry -> entry.withScope(key, name).withBadge(startServerIcon(server))).toList());
+                entries.add(new StartEntry("server:" + key + ":files", name + " Files", "Open File Explorer", StartEntry.Category.ACTIONS,
+                        Identifier.icon("explorer.png"), () -> {
+                            ServerModels.ClientServerView current = startServers.get(key);
+                            if (current != null) serverHost().openFileExplorer(this, current);
+                        }, List.of(name, "files", "folder", "explorer")).withScope(key, name).withBadge(startServerIcon(server)));
+            }
+            addStartAction(entries, "files", "File Explorer", "Browse Files", ServerScreenHost.Action.FILE_EXPLORER, this::openFileExplorer);
+            addStartAction(entries, "terminal", "Terminal", "Open Terminal", ServerScreenHost.Action.GLOBAL_TERMINAL, () -> serverHost().openGlobalTerminal(this));
+            addStartAction(entries, "create", "Create Server", "Create, Install Or Import A Server", ServerScreenHost.Action.CREATE_SERVER, this::showCreateChoice);
+            addStartAction(entries, "host", "Connect Host", "Connect A Remote Server Host", ServerScreenHost.Action.REMOTE_HOST, () -> serverHost().openRemoteHost(this));
+            entries.add(new StartEntry("action:refresh-files", "Refresh Files", "Refresh File Search", StartEntry.Category.ACTIONS,
+                    Identifier.icon("reload.png"), () -> { if (startFileIndex != null) startFileIndex.refresh(); }, List.of("search", "index", "reload")));
+            startServers = Map.copyOf(servers);
+            boolean changedSource = startBindings.entrySet().stream().anyMatch(entry -> {
+                ServerModels.ClientServerView current = servers.get(entry.getKey());
+                if (current == null) return true;
+                return !currentStartSource(current, entry.getValue());
+            });
+            if (changedSource) {
+                startNavigationGeneration++;
+                startBindings.entrySet().removeIf(entry -> !currentStartSource(servers.get(entry.getKey()), entry.getValue()));
+            }
+            startCatalog = List.copyOf(entries);
+            startCatalogRevision++;
+            startCatalogDirty = false;
+            if (!servers.containsKey(startScope)) startScope = "";
+            setStartScopes(servers.entrySet().stream().map(entry -> new StartMenuWidget.Scope(entry.getKey(), serverName(entry.getValue()), startServerIcon(entry.getValue()))).toList(),
+                    startScope, this::selectStartScope);
+        }
+        bindStartFiles();
+        bindStartResources();
+        bindStartSearches();
+        publishStartEntries(startFileIndex == null ? null : startFileIndex.snapshot());
+    }
+
+    private void addStartAction(List<StartEntry> entries, String id, String title, String detail, ServerScreenHost.Action action, Runnable run) {
+        String icon = switch (id) {
+            case "files" -> "explorer.png";
+            case "terminal" -> "terminal.png";
+            case "create" -> "server.png";
+            case "host" -> "reverse.png";
+            default -> "change.png";
+        };
+        if (serverHost().supports(action)) entries.add(new StartEntry("action:" + id, title, detail, StartEntry.Category.ACTIONS,
+                Identifier.icon(icon), run, List.of(title, detail)));
+    }
+
+    private void openStartServer(String key) {
+        ServerModels.ClientServerView server = startServers.get(key);
+        if (server != null) openServerScreen(server);
+    }
+
+    private Identifier startServerIcon(ServerModels.ClientServerView server) {
+        Identifier icon = iconManager.getQuickIconId(iconTarget(server));
+        return icon == null || icon.equals(Identifier.icon("server.png")) ? Identifier.icon("reverse.png") : icon;
+    }
+
+    private void bindStartHistory() {
+        String account = accountKey(serverHost().accountIdentity());
+        RemotelyConfigStore config = remotelyClient.getComposition().configManager();
+        if (account.equals(startHistoryAccount) && config == startHistoryConfig) return;
+        startHistoryAccount = account;
+        startHistoryConfig = config;
+        String key = "remotely.start.history." + Base64.getUrlEncoder().withoutPadding().encodeToString(account.getBytes(StandardCharsets.UTF_8));
+        setStartHistory(startStore(config, account, key));
+        setStartHome(startStore(config, account, key.replace(".history.", ".home.")),
+                List.of("settings:global", "action:terminal", "action:files", "action:create", "start:resources", "desktop:layout"));
+    }
+
+    private StartHistory.Store startStore(RemotelyConfigStore config, String account, String key) {
+        return new StartHistory.Store() {
+            public String load() { return config == null ? "" : config.get(key, ""); }
+            public void changed(String encoded) {
+                if (config == null || config != remotelyClient.getComposition().configManager()
+                        || !account.equals(accountKey(serverHost().accountIdentity()))) return;
+                config.set(key, encoded);
+                config.save();
+            }
+        };
+    }
+
+    private void selectStartScope(String scope) {
+        if (scope.equals(startScope) || !scope.isBlank() && !startServers.containsKey(scope)) return;
+        startScope = scope;
+        if (startFileIndex != null && !scope.isBlank()) startFileIndex.prioritize(scope);
+        if (startFileIndex != null) updateStartStatus(startFileIndex.snapshot());
+    }
+
+    private void bindStartFiles() {
+        if (startFileIndex != null && startBoundCatalog == startCatalogRevision) return;
+        startBoundCatalog = startCatalogRevision;
+        List<WorkspaceFileCatalog.Scope> scopes = new ArrayList<>();
+        for (Map.Entry<String, ServerModels.ClientServerView> entry : startServers.entrySet()) {
+            String scope = entry.getKey();
+            ServerModels.ClientServerView server = entry.getValue();
+            StartFileBinding binding = startBindings.get(scope);
+            if (binding == null || !currentStartSource(server, binding)) {
+                ServerScreenHost.ServerIdentity identity = serverHost().identity(server);
+                Object source = serverHost().iconTarget(server);
+                ServerScreenHost.StorageFiles files = serverHost().storageFiles(source);
+                DeveloperCapabilityProvider developer = DeveloperCapabilityProviders.resolve(source, files.provider());
+                binding = new StartFileBinding(identity.backendType(), identity.path(), serverHost().configurationTarget(source).backendCredentials(),
+                        serverHost().fileSourceOwner(source), files, developer.fileWatch());
+                startBindings.put(scope, binding);
+            }
+            ServerScreenHost.StorageFiles files = binding.files();
+            scopes.add(new WorkspaceFileCatalog.Scope(scope, files.provider(), files.root(), binding.watcher()));
+        }
+        if (startFileIndex == null) {
+            WorkspaceFileCatalog index = new WorkspaceFileCatalog(FileExplorerProviders.scheduler(), action -> ScreenManager.getInstance().execute(action));
+            startFileIndex = index;
+            index.onChanged(snapshot -> {
+                if (startFileIndex == index && reactiveRefreshEnabled) publishStartEntries(snapshot);
+            });
+        }
+        startFileIndex.setScopes(scopes);
+        if (!startScope.isBlank()) startFileIndex.prioritize(startScope);
+        startFileIndex.start();
+    }
+
+    private void bindStartResources() {
+        if (startResourceSearch != null && startBoundResources == startCatalogRevision) return;
+        startBoundResources = startCatalogRevision;
+        if (startResourceSearch == null) {
+            ResourceStartSearch search = new ResourceStartSearch(this, remotelyClient.getComposition().scheduler(), action -> ScreenManager.getInstance().execute(action));
+            startResourceSearch = search;
+            setStartResourceRefresh(search::refresh);
+            setStartSearchRefresh(StartEntry.Category.UPDATES, search::refresh);
+            search.onLoading(value -> {
+                if (startResourceSearch == search && reactiveRefreshEnabled && startAuthority.equals(currentStartAuthority())
+                        && startApi == remotelyClient.getApiClient()) {
+                    startResourceLoading = value;
+                    updateStartLoading();
+                }
+            });
+            search.onEntries(entries -> {
+                if (startResourceSearch != search || !reactiveRefreshEnabled || !startAuthority.equals(currentStartAuthority())
+                        || startApi != remotelyClient.getApiClient()) return;
+                if (startResourceEntries.equals(entries)) return;
+                startResourceEntries = List.copyOf(entries);
+                startResourceRevision++;
+                publishStartEntries(startFileIndex == null ? null : startFileIndex.snapshot());
+            });
+            search.onStatus(status -> {
+                if (startResourceSearch != search || !reactiveRefreshEnabled || !startAuthority.equals(currentStartAuthority())
+                        || startApi != remotelyClient.getApiClient()) return;
+                startResourceStatus = status;
+                if (resourceStartSearch()) setStartStatus(status);
+            });
+            search.onProviders(this::setStartResourceProviders);
+            setStartSearchListener(this::searchStart);
+        }
+        if (startGlobalMarket == null) {
+            ResourceMarketplaceProvider marketplace = serverHost().resourceSearchMarketplace(null);
+            ResourceBrowserContext context = marketplace == null ? null : serverHost().resourceSearchContext(null, marketplace);
+            if (context != null) startGlobalMarket = new ResourceStartSearch.Target("", "Online Resources", Identifier.icon("resources.png"),
+                    startAuthority, marketplace, context);
+        }
+        startMarkets.entrySet().removeIf(entry -> {
+            ServerModels.ClientServerView server = startServers.get(entry.getKey());
+            StartMarketStamp stamp = entry.getValue().stamp();
+            if (currentStartSource(server, stamp.source()) && startBindings.get(entry.getKey()) == stamp.source()
+                    && Objects.equals(server.version, stamp.version()) && Objects.equals(server.loader, stamp.loader())) return false;
+            entry.getValue().target().context().invalidate();
+            return true;
+        });
+        List<ResourceStartSearch.Target> targets = new ArrayList<>();
+        for (Map.Entry<String, ServerModels.ClientServerView> entry : startServers.entrySet()) {
+            String id = entry.getKey();
+            ServerModels.ClientServerView server = entry.getValue();
+            StartFileBinding source = startBindings.get(id);
+            if (!currentStartSource(server, source)) continue;
+            StartMarketBinding binding = startMarkets.get(id);
+            String name = serverName(server);
+            Identifier icon = startServerIcon(server);
+            if (binding == null) {
+                Object target = iconTarget(server);
+                ResourceMarketplaceProvider marketplace = serverHost().resourceSearchMarketplace(target);
+                ResourceBrowserContext context = marketplace == null ? null : serverHost().resourceSearchContext(target, marketplace);
+                if (context == null) continue;
+                StartMarketStamp stamp = new StartMarketStamp(source, server.version, server.loader);
+                binding = new StartMarketBinding(stamp, new ResourceStartSearch.Target(id, name, icon, stamp, marketplace, context));
+                startMarkets.put(id, binding);
+            } else if (!binding.target().label().equals(name) || !Objects.equals(binding.target().icon(), icon)) {
+                ResourceStartSearch.Target current = binding.target();
+                binding = new StartMarketBinding(binding.stamp(), new ResourceStartSearch.Target(id, name, icon, binding.stamp(), current.marketplace(), current.context()));
+                startMarkets.put(id, binding);
+            }
+            targets.add(binding.target());
+        }
+        startResourceSearch.setTargets(startGlobalMarket, targets);
+    }
+
+    private void bindStartSearches() {
+        if (startBoundSpecial == startCatalogRevision) return;
+        startBoundSpecial = startCatalogRevision;
+        if (startLogSearch == null) {
+            LogStartSearch search = new LogStartSearch(this, FileExplorerProviders.scheduler(), action -> ScreenManager.getInstance().execute(action));
+            startLogSearch = search;
+            setStartSearchRefresh(StartEntry.Category.LOGS, search::refresh);
+            search.onEntries(entries -> {
+                if (startLogSearch != search || !currentStartSearch() || startLogEntries.equals(entries)) return;
+                startLogEntries = List.copyOf(entries);
+                startSpecialRevision++;
+                publishStartEntries(startFileIndex == null ? null : startFileIndex.snapshot());
+            });
+            search.onStatus(status -> {
+                if (startLogSearch != search || !currentStartSearch()) return;
+                startLogStatus = status;
+                if (startSearch.active() && startSearch.category() == StartEntry.Category.LOGS) setStartStatus(status);
+            });
+            search.onLoading(value -> {
+                if (startLogSearch != search || !currentStartSearch()) return;
+                startLogLoading = value;
+                updateStartLoading();
+            });
+        }
+        if (startBackupSearch == null) {
+            BackupStartSearch search = new BackupStartSearch(this, remotelyClient.getComposition().scheduler(), action -> ScreenManager.getInstance().execute(action));
+            startBackupSearch = search;
+            setStartSearchRefresh(StartEntry.Category.BACKUPS, search::refresh);
+            search.onEntries(entries -> {
+                if (startBackupSearch != search || !currentStartSearch() || startBackupEntries.equals(entries)) return;
+                startBackupEntries = List.copyOf(entries);
+                startSpecialRevision++;
+                publishStartEntries(startFileIndex == null ? null : startFileIndex.snapshot());
+            });
+            search.onStatus(status -> {
+                if (startBackupSearch != search || !currentStartSearch()) return;
+                startBackupStatus = status;
+                if (startSearch.active() && startSearch.category() == StartEntry.Category.BACKUPS) setStartStatus(status);
+            });
+            search.onLoading(value -> {
+                if (startBackupSearch != search || !currentStartSearch()) return;
+                startBackupLoading = value;
+                updateStartLoading();
+            });
+        }
+        if (startServerActions == null) {
+            ServerStartActions search = new ServerStartActions(this, remotelyClient, action -> ScreenManager.getInstance().execute(action));
+            startServerActions = search;
+            search.onEntries(entries -> {
+                if (startServerActions != search || !currentStartSearch() || startActionEntries.equals(entries)) return;
+                startActionEntries = List.copyOf(entries);
+                startSpecialRevision++;
+                publishStartEntries(startFileIndex == null ? null : startFileIndex.snapshot());
+            });
+        }
+        startBackups.entrySet().removeIf(entry -> startBindings.get(entry.getKey()) != entry.getValue().stamp());
+        List<LogStartSearch.Source> logs = new ArrayList<>();
+        List<BackupStartSearch.Source> backups = new ArrayList<>();
+        List<ServerStartActions.Source> actions = new ArrayList<>();
+        for (Map.Entry<String, ServerModels.ClientServerView> entry : startServers.entrySet()) {
+            String id = entry.getKey();
+            ServerModels.ClientServerView server = entry.getValue();
+            StartFileBinding source = startBindings.get(id);
+            if (!currentStartSource(server, source)) continue;
+            String name = serverName(server);
+            Identifier icon = startServerIcon(server);
+            ServerScreenHost.StorageFiles files = source.files();
+            logs.add(new LogStartSearch.Source(id, name, icon, source, files.provider(), files.root(),
+                    (path, line) -> openStartLog(id, source, path, line), source.watcher()));
+            StartBackupBinding backup = startBackups.get(id);
+            if (backup == null) {
+                backup = new StartBackupBinding(source, serverHost().startBackups(this, serverHost().iconTarget(server)));
+                startBackups.put(id, backup);
+            }
+            backups.add(new BackupStartSearch.Source(id, name, icon, source, backup.backend()));
+            actions.add(new ServerStartActions.Source(id, name, icon, source, serverHost().iconTarget(server)));
+        }
+        startLogSearch.setSources(logs);
+        startBackupSearch.setSources(backups);
+        startServerActions.setSources(actions);
+        searchStart(startSearch);
+    }
+
+    private void openStartLog(String scope, StartFileBinding binding, RemotePath path, int line) {
+        ServerModels.ClientServerView server = startServers.get(scope);
+        if (!currentStartSearch() || server == null || startBindings.get(scope) != binding || !currentStartSource(server, binding)) return;
+        ServerScreenHost.StorageFiles files = binding.files();
+        String authority = startAuthority;
+        long generation = ++startNavigationGeneration;
+        FileExplorerProviders.canOpenEditor(files.provider(), path).whenComplete((accepted, failure) -> ScreenManager.getInstance().execute(() -> {
+            ServerModels.ClientServerView current = startServers.get(scope);
+            if (!currentStartSearch() || generation != startNavigationGeneration || startBindings.get(scope) != binding
+                    || !authority.equals(startAuthority) || !currentStartSource(current, binding)) return;
+            if (failure != null) {
+                new Notification("Log Open Failed", rootMessage(failure), Notification.Type.ERROR);
+                return;
+            }
+            Object context = serverHost().iconTarget(current);
+            if (Boolean.TRUE.equals(accepted) && FileExplorerProviders.openEditor(this, context, files.provider(), files.root(), path, files.root(), line)) return;
+            serverHost().application().setScreen(new FileExplorerScreen(this, context, path.parent(), files.root(), false, files.provider()));
+        }));
+    }
+
+    private boolean currentStartSearch() {
+        return reactiveRefreshEnabled && startAuthority.equals(currentStartAuthority()) && startApi == remotelyClient.getApiClient();
+    }
+
+    private boolean resourceStartSearch() {
+        return startSearch.active() && (startSearch.category() == StartEntry.Category.RESOURCES || startSearch.category() == StartEntry.Category.UPDATES);
+    }
+
+    private void updateStartLoading() {
+        boolean loading = resourceStartSearch() && startResourceLoading
+                || startSearch.active() && startSearch.category() == StartEntry.Category.LOGS && startLogLoading
+                || startSearch.active() && startSearch.category() == StartEntry.Category.BACKUPS && startBackupLoading;
+        setStartSearching(loading);
+    }
+
+    private void searchStart(StartMenuWidget.Search query) {
+        startSearch = query;
+        if (startFileIndex != null) startFileIndex.prioritize(query.scopeIds());
+        if (startResourceSearch != null) startResourceSearch.search(query);
+        if (startLogSearch != null) startLogSearch.search(query);
+        if (startBackupSearch != null) startBackupSearch.search(query);
+        if (startServerActions != null) startServerActions.search(query);
+        updateStartLoading();
+        if (startFileIndex != null) updateStartStatus(startFileIndex.snapshot());
+    }
+
+    private void publishStartEntries(WorkspaceFileCatalog.Snapshot snapshot) {
+        if (!startAuthority.equals(currentStartAuthority()) || startApi != remotelyClient.getApiClient()) return;
+        long revision = snapshot == null ? -1 : snapshot.revision();
+        long resourcesRevision = startResourceRevision;
+        if (startPublishedCatalog == startCatalogRevision && startPublishedIndex == revision && startPublishedResources == resourcesRevision && startPublishedSpecial == startSpecialRevision) return;
+        startPublishedCatalog = startCatalogRevision;
+        startPublishedIndex = revision;
+        startPublishedResources = resourcesRevision;
+        startPublishedSpecial = startSpecialRevision;
+        List<StartEntry> entries = new ArrayList<>(startCatalog);
+        if (snapshot != null) {
+            for (WorkspaceFileCatalog.Result result : snapshot.scopes()) {
+                String scope = result.scope().id();
+                ServerModels.ClientServerView server = startServers.get(scope);
+                StartFileBinding binding = startBindings.get(scope);
+                if (server == null || !currentStartSource(server, binding) || result.scope().provider() != binding.files().provider()
+                        || !result.scope().root().equals(binding.files().root())) continue;
+                String name = serverName(server);
+                Identifier icon = startServerIcon(server);
+                StartFileRows rows = startFileRows.get(scope);
+                if (rows == null || rows.source() != binding || rows.result() != result || !rows.name().equals(name) || !Objects.equals(rows.icon(), icon)) {
+                    List<StartEntry> files = new ArrayList<>();
+                    for (WorkspaceFileIndex.Entry entry : result.files().entries()) {
+                        files.add(new StartEntry("file:" + scope + ":" + entry.path(), entry.name(), name + " / " + entry.relativePath(),
+                                StartEntry.Category.FILES, Identifier.icon(entry.directory() ? "folder.png" : "file.png"),
+                                () -> openStartFile(scope, entry), List.of(entry.relativePath())).withScope(scope, name).withBadge(icon));
+                    }
+                    rows = new StartFileRows(binding, result, name, icon, List.copyOf(files));
+                    startFileRows.put(scope, rows);
+                }
+                entries.addAll(rows.entries());
+            }
+        }
+        entries.addAll(startResourceEntries);
+        entries.addAll(startLogEntries);
+        entries.addAll(startBackupEntries);
+        entries.addAll(startActionEntries);
+        if (snapshot != null) startFileRows.keySet().retainAll(snapshot.scopes().stream().map(result -> result.scope().id()).collect(Collectors.toSet()));
+        if (snapshot != null) updateStartStatus(snapshot);
+        setStartEntries(entries);
+    }
+
+    private void updateStartStatus(WorkspaceFileCatalog.Snapshot snapshot) {
+        if (resourceStartSearch()) {
+            setStartStatus(startResourceStatus);
+            return;
+        }
+        if (startSearch.active() && startSearch.category() == StartEntry.Category.LOGS) {
+            setStartStatus(startLogStatus);
+            return;
+        }
+        if (startSearch.active() && startSearch.category() == StartEntry.Category.BACKUPS) {
+            setStartStatus(startBackupStatus);
+            return;
+        }
+        if (startSearch.active() && startSearch.category() == StartEntry.Category.CALCULATOR) {
+            setStartStatus("");
+            return;
+        }
+        if (startSearch.scopeIds().size() == 1) {
+            WorkspaceFileCatalog.Result selected = snapshot.scopes().stream().filter(result -> result.scope().id().equals(startSearch.scopeId())).findFirst().orElse(null);
+            if (selected != null && !selected.files().detail().isBlank()) {
+                setStartStatus(selected.files().detail());
+                return;
+            }
+        }
+        List<WorkspaceFileCatalog.Result> selected = startSearch.scopeIds().isEmpty() ? snapshot.scopes()
+                : snapshot.scopes().stream().filter(result -> startSearch.scopeIds().contains(result.scope().id())).toList();
+        int count = selected.stream().mapToInt(result -> result.files().entries().size()).sum();
+        String detail = selected.stream().map(result -> result.files().detail()).filter(value -> !value.isBlank()).distinct().collect(Collectors.joining(". "));
+        setStartStatus(detail.isBlank() ? count + " Files And Folders Across " + selected.size() + " Servers" : detail);
+    }
+
+    private void openStartFile(String scope, WorkspaceFileIndex.Entry entry) {
+        ServerModels.ClientServerView server = startServers.get(scope);
+        StartFileBinding binding = startBindings.get(scope);
+        if (server == null || !currentStartSource(server, binding)
+                || !startAuthority.equals(currentStartAuthority()) || startApi != remotelyClient.getApiClient()) return;
+        ServerScreenHost.StorageFiles files = binding.files();
+        String authority = startAuthority;
+        long generation = ++startNavigationGeneration;
+        if (entry.directory()) {
+            serverHost().application().setScreen(new FileExplorerScreen(this, serverHost().iconTarget(server), entry.path(), files.root(), false, files.provider()));
+            return;
+        }
+        FileExplorerProviders.canOpenEditor(files.provider(), entry.path()).whenComplete((accepted, failure) -> ScreenManager.getInstance().execute(() -> {
+            ServerModels.ClientServerView current = startServers.get(scope);
+            if (!reactiveRefreshEnabled || generation != startNavigationGeneration || startBindings.get(scope) != binding
+                    || !authority.equals(currentStartAuthority()) || remotelyClient.getApiClient() != startApi || current == null
+                    || !currentStartSource(current, binding)) return;
+            if (failure != null) {
+                new Notification("File Open Failed", rootMessage(failure), Notification.Type.ERROR);
+                return;
+            }
+            Object context = serverHost().iconTarget(server);
+            if (Boolean.TRUE.equals(accepted) && FileExplorerProviders.openEditor(this, context, files.provider(), files.root(), entry.path(), files.root())) return;
+            serverHost().application().setScreen(new FileExplorerScreen(this, context, entry.path().parent(), files.root(), false, files.provider()));
+        }));
+    }
+
+    private void resetStartSearch() {
+        dropStartFiles();
+        startCatalog = List.of();
+        startServers = Map.of();
+        startCatalogDirty = true;
+        startAuthority = "";
+        startScope = "";
+        startApi = null;
+        startCatalogRevision++;
+        startPublishedCatalog = -1;
+        startPublishedIndex = -1;
+        setStartEntries(List.of());
+        setStartScopes(List.of(), "", null);
+        setStartStatus("");
+    }
+
+    private String currentStartAuthority() {
+        return accountKey(serverHost().accountIdentity()) + ":" + serverHost().authenticationSession() + ":" + callbackGeneration;
+    }
+
+    private boolean currentStartSource(ServerModels.ClientServerView server, StartFileBinding binding) {
+        if (server == null || binding == null) return false;
+        ServerScreenHost.ServerIdentity identity = serverHost().identity(server);
+        Object source = serverHost().iconTarget(server);
+        return binding.backend().equals(identity.backendType()) && binding.path().equals(identity.path())
+                && binding.credentials().equals(serverHost().configurationTarget(source).backendCredentials())
+                && binding.owner() == serverHost().fileSourceOwner(source);
+    }
+
+    private void dropStartFiles() {
+        startNavigationGeneration++;
+        if (startResourceSearch != null) startResourceSearch.close();
+        if (startLogSearch != null) startLogSearch.close();
+        if (startBackupSearch != null) startBackupSearch.close();
+        if (startServerActions != null) startServerActions.close();
+        startLogSearch = null;
+        startBackupSearch = null;
+        startServerActions = null;
+        startBackups.clear();
+        startLogEntries = List.of();
+        startBackupEntries = List.of();
+        startActionEntries = List.of();
+        startLogStatus = "";
+        startBackupStatus = "";
+        startResourceLoading = false;
+        startLogLoading = false;
+        startBackupLoading = false;
+        startBoundSpecial = -1;
+        startPublishedSpecial = -1;
+        startSpecialRevision++;
+        startResourceSearch = null;
+        startMarkets.values().forEach(binding -> binding.target().context().invalidate());
+        startMarkets.clear();
+        if (startGlobalMarket != null) startGlobalMarket.context().invalidate();
+        startGlobalMarket = null;
+        startResourceEntries = List.of();
+        startResourceStatus = "";
+        startSearch = new StartMenuWidget.Search("", "", null, "", false);
+        setStartSearchListener(null);
+        setStartResourceRefresh(null);
+        setStartSearchRefresh(StartEntry.Category.UPDATES, null);
+        setStartSearchRefresh(StartEntry.Category.LOGS, null);
+        setStartSearchRefresh(StartEntry.Category.BACKUPS, null);
+        setStartSearching(false);
+        setStartResourceProviders(List.of());
+        startResourceRevision++;
+        startFileRows.clear();
+        startBoundResources = -1;
+        startPublishedResources = -1;
+        if (startFileIndex != null) startFileIndex.close();
+        startFileIndex = null;
+        startBindings.clear();
+        startBoundCatalog = -1;
+        startPublishedIndex = -1;
+    }
+
     public void openWorldScreen(ServerModels.ClientServerView instance) {
         serverHost().openWorld(this, instance);
     }
@@ -3162,6 +3781,11 @@ public class ServerManagerScreen extends DesktopShellScreen {
 
     @Override
     public void removed() {
+        resetStartSearch();
+        if (startSettingsListening) {
+            ServerSettingsRegistry.getInstance().removeListener(startSettingsChanged);
+            startSettingsListening = false;
+        }
         reactiveRefreshEnabled = false;
         serverRefreshQueued = false;
         contextMenuRequestGeneration++;
@@ -3195,8 +3819,15 @@ public class ServerManagerScreen extends DesktopShellScreen {
     private long lastReloadTime = 0;
 
     @Override
+    public void onSuspended() {
+        startNavigationGeneration++;
+        super.onSuspended();
+    }
+
+    @Override
     public void onDisplayed() {
         super.onDisplayed();
+        if (Config.desktopMode) addDesktopControls();
         playSound(Sound.SERVERMANAGER);
         applyDesktopContentBounds();
         if (System.currentTimeMillis() - lastReloadTime > 5000) {
@@ -3234,6 +3865,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
     @Override
     public void tick() {
         super.tick();
+        if (isDesktopStartOpen() && (startCatalogDirty || !startAuthority.equals(currentStartAuthority()) || startApi != remotelyClient.getApiClient())) refreshStartEntries();
         if (networkRefreshRequired && isActiveScreen()) refreshNetworks();
         Object data = tabs().getActiveTab() != null ? tabs().getActiveTab().getData() : null;
         if (!(data instanceof ServerScreenHost.HostView) && !"RESTUDIO_MARKER".equals(data)) {

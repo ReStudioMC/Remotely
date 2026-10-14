@@ -58,6 +58,7 @@ import restudio.rescreen.util.UiTasks;
 import java.util.*;
 import java.time.Duration;
 import java.util.function.BiConsumer;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -89,6 +90,11 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
     private ServerDevelopmentPanel developmentPanel;
 
     private final Map<TabContext, TerminalSession> contextInfos = new HashMap<>();
+    private final Map<TabContext, ReScreen> lifecyclePopupHosts = new IdentityHashMap<>();
+    private final Map<TabContext, BooleanSupplier> lifecycleGuards = new IdentityHashMap<>();
+    private final Map<TabContext, ServerHealthPrompt> lifecycleHealthPrompts = new LinkedHashMap<>();
+    private final Map<String, Async<Object>> lifecycleTargetRequests = new HashMap<>();
+    private boolean backgroundLifecycleOwner;
     private final Map<TabContext, DevelopmentTabState> developmentTabs = new IdentityHashMap<>();
     private TaskScheduler.ScheduledTask statusScheduler;
     private ResourcePoolController resourcePoolController;
@@ -243,6 +249,9 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         }
     }
 
+    private record ServerHealthPrompt(TabContext context, TerminalSession info, ServerHealth health) {
+    }
+
     private record DevelopmentRestoreState(Object remote, Object local, boolean localActive,
                                             int remoteView, int localView, boolean panelVisible) {
     }
@@ -262,6 +271,102 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         this.initialInstanceToOpen = initialInstanceToOpen;
         this.browserRestoreState = client == null ? RemotelyViewStateStore.State.empty() : client.getBrowserViewState();
         this.openDevelopmentOnStart = openDevelopmentOnStart;
+    }
+
+    static ServerDetailsScreen lifecycleOwner(ReScreen parent, RemotelyClient client) {
+        ServerDetailsScreen owner = new ServerDetailsScreen(parent, client);
+        owner.backgroundLifecycleOwner = true;
+        owner.width = Math.max(300, parent.getWidth());
+        owner.height = Math.max(200, parent.getHeight());
+        owner.screenHost().addAuthStateListener(owner.serverHealthAuthStateListener);
+        owner.serverHealthAuthStateListenerRegistered = true;
+        return owner;
+    }
+
+    public boolean servesLifecycle(RemotelyClient client) {
+        return !closed && remotelyClient == client;
+    }
+
+    public void requestLifecycle(Object target, LifecycleButtonWidget.Operation operation, ReScreen popupHost) {
+        requestLifecycle(target, operation, popupHost, () -> true);
+    }
+
+    public void requestLifecycle(Object target, LifecycleButtonWidget.Operation operation, ReScreen popupHost, BooleanSupplier current) {
+        if (closed || target == null || operation == null || popupHost == null || current == null || !current.getAsBoolean()) return;
+        String key = killKey(target);
+        if (lifecycleTargetRequests.containsKey(key)) return;
+        String account = serverHealthAccountKey(screenHost().accountIdentity());
+        NewTerminalTargetProvider provider = screenHost().newTerminalTargetProvider();
+        Async<Object> request = provider.resolve(developmentSource(target));
+        if (request == null) return;
+        lifecycleTargetRequests.put(key, request);
+        request.whenComplete((resolved, failure) -> screenHost().application().execute(() -> {
+            if (lifecycleTargetRequests.get(key) != request) return;
+            lifecycleTargetRequests.remove(key);
+            if (closed || !current.getAsBoolean() || !account.equals(serverHealthAccountKey(screenHost().accountIdentity()))) return;
+            if (failure != null || resolved == null || !provider.supports(resolved)) {
+                screenHost().application().notify("Server Action", failure == null ? "Server Is Unavailable" : message(failure), ReSyncNotificationLevel.WARN);
+                return;
+            }
+            TabContext context = tabContexts.values().stream().filter(value -> sameInstance(value.instance, resolved)).findFirst().orElse(null);
+            if (context == null) {
+                createAndAddTab(resolved, false, false);
+                context = tabContexts.values().stream().filter(value -> sameInstance(value.instance, resolved)).findFirst().orElse(null);
+            }
+            if (context == null) return;
+            ServerUiCapabilityProvider.Availability availability = screenHost().lifecycleAvailability(resolved);
+            if (!availability.available()) {
+                screenHost().application().notify("Server Action", availability.reason(), ReSyncNotificationLevel.WARN);
+                return;
+            }
+            TerminalSession info = initializeTabContext(context);
+            lifecyclePopupHosts.put(context, popupHost);
+            lifecycleGuards.put(context, () -> current.getAsBoolean() && account.equals(serverHealthAccountKey(screenHost().accountIdentity())));
+            runLifecycleOperation(context, info, operation);
+        }));
+    }
+
+    boolean lifecyclePending(Object target) {
+        String key = killKey(target);
+        return lifecycleTargetRequests.containsKey(key) || serverHealthChecksInFlight.containsKey(key) || restartListeners.containsKey(key)
+                || serverHealthPopupContext != null && sameInstance(serverHealthPopupContext.instance, target);
+    }
+
+    void retainLifecycleTargets(List<Object> targets) {
+        if (!backgroundLifecycleOwner) return;
+        for (Map.Entry<TabsManager.Tab, TabContext> entry : new ArrayList<>(tabContexts.entrySet())) {
+            TabContext context = entry.getValue();
+            if (targets.stream().anyMatch(target -> sameInstance(context.instance, target))) continue;
+            removeRestartListener(context.instance);
+            clearPerServerState(context.instance);
+            if (serverHealthPopupContext == context) hideServerHealthPopup();
+            lifecyclePopupHosts.remove(context);
+            lifecycleGuards.remove(context);
+            lifecycleHealthPrompts.remove(context);
+            contextInfos.remove(context);
+            tabContexts.remove(entry.getKey());
+            int tabIndex = tabs().getTabs().indexOf(entry.getKey());
+            if (tabIndex >= 0) tabs().removeTabRaw(tabIndex);
+        }
+    }
+
+    void closeLifecycleOwner() {
+        if (!backgroundLifecycleOwner || closed) return;
+        closed = true;
+        lifecycleTargetRequests.values().forEach(Async::cancel);
+        lifecycleTargetRequests.clear();
+        tabContexts.values().forEach(context -> removeRestartListener(context.instance));
+        if (serverHealthAuthStateListenerRegistered) screenHost().removeAuthStateListener(serverHealthAuthStateListener);
+        serverHealthAuthStateListenerRegistered = false;
+        serverHealthChecksInFlight.clear();
+        serverHealthRepairRequests.invalidate();
+        hideServerHealthPopup();
+        tabContexts.clear();
+        contextInfos.clear();
+        lifecyclePopupHosts.clear();
+        lifecycleGuards.clear();
+        lifecycleHealthPrompts.clear();
+        tabs().clearTabs();
     }
 
     private ServerScreenHost screenHost() {
@@ -411,6 +516,11 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
             }
         }
         restartListeners.clear();
+        lifecycleTargetRequests.values().forEach(Async::cancel);
+        lifecycleTargetRequests.clear();
+        lifecyclePopupHosts.clear();
+        lifecycleGuards.clear();
+        lifecycleHealthPrompts.clear();
         serverHealthChecksInFlight.clear();
         serverHealthRepairRequests.invalidate();
         localControllerFailureNotices.clear();
@@ -1781,6 +1891,10 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
     private void launchOrStopInstance(boolean allowRestart){
         TabContext context = getActiveContext();
         TerminalSession info = context == null ? null : contextInfos.get(context);
+        launchOrStopInstance(context, info, allowRestart);
+    }
+
+    private void launchOrStopInstance(TabContext context, TerminalSession info, boolean allowRestart) {
         if (context == null || context.instance == null || info == null || info.isLocalTerminalMode()) return;
         ServerScreenHost.ServerState state = stateOf(context.instance);
         if (allowRestart && hasShiftDown() && state == ServerScreenHost.ServerState.RUNNING) {
@@ -1821,7 +1935,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
             String requestedOperationId = operationId;
             ServerScreenHost.ServerState priorState = state;
             operation.whenComplete((ignored, failure) -> screenHost().application().execute(() -> {
-                if (failure != null) {
+                if (failure != null && currentLifecycleOperation(context, info, requestedOperationId)) {
                     screenHost().restoreRunning(context.instance, requestedOperationId, message(failure));
                     screenHost().setState(context.instance, priorState);
                     screenHost().application().notify("Stop Server", message(failure), ReSyncNotificationLevel.ERROR);
@@ -1836,6 +1950,10 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
     private void runLifecycleOperation(LifecycleButtonWidget.Operation operation) {
         TabContext context = getActiveContext();
         TerminalSession info = context == null ? null : contextInfos.get(context);
+        runLifecycleOperation(context, info, operation);
+    }
+
+    private void runLifecycleOperation(TabContext context, TerminalSession info, LifecycleButtonWidget.Operation operation) {
         if (context == null || context.instance == null || info == null || info.isLocalTerminalMode()) return;
         ServerScreenHost.ServerState state = stateOf(context.instance);
         InstanceState instanceState;
@@ -1846,7 +1964,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         }
         if (!LifecycleButtonWidget.supports(operation, instanceState)) return;
         switch (operation) {
-            case START, STOP -> launchOrStopInstance(false);
+            case START, STOP -> launchOrStopInstance(context, info, false);
             case RESTART -> restartInstance(context, info);
             case KILL -> {
                 if (canKillActiveServer()) killStoppingServer(context, info);
@@ -1904,7 +2022,8 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
                     return;
                 }
                 screenHost().removeStateListener(context.instance, listener);
-                restartListeners.remove(key);
+                if (restartListeners.get(key) == listener) restartListeners.remove(key);
+                if (!currentLifecycleOperation(context, info, requestedOperationId)) return;
                 screenHost().restoreRunning(context.instance, requestedOperationId, message(failure));
                 screenHost().setState(context.instance, priorState);
                 screenHost().application().notify("Restart Server", message(failure), ReSyncNotificationLevel.ERROR);
@@ -1918,12 +2037,15 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         ServerModels.ClientServerView server = screenHost().serverView(context.instance);
         if (server == null) return;
         String healthKey = killKey(context.instance);
+        String account = serverHealthAccountKey(screenHost().accountIdentity());
+        long accountGeneration = serverHealthAccountGeneration;
         long requestId = ++serverHealthRequestSequence;
         if (serverHealthChecksInFlight.putIfAbsent(healthKey, requestId) != null) return;
         screenHost().serverHealth(server).whenComplete((health, failure) -> screenHost().application().execute(() -> {
             if (!Objects.equals(serverHealthChecksInFlight.get(healthKey), requestId)) return;
             serverHealthChecksInFlight.remove(healthKey);
-            if (!canContinueServerStart(context, info)) return;
+            if (accountGeneration != serverHealthAccountGeneration || !account.equals(serverHealthAccountKey(screenHost().accountIdentity()))
+                    || !canContinueServerStart(context, info)) return;
             if (failure != null) {
                 screenHost().application().notify("Health Check Failed", message(failure), ReSyncNotificationLevel.ERROR);
                 return;
@@ -1942,7 +2064,8 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
 
     private boolean canContinueServerStart(TabContext context, TerminalSession info){
         return !closed && context != null && context.instance != null && info != null && tabContexts.containsValue(context)
-                && contextInfos.get(context) == info
+                && contextInfos.get(context) == info && remotelyClient.getSessionManager().getSession(info.getTabId()) == info
+                && lifecycleGuards.getOrDefault(context, () -> true).getAsBoolean()
                 && (stateOf(context.instance) == ServerScreenHost.ServerState.STOPPED
                 || stateOf(context.instance) == ServerScreenHost.ServerState.CRASHED
                 || stateOf(context.instance) == ServerScreenHost.ServerState.UNKNOWN);
@@ -1950,13 +2073,23 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
 
     private boolean isServerContextAvailable(TabContext context, TerminalSession info){
         return !closed && context != null && context.instance != null && info != null && tabContexts.containsValue(context)
-                && contextInfos.get(context) == info;
+                && contextInfos.get(context) == info && remotelyClient.getSessionManager().getSession(info.getTabId()) == info
+                && lifecycleGuards.getOrDefault(context, () -> true).getAsBoolean();
+    }
+
+    private boolean currentLifecycleOperation(TabContext context, TerminalSession info, String operationId) {
+        return isServerContextAvailable(context, info) && Objects.equals(operationId, screenHost().activeOperationId(context.instance));
     }
 
     private void onServerHealthAuthStateChanged() {
         serverHealthAccountGeneration++;
         screenHost().application().execute(() -> {
             if (closed) return;
+            serverHealthChecksInFlight.clear();
+            lifecycleHealthPrompts.clear();
+            lifecycleTargetRequests.values().forEach(Async::cancel);
+            lifecycleTargetRequests.clear();
+            tabContexts.values().forEach(context -> removeRestartListener(context.instance));
             serverHealthRepairRequests.invalidate();
             hideServerHealthPopup();
         });
@@ -1983,7 +2116,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
     }
 
     private void updateStartButton(TabContext context, TerminalSession info){
-        if (startIconButton == null) return;
+        if (startIconButton == null || getActiveContext() != context) return;
         boolean visible = info != null && !info.isLocalTerminalMode() && context != null && context.instance != null;
         startIconButton.setVisible(visible);
         if (!visible) return;
@@ -2059,7 +2192,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         String requestedOperationId = operationId;
         screenHost().killServer(remotelyClient.getApiClient(), context.instance).whenComplete((ignored, failure) ->
                 screenHost().application().execute(() -> {
-                    if (failure != null) {
+                    if (failure != null && currentLifecycleOperation(context, info, requestedOperationId)) {
                         clearKillConfirmation(context.instance);
                         screenHost().restoreRunning(context.instance, requestedOperationId, message(failure));
                         screenHost().setState(context.instance, ServerScreenHost.ServerState.RUNNING);
@@ -2087,12 +2220,26 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
     }
 
     private void showServerHealthPopup(TabContext context, TerminalSession info, ServerHealth status){
-        hideServerHealthPopup();
         if (context == null || status == null) return;
+        if (serverHealthPopup != null && serverHealthPopupContext != context && lifecyclePopupHosts.containsKey(context)) {
+            lifecycleHealthPrompts.put(context, new ServerHealthPrompt(context, info, status));
+            return;
+        }
+        hideServerHealthPopup();
         ServerHealthPopupState state = new ServerHealthPopupState(context, info, status);
         serverHealthPopup = state.popup;
         serverHealthPopupContext = context;
         state.show();
+    }
+
+    private void showNextLifecycleHealthPrompt() {
+        if (closed || serverHealthPopup != null) return;
+        for (ServerHealthPrompt prompt : new ArrayList<>(lifecycleHealthPrompts.values())) {
+            lifecycleHealthPrompts.remove(prompt.context());
+            if (!canContinueServerStart(prompt.context(), prompt.info())) continue;
+            showServerHealthPopup(prompt.context(), prompt.info(), prompt.health());
+            return;
+        }
     }
 
     private final class ServerHealthPopupState {
@@ -2148,13 +2295,14 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
                 if (serverHealthPopup == popup) {
                     serverHealthPopup = null;
                     serverHealthPopupContext = null;
+                    screenHost().application().execute(ServerDetailsScreen.this::showNextLifecycleHealthPrompt);
                 }
             };
             refresh();
         }
 
         private void show() {
-            addDrawableChild(popup);
+            lifecyclePopupHosts.getOrDefault(context, ServerDetailsScreen.this).addDrawableChild(popup);
             popup.show();
         }
 
@@ -2278,6 +2426,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
             if (repair != ServerHealthRepair.NONE || !anyway && !status.healthy()) return;
             hideServerHealthPopup(popup);
             proceedWithServerStart(context, info);
+            screenHost().application().execute(ServerDetailsScreen.this::showNextLifecycleHealthPrompt);
         }
 
         private record HealthCheckControl(ServerHealth.LaunchCheck check, ServerHealthRepair repair,
@@ -2363,7 +2512,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         }
         screenHost().startServer(remotelyClient.getApiClient(), context.instance).whenComplete((ignored, failure) ->
                 screenHost().application().execute(() -> {
-                    if (failure != null) {
+                    if (failure != null && currentLifecycleOperation(context, info, requestedOperationId)) {
                         String reason = message(failure);
                         screenHost().failServerOperation(context.instance, requestedOperationId, ServerScreenHost.ServerState.CRASHED, reason);
                         screenHost().setState(context.instance, ServerScreenHost.ServerState.CRASHED);
@@ -2393,7 +2542,7 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
         }
         screenHost().attachTerminal(context.instance, terminal);
         setupTerminalListeners(context.instance, info);
-        if (context.selectedViewIndex >= 0 && context.selectedViewIndex < context.views.size()
+        if (!backgroundLifecycleOwner && getActiveContext() == context && context.selectedViewIndex >= 0 && context.selectedViewIndex < context.views.size()
                 && "Terminal".equals(context.views.get(context.selectedViewIndex).hint())) {
             onViewSwitched(context, context.selectedViewIndex);
         }
@@ -3360,6 +3509,11 @@ public class ServerDetailsScreen extends ReScreen implements IDebugInfoProvider,
     @Override
     public void removed(){
         closed = true;
+        lifecycleTargetRequests.values().forEach(Async::cancel);
+        lifecycleTargetRequests.clear();
+        lifecyclePopupHosts.clear();
+        lifecycleGuards.clear();
+        lifecycleHealthPrompts.clear();
         hideReProxyControls();
         reProxyConnecting.clear();
         if (serverHealthAuthStateListenerRegistered) {

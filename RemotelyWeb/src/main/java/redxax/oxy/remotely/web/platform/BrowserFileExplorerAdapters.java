@@ -463,6 +463,16 @@ public final class BrowserFileExplorerAdapters {
             }
 
             @Override
+            public boolean open(Screen parent, Object context, RemoteFileSystemProvider provider, RemotePath workspaceRoot,
+                                RemotePath initialFile, RemotePath configDir, int line) {
+                if (initialFile == null) return false;
+                FileEditorScreen editor = createEditor(parent, context, provider, workspaceRoot, initialFile, configDir);
+                editor.requestOpenFileAtLine(initialFile, provider, line);
+                ScreenManager.getInstance().setScreen(editor);
+                return true;
+            }
+
+            @Override
             public boolean openWorkspace(Screen parent, Object context, RemoteFileSystemProvider provider, RemotePath workspaceRoot,
                                          RemotePath configDir) {
                 if (workspaceRoot == null) return false;

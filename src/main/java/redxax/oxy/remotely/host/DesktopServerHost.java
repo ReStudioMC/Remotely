@@ -1,6 +1,8 @@
 package redxax.oxy.remotely.host;
 
 import restudio.rebase.platform.ExternalOpenResult;
+import restudio.rebase.developer.search.BackupStartSearch;
+import restudio.rebase.platform.jvm.JvmBackupSettingsProvider;
 
 import restudio.rebase.backend.ServerBackend;
 import redxax.oxy.remotely.network.NetworkBootstrap;
@@ -79,6 +81,7 @@ import redxax.oxy.remotely.ui.server.ServerDevelopmentProvider;
 import redxax.oxy.remotely.ui.server.ServerDetailsTarget;
 import redxax.oxy.remotely.ui.server.ClientServerDetailsTarget;
 import redxax.oxy.remotely.ui.settings.data.ServerSettingsDataController;
+import redxax.oxy.remotely.ui.settings.data.DesktopServerSettingsPackMatcher;
 import redxax.oxy.remotely.ui.settings.data.DesktopServerSettingsDataController;
 import redxax.oxy.remotely.ui.settings.data.ServerSettingsController;
 import redxax.oxy.remotely.settings.server.ServerSettingsSnapshot;
@@ -101,6 +104,7 @@ import restudio.rebase.api.unified.InstanceApi;
 import restudio.rebase.api.unified.internal.StandardOutputStateParser;
 import restudio.rebase.backend.BackendConfig;
 import restudio.rebase.backend.CapabilityIds;
+import restudio.rebase.backend.CapabilityDescriptor;
 import restudio.rebase.backend.FileExplorerProviders;
 import restudio.rebase.backend.RemoteFileSystemProvider;
 import restudio.rebase.backend.RemotePath;
@@ -145,8 +149,11 @@ import restudio.rebase.ui.screens.notification.InboxScreen;
 import restudio.rebase.resource.ResourceType;
 import restudio.rebase.resource.ResourcePoolClient;
 import restudio.rebase.resource.marketplace.JvmResourceMarketplaceAdapter;
+import restudio.rebase.resource.marketplace.ResourceMarketplaceProvider;
+import restudio.rebase.resource.marketplace.ResourceBrowserContext;
 import restudio.rebase.ui.screens.resources.ResourceContainer;
 import restudio.rebase.ui.screens.resources.DesktopResourceContainerProvider;
+import restudio.rebase.ui.screens.resources.ResourceContainerProvider;
 import restudio.rebase.ui.screens.explorer.FileExplorerScreen;
 import restudio.rebase.ui.widgets.IconCustomizerWidget;
 import restudio.rebase.ui.widgets.TerminalWidget;
@@ -161,6 +168,7 @@ import restudio.rescreen.util.BrowserUtils;
 import restudio.rescreen.util.Identifier;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -974,7 +982,13 @@ public final class DesktopServerHost implements ServerScreenHost {
 
     @Override
     public ServerConfigurationTarget configurationTarget(Object value) {
-        return value instanceof Instance instance ? new DesktopServerConfigurationTarget(instance) : ServerConfigurationTarget.unavailable(value);
+        Instance resolved = instance(value);
+        return resolved == null ? ServerConfigurationTarget.unavailable(value) : new DesktopServerConfigurationTarget(resolved);
+    }
+
+    @Override
+    public Collection<String> settingsSoftwareTokens(Object target) {
+        return DesktopServerSettingsPackMatcher.softwareTokens(instance(target));
     }
 
     @Override
@@ -1086,6 +1100,18 @@ public final class DesktopServerHost implements ServerScreenHost {
     public ServerUiCapabilityProvider capabilities(ServerModels.ClientServerView server) {
         Instance instance = resolve(server);
         return instance == null ? DesktopServerUiCapabilities.desktop() : DesktopServerUiCapabilities.desktop(instance);
+    }
+
+    @Override
+    public ServerUiCapabilityProvider.Availability lifecycleAvailability(Object value) {
+        Instance resolved = instance(value);
+        if (resolved == null && value instanceof ServerModels.ClientServerView server) resolved = resolve(server);
+        if (resolved == null || resolved.getBackend() == null || resolved.getBackend().getExecution() == null) {
+            return ServerUiCapabilityProvider.Availability.missing("Server Lifecycle Is Unavailable");
+        }
+        CapabilityDescriptor capability = resolved.getBackend().getExecution().capabilities().get(CapabilityIds.EXECUTION);
+        return capability != null && !capability.available() ? ServerUiCapabilityProvider.Availability.missing(capability.detail())
+                : ServerUiCapabilityProvider.Availability.supported();
     }
 
     @Override
@@ -2885,6 +2911,36 @@ public final class DesktopServerHost implements ServerScreenHost {
     }
 
     @Override
+    public ResourceMarketplaceProvider resourceSearchMarketplace(Object value) {
+        Instance instance = instance(value);
+        if (instance == null && value instanceof ServerModels.ClientServerView server) instance = resolve(server);
+        return value != null && instance == null ? null : JvmResourceMarketplaceAdapter.provider(instance, true);
+    }
+
+    @Override
+    public ResourceBrowserContext resourceSearchContext(Object value, ResourceMarketplaceProvider marketplace) {
+        Instance instance = instance(value);
+        if (instance == null && value instanceof ServerModels.ClientServerView server) instance = resolve(server);
+        return value != null && instance == null ? null : JvmResourceMarketplaceAdapter.context(instance, marketplace);
+    }
+
+    @Override
+    public BackupStartSearch.Backend startBackups(ReScreen owner, Object value) {
+        Instance resolved = instance(value);
+        if (resolved == null && value instanceof ServerModels.ClientServerView server) resolved = resolve(server);
+        if (resolved == null) return ServerScreenHost.super.startBackups(owner, value);
+        Instance target = resolved;
+        return BackupStartSearch.Backend.local(owner, () -> new JvmBackupSettingsProvider(owner, target));
+    }
+
+    @Override
+    public ResourceContainerProvider resourceSearchProvider(Object value) {
+        Instance instance = instance(value);
+        if (instance == null && value instanceof ServerModels.ClientServerView server) instance = resolve(server);
+        return instance == null ? null : new DesktopResourceContainerProvider(instance, pluginForwarding(instance));
+    }
+
+    @Override
     public void openServerReProxySettings(Screen current, Object value) {
         ReProxyTarget target = reProxyTarget(value);
         if (target == null) return;
@@ -3424,6 +3480,12 @@ public final class DesktopServerHost implements ServerScreenHost {
     }
 
     @Override
+    public Object fileSourceOwner(Object target) {
+        Instance value = instance(target);
+        return value == null ? null : value.getBackend();
+    }
+
+    @Override
     public void openServerConfiguration(Screen current, ServerModels.ClientServerView server) {
         Instance instance = resolve(server);
         if (instance != null && configurationAccess(instance) != ServerSettingsFeature.Access.NONE) {
@@ -3436,10 +3498,16 @@ public final class DesktopServerHost implements ServerScreenHost {
     @Override
     public void openServerConfiguration(Screen current, ServerModels.ClientServerView server, String initialTab,
                                         String diskMiB) {
+        openServerConfiguration(current, server, initialTab, diskMiB, null);
+    }
+
+    @Override
+    public void openServerConfiguration(Screen current, ServerModels.ClientServerView server, String initialTab,
+                                        String diskMiB, String setting) {
         Instance instance = resolve(server);
         if (instance != null) {
             ScreenManager.getInstance().navigate(current, new ServerConfigurationScreen(current, instance,
-                    findHost(instance), client, initialTab, diskMiB));
+                    findHost(instance), client, initialTab, diskMiB).focusSetting(setting));
             return;
         }
         unavailable(Action.SERVER_CONFIGURATION);
@@ -3679,9 +3747,19 @@ public final class DesktopServerHost implements ServerScreenHost {
 
     @Override
     public void openSettings(Screen current) {
+        openSettings(current, null);
+    }
+
+    @Override
+    public void openSettings(Screen current, String initialTab) {
+        openSettings(current, initialTab, null);
+    }
+
+    @Override
+    public void openSettings(Screen current, String initialTab, String setting) {
         RemotelyConfigManager settingsConfig = config();
         if (current instanceof ReScreen parentScreen && settingsConfig != null) {
-            application().setScreen(DesktopSettingsScreenFactory.createGlobalSettingsScreen(parentScreen, settingsConfig));
+            application().setScreen(DesktopSettingsScreenFactory.createGlobalSettingsScreen(parentScreen, settingsConfig, initialTab).focusSetting(setting));
             return;
         }
         unavailable(Action.HOST_SETTINGS);

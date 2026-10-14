@@ -964,6 +964,13 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
         return request("GET", "/servers/" + path(serverId) + "/files/content?path=" + query(path), null);
     }
 
+    public Async<RemoteFileSystemProvider.BoundedText> getFileContentBounded(String serverId, String path, int maxBytes) {
+        RemoteFileSystemProvider.requireReadLimit(maxBytes);
+        return get("/servers/" + path(serverId) + "/files/content-prefix?path=" + query(path) + "&maxBytes=" + maxBytes,
+                value -> new RemoteFileSystemProvider.BoundedText(Objects.requireNonNullElse(BrowserJson.string(value, "text"), ""),
+                        BrowserJson.bool(value, "truncated", false)));
+    }
+
     Async<String> getFileContentAllowMissing(String serverId, String path) {
         return requestAllowMissingContent("GET", "/servers/" + path(serverId) + "/files/content?path=" + query(path), null);
     }
@@ -2405,6 +2412,17 @@ public final class BrowserRemotelyServerApi implements RemotelyServerApi, Browse
                     if (result.version != null) fileVersions.put(relative(path), result.version);
                     return result.content == null ? "" : result.content;
                 });
+            }
+
+            @Override
+            public boolean supportsBoundedRead() {
+                return hasAccess() && supportsFile("read");
+            }
+
+            @Override
+            public Async<BoundedText> readBounded(RemotePath path, int maxBytes) {
+                RemoteFileSystemProvider.requireReadLimit(maxBytes);
+                return read(path).thenApply(content -> BoundedText.prefix(content.getBytes(StandardCharsets.UTF_8), maxBytes));
             }
 
             @Override

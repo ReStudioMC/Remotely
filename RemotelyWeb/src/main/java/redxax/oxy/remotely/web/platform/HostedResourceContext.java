@@ -70,6 +70,11 @@ final class HostedResourceContext implements ResourceBrowserContext {
     private final ResourceIdentifier identifier;
     private boolean maintainingIndex;
     private Async<Void> indexMaintenance;
+    private Async<Void> resourceUpdate;
+    private boolean discoveringUpdates;
+    private boolean updateDiscoveryCompleted;
+    private boolean updateDiscoveryFailed;
+    private Async<List<InstalledResource>> updateDiscovery;
     private final List<Consumer<ResourceBrowserContext.ResourceChange>> resourceListeners = new ArrayList<>();
     private final List<Consumer<CanonicalResourceInventory>> canonicalInventoryListeners = new ArrayList<>();
     private final Map<String, BrowserRemotelyServerApi.HostedModpackCapabilities> modpackCapabilities = new LinkedHashMap<>();
@@ -465,6 +470,34 @@ final class HostedResourceContext implements ResourceBrowserContext {
         return view(request);
     }
 
+    @Override
+    public Async<List<InstalledResource>> discoverUpdates() {
+        if (!hasInstance()) return Async.completed(List.of());
+        if (isQuickUpdateBusy()) return Async.failed(new IllegalStateException("A Resource Update Is Already Running"));
+        discoveringUpdates = true;
+        updateDiscoveryCompleted = false;
+        updateDiscoveryFailed = false;
+        Async<Void> discovery = maintainIndex(false, false);
+        OperationFence fence = captureFence();
+        ResourceDataCache cache = dataCache;
+        long generation = cache.resourceIndexGeneration;
+        Async<List<InstalledResource>> request = discovery.thenApply(ignored -> {
+            if (!isInventoryCurrent(fence, cache, generation)) throw new Async.Cancellation();
+            return installedProjection(cache.canonicalResourceResult);
+        });
+        updateDiscovery = request;
+        request.whenComplete((installed, failure) -> {
+            if (updateDiscovery != request) return;
+            updateDiscovery = null;
+            discoveringUpdates = false;
+            if (!isInventoryCurrent(fence, cache, generation)) return;
+            updateDiscoveryCompleted = failure == null;
+            updateDiscoveryFailed = failure != null;
+            notifyResourceListeners(fence);
+        });
+        return view(request);
+    }
+
     private List<InstalledResource> installedProjection(ResourceIndexOrchestrator.Result result) {
         List<ResourceIndexOrchestrator.ResolvedEntry> resources = dataCache.indexedResources;
         if (resources == null || resources.isEmpty()) resources = result == null ? List.of() : result.resources();
@@ -472,8 +505,21 @@ final class HostedResourceContext implements ResourceBrowserContext {
         return resources.stream().filter(resource -> resource != null && resource.metadata() != null
                 && resource.metadata().projectId() != null && !resource.metadata().projectId().isBlank())
                 .map(resource -> new InstalledResource(resource.metadata().provider(), resource.metadata().projectId(),
-                        resource.metadata().availableUpdate() != null)).distinct().toList();
+                        resource.metadata().availableUpdate() != null, installedType(resource),
+                        resource.metadata().availableUpdate() == null ? "" : resource.metadata().availableUpdate().id,
+                        resource.path() + ":" + Objects.requireNonNullElse(resource.metadata().versionId(), ""))).distinct().toList();
     }
+
+    private static ResourceType installedType(ResourceIndexOrchestrator.ResolvedEntry resource) {
+        String directory = directory(resource).toLowerCase(Locale.ROOT);
+        String name = directory.substring(directory.lastIndexOf('/') + 1);
+        for (ResourceType type : ResourceType.values()) if (Objects.equals(name, type.getDirectoryName())) return type;
+        OnlineResourceVersion update = resource.metadata().availableUpdate();
+        return update == null ? null : ResourceType.getTypeFromString(update.projectType);
+    }
+
+    @Override
+    public boolean isQuickUpdateBusy() { return resourceUpdate != null && !resourceUpdate.isDone(); }
 
     private record ResourceIndexLoad(ResourceDataCache cache, long generation, Async<ResourceIndexOrchestrator.Result> request) {
     }
@@ -714,8 +760,12 @@ final class HostedResourceContext implements ResourceBrowserContext {
     }
 
     Async<Void> maintainIndex(boolean purge) {
+        return maintainIndex(purge, true);
+    }
+
+    private Async<Void> maintainIndex(boolean purge, boolean retire) {
         if (indexMaintenance != null && !indexMaintenance.isDone()) return indexMaintenance;
-        clearInventoryCache();
+        clearInventoryCache(retire);
         maintainingIndex = true;
         OperationFence fence = captureFence();
         ResourceDataCache cache = dataCache;
@@ -1582,6 +1632,17 @@ final class HostedResourceContext implements ResourceBrowserContext {
 
     private Async<Void> update(ResourceMarketplaceProvider.Card resource, ResourceMarketplaceProvider.Version selected,
                                ResourceMarketplaceProvider.VersionFile selectedFile, Runnable refreshed, OperationFence fence) {
+        if (isQuickUpdateBusy()) return Async.failed(new IllegalStateException("A Resource Update Is Already Running"));
+        Async<Void> request = runUpdate(resource, selected, selectedFile, refreshed, fence);
+        resourceUpdate = request;
+        request.whenComplete((ignored, failure) -> {
+            if (resourceUpdate == request) resourceUpdate = null;
+        });
+        return request;
+    }
+
+    private Async<Void> runUpdate(ResourceMarketplaceProvider.Card resource, ResourceMarketplaceProvider.Version selected,
+                                  ResourceMarketplaceProvider.VersionFile selectedFile, Runnable refreshed, OperationFence fence) {
         if (!hasInstance() || !supportsResourceResolution(resource)) {
             return Async.failed(new UnsupportedOperationException("Resource Update Is Unavailable"));
         }
@@ -1904,8 +1965,15 @@ final class HostedResourceContext implements ResourceBrowserContext {
         }
         for (Consumer<ResourceBrowserContext.ResourceChange> listener : listeners) {
             if (!isInventoryCurrent(fence, cache, generation)) return;
-            listener.accept(new ResourceBrowserContext.ResourceChange(ResourceBrowserContext.ResourceChange.EventType.REFRESHED, List.of()));
+            ResourceBrowserContext.ResourceChange.EventType type = discoveringUpdates
+                    ? ResourceBrowserContext.ResourceChange.EventType.LOAD_STARTED : updateDiscoveryCompleted
+                    ? ResourceBrowserContext.ResourceChange.EventType.LOAD_COMPLETED : updateDiscoveryFailed
+                    ? ResourceBrowserContext.ResourceChange.EventType.LOAD_FAILED : ResourceBrowserContext.ResourceChange.EventType.REFRESHED;
+            listener.accept(new ResourceBrowserContext.ResourceChange(type,
+                    type == ResourceBrowserContext.ResourceChange.EventType.LOAD_COMPLETED ? installedProjection(cache.canonicalResourceResult) : List.of()));
         }
+        updateDiscoveryCompleted = false;
+        updateDiscoveryFailed = false;
     }
 
     static List<String> prioritizeProvider(List<String> providers, String preferred) {
@@ -2014,7 +2082,11 @@ final class HostedResourceContext implements ResourceBrowserContext {
     }
 
     private void clearInventoryCache() {
-        advanceLifecycleGeneration();
+        clearInventoryCache(true);
+    }
+
+    private void clearInventoryCache(boolean retire) {
+        if (retire) advanceLifecycleGeneration();
         dataCache.resourceIndexGeneration++;
         dataCache.resourceHydrationGeneration++;
         List<Async<List<ServerModels.PteroFileObjectAttributes>>> directoryRequests =
@@ -2177,6 +2249,11 @@ final class HostedResourceContext implements ResourceBrowserContext {
     }
 
     private void retireResourceWork() {
+        discoveringUpdates = false;
+        updateDiscoveryCompleted = false;
+        updateDiscoveryFailed = false;
+        cancel(updateDiscovery);
+        updateDiscovery = null;
         cancel(indexMaintenance);
         indexMaintenance = null;
         maintainingIndex = false;
@@ -2531,17 +2608,23 @@ final class HostedResourceContext implements ResourceBrowserContext {
     public void openResource(Screen parent, ResourceMarketplaceProvider source, ResourceMarketplaceProvider.Card resource,
                              ResourceType type, boolean server, Object remoteHost, boolean reStudioContext,
                              boolean replacement, Runnable changeCallback) {
-        if (!(parent instanceof ReScreen reScreen)) return;
+        openResource(parent, source, resource, type, server, remoteHost, reStudioContext, replacement, changeCallback, () -> true);
+    }
+
+    public void openResource(Screen parent, ResourceMarketplaceProvider source, ResourceMarketplaceProvider.Card resource,
+                             ResourceType type, boolean server, Object remoteHost, boolean reStudioContext,
+                             boolean replacement, Runnable changeCallback, BooleanSupplier current) {
+        if (!(parent instanceof ReScreen reScreen) || !current.getAsBoolean()) return;
         OperationFence fence = captureFence();
         if (hasInstance() && (dataCache.canonicalResourceRequest == null || !dataCache.canonicalResourceRequest.isDone())) {
             installedResources().whenComplete((ignored, failure) -> ScreenManager.getInstance().execute(() -> {
-                if (!isCurrent(fence)) return;
+                if (!isCurrent(fence) || !current.getAsBoolean()) return;
                 if (failure != null) log("Installed Resource State Unavailable", failure);
                 openResourceScreen(reScreen, source, resource, type, server, remoteHost, reStudioContext, replacement, changeCallback);
             }));
             return;
         }
-        if (!isCurrent(fence)) return;
+        if (!isCurrent(fence) || !current.getAsBoolean()) return;
         openResourceScreen(reScreen, source, resource, type, server, remoteHost, reStudioContext, replacement, changeCallback);
     }
 

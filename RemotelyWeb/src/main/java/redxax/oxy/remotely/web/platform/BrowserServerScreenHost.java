@@ -103,6 +103,7 @@ import restudio.rebase.restudio.community.ReStudioCommunityProviders;
 import restudio.rebase.settings.controllers.ModpackSettingsProvider;
 import restudio.rebase.settings.controllers.ModpackSettingsTarget;
 import restudio.rebase.settings.controllers.BackupSettingsProvider;
+import restudio.rebase.developer.search.BackupStartSearch;
 import restudio.rebase.settings.controllers.SettingsActionCapability;
 import restudio.rebase.settings.controllers.MinecraftAssetsSettingsProvider;
 import restudio.rebase.settings.controllers.VersionSettingsCatalog;
@@ -118,6 +119,7 @@ import restudio.rebase.ui.screens.feedback.FeedbackBrowserScreen;
 import restudio.rebase.ui.screens.notification.InboxScreen;
 import restudio.rebase.ui.screens.resources.ResourceBrowserScreen;
 import restudio.rebase.ui.screens.resources.ResourceContainer;
+import restudio.rebase.ui.screens.resources.ResourceContainerProvider;
 import restudio.rebase.ui.screens.auth.ReStudioLoginScreen;
 import restudio.rescreen.ui.core.Screen;
 import restudio.rescreen.ui.core.ScreenManager;
@@ -1210,6 +1212,41 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     @Override
     public ResourceContainerAdapter createResourceContainer(ReScreen host, Object instance, ServerModels.ClientServerView server,
                                                             int x, int y, int width, int height) {
+        ResourceContainerProvider provider = resourceSearchProvider(server);
+        if (provider == null) return null;
+        ResourceContainer container = new ResourceContainer(host, provider, x, y, width, height, InstanceResourceWidget::new, true);
+        return new CanonicalResourceContainerAdapter(container);
+    }
+
+    @Override
+    public ResourceMarketplaceProvider resourceSearchMarketplace(Object target) {
+        return resourceMarketplace();
+    }
+
+    @Override
+    public ResourceBrowserContext resourceSearchContext(Object target, ResourceMarketplaceProvider marketplace) {
+        if (!(marketplace instanceof ResourceMarketplaceProviderAdapter adapter)) return null;
+        ServerModels.ClientServerView server = target == null ? null : serverView(target);
+        String id = server == null ? "" : serverId(server);
+        BrowserRemotelyServerApi api = browserApi();
+        if (target != null && (api == null || id.isBlank())) return null;
+        return new HostedResourceContext(adapter, api, id, server == null ? null : server.version, server == null ? null : server.loader,
+                this, configStore(), server == null ? null : capabilities(server), server);
+    }
+
+    @Override
+    public BackupStartSearch.Backend startBackups(ReScreen owner, Object target) {
+        ServerModels.ClientServerView server = serverView(target);
+        BrowserRemotelyServerApi api = browserApi();
+        String id = serverId(server);
+        if (demo()) return BackupStartSearch.Backend.unavailable("Backups Are Unavailable In Reactor Demo");
+        if (server == null || api == null || id.isBlank()) return ServerScreenHost.super.startBackups(owner, target);
+        return BackupStartSearch.Backend.managed(owner, BrowserHostedSettingsProviders.backups(api, id, configStore()));
+    }
+
+    @Override
+    public ResourceContainerProvider resourceSearchProvider(Object target) {
+        ServerModels.ClientServerView server = serverView(target);
         BrowserRemotelyServerApi browserApi = browserApi();
         String id = serverId(server);
         if (browserApi == null || id.isBlank()) {
@@ -1219,9 +1256,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         HostedResourceContext context = new HostedResourceContext(marketplace, browserApi, id,
                 server == null ? null : server.version, server == null ? null : server.loader, this, configStore(), capabilities(server), server);
         ResourceForwarding forwarding = networkForwarding(server);
-        HostedResourceContainerProvider provider = new HostedResourceContainerProvider(this, server, marketplace, context, forwarding);
-        ResourceContainer container = new ResourceContainer(host, provider, x, y, width, height, InstanceResourceWidget::new, true);
-        return new CanonicalResourceContainerAdapter(container);
+        return new HostedResourceContainerProvider(this, server, marketplace, context, forwarding);
     }
 
     private PluginForwarding forwarding(ServerModels.ClientServerView server) {
@@ -1457,6 +1492,9 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     }
 
     @Override
+    public Object fileSourceOwner(Object target) { return browserApi(); }
+
+    @Override
     public void openDevelopment(Screen current, ServerModels.ClientServerView server) {
         if (demo()) {
             unavailable(Action.DEVELOPMENT);
@@ -1523,12 +1561,18 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
     @Override
     public void openServerConfiguration(Screen current, ServerModels.ClientServerView server, String initialTab,
                                         String diskMiB) {
+        openServerConfiguration(current, server, initialTab, diskMiB, null);
+    }
+
+    @Override
+    public void openServerConfiguration(Screen current, ServerModels.ClientServerView server, String initialTab,
+                                        String diskMiB, String setting) {
         if (demo()) {
             openServerConfiguration(current, server);
             return;
         }
         withCapability(server, "settings.read", () -> ScreenManager.getInstance().navigate(current,
-                new ServerConfigurationScreen(current, server, null, remotelyClient, initialTab, diskMiB)));
+                new ServerConfigurationScreen(current, server, null, remotelyClient, initialTab, diskMiB).focusSetting(setting)));
     }
 
     @Override
@@ -2208,7 +2252,16 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         openSettings(current, null);
     }
 
-    private void openSettings(Screen current, String initialTab) {
+    @Override
+    public List<String> extraGlobalSettingTabs() { return List.of("Connections"); }
+
+    @Override
+    public void openSettings(Screen current, String initialTab) {
+        openSettings(current, initialTab, null);
+    }
+
+    @Override
+    public void openSettings(Screen current, String initialTab, String setting) {
         if (demo()) {
             unavailable(Action.HOST_SETTINGS);
             return;
@@ -2223,7 +2276,7 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
             return;
         }
         application.setScreen(SettingsScreenFactory.createGlobalSettingsScreen(parent, config,
-                BrowserGlobalSettingsProviders.create(parent, config, browserApi(), this), initialTab));
+                BrowserGlobalSettingsProviders.create(parent, config, browserApi(), this), initialTab).focusSetting(setting));
     }
 
     @Override
@@ -3409,6 +3462,17 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         @Override
         public Async<String> read(RemotePath path) {
             return operation("files.read", () -> capabilities.readFile(server, remote(path)));
+        }
+
+        @Override
+        public boolean supportsBoundedRead() {
+            return capability(CapabilityIds.FILES, "files.read").available();
+        }
+
+        @Override
+        public Async<BoundedText> readBounded(RemotePath path, int maxBytes) {
+            RemoteFileSystemProvider.requireReadLimit(maxBytes);
+            return operation("files.read", () -> api.getFileContentBounded(serverId, remote(path), maxBytes));
         }
 
         @Override

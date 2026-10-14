@@ -1,12 +1,16 @@
 package redxax.oxy.remotely.ui.server;
 
 import restudio.rebase.platform.ExternalOpenResult;
+import restudio.rebase.developer.search.BackupStartSearch;
 
 import redxax.oxy.remotely.servers.ReProxyTarget;
 import restudio.rebase.reproxy.ReProxyModels.AddressSpec;
 import restudio.rebase.reproxy.ReProxyModels.Connection;
 import restudio.rebase.reproxy.ReProxyModels.Suffix;
 import restudio.rebase.ui.screens.resources.ResourceContainerItem;
+import restudio.rebase.ui.screens.resources.ResourceContainerProvider;
+import restudio.rebase.resource.marketplace.ResourceMarketplaceProvider;
+import restudio.rebase.resource.marketplace.ResourceBrowserContext;
 import restudio.rebase.ui.screens.resources.ResourceForwarding;
 
 import redxax.oxy.remotely.host.ApplicationHost;
@@ -21,6 +25,7 @@ import redxax.oxy.remotely.data.flow.ReSyncNotificationLevel;
 import redxax.oxy.remotely.session.TerminalSession;
 import redxax.oxy.remotely.ui.settings.data.ServerSettingsDataController;
 import redxax.oxy.remotely.settings.server.ServerSettingsSnapshot;
+import redxax.oxy.remotely.ui.settings.data.ServerSettingsDocumentTarget;
 import restudio.rescreen.platform.Async;
 import restudio.rescreen.platform.http.HttpTransport;
 import restudio.rebase.api.unified.internal.StandardOutputStateParser;
@@ -45,6 +50,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -71,6 +77,12 @@ public interface ServerScreenHost {
 
     default StorageFiles storageFiles(Object target) {
         return new StorageFiles(RemoteFileSystemProvider.unavailable(), RemotePath.root());
+    }
+
+    default Object fileSourceOwner(Object target) { return application(); }
+
+    default BackupStartSearch.Backend startBackups(ReScreen owner, Object target) {
+        return BackupStartSearch.Backend.unavailable("Backups Are Unavailable For This Server");
     }
 
     default HttpTransport weatherTransport() { return null; }
@@ -132,6 +144,12 @@ public interface ServerScreenHost {
     default Async<List<ResourceContainerItem>> serverResources(Object target) {
         return Async.completed(List.of());
     }
+
+    default ResourceContainerProvider resourceSearchProvider(Object target) { return null; }
+
+    default ResourceMarketplaceProvider resourceSearchMarketplace(Object target) { return null; }
+
+    default ResourceBrowserContext resourceSearchContext(Object target, ResourceMarketplaceProvider marketplace) { return null; }
 
     default Async<Void> reconcileServerResources(Object target) {
         return serverResourceForwarding(target).reconcile();
@@ -496,6 +514,11 @@ public interface ServerScreenHost {
         return ServerConfigurationTarget.unavailable(value);
     }
 
+    default Collection<String> settingsSoftwareTokens(Object target) {
+        ServerConfigurationTarget value = configurationTarget(target);
+        return value instanceof ServerSettingsDocumentTarget document ? document.softwareTokens() : List.of();
+    }
+
     default ServerConfigurationTarget copyConfigurationTarget(Object value, String name) {
         return configurationTarget(value);
     }
@@ -570,6 +593,12 @@ public interface ServerScreenHost {
 
     default ServerUiCapabilityProvider capabilities(ServerModels.ClientServerView server) {
         return ServerUiCapabilityProvider.unavailable();
+    }
+
+    default ServerUiCapabilityProvider.Availability lifecycleAvailability(Object target) {
+        ServerModels.ClientServerView server = serverView(target);
+        return server == null ? ServerUiCapabilityProvider.Availability.missing("Server Is Unavailable")
+                : capabilities(server).availability(server, "server.lifecycle");
     }
 
     default String collaborationResourceId(Object target) { return ""; }
@@ -1286,6 +1315,16 @@ public interface ServerScreenHost {
         unavailable(Action.HOST_SETTINGS);
     }
 
+    default void openSettings(Screen current, String initialTab) {
+        openSettings(current);
+    }
+
+    default void openSettings(Screen current, String initialTab, String setting) {
+        openSettings(current, initialTab);
+    }
+
+    default List<String> extraGlobalSettingTabs() { return List.of(); }
+
     default void openModpackBrowser(Screen current) {
         unavailable(Action.MODPACK_SERVER);
     }
@@ -1582,6 +1621,11 @@ public interface ServerScreenHost {
     default void openServerConfiguration(Screen current, ServerModels.ClientServerView server, String initialTab,
                                          String diskMiB) {
         openServerConfiguration(current, server);
+    }
+
+    default void openServerConfiguration(Screen current, ServerModels.ClientServerView server, String initialTab,
+                                         String diskMiB, String setting) {
+        openServerConfiguration(current, server, initialTab, diskMiB);
     }
 
     default void openServerConfiguration(Screen current, Object instance) {

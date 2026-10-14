@@ -76,6 +76,7 @@ public class ServerConfigurationScreen extends ReScreen {
     private final ResourcePoolController.Creation poolCreation;
     private final HostedModpackSelection modpackSelection;
     private String initialTab;
+    private String initialSetting;
     private String storageDiskMiB;
     private StorageBreakdownController storageBreakdownController;
     private ResourcePoolModels.DraftOptions poolOptions = new ResourcePoolModels.DraftOptions(List.of());
@@ -107,6 +108,9 @@ public class ServerConfigurationScreen extends ReScreen {
     private final BrowserSafeState.LongValue settingsReloadRevision = new BrowserSafeState.LongValue();
     private final BrowserSafeState.LongValue configurationLoadRevision = new BrowserSafeState.LongValue();
     private ServerSettingsDataController pendingSettingsController;
+    private SettingsStamp settingsStamp;
+    private SettingsStamp requestedSettingsStamp;
+    private SettingsStamp pendingSettingsStamp;
     private Runnable settingsCleanup = () -> {};
     private boolean settingsHandoff;
     private boolean settingsControllerRetained;
@@ -253,8 +257,9 @@ public class ServerConfigurationScreen extends ReScreen {
             creationInitializer.accept(tempInstance.raw());
         }
         if (poolCreation == null) {
+            settingsStamp = currentSettingsStamp();
             ServerSettingsDataController controller = screenHost().createServerSettingsController(tempInstance.raw(),
-                    ServerSettingsRegistry.getInstance().snapshot(tempInstance.raw()));
+                    settingsStamp.snapshot());
             setupSettingsUI(extraFiles, controller);
             startInitialConfigLoad();
             return;
@@ -264,8 +269,8 @@ public class ServerConfigurationScreen extends ReScreen {
             new Notification("Configuration Unavailable", "Resource Pool Capacity Is Unavailable", Notification.Type.ERROR);
             return;
         }
-        ServerSettingsDataController controller = host.createNewServerSettingsController(tempInstance.raw(),
-                ServerSettingsRegistry.getInstance().snapshot(tempInstance.raw()));
+        settingsStamp = currentSettingsStamp();
+        ServerSettingsDataController controller = host.createNewServerSettingsController(tempInstance.raw(), settingsStamp.snapshot());
         startInitialConfigLoad();
         poolOwner = new PoolOwner(host, serverApi(), host.resourcePools(), host.hostedNetworkAccount(),
                 host.authenticationSession(), configurationLoadRevision.get());
@@ -317,6 +322,7 @@ public class ServerConfigurationScreen extends ReScreen {
         }
         poolSettingsLoading = true;
         PoolOwner captured = poolOwner;
+        SettingsStamp stamp = currentSettingsStamp();
         poolSettingsReady = false;
         poolSettingsFailure = "";
         long request = ++poolSettingsRevision;
@@ -337,7 +343,7 @@ public class ServerConfigurationScreen extends ReScreen {
                 poolSettingsFailure = "Software Settings Could Not Load: " + configurationFailureMessage(failure);
                 if (replace) controller.close();
             } else {
-                if (replace) applyDataDrivenReload(settingsReloadRevision.incrementAndGet(), controller);
+                if (replace) applyDataDrivenReload(settingsReloadRevision.incrementAndGet(), controller, stamp);
                 poolSettingsReady = settingsController == controller;
                 if (!poolSettingsReady) poolSettingsFailure = "Reset Changed Software Settings Before Retrying Setup";
                 refreshConfigurationCategories(controller.tabNames());
@@ -481,7 +487,7 @@ public class ServerConfigurationScreen extends ReScreen {
         for (String category : categories) {
             if (category == null) continue;
             Supplier<List<Setting>> fixed = fixedSettingsSuppliers.get(category);
-            boolean dataDriven = settingsController != null && settingsController.tabNames().contains(category);
+            boolean dataDriven = settingsController != null && settingsController.plannedTabNames().contains(category);
             if (fixed != null || dataDriven) {
                 boolean accepted = settingsScreen.registerCategory(category, dataDriven
                         ? combinedSupplier(fixed, () -> settingsController.settings(category)) : fixed);
@@ -491,6 +497,14 @@ public class ServerConfigurationScreen extends ReScreen {
     }
 
     public Screen settingsOwner() { return settingsScreen == null ? this : settingsScreen; }
+
+    ServerSettingsDataController settingsData() { return settingsController; }
+
+    public ServerConfigurationScreen focusSetting(String setting) {
+        initialSetting = setting;
+        if (settingsScreen != null) settingsScreen.focusSetting(setting);
+        return this;
+    }
 
     private void setupSettingsUI(List<String> extraFiles, ServerSettingsDataController settingsController) {
         this.settingsController = settingsController;
@@ -531,7 +545,7 @@ public class ServerConfigurationScreen extends ReScreen {
         fixedSettingsSuppliers = new LinkedHashMap<>(settingsByTab);
         mergeDataDrivenTabs(settingsByTab);
 
-        settingsRegistryListener = ignored -> reloadDataDrivenSettings();
+        settingsRegistryListener = ignored -> ScreenManager.getInstance().execute(this::reloadDataDrivenSettings);
         ServerSettingsRegistry.getInstance().addListener(settingsRegistryListener);
         cleanupActions.add(() -> {
             configurationLoadRevision.incrementAndGet();
@@ -571,6 +585,7 @@ public class ServerConfigurationScreen extends ReScreen {
                 super.removed();
             }
         };
+        settingsScreen.focusSetting(initialSetting);
         if (poolCreation != null || parent instanceof ResourcePoolScreen) {
             settingsScreen.enableNavigation(parent);
         }
@@ -578,7 +593,7 @@ public class ServerConfigurationScreen extends ReScreen {
         Runnable publicationCleanup = publishedController.onTabsPublished(tabs -> ScreenManager.getInstance().execute(() -> {
             if (screenClosed || this.settingsController != publishedController) return;
             for (String tab : tabs) {
-                if (settingsScreen.hasPendingChanges(tab)) {
+                if (settingsScreen.hasActiveEdit(tab)) {
                     pendingPublishedTabs.add(tab);
                 } else {
                     refreshConfigurationCategories(Set.of(tab));
@@ -689,18 +704,32 @@ public class ServerConfigurationScreen extends ReScreen {
         if (screenClosed) {
             return;
         }
+        SettingsStamp stamp = currentSettingsStamp();
+        if (stamp.equals(settingsStamp)) {
+            if (requestedSettingsStamp != null && !stamp.equals(requestedSettingsStamp)) {
+                settingsReloadRevision.incrementAndGet();
+                requestedSettingsStamp = null;
+                if (pendingSettingsController != null) pendingSettingsController.close();
+                pendingSettingsController = null;
+                pendingSettingsStamp = null;
+            }
+            return;
+        }
+        if (stamp.equals(requestedSettingsStamp)) return;
         if (poolCreation != null) {
             if (!currentPoolCreation(poolOwner) || poolSettingsLoading) return;
-            loadPoolSettings(poolOwner.host().createNewServerSettingsController(tempInstance.raw(),
-                    ServerSettingsRegistry.getInstance().snapshot(tempInstance.raw())), true);
+            requestedSettingsStamp = stamp;
+            loadPoolSettings(poolOwner.host().createNewServerSettingsController(tempInstance.raw(), stamp.snapshot()), true);
             return;
         }
         long revision = settingsReloadRevision.incrementAndGet();
-        ServerSettingsDataController next = poolCreation == null ? screenHost().createServerSettingsController(tempInstance.raw(),
-                ServerSettingsRegistry.getInstance().snapshot(tempInstance.raw())) : screenHost().createNewServerSettingsController(tempInstance.raw(),
-                ServerSettingsRegistry.getInstance().snapshot(tempInstance.raw()));
-        next.load().thenRun(() -> ScreenManager.getInstance().execute(() -> applyDataDrivenReload(revision, next))).exceptionally(error -> {
+        requestedSettingsStamp = stamp;
+        ServerSettingsDataController next = screenHost().createServerSettingsController(tempInstance.raw(), stamp.snapshot());
+        next.load().thenRun(() -> ScreenManager.getInstance().execute(() -> applyDataDrivenReload(revision, next, stamp))).exceptionally(error -> {
             next.close();
+            ScreenManager.getInstance().execute(() -> {
+                if (revision == settingsReloadRevision.get()) requestedSettingsStamp = null;
+            });
             ReLog.logger(LogTypes.CONFIGURATION).source(LogSource.instance(tempInstance.id(), tempInstance.name())).component(ServerConfigurationScreen.class).operation("Reload Server Settings").error("Could not reload server settings metadata", error);
             return null;
         });
@@ -717,27 +746,46 @@ public class ServerConfigurationScreen extends ReScreen {
         return false;
     }
 
-    private void applyDataDrivenReload(long revision, ServerSettingsDataController next) {
-        if (screenClosed || revision != settingsReloadRevision.get() || settingsScreen == null || settingsController == null) {
+    private SettingsStamp currentSettingsStamp() {
+        Collection<String> tokens = screenHost().settingsSoftwareTokens(tempInstance.raw());
+        List<String> software = tokens == null ? List.of() : tokens.stream().filter(Objects::nonNull)
+                .map(value -> value.trim().toLowerCase(Locale.ROOT)).filter(value -> !value.isBlank()).distinct().sorted().toList();
+        ServerSettingsSnapshot snapshot = ServerSettingsRegistry.getInstance().snapshot(tempInstance.raw());
+        ServerSettingsSnapshot selected = new ServerSettingsSnapshot(snapshot.packs().stream().filter(pack -> pack.appliesTo(software)).toList());
+        return new SettingsStamp(selected, software, tempInstance.version(), tempInstance.backendType(), Map.copyOf(tempInstance.backendCredentials()));
+    }
+
+    private record SettingsStamp(ServerSettingsSnapshot snapshot, List<String> software, String version, String backend, Map<String, String> credentials) {}
+
+    private void applyDataDrivenReload(long revision, ServerSettingsDataController next, SettingsStamp stamp) {
+        if (screenClosed || revision != settingsReloadRevision.get() || settingsScreen == null || settingsController == null
+                || stamp == null || !stamp.equals(currentSettingsStamp())) {
             next.close();
+            if (revision == settingsReloadRevision.get()) requestedSettingsStamp = null;
             return;
         }
-        Set<String> affectedTabs = new LinkedHashSet<>(settingsController.tabNames());
-        affectedTabs.addAll(next.tabNames());
+        Set<String> affectedTabs = new LinkedHashSet<>(settingsController.plannedTabNames());
+        affectedTabs.addAll(next.plannedTabNames());
         affectedTabs.add("Extra Files");
-        if (affectedTabs.stream().anyMatch(settingsScreen::hasPendingChanges)) {
+        if (affectedTabs.stream().anyMatch(settingsScreen::hasActiveEdit)) {
             if (pendingSettingsController != null) {
                 pendingSettingsController.close();
             }
             pendingSettingsController = next;
+            pendingSettingsStamp = stamp;
             return;
         }
 
         ServerSettingsDataController previous = settingsController;
+        if (pendingSettingsController != null && pendingSettingsController != next) pendingSettingsController.close();
+        pendingSettingsController = null;
         settingsController = next;
+        settingsStamp = stamp;
+        requestedSettingsStamp = null;
+        pendingSettingsStamp = null;
         for (String tab : affectedTabs) {
             Supplier<List<Setting>> fixed = fixedSettingsSuppliers.get(tab);
-            boolean dataDriven = next.tabNames().contains(tab);
+            boolean dataDriven = next.plannedTabNames().contains(tab);
             if (fixed == null && !dataDriven) {
                 settingsScreen.removeCategory(tab);
             } else {
@@ -759,7 +807,9 @@ public class ServerConfigurationScreen extends ReScreen {
             return;
         }
         pendingSettingsController = null;
-        applyDataDrivenReload(settingsReloadRevision.get(), pending);
+        SettingsStamp stamp = pendingSettingsStamp;
+        pendingSettingsStamp = null;
+        applyDataDrivenReload(settingsReloadRevision.get(), pending, stamp);
     }
 
     private void saveConfiguration() {

@@ -194,10 +194,13 @@ public final class ServerConfigurationUiComposition {
         }
         if (state.editMode() && !state.restudioCreation()) {
             ServerExtraSettingsController extra = new ServerExtraSettingsController(extraFiles, data.documentPaths(), platform.documentAccess());
+            Supplier<ServerSettingsDataController> currentData = owner instanceof ServerConfigurationScreen configuration
+                    ? configuration::settingsData : () -> data;
             settings.put("Extra Files", () -> {
+                ServerSettingsDataController loaded = currentData.get();
                 List<String> availableFiles = new ArrayList<>(extraFiles == null ? List.of() : extraFiles);
-                availableFiles.addAll(data.availableDocumentPaths());
-                extra.updateFiles(availableFiles, data.documentPaths());
+                availableFiles.addAll(loaded.availableDocumentPaths());
+                extra.updateFiles(availableFiles, loaded.documentPaths());
                 return extra.getSettings();
             });
         }
