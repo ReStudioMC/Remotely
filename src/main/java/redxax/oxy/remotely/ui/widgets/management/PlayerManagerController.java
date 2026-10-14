@@ -13,6 +13,7 @@ import redxax.oxy.remotely.data.managed.PlayerSession;
 import redxax.oxy.remotely.data.player.IPlayerHistoryProvider;
 import redxax.oxy.remotely.data.player.PlayerService;
 import redxax.oxy.remotely.data.player.PlayerUpdateBatch;
+import redxax.oxy.remotely.data.player.PlayerFiles;
 import redxax.oxy.remotely.data.player.management.PlayerManagementService;
 import redxax.oxy.remotely.data.player.management.PlayerOperation;
 import redxax.oxy.remotely.data.player.management.PlayerOperationResult;
@@ -25,13 +26,17 @@ import redxax.oxy.remotely.data.player.action.StandardActionExecutor;
 import redxax.oxy.remotely.data.player.model.UnifiedPlayer;
 import redxax.oxy.remotely.data.player.source.IPlayerSource;
 import redxax.oxy.remotely.session.StreamDataParser;
+import redxax.oxy.remotely.util.AsyncTools;
+import redxax.oxy.remotely.util.TaskSchedulers;
 import redxax.oxy.remotely.ui.server.ServerUiCapabilityProvider;
 import redxax.oxy.remotely.ui.server.containers.PlayersContainer;
 import restudio.rebase.ui.widgets.TerminalWidget;
+import restudio.rebase.restudio.api.models.ServerModels;
 import restudio.rescreen.ui.core.ScreenManager;
 import restudio.rescreen.util.Notification;
 
 import java.util.*;
+import java.time.Duration;
 import restudio.rescreen.platform.Async;
 import java.util.function.Consumer;
 import com.google.gson.JsonObject;
@@ -80,6 +85,13 @@ public class PlayerManagerController {
     private volatile String loadFailure = "";
     private volatile ServerUiCapabilityProvider.Availability playerAvailability;
     private UnifiedPlayerSource unifiedPlayerSource;
+    private final PlayerFiles playerFiles = new PlayerFiles();
+    private long whitelistGeneration;
+    private volatile long serviceGeneration;
+    private Async<Void> fileWrites = Async.completed(null);
+    private long fileGeneration;
+    private Async<Void> fileRead;
+    private long fileReadToken;
 
     private PlayerManagerController(Object instance) {
         this(instance, defaultCapabilities());
@@ -94,6 +106,8 @@ public class PlayerManagerController {
                 && canEditPlayerInventory(operationPlayers.get(operation.playerId())) && operation.baseRevision() >= 0L, this::executeReSyncOperation);
         operationRouter.register("player-service", 100, operation -> operation.type() != PlayerOperation.Type.INVENTORY_EDIT && isServerRunning()
                 && playerService != null && playerService.supportsAction(actionName(operation.type())), this::executePlayerServiceOperation);
+        operationRouter.register("files", 100, operation -> PlayerFiles.editable(operation.type()) && capabilities.serverStopped(instance)
+                && capabilities.playerFilesAvailability(instance).available(), this::executeOfflineOperation);
     }
 
     public static PlayerManagerController getOrCreate(Object instance) {
@@ -133,7 +147,10 @@ public class PlayerManagerController {
             ServerUiCapabilityProvider.Availability next = capabilities.availability(instance, ServerUiCapabilityProvider.Capability.PLAYERS);
             ServerUiCapabilityProvider.Availability previous = playerAvailability;
             playerAvailability = next;
-            if (Objects.equals(previous, next)) return;
+            if (Objects.equals(previous, next)) {
+                syncPlayers();
+                return;
+            }
             if (isInitialized) reinitializeService();
             else applyAvailability(next);
         });
@@ -192,6 +209,12 @@ public class PlayerManagerController {
     }
 
     private void initializeService(boolean shutdownExisting) {
+        synchronized (playerFiles) {
+            whitelistGeneration++;
+            serviceGeneration++;
+            fileGeneration++;
+            playerFiles.clear();
+        }
         if (shutdownExisting) {
             clearReSyncWatches();
             if (this.playerService != null) this.playerService.shutdown();
@@ -234,6 +257,10 @@ public class PlayerManagerController {
             if (source == null) continue;
             if (source instanceof ServerUiCapabilityProvider.ContentPlayerSource contentSource) {
                 standardFileSource = contentSource;
+                long generation = serviceGeneration;
+                contentSource.onContent((name, content) -> {
+                    if (contentSource == standardFileSource && generation == serviceGeneration) handleFileUpdate(name, content);
+                });
             }
             playerService.registerSource(source);
         }
@@ -248,6 +275,9 @@ public class PlayerManagerController {
         if (this.historyProvider != null) this.historyProvider.initialize();
         this.playerManagementService = new PlayerManagementService(playerDataManager, historyProvider, this::getPlayerDossier, this::requestPlayerDossier, this::isReSyncPlayerManagementAvailable);
         loadActionsAsync();
+        refreshWhitelist().exceptionally(error -> null);
+        if (unifiedPlayerSource == null) refreshPlayerFiles().exceptionally(error -> null);
+        refreshServerState();
     }
 
     private synchronized void clearReSyncWatches() {
@@ -312,10 +342,45 @@ public class PlayerManagerController {
             isInitialized = true;
         } else {
              if (container != null && playerService != null) container.syncUi(playerService.getRegistry().getAll());
+             refreshWhitelist().exceptionally(error -> null);
+             refreshPlayerFiles().exceptionally(error -> null);
+             refreshServerState();
         }
     }
 
     public void handleFileUpdate(String fileName, String content) {
+        String name = fileName == null ? "" : fileName.substring(fileName.lastIndexOf('/') + 1);
+        if (List.of("ops.json", "banned-players.json", "banned-ips.json").contains(name)) {
+            try {
+                synchronized (playerFiles) {
+                    fileGeneration++;
+                    playerFiles.accept(name, true, content);
+                    if (playerService != null) playerFiles.project(playerService);
+                }
+            } catch (RuntimeException failure) {
+                ScreenManager.getInstance().execute(() -> new Notification("Player File Error", failure.getMessage(), Notification.Type.ERROR));
+            }
+        }
+        if (fileName != null && (fileName.endsWith("/server.properties") || fileName.equals("server.properties")
+                || fileName.endsWith("/whitelist.json") || fileName.equals("whitelist.json"))) {
+            synchronized (playerFiles) {
+                boolean properties = fileName.endsWith("server.properties");
+                String accepted = properties ? playerFiles.snapshot().properties() : playerFiles.snapshot().content();
+                if (!Objects.equals(accepted, content)) {
+                    whitelistGeneration++;
+                    try {
+                        if (properties) playerFiles.properties(content);
+                        else playerFiles.members(content);
+                    } catch (RuntimeException failure) {
+                        playerFiles.clearWhitelist();
+                    }
+                }
+            }
+            syncPlayers();
+            if (fileName.endsWith("server.properties") && isWhitelistEnabled() && !playerFiles.snapshot().ready()) {
+                refreshWhitelist().exceptionally(error -> null);
+            }
+        }
         if (standardFileSource != null) {
             standardFileSource.updateFromContent(fileName, content);
         }
@@ -323,6 +388,9 @@ public class PlayerManagerController {
 
     public void fullRefresh() {
         ensureServiceInitialized();
+        if (unifiedPlayerSource == null) refreshPlayerFiles().exceptionally(error -> null);
+        refreshServerState();
+        refreshWhitelist().exceptionally(error -> null);
         capabilities.preparePlayerSources(instance);
         ServerUiCapabilityProvider.Availability availability = capabilities.availability(instance, ServerUiCapabilityProvider.Capability.PLAYERS);
         playerAvailability = availability;
@@ -420,7 +488,7 @@ public class PlayerManagerController {
         if (root == null) root = "";
         String prefix = root.isBlank() || root.endsWith("/") ? root : root + "/";
         String logPath = prefix + "logs/latest.log";
-        List<String> preLoadFiles = List.of("ops.json", "banned-players.json", "banned-ips.json", "whitelist.json", "usercache.json").stream()
+        List<String> preLoadFiles = List.of("server.properties", "ops.json", "banned-players.json", "banned-ips.json", "whitelist.json", "usercache.json").stream()
                 .map(file -> prefix + file).toList();
         feature.get().streamData(logPath, preLoadFiles, new StreamDataParser(this))
                 .whenComplete((ignored, throwable) -> {
@@ -589,27 +657,28 @@ public class PlayerManagerController {
             if (e != null) {
                 ScreenManager.getInstance().execute(() -> new Notification("Error", e.getMessage(), Notification.Type.ERROR));
             } else {
-                playerService.refreshSources();
+                refreshPlayerState();
             }
         });
     }
 
-    public void banPlayer(UnifiedPlayer player, String reason, boolean ipBan) {
-        executeOperation(player, PlayerOperation.Type.BAN, reason, ipBan).whenComplete((v, e) -> {
+    public Async<PlayerOperationResult> banPlayer(UnifiedPlayer player, String reason, boolean ipBan) {
+        return executeOperation(player, PlayerOperation.Type.BAN, reason, ipBan).whenComplete((v, e) -> {
             if (e != null) {
                 ScreenManager.getInstance().execute(() -> new Notification("Error", e.getMessage(), Notification.Type.ERROR));
             } else {
-                playerService.refreshSources();
+                refreshPlayerState();
             }
         });
     }
 
     public void unbanPlayer(UnifiedPlayer player) {
-        executeOperation(player, PlayerOperation.Type.UNBAN, "", false).whenComplete((v, e) -> {
+        boolean ipBan = player.getBan().getValue() != null && "IP Ban".equals(player.getBan().getValue().source());
+        executeOperation(player, PlayerOperation.Type.UNBAN, "", ipBan).whenComplete((v, e) -> {
             if (e != null) {
                 ScreenManager.getInstance().execute(() -> new Notification("Error", e.getMessage(), Notification.Type.ERROR));
             } else {
-                playerService.refreshSources();
+                refreshPlayerState();
             }
         });
     }
@@ -620,8 +689,216 @@ public class PlayerManagerController {
             if (e != null) {
                 ScreenManager.getInstance().execute(() -> new Notification("Error", e.getMessage(), Notification.Type.ERROR));
             } else {
-                playerService.refreshSources();
+                refreshPlayerState();
             }
+        });
+    }
+
+    public boolean isWhitelistEnabled() {
+        return playerFiles.snapshot().enabled();
+    }
+
+    public boolean isWhitelisted(UnifiedPlayer player) {
+        return player != null && playerFiles.snapshot().players().containsKey(player.getUuid());
+    }
+
+    public Async<Void> refreshWhitelist() {
+        long generation;
+        ServerUiCapabilityProvider provider = capabilities;
+        synchronized (playerFiles) {
+            generation = ++whitelistGeneration;
+        }
+        return readPlayerContent(provider, "server.properties").thenCompose(properties -> {
+            synchronized (playerFiles) {
+                if (generation != whitelistGeneration || provider != capabilities) return Async.failed(new IllegalStateException("Whitelist Changed. Try Again"));
+                playerFiles.properties(properties);
+                if (!playerFiles.snapshot().enabled()) return Async.completed(null);
+            }
+            return readPlayerFile(provider, "whitelist.json").thenAccept(content -> {
+                synchronized (playerFiles) {
+                    if (generation != whitelistGeneration || provider != capabilities) throw new IllegalStateException("Whitelist Changed. Try Again");
+                    playerFiles.members(content.content());
+                }
+            });
+        }).whenComplete((ignored, failure) -> {
+            synchronized (playerFiles) {
+                if (generation != whitelistGeneration || provider != capabilities) return;
+                if (failure != null) playerFiles.clearWhitelist();
+                else if (playerService != null) playerFiles.project(playerService);
+            }
+            syncPlayers();
+        });
+    }
+
+    private Async<String> readPlayerContent(ServerUiCapabilityProvider provider, String path) {
+        try {
+            return Objects.requireNonNull(provider.readFile(instance, path));
+        } catch (RuntimeException failure) {
+            return Async.failed(failure);
+        }
+    }
+
+    private void refreshServerState() {
+        ServerUiCapabilityProvider provider = capabilities;
+        long generation = serviceGeneration;
+        try {
+            provider.status(instance).thenAccept(status -> {
+                if (provider != capabilities || generation != serviceGeneration) return;
+                if (ServerUiCapabilityProvider.stopped(status) && playerService != null) {
+                    for (UnifiedPlayer player : playerService.getRegistry().getAll()) {
+                        player.updateOnline(false, player.getOnline().getSource(), player.getOnline().getPriority());
+                    }
+                }
+                syncPlayers();
+            }).exceptionally(error -> null);
+        } catch (RuntimeException failure) {
+            syncPlayers();
+        }
+    }
+
+    public Async<Void> refreshPlayerFiles() {
+        ServerUiCapabilityProvider provider = capabilities;
+        long generation = serviceGeneration;
+        long token;
+        Async<Void> result = Async.pending();
+        synchronized (playerFiles) {
+            if (fileRead != null && !fileRead.isDone() && fileReadToken == fileGeneration) return fileRead;
+            token = ++fileGeneration;
+            fileReadToken = token;
+            fileRead = result;
+        }
+        try {
+            provider.listFiles(instance, "/").thenCompose(entries -> {
+                List<Async<Void>> reads = new ArrayList<>();
+                for (String path : List.of("ops.json", "banned-players.json", "banned-ips.json")) {
+                    boolean exists = entries.stream().anyMatch(entry -> entry != null && entry.isFile && path.equals(entry.name));
+                    Async<String> content = exists ? readPlayerContent(provider, path) : Async.completed("[]");
+                    reads.add(content.thenAccept(value -> {
+                        synchronized (playerFiles) {
+                            if (provider != capabilities || generation != serviceGeneration || token != fileGeneration) return;
+                            playerFiles.accept(path, exists, value);
+                        }
+                    }));
+                }
+                return Async.allOf(reads.toArray(Async[]::new)).thenRun(() -> {
+                    synchronized (playerFiles) {
+                        if (provider != capabilities || generation != serviceGeneration || token != fileGeneration) {
+                            throw new IllegalStateException("Player Files Changed. Refresh And Try Again");
+                        }
+                        if (playerService != null) playerFiles.project(playerService);
+                    }
+                });
+            }).whenComplete((ignored, failure) -> {
+                if (failure == null) result.complete(null);
+                else result.fail(failure);
+            });
+        } catch (RuntimeException failure) {
+            result.fail(failure);
+        }
+        return result;
+    }
+
+    private record FileContent(boolean exists, String content) {
+    }
+
+    private Async<FileContent> readPlayerFile(ServerUiCapabilityProvider provider, String path) {
+        return provider.listFiles(instance, "/").thenCompose(entries -> {
+            boolean exists = entries.stream().anyMatch(entry -> entry != null && entry.isFile && path.equals(entry.name));
+            return exists ? readPlayerContent(provider, path).thenApply(content -> new FileContent(true, content))
+                    : Async.completed(new FileContent(false, "[]"));
+        });
+    }
+
+    private Async<Void> requireStopped(ServerUiCapabilityProvider provider, long generation) {
+        if (provider != capabilities || generation != serviceGeneration) return Async.failed(new IllegalStateException("Server Session Changed"));
+        return provider.status(instance).thenCompose(status -> ServerUiCapabilityProvider.stopped(status)
+                ? Async.completed(null) : Async.failed(new IllegalStateException("Stop Server Before Editing Player Files")));
+    }
+
+    private synchronized Async<PlayerOperationResult> executeOfflineOperation(PlayerOperation operation) {
+        UnifiedPlayer player = operationPlayers.get(operation.playerId());
+        if (player == null) return Async.failed(new IllegalArgumentException("Player Is Unavailable"));
+        ServerUiCapabilityProvider provider = capabilities;
+        long generation = serviceGeneration;
+        Async<Void> write = fileWrites.handle((ignored, failure) -> null).thenCompose(ignored -> requireStopped(provider, generation))
+                .thenCompose(ignored -> {
+                    if (isWhitelistAction(operation.type())) return refreshWhitelist().thenCompose(next -> isWhitelistEnabled()
+                            ? Async.completed(null) : Async.failed(new IllegalStateException("Enable Whitelist In Server Settings First")));
+                    return Async.completed(null);
+                }).thenCompose(ignored -> readPlayerFile(provider, PlayerFiles.path(operation)))
+                .thenCompose(content -> {
+                    PlayerFiles.Edit edit;
+                    synchronized (playerFiles) {
+                        if (provider != capabilities || generation != serviceGeneration) return Async.failed(new IllegalStateException("Server Session Changed"));
+                        edit = playerFiles.edit(operation, player, content.exists(), content.content());
+                    }
+                    if (edit.before().equals(edit.after())) return Async.completed(null);
+                    return readPlayerFile(provider, edit.path()).thenCompose(current -> {
+                        if (current.exists() != edit.existed() || !current.content().equals(edit.before())) {
+                            return Async.failed(new IllegalStateException("Player File Changed. Refresh And Try Again"));
+                        }
+                        return requireStopped(provider, generation).thenCompose(ignored -> {
+                            if (provider != capabilities || generation != serviceGeneration) return Async.failed(new IllegalStateException("Server Session Changed"));
+                            if (!provider.serverStopped(instance)) return Async.failed(new IllegalStateException("Stop Server Before Editing Player Files"));
+                            return provider.writeFile(instance, edit.path(), edit.after());
+                        }).thenRun(() -> {
+                            synchronized (playerFiles) {
+                                if (provider != capabilities || generation != serviceGeneration) return;
+                                playerFiles.accept(edit.path(), true, edit.after());
+                                if ("whitelist.json".equals(edit.path())) playerFiles.members(edit.after());
+                                handleFileUpdate(edit.path(), edit.after());
+                            }
+                        });
+                    });
+                }).thenRun(() -> {
+                    if (provider == capabilities && generation == serviceGeneration && playerService != null) playerFiles.project(playerService);
+                });
+        fileWrites = write;
+        return write.thenApply(ignored -> new PlayerOperationResult(operation.operationId(), true, "", 0L, null));
+    }
+
+    private void syncPlayers() {
+        ScreenManager.getInstance().execute(() -> {
+            if (container != null && playerService != null) container.syncUi(playerService.getRegistry().getAll());
+        });
+    }
+
+    public void setWhitelisted(UnifiedPlayer player, boolean value) {
+        setWhitelisted(List.of(player), value);
+    }
+
+    public void setWhitelisted(List<UnifiedPlayer> players, boolean value) {
+        List<UnifiedPlayer> selected = List.copyOf(players);
+        long session = serviceGeneration;
+        ServerUiCapabilityProvider provider = capabilities;
+        refreshWhitelist().thenCompose(ignored -> {
+            if (session != serviceGeneration || provider != capabilities) return Async.failed(new IllegalStateException("Server Session Changed"));
+            return Async.allOf(selected.stream().map(player -> executeOperation(player,
+                    value ? PlayerOperation.Type.WHITELIST : PlayerOperation.Type.UNWHITELIST, "", false)).toArray(Async[]::new));
+        })
+                .thenCompose(ignored -> settleWhitelist(selected, value, session, provider, 3))
+                .whenComplete((result, failure) -> {
+                    if (session != serviceGeneration || provider != capabilities) return;
+                    if (failure != null) {
+                        refreshWhitelist().exceptionally(error -> null);
+                        ScreenManager.getInstance().execute(() -> new Notification("Whitelist Error", failure.getMessage(), Notification.Type.ERROR));
+                    } else {
+                        refreshPlayerState();
+                    }
+                });
+    }
+
+    private Async<Void> settleWhitelist(List<UnifiedPlayer> players, boolean value, long session, ServerUiCapabilityProvider provider, int attempts) {
+        if (session != serviceGeneration || provider != capabilities) return Async.failed(new IllegalStateException("Server Session Changed"));
+        return refreshWhitelist().thenCompose(ignored -> {
+            if (session != serviceGeneration || provider != capabilities) return Async.failed(new IllegalStateException("Server Session Changed"));
+            PlayerFiles.Snapshot snapshot = playerFiles.snapshot();
+            if (!snapshot.enabled() || players.stream().allMatch(player -> snapshot.players().containsKey(player.getUuid()) == value)) {
+                return Async.completed(null);
+            }
+            if (attempts == 0) return Async.failed(new IllegalStateException("Whitelist Update Could Not Be Confirmed. Refresh The Player List"));
+            return AsyncTools.delay(TaskSchedulers.current(), Duration.ofMillis(250))
+                    .thenCompose(next -> settleWhitelist(players, value, session, provider, attempts - 1));
         });
     }
 
@@ -635,7 +912,7 @@ public class PlayerManagerController {
             if (e != null) {
                 ScreenManager.getInstance().execute(() -> new Notification("Error", e.getMessage(), Notification.Type.ERROR));
             } else {
-                playerService.refreshSources();
+                refreshPlayerState();
             }
         });
     }
@@ -644,12 +921,32 @@ public class PlayerManagerController {
         return capabilities.serverRunning(instance);
     }
 
+    private void refreshPlayerState() {
+        refreshPlayerFiles().exceptionally(error -> null);
+        refreshWhitelist().exceptionally(error -> null);
+        playerService.refreshSources();
+    }
+
     public boolean canExecutePlayerAction(String actionType) {
         PlayerOperation.Type type = operationType(actionType);
+        if (isWhitelistAction(type) && (!isWhitelistEnabled() || !playerFiles.snapshot().ready())) return false;
         return type != null && operationRouter.supports(new PlayerOperation("capability", type, null, "", false, 0L, List.of()));
     }
 
+    private boolean isWhitelistAction(PlayerOperation.Type type) {
+        return type == PlayerOperation.Type.WHITELIST || type == PlayerOperation.Type.UNWHITELIST;
+    }
+
     private Async<PlayerOperationResult> executeOperation(UnifiedPlayer player, PlayerOperation.Type type, String text, boolean flag) {
+        if (isWhitelistAction(type) && (!isWhitelistEnabled() || !playerFiles.snapshot().ready())) {
+            return Async.failed(new IllegalStateException("Enable Whitelist In Server Settings First"));
+        }
+        if (PlayerFiles.editable(type) && (player == null || player.getName() == null || !player.getName().matches("[A-Za-z0-9_]{1,16}"))) {
+            return Async.failed(new IllegalArgumentException("Player Name Is Invalid"));
+        }
+        if (PlayerFiles.editable(type) && flag && PlayerFiles.address(player.getIp().getValue()).isBlank()) {
+            return Async.failed(new IllegalArgumentException("Player IP Is Unavailable"));
+        }
         PlayerOperation operation = new PlayerOperation(UUID.randomUUID().toString(), type, player.getUuid(), text, flag, 0L, List.of());
         operationPlayers.put(player.getUuid(), player);
         return operationRouter.execute(operation).thenCompose(result -> result.success() ? Async.completed(result)
@@ -657,15 +954,35 @@ public class PlayerManagerController {
     }
 
     private Async<PlayerOperationResult> executePlayerServiceOperation(PlayerOperation operation) {
+        if (isWhitelistAction(operation.type()) && (!isWhitelistEnabled() || !playerFiles.snapshot().ready())) {
+            return Async.completed(PlayerOperationResult.failed(operation.operationId(), "Enable Whitelist In Server Settings First"));
+        }
         UnifiedPlayer target = operationPlayers.get(operation.playerId());
         if (target == null) return Async.completed(PlayerOperationResult.failed(operation.operationId(), "Player Unavailable"));
         Async<Void> execution = switch (operation.type()) {
             case KICK, COMMAND -> playerService.executeAction(target, actionName(operation.type()), operation.text());
             case BAN -> playerService.executeAction(target, actionName(operation.type()), operation.text(), operation.flag());
-            case UNBAN, OP, DEOP -> playerService.executeAction(target, actionName(operation.type()));
+            case UNBAN -> operation.flag() ? playerService.executeAction(target, "unban-ip", PlayerFiles.address(target.getIp().getValue()))
+                    : playerService.executeAction(target, actionName(operation.type()));
+            case OP, DEOP, WHITELIST, UNWHITELIST -> playerService.executeAction(target, actionName(operation.type()));
             case INVENTORY_EDIT -> Async.failed(new IllegalStateException("Invalid Operation Route"));
         };
-        return execution.thenApply(ignored -> new PlayerOperationResult(operation.operationId(), true, "", 0L, null));
+        long generation = serviceGeneration;
+        return execution.thenCompose(ignored -> PlayerFiles.editable(operation.type()) && !isWhitelistAction(operation.type())
+                ? settlePlayerFiles(operation, target, generation, 3) : Async.completed(null))
+                .thenApply(ignored -> new PlayerOperationResult(operation.operationId(), true, "", 0L, null));
+    }
+
+    private Async<Void> settlePlayerFiles(PlayerOperation operation, UnifiedPlayer player, long generation, int attempts) {
+        if (generation != serviceGeneration) return Async.failed(new IllegalStateException("Server Session Changed"));
+        return refreshPlayerFiles().handle((ignored, failure) -> failure).thenCompose(failure -> {
+            if (generation != serviceGeneration) return Async.failed(new IllegalStateException("Server Session Changed"));
+            boolean added = operation.type() == PlayerOperation.Type.BAN || operation.type() == PlayerOperation.Type.OP;
+            if (failure == null && playerFiles.contains(operation, player) == added) return Async.completed(null);
+            if (attempts == 0) return Async.failed(failure == null ? new IllegalStateException("Player Update Could Not Be Confirmed. Refresh The Player List") : failure);
+            return AsyncTools.delay(TaskSchedulers.current(), Duration.ofMillis(250))
+                    .thenCompose(next -> settlePlayerFiles(operation, player, generation, attempts - 1));
+        });
     }
 
     private Async<PlayerOperationResult> executeReSyncOperation(PlayerOperation operation) {
@@ -732,6 +1049,7 @@ public class PlayerManagerController {
                 unifiedPlayersLoaded(this);
             }).exceptionally(error -> {
                 unifiedPlayersFailed(this, error);
+                if (this == unifiedPlayerSource) refreshPlayerFiles().exceptionally(failure -> null);
                 return null;
             });
         }
@@ -742,9 +1060,10 @@ public class PlayerManagerController {
             Set<UUID> online = new HashSet<>();
             for (RemotelyServerApi.Player player : players) {
                 if (player == null || player.uuid() == null) continue;
-                if (player.online()) online.add(player.uuid());
+                boolean connected = player.online() && !capabilities.serverStopped(instance);
+                if (connected) online.add(player.uuid());
                 PlayerUpdateBatch.PlayerUpdate update = new PlayerUpdateBatch.PlayerUpdate(player.uuid(), player.name());
-                update.setOnline(player.online());
+                update.setOnline(connected);
                 update.setOp(player.operator());
                 if (player.ping() >= 0) update.setPing(player.ping());
                 if (player.address() != null && !player.address().isBlank()) update.setIp(player.address());
@@ -758,6 +1077,10 @@ public class PlayerManagerController {
                     .peek(update -> update.setOnline(false))
                     .forEach(batch::add);
             service.submitUpdate(batch);
+            if (this == unifiedPlayerSource) {
+                playerFiles.project(service);
+                refreshPlayerFiles().exceptionally(error -> null);
+            }
         }
     }
 
@@ -773,7 +1096,7 @@ public class PlayerManagerController {
         @Override
         public boolean canExecute(String actionType) {
             return switch (actionType) {
-                case "kick", "ban", "unban", "op", "deop" -> true;
+                case "kick", "ban", "unban", "unban-ip", "op", "deop", "whitelist", "unwhitelist" -> true;
                 default -> false;
             };
         }
@@ -786,7 +1109,8 @@ public class PlayerManagerController {
             String fallbackReason = "ban".equals(actionType) ? "Banned By Operator" : "Kicked By Operator";
             String reason = args.length > 0 && args[0] instanceof String value && !value.isBlank() ? value : fallbackReason;
             boolean flag = args.length > 1 && args[1] instanceof Boolean value && value;
-            RemotelyServerApi.PlayerAction action = new RemotelyServerApi.PlayerAction(actionType, player.getUuid(), player.getName(), reason, flag);
+            boolean ipUnban = "unban-ip".equals(actionType);
+            RemotelyServerApi.PlayerAction action = new RemotelyServerApi.PlayerAction(ipUnban ? "unban" : actionType, player.getUuid(), player.getName(), reason, flag || ipUnban);
             return capabilities.playerAction(instance, action);
         }
 

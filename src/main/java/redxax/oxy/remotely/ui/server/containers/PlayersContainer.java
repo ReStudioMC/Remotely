@@ -211,15 +211,27 @@ public class PlayersContainer extends SelectableContainer {
         }
         if (players.isEmpty()) return;
         ContextMenuWidget.Builder builder = new ContextMenuWidget.Builder(host)
-            .addHeaderButton("delete.png", () -> kickSelected(players), "Kick Selected", ThemeManager.getAccent("danger"))
-            .addHeaderButton("close.png", () -> showBanMultiPopup(players), "Ban Selected")
-            .addHeaderButton("heart.png", () -> unbanSelected(players), "Unban Selected")
-            .addHeaderButton("op.png", () -> toggleOpSelected(players), "Toggle Op Selected");
+            .addHeaderButton(new SquareButtonWidget.Builder().imagePath("delete.png").hint("Kick Selected").accentType(ThemeManager.getAccent("danger"))
+                    .onClick(() -> kickSelected(players)).active(controller.canExecutePlayerAction("kick") && players.stream().anyMatch(UnifiedPlayer::isOnline)).build())
+            .addHeaderButton(new SquareButtonWidget.Builder().imagePath("close.png").hint("Ban Selected")
+                    .onClick(() -> showBanMultiPopup(players)).active(controller.canExecutePlayerAction("ban")).build())
+            .addHeaderButton(new SquareButtonWidget.Builder().imagePath("heart.png").hint("Unban Selected")
+                    .onClick(() -> unbanSelected(players)).active(controller.canExecutePlayerAction("unban")).build())
+            .addHeaderButton(new SquareButtonWidget.Builder().imagePath("op.png").hint("Toggle Op Selected")
+                    .onClick(() -> toggleOpSelected(players)).active(controller.canExecutePlayerAction("op")).build());
+
+        if (controller.isWhitelistEnabled()) {
+            builder.addHeaderButton(new SquareButtonWidget.Builder().imagePath("start.png").hint("Whitelist Selected")
+                    .onClick(() -> controller.setWhitelisted(players, true)).active(controller.canExecutePlayerAction("whitelist")).build());
+            builder.addHeaderButton(new SquareButtonWidget.Builder().imagePath("stop.png").hint("Unwhitelist Selected")
+                    .onClick(() -> controller.setWhitelisted(players, false)).active(controller.canExecutePlayerAction("unwhitelist")).build());
+        }
 
         List<PlayerAction> actions = controller.getPlayerActions();
         if (actions != null) {
             for (PlayerAction action : actions) {
-                builder.addHeaderButton(action.icon, () -> showCustomActionMultiPopup(action, players), action.name);
+                builder.addHeaderButton(new SquareButtonWidget.Builder().imagePath(action.icon).hint(action.name)
+                        .onClick(() -> showCustomActionMultiPopup(action, players)).active(controller.canExecutePlayerAction("command")).build());
             }
         }
         host.showContextMenu((int) mouseX, (int) mouseY, builder);

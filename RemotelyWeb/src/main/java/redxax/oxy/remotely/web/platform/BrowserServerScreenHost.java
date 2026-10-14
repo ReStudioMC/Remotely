@@ -2968,6 +2968,10 @@ public final class BrowserServerScreenHost implements ServerScreenHost {
         environment.put("current_state", state.name());
         server.environment = environment;
         server.isInstalling = state == ServerState.INSTALLING;
+        ServerModels.ServerStatus observed = new ServerModels.ServerStatus();
+        observed.currentState = state.name();
+        observed.installing = server.isInstalling;
+        capabilities(server).observeStatus(server, observed);
         ServerState previous = serverStates.put(id, state);
         trimStateCache();
         if (state == previous) return;

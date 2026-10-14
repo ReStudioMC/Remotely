@@ -438,6 +438,13 @@ public interface DesktopServerUiCapabilities extends ServerUiCapabilityProvider 
     }
 
     @Override
+    default boolean serverStopped(Object server) {
+        Instance value = instance(server);
+        return value != null && (value.getState() == InstanceState.STOPPED || value.getState() == InstanceState.CRASHED
+                || value.getState() == InstanceState.SAVED) && (value.getMSMPManager() == null || !value.getMSMPManager().isConnected);
+    }
+
+    @Override
     default void preparePlayerSources(Object server) {
         if (server instanceof ServerModels.ClientServerView) {
             ServerUiCapabilityProvider.super.preparePlayerSources(server);
@@ -864,6 +871,16 @@ public interface DesktopServerUiCapabilities extends ServerUiCapabilityProvider 
         @Override
         public Async<Void> playerAction(Instance instance, RemotelyServerApi.PlayerAction action) {
             if (action == null || action.playerId() == null) return Async.failed(new IllegalArgumentException("Player Is Unavailable"));
+            if ("unban".equals(action.action()) && action.flag()) {
+                if (action.argument() == null || !action.argument().matches("[0-9a-fA-F:.]+")) return Async.failed(new IllegalArgumentException("Player IP Is Invalid"));
+                return sendCommand(instance, "pardon-ip " + action.argument());
+            }
+            if ("whitelist".equals(action.action()) || "unwhitelist".equals(action.action())) {
+                if (action.playerName() == null || !action.playerName().matches("[A-Za-z0-9_]{1,16}")) {
+                    return Async.failed(new IllegalArgumentException("Player Name Is Invalid"));
+                }
+                return sendCommand(instance, "whitelist " + ("whitelist".equals(action.action()) ? "add " : "remove ") + action.playerName());
+            }
             PlayerManagementFeature players = instance.getBackend().getFeature(PlayerManagementFeature.class)
                     .orElseThrow(() -> new UnsupportedOperationException("Player Management Is Unavailable"));
             return switch (action.action().toLowerCase(Locale.ROOT)) {
@@ -1072,11 +1089,31 @@ public interface DesktopServerUiCapabilities extends ServerUiCapabilityProvider 
             public void updateFromContent(String fileName, String content) {
                 delegate.updateFromContent(fileName, content);
             }
+
+            @Override
+            public void onContent(BiConsumer<String, String> listener) {
+                delegate.onContent(listener);
+            }
         }
     }
 
     final class BoundDesktopServerUiCapabilities implements DesktopServerUiCapabilities {
         private final Instance instance;
+
+        @Override
+        public boolean serverRunning(Object server) {
+            return DesktopServerUiCapabilities.desktop().serverRunning(instance);
+        }
+
+        @Override
+        public boolean serverStopped(Object server) {
+            return DesktopServerUiCapabilities.desktop().serverStopped(instance);
+        }
+
+        @Override
+        public Availability playerFilesAvailability(Object server) {
+            return DesktopServerUiCapabilities.desktop().availability(instance, Capability.FILES);
+        }
 
         private BoundDesktopServerUiCapabilities(Instance instance) {
             this.instance = instance;

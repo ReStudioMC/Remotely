@@ -763,6 +763,7 @@ public class ServerConfigurationScreen extends ReScreen {
     }
 
     private void saveConfiguration() {
+        if (!isEditMode && !tempInstance.properties().containsKey("white-list")) tempInstance.property("white-list", "false");
         if (poolCreation != null) {
             createPoolServer();
         } else if (isReStudioCreation) {

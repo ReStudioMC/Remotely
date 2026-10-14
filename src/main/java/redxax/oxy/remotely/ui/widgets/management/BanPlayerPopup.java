@@ -22,14 +22,14 @@ public class BanPlayerPopup extends PopupWidget {
         Runnable banAction = () -> {
             String reason = ref.reasonInput.getText();
             boolean ipBan = ipBanToggle.getValue();
-            controller.banPlayer(player, reason, ipBan);
-            new Notification(player.getName() + " has been banned.", "Click Here To Unban", Notification.Type.SUCCESS, () -> controller.unbanPlayer(player));
+            controller.banPlayer(player, reason, ipBan).thenRun(() -> parent.execute(() ->
+                    new Notification(player.getName() + " Has Been Banned", "Click Here To Unban", Notification.Type.SUCCESS, () -> controller.unbanPlayer(player))));
             hide();
         };
         ref.reasonInput = new TextInputWidget.Builder().placeholder("Reason for ban").onEnter(banAction).build();
 
         addRow("Reason", ref.reasonInput);
-        if (player.isOnline() && player.getIp().getValue() != null && !player.getIp().getValue().isEmpty()) {
+        if (player.getIp().getValue() != null && !player.getIp().getValue().isEmpty()) {
             addRow(new PopupWidget.PopupRow.Builder("IP Ban", ipBanToggle).contentWidth().build());
         }
 

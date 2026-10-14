@@ -12,6 +12,8 @@ public record PlayerOperation(String operationId, Type type, UUID playerId, Stri
         UNBAN,
         OP,
         DEOP,
+        WHITELIST,
+        UNWHITELIST,
         COMMAND,
         INVENTORY_EDIT
     }

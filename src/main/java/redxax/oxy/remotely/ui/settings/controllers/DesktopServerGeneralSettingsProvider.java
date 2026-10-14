@@ -13,4 +13,6 @@ public final class DesktopServerGeneralSettingsProvider implements ServerGeneral
     @Override public void name(String value) { instance.setName(value); }
     @Override public String property(String key, String fallback) { return instance.getSettings().getProperty(key, fallback); }
     @Override public void setProperty(String key, String value) { instance.getSettings().setProperty(key, value); }
+    @Override public String serverProperty(String key, String fallback) { return instance.getServerProperties().getProperty(key, fallback); }
+    @Override public void setServerProperty(String key, String value) { instance.getServerProperties().setProperty(key, value); }
 }

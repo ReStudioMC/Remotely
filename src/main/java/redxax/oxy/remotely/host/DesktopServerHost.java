@@ -3144,7 +3144,7 @@ public final class DesktopServerHost implements ServerScreenHost {
             public Async<Void> stream(BiConsumer<Integer, String> onLine) {
                 String root = instance.getPath() == null ? "" : instance.getPath().replace('\\', '/');
                 String prefix = root.isBlank() || root.endsWith("/") ? root : root + "/";
-                List<String> preLoadFiles = List.of("ops.json", "banned-players.json", "banned-ips.json", "whitelist.json", "usercache.json")
+                List<String> preLoadFiles = List.of("server.properties", "ops.json", "banned-players.json", "banned-ips.json", "whitelist.json", "usercache.json")
                         .stream().map(file -> prefix + file).toList();
                 PlayerManagerController controller = PlayerManagerController.getOrCreate(instance, capabilities(server));
                 StreamDataParser parser = new StreamDataParser(controller);

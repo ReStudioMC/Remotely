@@ -19,6 +19,7 @@ import restudio.rebase.ui.widgets.TerminalWidget;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -91,6 +92,17 @@ public interface ServerUiCapabilityProvider {
         return true;
     }
 
+    default boolean serverStopped(Object server) {
+        return false;
+    }
+
+    default void observeStatus(Object server, ServerModels.ServerStatus status) {
+    }
+
+    default Availability playerFilesAvailability(Object server) {
+        return server instanceof ServerModels.ClientServerView view ? availability(view, "files.write") : availability(server, Capability.FILES);
+    }
+
     default void preparePlayerSources(Object server) {
     }
 
@@ -98,12 +110,27 @@ public interface ServerUiCapabilityProvider {
         return Async.failed(new UnsupportedOperationException("Server Files Are Unavailable"));
     }
 
+    default Async<List<ServerModels.PteroFileObjectAttributes>> listFiles(Object server, String directory) {
+        return server instanceof ServerModels.ClientServerView view ? listFiles(view, directory)
+                : Async.failed(new UnsupportedOperationException("Server Files Are Unavailable"));
+    }
+
     default Async<String> readFile(ServerModels.ClientServerView server, String path) {
         return Async.failed(new UnsupportedOperationException("Server Files Are Unavailable"));
     }
 
+    default Async<String> readFile(Object server, String path) {
+        return server instanceof ServerModels.ClientServerView view ? readFile(view, path)
+                : Async.failed(new UnsupportedOperationException("Server Files Are Unavailable"));
+    }
+
     default Async<Void> writeFile(ServerModels.ClientServerView server, String path, String content) {
         return Async.failed(new UnsupportedOperationException("Server Files Are Unavailable"));
+    }
+
+    default Async<Void> writeFile(Object server, String path, String content) {
+        return server instanceof ServerModels.ClientServerView view ? writeFile(view, path, content)
+                : Async.failed(new UnsupportedOperationException("Server Files Are Unavailable"));
     }
 
     default Async<Void> deleteFiles(ServerModels.ClientServerView server, String root, List<String> files) {
@@ -141,6 +168,16 @@ public interface ServerUiCapabilityProvider {
 
     default Async<ServerModels.ServerStatus> status(ServerModels.ClientServerView server) {
         return Async.failed(new UnsupportedOperationException("Server Status Is Unavailable"));
+    }
+
+    default Async<ServerModels.ServerStatus> status(Object server) {
+        return server instanceof ServerModels.ClientServerView view ? status(view)
+                : Async.failed(new UnsupportedOperationException("Server Status Is Unavailable"));
+    }
+
+    static boolean stopped(ServerModels.ServerStatus status) {
+        if (status == null || status.installing || status.currentState == null) return false;
+        return List.of("stopped", "offline", "crashed", "saved").contains(status.currentState.toLowerCase(Locale.ROOT));
     }
 
     default Async<ServerModels.ServerStats> stats(ServerModels.ClientServerView server) {
@@ -256,6 +293,9 @@ public interface ServerUiCapabilityProvider {
 
     interface ContentPlayerSource extends IPlayerSource {
         void updateFromContent(String fileName, String content);
+
+        default void onContent(BiConsumer<String, String> listener) {
+        }
     }
 
     interface DataStream {
@@ -282,6 +322,45 @@ public interface ServerUiCapabilityProvider {
         private final Map<String, RemotelyServerApi.ServerCapabilities> inventories = new LinkedHashMap<>();
         private final Map<String, String> inventoryFailures = new LinkedHashMap<>();
         private final List<Runnable> capabilityListeners = new ArrayList<>();
+        private final Map<String, Lifecycle> lifecycles = new LinkedHashMap<>();
+        private final Map<String, Long> lifecycleGenerations = new LinkedHashMap<>();
+
+        private record Lifecycle(boolean running, boolean stopped) {
+        }
+
+        @Override
+        public boolean serverRunning(Object server) {
+            synchronized (lifecycles) {
+                Lifecycle lifecycle = lifecycles.get(serverId(server));
+                return lifecycle != null && lifecycle.running();
+            }
+        }
+
+        @Override
+        public boolean serverStopped(Object server) {
+            synchronized (lifecycles) {
+                Lifecycle lifecycle = lifecycles.get(serverId(server));
+                return lifecycle != null && lifecycle.stopped();
+            }
+        }
+
+        @Override
+        public void observeStatus(Object server, ServerModels.ServerStatus status) {
+            String id = serverId(server);
+            publishStatus(id, status, null);
+        }
+
+        private void publishStatus(String id, ServerModels.ServerStatus status, Long generation) {
+            Lifecycle next = new Lifecycle(status != null && !status.installing && "running".equalsIgnoreCase(status.currentState), stopped(status));
+            boolean changed;
+            synchronized (lifecycles) {
+                if (generation != null && !generation.equals(lifecycleGenerations.get(id))) throw new IllegalStateException("Server State Changed. Try Again");
+                Lifecycle previous = lifecycles.put(id, next);
+                changed = !next.equals(previous);
+                if (changed) lifecycleGenerations.merge(id, 1L, Long::sum);
+            }
+            if (changed) List.copyOf(capabilityListeners).forEach(Runnable::run);
+        }
 
         private ApiServerUiCapabilityProvider(RemotelyServerApi api, FlowManager flowManager) {
             this.api = api;
@@ -335,7 +414,15 @@ public interface ServerUiCapabilityProvider {
 
         @Override
         public Async<ServerModels.ServerStatus> status(ServerModels.ClientServerView server) {
-            return requiredApi().getServerStatus(requiredId(server));
+            String id = requiredId(server);
+            long generation;
+            synchronized (lifecycles) {
+                generation = lifecycleGenerations.merge(id, 1L, Long::sum);
+            }
+            return requiredApi().getServerStatus(id).thenApply(status -> {
+                publishStatus(id, status, generation);
+                return status;
+            });
         }
 
         @Override

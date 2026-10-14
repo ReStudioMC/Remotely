@@ -178,6 +178,7 @@ final class ServerConfigurationDraft {
     }
 
     ServerConfigurationTarget target() {
+        if (!target.properties().containsKey("white-list")) target.property("white-list", "false");
         return target;
     }
 

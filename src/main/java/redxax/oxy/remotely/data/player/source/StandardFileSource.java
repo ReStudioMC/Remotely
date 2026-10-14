@@ -36,6 +36,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.function.BiConsumer;
 import java.util.stream.Collectors;
 
 public class StandardFileSource implements IPlayerSource {
@@ -52,6 +53,11 @@ public class StandardFileSource implements IPlayerSource {
     private final List<WatchedFile<?>> watchedFiles;
     private PlayerService service;
     private volatile boolean enabled;
+    private volatile BiConsumer<String, String> contentListener;
+
+    public void onContent(BiConsumer<String, String> listener) {
+        contentListener = listener;
+    }
 
     public StandardFileSource(Instance instance, RebaseAPI api) {
         this.api = api;
@@ -293,6 +299,10 @@ public class StandardFileSource implements IPlayerSource {
 
         private void parse(String content, long generation, int attempt) {
             if (!enabled || !state.current(generation)) return;
+            if (content.equals(state.acceptedContent())) {
+                state.accept(generation, content);
+                return;
+            }
             List<T> values;
             try {
                 JsonReader reader = new JsonReader(new StringReader(content));
@@ -308,6 +318,8 @@ public class StandardFileSource implements IPlayerSource {
             PlayerFileSnapshotState.Accepted accepted = state.accept(generation, content);
             if (accepted.current() && accepted.changed()) {
                 consumer.accept(values);
+                BiConsumer<String, String> listener = contentListener;
+                if (listener != null) listener.accept(name, content);
             }
         }
 

@@ -35,6 +35,14 @@ public class ServerGeneralSettingsController {
                 .resettable(false)
                 .build());
 
+        general.addOption(ConfigOption.<Boolean>builder("Whitelist")
+                .description("Allow Only Whitelisted Players To Join.")
+                .bind(() -> Boolean.parseBoolean(provider.serverProperty("white-list", "false").trim()),
+                    value -> provider.setServerProperty("white-list", String.valueOf(value)))
+                .defaultValue(false)
+                .resettable(false)
+                .build());
+
         if (!editMode && RemotelyClient.INSTANCE.getHost().getGameUserName() != null) {
             general.addOption(ConfigOption.<Boolean>builder("Op Me")
                 .description("Grant " + RemotelyClient.INSTANCE.getHost().getGameUserName() + " Operator.")

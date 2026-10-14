@@ -628,7 +628,10 @@ public class ServerSettingsDocumentDataController implements ServerSettingsDataC
 
     private List<Setting> buildSettings(List<FieldBinding> bindings) {
         LinkedHashMap<String, Setting.Builder> grouped = new LinkedHashMap<>();
-        for (FieldBinding binding : bindings) addSetting(grouped, binding);
+        for (FieldBinding binding : bindings) {
+            if (isServerProperties(binding.document.definition.relativePath()) && "white-list".equals(binding.field.key())) continue;
+            addSetting(grouped, binding);
+        }
         return grouped.values().stream().map(Setting.Builder::build).toList();
     }
 

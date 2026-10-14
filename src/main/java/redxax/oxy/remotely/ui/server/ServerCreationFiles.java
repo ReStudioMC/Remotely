@@ -33,6 +33,7 @@ final class ServerCreationFiles {
             String value = escape(Objects.requireNonNull(entry.getValue(), "Server Property Value Is Required"), false);
             content = adapter.apply(content, adapter.contains(content, key) ? key : escape(key, true), value);
         }
+        if (!adapter.contains(content, "white-list")) content = adapter.apply(content, "white-list", "false");
         return content;
     }
 

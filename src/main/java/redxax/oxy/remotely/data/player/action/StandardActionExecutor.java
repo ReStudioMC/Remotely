@@ -18,7 +18,7 @@ public class StandardActionExecutor implements IActionExecutor {
     @Override
     public boolean canExecute(String actionType) {
         return switch (actionType) {
-            case "kick", "ban", "unban", "op", "deop", "command" -> true;
+            case "kick", "ban", "unban", "unban-ip", "op", "deop", "whitelist", "unwhitelist", "command" -> true;
             default -> false;
         };
     }
@@ -52,12 +52,15 @@ public class StandardActionExecutor implements IActionExecutor {
             case "unban" -> {
                 terminal.executeCommand("pardon " + name);
             }
+            case "unban-ip" -> terminal.executeCommand("pardon-ip " + args[0]);
             case "op" -> {
                 terminal.executeCommand("op " + name);
             }
             case "deop" -> {
                 terminal.executeCommand("deop " + name);
             }
+            case "whitelist" -> terminal.executeCommand("whitelist add " + name);
+            case "unwhitelist" -> terminal.executeCommand("whitelist remove " + name);
             case "command" -> {
                 String command = args.length > 0 ? (String) args[0] : null;
                 if (command != null) {

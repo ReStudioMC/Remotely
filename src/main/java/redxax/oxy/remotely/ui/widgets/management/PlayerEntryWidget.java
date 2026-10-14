@@ -31,6 +31,8 @@ public class PlayerEntryWidget extends MountableButtonWidget {
     private final PlayerManagerController controller;
     private final Identifier opIcon = Identifier.icon("op.png");
     private final Identifier deopIcon = Identifier.icon("deop.png");
+    private final Identifier whitelistIcon = Identifier.icon("start.png");
+    private final Identifier unwhitelistIcon = Identifier.icon("stop.png");
     private String faceName;
     private boolean faceRequested;
 
@@ -42,10 +44,12 @@ public class PlayerEntryWidget extends MountableButtonWidget {
     private SquareButtonWidget kickButton;
     private SquareButtonWidget banButton;
     private SquareButtonWidget opButton;
+    private SquareButtonWidget whitelistButton;
     private SquareButtonWidget infoButton;
     private final List<SquareButtonWidget> actionButtons = new ArrayList<>();
     private boolean buttonsInitialized = false;
     private int lastActionsHash = Integer.MIN_VALUE;
+    private boolean whitelistVisible;
 
     public PlayerEntryWidget(UnifiedPlayer player, PlayerManagerController controller) {
         super(player.getName(), "", "", BrowserSafeState.list(), null);
@@ -79,6 +83,10 @@ public class PlayerEntryWidget extends MountableButtonWidget {
             .accentType(ThemeManager.getAccent("calm"))
             .onClick(() -> controller.toggleOp(player)).build();
 
+        whitelistButton = new SquareButtonWidget.Builder()
+            .identifier(whitelistIcon).size(18, 18).hint("Whitelist Player")
+            .onClick(() -> controller.setWhitelisted(player, !controller.isWhitelisted(player))).build();
+
         infoButton = new SquareButtonWidget.Builder()
             .imagePath("info.png").size(18, 18).hint("Player Data")
             .accentType(ThemeManager.getAccent("calm"))
@@ -103,8 +111,13 @@ public class PlayerEntryWidget extends MountableButtonWidget {
         boolean isOp = player.isOp();
         updateBanButton(isBanned, serverRunning);
         updateOpButton(isOp, serverRunning);
+        boolean showWhitelist = controller.isWhitelistEnabled();
+        boolean whitelisted = controller.isWhitelisted(player);
+        whitelistButton.setIcon(whitelisted ? unwhitelistIcon : whitelistIcon);
+        whitelistButton.hint = whitelisted ? "Unwhitelist Player" : "Whitelist Player";
+        whitelistButton.active = controller.canExecutePlayerAction(whitelisted ? "unwhitelist" : "whitelist");
         int actionsHash = hashActions(actions);
-        if (!buttonsInitialized || actionsHash != lastActionsHash) {
+        if (!buttonsInitialized || actionsHash != lastActionsHash || showWhitelist != whitelistVisible) {
             rebuildActionButtons(actions);
             mountedWidgets.clear();
             mountedWidgets.addAll(actionButtons);
@@ -112,8 +125,10 @@ public class PlayerEntryWidget extends MountableButtonWidget {
             mountedWidgets.add(banButton);
             mountedWidgets.add(kickButton);
             mountedWidgets.add(opButton);
+            if (showWhitelist) mountedWidgets.add(whitelistButton);
             buttonsInitialized = true;
             lastActionsHash = actionsHash;
+            whitelistVisible = showWhitelist;
         }
         for (SquareButtonWidget actionButton : actionButtons) {
             actionButton.active = serverRunning;
@@ -124,13 +139,13 @@ public class PlayerEntryWidget extends MountableButtonWidget {
         banButton.setIcon(Identifier.icon(isBanned ? "heart.png" : "close.png"));
         banButton.hint = isBanned ? "Unban Player" : "Ban Player";
         banButton.accentType = isBanned ? ThemeManager.getAccent("nice") : ThemeManager.getAccent("danger");
-        banButton.active = serverRunning;
+        banButton.active = controller.canExecutePlayerAction(isBanned ? "unban" : "ban");
     }
 
     private void updateOpButton(boolean isOp, boolean serverRunning) {
         opButton.setIcon(isOp ? deopIcon : opIcon);
         opButton.hint = isOp ? "De-Op Player" : "Op Player";
-        opButton.active = serverRunning;
+        opButton.active = controller.canExecutePlayerAction(isOp ? "deop" : "op");
     }
 
     private void rebuildActionButtons(List<PlayerAction> actions) {
@@ -165,6 +180,8 @@ public class PlayerEntryWidget extends MountableButtonWidget {
     @Override
     public void tick() {
         super.tick();
+        if (opButton.active != controller.canExecutePlayerAction(player.isOp() ? "deop" : "op")
+                || kickButton.active != (player.isOnline() && controller.isServerRunning())) updateButtonsState(controller.isServerRunning());
         String nextFaceName = player.getName();
         if ((!faceRequested || !Objects.equals(faceName, nextFaceName))
                 && RemotelyClient.INSTANCE != null && RemotelyClient.INSTANCE.getHost() != null) {
@@ -232,6 +249,7 @@ public class PlayerEntryWidget extends MountableButtonWidget {
             active = false;
         }
         titleColor = player.isOnline() ? ThemeManager.getColor(ThemeColor.text) : ThemeManager.getColor(ThemeColor.textDark);
+        if (controller.isWhitelistEnabled() && controller.isWhitelisted(player)) description += " | Whitelisted";
 
         super.drawContent(ctx, mouseX, mouseY);
     }

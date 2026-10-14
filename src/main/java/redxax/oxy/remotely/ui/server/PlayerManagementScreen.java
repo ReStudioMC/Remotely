@@ -68,6 +68,7 @@ import java.util.regex.Pattern;
 import static restudio.rescreen.config.Config.desktopMode;
 
 public class PlayerManagementScreen extends ReScreen implements DesktopWindowBehaviorProvider {
+    private int actionStamp = -1;
     private static final int CONTENT_Y = 60;
     private static final int DETAILS_PANEL_WIDTH = 280;
     private static final String TAB_OVERVIEW = "Overview";
@@ -197,6 +198,15 @@ public class PlayerManagementScreen extends ReScreen implements DesktopWindowBeh
         super.tick();
         requestFace();
         updateHeaderButton();
+        int stamp = (player.isOp() ? 1 : 0) | (player.getBan().getValue() != null ? 2 : 0)
+                | (controller.isWhitelistEnabled() ? 4 : 0) | (controller.isWhitelisted(player) ? 8 : 0)
+                | (controller.canExecutePlayerAction("op") ? 16 : 0) | (controller.canExecutePlayerAction("ban") ? 32 : 0)
+                | (controller.canExecutePlayerAction("whitelist") ? 64 : 0) | (controller.isServerRunning() ? 128 : 0)
+                | (controller.canExecutePlayerAction("command") ? 256 : 0) | (player.isOnline() ? 512 : 0);
+        if (stamp != actionStamp) {
+            actionStamp = stamp;
+            rebuildSidePanel();
+        }
     }
 
     @Override
@@ -825,6 +835,12 @@ public class PlayerManagementScreen extends ReScreen implements DesktopWindowBeh
             }
         }, controller.canExecutePlayerAction(banned ? "unban" : "ban"), banned ? ThemeManager.getAccent("nice") : ThemeManager.getAccent("danger")));
         panel.addWidget(createActionRow(player.isOp() ? "De-Op" : "Op", player.isOp() ? "Remove operator privileges." : "Grant operator privileges.", player.isOp() ? "deop.png" : "op.png", () -> controller.toggleOp(player), controller.canExecutePlayerAction(player.isOp() ? "deop" : "op"), ThemeManager.getAccent("calm")));
+        if (controller.isWhitelistEnabled()) {
+            boolean whitelisted = controller.isWhitelisted(player);
+            panel.addWidget(createActionRow(whitelisted ? "Unwhitelist" : "Whitelist", whitelisted ? "Remove This Player From The Whitelist." : "Allow This Player To Join.",
+                    whitelisted ? "stop.png" : "start.png", () -> controller.setWhitelisted(player, !controller.isWhitelisted(player)),
+                    controller.canExecutePlayerAction(whitelisted ? "unwhitelist" : "whitelist"), null));
+        }
 
         List<PlayerAction> actions = controller.getPlayerActions();
         if (!actions.isEmpty()) {

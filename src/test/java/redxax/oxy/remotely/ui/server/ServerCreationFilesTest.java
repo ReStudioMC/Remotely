@@ -32,5 +32,10 @@ class ServerCreationFilesTest {
         assertEquals(" leading value", properties.getProperty("custom:key"));
         assertFalse(properties.containsKey("server-port"));
         assertFalse(properties.containsKey("op-me"));
+        assertEquals("false", properties.getProperty("white-list"));
+        properties.load(new StringReader(ServerCreationFiles.serverProperties("white-list=true\n", Map.of())));
+        assertEquals("true", properties.getProperty("white-list"));
+        properties.load(new StringReader(ServerCreationFiles.serverProperties("white-list=true\n", Map.of("white-list", "false"))));
+        assertEquals("false", properties.getProperty("white-list"));
     }
 }
