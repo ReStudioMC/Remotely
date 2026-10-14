@@ -32,6 +32,7 @@ import restudio.rebase.preset.ResourceCollectionEntry;
 import restudio.rebase.preset.ResourceList;
 import restudio.rescreen.platform.Async;
 import restudio.rescreen.theme.ThemeManager;
+import restudio.rescreen.theme.ControlStyle;
 import restudio.rescreen.ui.core.Screen;
 import restudio.rescreen.ui.core.ScreenManager;
 import restudio.rescreen.ui.rescreen.ReScreen;
@@ -223,6 +224,8 @@ final class BrowserGlobalSettingsProviders {
             public Accent accent(String name) { return ThemeManager.getAccent(name); }
             public int registeredAccentCount() { return ThemeManager.getRegisteredAccents().size(); }
             public boolean textShadow() { return config.getShadow(); }
+            public ControlStyle controlStyle() { return ThemeManager.getControlStyle(); }
+            public void setControlStyle(ControlStyle style) { config.setControlStyle(style); }
             public void registerTheme(Theme theme) { ThemeManager.registerTheme(theme); }
             public void removeTheme(String name) { ThemeManager.removeTheme(name); }
             public void selectTheme(String name) { config.setCurrentTheme(name); ThemeManager.setCurrentTheme(name); }
@@ -239,9 +242,11 @@ final class BrowserGlobalSettingsProviders {
     private static void saveBrowserThemes(BrowserRemotelyConfigStore config) {
         JsonArray themes = new JsonArray();
         ThemeManager.getRegisteredThemes().values().forEach(theme -> {
+            if (theme.isBuiltIn()) return;
             JsonObject value = new JsonObject();
             value.addProperty("name", theme.getName());
             value.addProperty("defaultAccent", theme.getDefaultAccentName());
+            value.addProperty("style", theme.getStyle().name());
             JsonObject colors = new JsonObject();
             theme.getColors().forEach((key, color) -> colors.addProperty(key.name(), color));
             value.add("colors", colors);
@@ -267,7 +272,10 @@ final class BrowserGlobalSettingsProviders {
 
     private static void restoreBrowserThemes(BrowserRemotelyConfigStore config) {
         String serialized = config.get("ui.browserThemes", "");
-        if (serialized.isBlank()) return;
+        if (serialized.isBlank()) {
+            ThemeManager.setCurrentTheme(config.getCurrentTheme());
+            return;
+        }
         try {
             JsonElement parsed = BrowserJson.parse(serialized);
             if (!parsed.isJsonArray()) return;
@@ -277,6 +285,7 @@ final class BrowserGlobalSettingsProviders {
                 String name = BrowserJson.string(value, "name");
                 if (name.isBlank()) return;
                 Theme theme = new Theme(name);
+                theme.setStyle(Theme.Style.parse(BrowserJson.string(value, "style")));
                 JsonElement colors = BrowserJson.element(value, "colors");
                 if (colors != null && colors.isJsonObject()) colors.getAsJsonObject().entrySet().forEach(entry -> {
                     try {

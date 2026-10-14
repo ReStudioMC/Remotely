@@ -1,5 +1,6 @@
 package redxax.oxy.remotely.web.platform;
 
+import restudio.rescreen.theme.ThemeManager;
 import org.teavm.jso.JSBody;
 import redxax.oxy.remotely.config.RemotelyGroup;
 import redxax.oxy.remotely.config.RemotelyConfigStore;
@@ -221,6 +222,7 @@ public final class BrowserRemotelyConfigStore implements RemotelyConfigStore, Re
     }
 
     public void applyBrowserAppearance() {
+        ThemeManager.setControlStyle(getControlStyle());
         Config.shadow = getShadow();
         Config.globalExpandSpeed = getGlobalExpandSpeed();
         Config.scaleAnimationSpeed = getScaleAnimationSpeed();

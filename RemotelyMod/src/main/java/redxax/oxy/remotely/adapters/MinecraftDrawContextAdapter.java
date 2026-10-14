@@ -12,6 +12,7 @@ import restudio.rescreen.platform.IDrawContext;
 import restudio.rescreen.platform.IMatrixStack;
 import restudio.rescreen.platform.TextDraw;
 import restudio.rescreen.render.TextRenderer;
+import restudio.rescreen.theme.ThemeManager;
 import restudio.rescreen.util.Identifier;
 import restudio.rescreen.util.ResourceManager;
 
@@ -197,7 +198,7 @@ public class MinecraftDrawContextAdapter implements IDrawContext {
     @Override
     public void drawText(String text, int x, int y, int color, boolean shadow) {
         if (ctx instanceof RematrixContext mc) {
-            mc.drawText(text, x, y, color, shadow);
+            mc.drawText(text, x, y, color, ThemeManager.textShadow(shadow));
         }
     }
 
@@ -293,7 +294,7 @@ public class MinecraftDrawContextAdapter implements IDrawContext {
     @Override
     public void drawStyledText(Object text, int x, int y, int color, boolean shadow) {
         if (ctx instanceof RematrixContext mc) {
-            mc.drawStyledText(text, x, y, color, shadow);
+            mc.drawStyledText(text, x, y, color, ThemeManager.textShadow(shadow));
         }
     }
 
