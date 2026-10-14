@@ -176,7 +176,8 @@ public class ServerManagerScreen extends DesktopShellScreen {
     private enum RemoteHostType {
         SSH("SSH", "SSH", "Connect With A Password Or SSH Key", false),
         PTERO("PTERO", "Pterodactyl", "Connect Your Panel With A Client API Key", true),
-        CALAGOPUS("CALAGOPUS", "Calagopus", "Connect Your Panel With An API Key", true);
+        CALAGOPUS("CALAGOPUS", "Calagopus", "Connect Your Panel With An API Key", true),
+        CRAFTY("CRAFTY", "Crafty Controller", "Connect Your Panel With An API Token", true);
 
         private final String id;
         private final String label;
@@ -3148,6 +3149,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
             case "RESTUDIO" -> "Reactor";
             case "PTERO" -> "Pterodactyl";
             case "CALAGOPUS" -> "Calagopus";
+            case "CRAFTY" -> "Crafty Controller";
             case "SSH" -> "SSH";
             default -> "Local";
         };
@@ -3486,7 +3488,10 @@ public class ServerManagerScreen extends DesktopShellScreen {
         remoteHostUserInput.addOnEnter(w -> remoteHostPopup.setFocusedWidget(remoteHostIpInput));
         remoteHostIpInput.addOnEnter(w -> remoteHostPopup.setFocusedWidget(isPanelHostSelected() ? remoteHostPasswordInput : remoteHostPortInput));
         remoteHostPortInput.addOnEnter(w -> remoteHostPopup.setFocusedWidget(remoteHostAuthModeSwitch.getCurrentIndex() == 1 ? remoteHostKeyPathInput : remoteHostPasswordInput));
-        remoteHostPasswordInput.addOnEnter(w -> remoteHostPopup.setFocusedWidget(isPanelHostSelected() ? remoteHostSftpPasswordInput : remoteHostRegistryPathInput));
+        remoteHostPasswordInput.addOnEnter(w -> {
+            if (remoteHostType == RemoteHostType.CRAFTY) onConfirmRemoteHost();
+            else remoteHostPopup.setFocusedWidget(isPanelHostSelected() ? remoteHostSftpPasswordInput : remoteHostRegistryPathInput);
+        });
         remoteHostSftpPasswordInput.addOnEnter(w -> onConfirmRemoteHost());
         remoteHostKeyPathInput.addOnEnter(w -> remoteHostPopup.setFocusedWidget(remoteHostKeyPassphraseInput));
         remoteHostKeyPassphraseInput.addOnEnter(w -> remoteHostPopup.setFocusedWidget(remoteHostRegistryPathInput));
@@ -3598,7 +3603,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
         }
         for (PopupWidget.PopupRow row : remoteHostPopup.getRows()) {
             if (ROW_REMOTE_HOST_IP.equals(row.id)) row.setLabel(remoteHostType.panel ? "Panel URL" : "IP Or Domain");
-            if (ROW_REMOTE_HOST_PASSWORD.equals(row.id)) row.setLabel(remoteHostType.panel ? "API Key" : "Password");
+            if (ROW_REMOTE_HOST_PASSWORD.equals(row.id)) row.setLabel(remoteHostType == RemoteHostType.CRAFTY ? "API Token" : remoteHostType.panel ? "API Key" : "Password");
         }
         updateRemoteHostAdvancedVisibility();
         remoteHostPopup.centerOnOwner();
@@ -3658,6 +3663,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
 
     private void updateRemoteHostAdvancedVisibility() {
         boolean usePanel = isPanelHostSelected();
+        boolean useSftp = usePanel && remoteHostType != RemoteHostType.CRAFTY;
         boolean useKey = !usePanel && remoteHostAuthModeSwitch != null && remoteHostAuthModeSwitch.getCurrentIndex() == 1;
         if (remoteHostPopup != null) {
             remoteHostPopup.setRowVisibility(ROW_REMOTE_HOST_USER, !usePanel);
@@ -3665,7 +3671,7 @@ public class ServerManagerScreen extends DesktopShellScreen {
             remoteHostPopup.setRowVisibility(ROW_REMOTE_HOST_PORT, !usePanel);
             remoteHostPopup.setRowVisibility(ROW_REMOTE_HOST_PASSWORD, usePanel || !useKey);
             remoteHostPopup.setRowVisibility(ROW_REMOTE_HOST_AUTH_MODE, !usePanel);
-            remoteHostPopup.setRowVisibility(ROW_REMOTE_HOST_SFTP_PASSWORD, usePanel);
+            remoteHostPopup.setRowVisibility(ROW_REMOTE_HOST_SFTP_PASSWORD, useSftp);
             remoteHostPopup.setRowVisibility(ROW_REMOTE_HOST_KEY_PATH, useKey);
             remoteHostPopup.setRowVisibility(ROW_REMOTE_HOST_PASSPHRASE, useKey);
             remoteHostPopup.setRowVisibility(ROW_REMOTE_HOST_REGISTRY_PATH, !usePanel);
@@ -3683,8 +3689,8 @@ public class ServerManagerScreen extends DesktopShellScreen {
             remoteHostPasswordInput.setVisible(usePanel || !useKey);
         }
         if (remoteHostSftpPasswordInput != null) {
-            remoteHostSftpPasswordInput.setActive(usePanel);
-            remoteHostSftpPasswordInput.setVisible(usePanel);
+            remoteHostSftpPasswordInput.setActive(useSftp);
+            remoteHostSftpPasswordInput.setVisible(useSftp);
         }
         if (remoteHostKeyPathInput != null) {
             remoteHostKeyPathInput.setActive(useKey);

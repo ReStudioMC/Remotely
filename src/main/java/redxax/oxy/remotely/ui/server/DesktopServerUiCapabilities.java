@@ -25,6 +25,7 @@ import redxax.oxy.remotely.packcontent.DesktopGlyphPreviewAccess;
 import restudio.rebase.api.RebaseApiFactory;
 import restudio.rebase.api.RebaseAPI;
 import restudio.rebase.backend.feature.DataStreamFeature;
+import restudio.rebase.backend.CapabilityIds;
 import restudio.rebase.backend.feature.PlayerManagementFeature;
 import restudio.rebase.backend.feature.ResourceUsageFeature;
 import restudio.rebase.backend.feature.ServerHealthFeature;
@@ -372,7 +373,7 @@ public interface DesktopServerUiCapabilities extends ServerUiCapabilityProvider 
 
     default boolean isPanelManaged(Instance instance) {
         String type = backendType(instance);
-        return "PTERO".equalsIgnoreCase(type) || "CALAGOPUS".equalsIgnoreCase(type);
+        return "PTERO".equalsIgnoreCase(type) || "CALAGOPUS".equalsIgnoreCase(type) || "CRAFTY".equalsIgnoreCase(type);
     }
 
     default boolean supports(Instance instance, Capability capability) {
@@ -1003,7 +1004,10 @@ public interface DesktopServerUiCapabilities extends ServerUiCapabilityProvider 
                 return Availability.missing("Server Backend Is Unavailable");
             }
             return switch (capability) {
-                case FILES, CONSOLE -> Availability.supported();
+                case FILES -> instance.getBackend().capability(CapabilityIds.FILES).available()
+                        ? Availability.supported()
+                        : Availability.missing(instance.getBackend().capability(CapabilityIds.FILES).detail());
+                case CONSOLE -> Availability.supported();
                 case PLAYERS -> (instance.getMSMPManager() != null && instance.getMSMPManager().isConnected) || instance.getBackend().getFeature(PlayerManagementFeature.class).isPresent()
                         ? Availability.supported()
                         : Availability.missing("Player Management Is Unavailable");

@@ -679,7 +679,7 @@ public interface ServerScreenHost {
     }
 
     default boolean isPanel(Object target) {
-        return "PTERO".equalsIgnoreCase(identity(target).backendType()) || "CALAGOPUS".equalsIgnoreCase(identity(target).backendType());
+        return "PTERO".equalsIgnoreCase(identity(target).backendType()) || "CALAGOPUS".equalsIgnoreCase(identity(target).backendType()) || "CRAFTY".equalsIgnoreCase(identity(target).backendType());
     }
 
     default ServerSettingsFeature providerSettings(Object target) {

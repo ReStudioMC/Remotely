@@ -8,6 +8,7 @@ import redxax.oxy.remotely.settings.server.ServerSettingsRegistry;
 import redxax.oxy.remotely.settings.server.DesktopServerSettingsRegistry;
 import restudio.rebase.backend.impl.ReStudioBackend;
 import restudio.rebase.backend.impl.CalagopusBackend;
+import restudio.rebase.backend.impl.CraftyBackend;
 import restudio.rebase.update.ApplicationUpdateManager;
 import restudio.rebase.IRebaseManager;
 import restudio.rebase.account.AccountManager;
@@ -140,6 +141,7 @@ public class RemotelyManager implements IRebaseManager {
         BackendFactory.register("SSH", SshBackend::new);
         BackendFactory.register("PTERO", PteroBackend::new);
         BackendFactory.register("CALAGOPUS", CalagopusBackend::new);
+        BackendFactory.register("CRAFTY", CraftyBackend::new);
         BackendFactory.register("RESTUDIO", ReStudioBackend::new);
         desktopServerSettingsRegistry = new DesktopServerSettingsRegistry(
                 ServerSettingsRegistry.getInstance(),

@@ -113,6 +113,7 @@ import restudio.rebase.backend.TerminalSessionProvider;
 import restudio.rebase.backend.ExecutionProvider;
 import restudio.rebase.backend.impl.LocalBackend;
 import restudio.rebase.backend.impl.PteroBackend;
+import restudio.rebase.backend.crafty.CraftyClient;
 import restudio.rebase.backend.feature.ServerSettingsFeature;
 import restudio.rebase.backend.impl.ReStudioBackend;
 import restudio.rebase.backend.feature.ModpackManagementFeature;
@@ -1046,7 +1047,7 @@ public final class DesktopServerHost implements ServerScreenHost {
         credentials.put("host", host.getIp());
         credentials.put("hostId", host.hostId);
         if (host.isPanelHost()) {
-            credentials.put("apiUrl", PteroBackend.normalizePanelUrl(host.getIp()));
+            credentials.put("apiUrl", "CRAFTY".equalsIgnoreCase(host.getType()) ? CraftyClient.normalizeUrl(host.getIp()) : PteroBackend.normalizePanelUrl(host.getIp()));
             instance.setBackendConfig(new BackendConfig(host.getType().toUpperCase(Locale.ROOT), credentials));
             return;
         }
@@ -3408,7 +3409,7 @@ public final class DesktopServerHost implements ServerScreenHost {
     }
 
     private static boolean isPanelType(String type) {
-        return "PTERO".equalsIgnoreCase(type) || "CALAGOPUS".equalsIgnoreCase(type);
+        return PteroBackend.isPanelType(type);
     }
 
     private static boolean isStreamControlLine(String line) {
