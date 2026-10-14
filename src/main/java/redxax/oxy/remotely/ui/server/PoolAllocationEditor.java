@@ -17,7 +17,15 @@ final class PoolAllocationEditor {
         RAM, CPU, DISK, BACKUP
     }
 
-    record Change(String serverId, String revision, BigInteger ram, BigInteger cpu, BigInteger disk, boolean reduction) {}
+    record Change(String serverId, String revision, BigInteger ram, BigInteger cpu, BigInteger disk, boolean reduction) {
+        List<Resource> missing() {
+            List<Resource> missing = new ArrayList<>();
+            if (ram.signum() <= 0) missing.add(Resource.RAM);
+            if (cpu.signum() <= 0) missing.add(Resource.CPU);
+            if (disk.signum() <= 0) missing.add(Resource.DISK);
+            return List.copyOf(missing);
+        }
+    }
 
     private static final class Proposal {
         private ResourcePoolModels.Allocation allocation;

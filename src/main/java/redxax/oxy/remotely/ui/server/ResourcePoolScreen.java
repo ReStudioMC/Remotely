@@ -685,6 +685,10 @@ public final class ResourcePoolScreen extends ReScreen {
                 boolean[] valid = {true, true, true};
                 editorValidity.put(selected.serverId(), valid);
                 List<Runnable> sync = new ArrayList<>();
+                if (selected.state() == ResourcePoolModels.AllocationState.DISABLED) {
+                    rows.add(new MountableButtonWidget.Builder("Enable Server")
+                            .description("Set RAM And CPU Above Zero Before Applying Changes").build());
+                }
                 rows.add(allocationControl(editor, PoolAllocationEditor.Resource.RAM, 0, disable, valid, refreshBars, sync));
                 rows.add(allocationControl(editor, PoolAllocationEditor.Resource.CPU, 1, disable, valid, refreshBars, sync));
                 rows.add(allocationControl(editor, PoolAllocationEditor.Resource.DISK, 2, disable, valid, refreshBars, sync));
@@ -1326,15 +1330,27 @@ public final class ResourcePoolScreen extends ReScreen {
 
     void applyChanges(UUID poolId) {
         if (applyingChanges() || editors.values().stream().anyMatch(PoolAllocationEditor::hasPending)) return;
-        if (poolId == null && editorValidity.values().stream().anyMatch(values -> !values[0] || !values[1] || !values[2])) {
-            new Notification("Check Resource Values", "Enter Valid Values Before Applying Changes", Notification.Type.WARN);
-            return;
-        }
         List<PendingChange> changes = new ArrayList<>();
         editors.forEach((id, editor) -> {
             if (poolId == null || poolId.equals(id)) editor.changes().forEach(change -> changes.add(new PendingChange(id, change)));
         });
         if (changes.isEmpty()) return;
+        for (PendingChange pending : changes) {
+            List<PoolAllocationEditor.Resource> missing = pending.change().missing();
+            if (!missing.isEmpty()) {
+                String fields = String.join(" And ", missing.stream().map(resource -> resource == PoolAllocationEditor.Resource.DISK
+                        ? "Disk" : resource.name()).toList());
+                new Notification("Check Resource Values", "Set " + fields + " Above Zero For "
+                        + serverName(pending.change().serverId()), Notification.Type.WARN);
+                return;
+            }
+            boolean[] valid = editorValidity.get(pending.change().serverId());
+            if (valid != null && (!valid[0] || !valid[1] || !valid[2])) {
+                new Notification("Check Resource Values", "Enter Valid Values For "
+                        + serverName(pending.change().serverId()), Notification.Type.WARN);
+                return;
+            }
+        }
         changes.sort(Comparator.comparing((PendingChange pending) -> pending.change().reduction()).reversed()
                 .thenComparing(pending -> pending.poolId().toString()).thenComparing(pending -> pending.change().serverId()));
         changeAccount = controller.snapshot().accountId();

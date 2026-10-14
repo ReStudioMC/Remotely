@@ -15,6 +15,27 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PoolAllocationEditorTest {
     @Test
+    void disabledServerNeedsBothComputeValuesBeforeAssignment() {
+        UUID poolId = UUID.randomUUID();
+        ResourcePoolModels.Compute released = new ResourcePoolModels.Compute("0", "0");
+        ResourcePoolModels.Allocation disabled = new ResourcePoolModels.Allocation("first", poolId, "node", "3",
+                released, released, released, new ResourcePoolModels.Storage("1000", "0"),
+                ResourcePoolModels.AllocationState.DISABLED, null, null);
+        PoolAllocationEditor editor = new PoolAllocationEditor();
+        editor.accept(view(poolId, List.of(disabled), "6144", "300", "0", "0", "6144", "300"));
+
+        assertTrue(editor.propose(PoolAllocationEditor.Resource.RAM, BigInteger.valueOf(4096)));
+        assertEquals(List.of(PoolAllocationEditor.Resource.CPU), editor.changes().getFirst().missing());
+        assertFalse(editor.beginIndependent("first"));
+        assertFalse(editor.hasPending());
+
+        assertTrue(editor.propose(PoolAllocationEditor.Resource.CPU, BigInteger.valueOf(200)));
+        assertTrue(editor.changes().getFirst().missing().isEmpty());
+        assertTrue(editor.beginIndependent("first"));
+        assertTrue(editor.hasPending());
+    }
+
+    @Test
     void admittedDiskReductionWaitsForItsOwnStorageReservationToSettle() {
         UUID poolId = UUID.randomUUID();
         UUID requestId = UUID.randomUUID();
