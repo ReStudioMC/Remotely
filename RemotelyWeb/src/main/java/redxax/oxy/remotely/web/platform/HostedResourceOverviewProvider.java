@@ -21,12 +21,14 @@ import restudio.rescreen.ui.core.ScreenManager;
 import restudio.rescreen.util.Notification;
 import restudio.rescreen.util.Identifier;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 final class HostedResourceOverviewProvider implements ResourceOverviewProvider {
     private final HostedResourceContext context;
@@ -34,14 +36,31 @@ final class HostedResourceOverviewProvider implements ResourceOverviewProvider {
     private final ResourceMarketplaceProvider.Card card;
     private final OnlineResource resource;
     private final ResourceType type;
-    private State state;
+    private final Mode mode;
+    private Snapshot snapshot;
     private Runnable changed;
+    private Runnable capabilityChanged;
     private Consumer<ResourceBrowserContext.ResourceChange> resourceChanged;
     private final Runnable actionChanged;
     private final Set<Async<?>> pendingRequests = Collections.newSetFromMap(new IdentityHashMap<>());
+    private final List<Runnable> refreshCallbacks = new ArrayList<>();
+    private Async<State> initialization;
+    private Async<State> refreshRequest;
+    private long lifecycle;
+    private long activity;
+    private long revision;
     private long versionBatchGeneration;
     private long markdownWorkGeneration;
+    private boolean active;
+    private boolean reading;
+    private boolean scheduled;
+    private boolean refreshRequested;
+    private boolean capabilitiesRequested;
+    private boolean notifyRequested;
     private boolean disposed;
+
+    private record Snapshot(State state, boolean installsModpack) {
+    }
 
     HostedResourceOverviewProvider(HostedResourceContext context, ResourceMarketplaceProvider marketplace,
                                     ResourceMarketplaceProvider.Card card, ResourceType type, boolean replacement, Runnable actionChanged) {
@@ -51,10 +70,10 @@ final class HostedResourceOverviewProvider implements ResourceOverviewProvider {
         this.type = type == null ? ResourceType.getTypeFromString(card.type()) : type;
         this.resource = resource(card);
         this.actionChanged = actionChanged;
-        Mode initialMode = replacement ? Mode.REPLACEMENT
+        this.mode = replacement ? Mode.REPLACEMENT
                 : this.type == ResourceType.MODPACK && context.hasLinkedModpack() ? Mode.LINKED
                 : context.hasInstance() ? Mode.STANDARD : Mode.INSTALL;
-        this.state = new State(initialMode, "", "");
+        this.snapshot = snapshot(new State(mode, "", ""));
     }
 
     @Override
@@ -84,74 +103,110 @@ final class HostedResourceOverviewProvider implements ResourceOverviewProvider {
 
     @Override
     public Async<OnlineResource> details() {
-        return track(source.getResourceDetailsAsync(card.id()));
+        return request(() -> source.getResourceDetailsAsync(card.id()));
     }
 
     @Override
     public Async<List<OnlineResourceVersion>> versions(List<String> loaders, List<String> gameVersions) {
-        return track(source.getResourceVersionsAsync(card.id(), loaders, gameVersions, type));
+        return request(() -> source.getResourceVersionsAsync(card.id(), loaders, gameVersions, type));
     }
 
     @Override
     public Async<List<VersionUtil.McVersion>> gameVersionCatalog() {
-        return track(source.getGameVersionCatalogAsync());
+        return request(source::getGameVersionCatalogAsync);
     }
 
     @Override
     public Async<Author> author(String identifier) {
-        return track(source.getAuthorAsync(identifier));
+        return request(() -> source.getAuthorAsync(identifier));
     }
 
     @Override
     public Async<Identifier> avatar(Author author) {
-        if (author == null || author.avatarUrl == null || author.avatarUrl.isBlank()) return Async.completed(null);
-        return Async.completed(ScreenManager.getInstance().imageAssets().registerRemoteImage(author.avatarUrl));
+        return request(() -> Async.completed(author == null || author.avatarUrl == null || author.avatarUrl.isBlank()
+                ? null : ScreenManager.getInstance().imageAssets().registerRemoteImage(author.avatarUrl)));
     }
 
     @Override
-    public State state() {
-        return state;
+    public synchronized State state() {
+        return snapshot.state();
     }
 
     @Override
-    public Async<State> initialize(ReScreen screen, Runnable changed) {
+    public synchronized boolean installsModpack() {
+        return snapshot.installsModpack();
+    }
+
+    @Override
+    public synchronized Async<State> initialize(ReScreen screen, Runnable changed) {
+        dispose();
+        disposed = false;
+        active = true;
         this.changed = changed;
-        this.resourceChanged = event -> {
-            if (!disposed && this.changed != null) this.changed.run();
-        };
-        context.addResourceListener(resourceChanged);
-        if (changed != null) context.addCapabilityListener(changed);
-        return track(context.refreshModpackCapabilities(card).thenCompose(ignored -> context.state(card)).thenApply(value -> state = map(value)));
+        initialization = Async.pending();
+        attach();
+        requestRefresh(lifecycle, activity, true, true);
+        return initialization;
     }
 
     @Override
-    public void dispose() {
+    public synchronized void setActive(boolean active) {
+        if (disposed || initialization == null || this.active == active) return;
+        this.active = active;
+        activity++;
+        revision++;
+        detach();
+        reading = false;
+        scheduled = false;
+        refreshRequested = true;
+        capabilitiesRequested = true;
+        notifyRequested = true;
+        Async<State> request = refreshRequest;
+        refreshRequest = null;
+        if (request != null) request.cancel();
+        if (active) {
+            attach();
+            queueRefresh();
+        }
+    }
+
+    @Override
+    public synchronized void dispose() {
+        lifecycle++;
+        activity++;
+        revision++;
         disposed = true;
-        if (resourceChanged != null) context.removeResourceListener(resourceChanged);
-        if (changed != null) context.removeCapabilityListener(changed);
-        resourceChanged = null;
+        active = false;
+        detach();
         changed = null;
+        reading = false;
+        scheduled = false;
+        refreshRequested = false;
+        capabilitiesRequested = false;
+        notifyRequested = false;
+        refreshRequest = null;
+        refreshCallbacks.clear();
+        if (initialization != null) initialization.cancel();
+        initialization = null;
         cancelVersionWidgetBatches();
         cancelMarkdownWork();
-        List<Async<?>> requests;
-        synchronized (pendingRequests) {
-            requests = List.copyOf(pendingRequests);
-            pendingRequests.clear();
-        }
+        List<Async<?>> requests = List.copyOf(pendingRequests);
+        pendingRequests.clear();
         requests.forEach(Async::cancel);
     }
 
     @Override
-    public void scheduleVersionWidgetBatch(Runnable task) {
+    public synchronized void scheduleVersionWidgetBatch(Runnable task) {
         if (task == null || disposed) return;
+        long epoch = lifecycle;
         long generation = versionBatchGeneration;
-        ScreenManager.getInstance().execute(() -> {
-            if (!disposed && generation == versionBatchGeneration) task.run();
+        publish(epoch, () -> {
+            if (generation == versionBatchGeneration) task.run();
         });
     }
 
     @Override
-    public void cancelVersionWidgetBatches() {
+    public synchronized void cancelVersionWidgetBatches() {
         versionBatchGeneration++;
     }
 
@@ -161,23 +216,24 @@ final class HostedResourceOverviewProvider implements ResourceOverviewProvider {
     }
 
     @Override
-    public void scheduleMarkdownWork(Runnable task) {
+    public synchronized void scheduleMarkdownWork(Runnable task) {
         if (task == null || disposed) return;
+        long epoch = lifecycle;
         long generation = markdownWorkGeneration;
-        ScreenManager.getInstance().execute(() -> {
-            if (!disposed && generation == markdownWorkGeneration) task.run();
+        publish(epoch, () -> {
+            if (generation == markdownWorkGeneration) task.run();
         });
     }
 
     @Override
-    public void cancelMarkdownWork() {
+    public synchronized void cancelMarkdownWork() {
         markdownWorkGeneration++;
     }
 
     @Override
     public Availability availability(Action action, OnlineResourceVersion version, OnlineResourceVersion.VersionFile file) {
-        if (state.mode() == Mode.LINKED) return Availability.unavailable("Linked Modpack Is Read Only");
-        if (action == Action.DOWNLOAD_LATEST && state.mode() == Mode.STANDARD && context.hasInstance()) {
+        if (state().mode() == Mode.LINKED) return Availability.unavailable("Linked Modpack Is Read Only");
+        if (action == Action.DOWNLOAD_LATEST && state().mode() == Mode.STANDARD && context.hasInstance()) {
             return Availability.supported();
         }
         ResourceOverviewContext.ActionRequest request = request(action, version, file);
@@ -186,23 +242,20 @@ final class HostedResourceOverviewProvider implements ResourceOverviewProvider {
     }
 
     @Override
-    public void perform(ReScreen screen, Action action, OnlineResourceVersion version, OnlineResourceVersion.VersionFile file,
+    public synchronized void perform(ReScreen screen, Action action, OnlineResourceVersion version, OnlineResourceVersion.VersionFile file,
                         Runnable refreshed) {
-        if (disposed) return;
-        if (state.mode() == Mode.LINKED) {
+        if (disposed || !active) return;
+        if (state().mode() == Mode.LINKED) {
             context.log("Resource Action Failed", new UnsupportedOperationException("Linked Modpack Is Read Only"));
             return;
         }
-        Async<Void> operation = context.action(request(action, version, file), () -> {
-            if (disposed) return;
-            track(context.state(card)).whenComplete((value, failure) -> {
-                if (disposed) return;
-                if (failure == null && value != null) state = map(value);
-                if (refreshed != null) refreshed.run();
-            });
-        });
-        track(operation).whenComplete((ignored, failure) -> {
-            if (disposed) return;
+        long epoch = lifecycle;
+        Async<Void> operation = context.action(request(action, version, file), () -> refreshAfterOperation(epoch, refreshed));
+        publish(epoch, this::notifyChanged);
+        track(operation, epoch).whenComplete((ignored, failure) -> {
+            if (!current(epoch)) return;
+            notifyChanged();
+            if (!current(epoch)) return;
             if (failure != null) context.log("Resource Action Failed", failure);
             else if (actionChanged != null) actionChanged.run();
         });
@@ -215,9 +268,9 @@ final class HostedResourceOverviewProvider implements ResourceOverviewProvider {
     }
 
     @Override
-    public void installWorld(ReScreen screen, OnlineResourceVersion version, String name, boolean replace,
+    public synchronized void installWorld(ReScreen screen, OnlineResourceVersion version, String name, boolean replace,
                              boolean allowIncompatible, Runnable refreshed) {
-        if (disposed || version == null) return;
+        if (disposed || !active || version == null) return;
         if (!allowIncompatible && !ResourceCompatibilityTokens.matches(version,
                 context.providerLoaderTokens(ResourceType.WORLD), context.versionId(), ResourceType.WORLD)) {
             new Notification("World Incompatible", "Select A Compatible World Version", Notification.Type.ERROR);
@@ -225,24 +278,25 @@ final class HostedResourceOverviewProvider implements ResourceOverviewProvider {
         }
         Notification progress = new Notification("Installing World", "Downloading And Extracting World Archive", Notification.Type.INFO);
         progress.update().loading(true).commit();
-        context.installWorld(card, version(version), name, replace).whenComplete((path, failure) ->
-                ScreenManager.getInstance().execute(() -> {
-                    if (failure != null) {
-                        progress.update().message("World Install Failed").description(this.failure(failure))
-                                .type(Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
-                        context.log("World Install Failed", failure);
-                        return;
-                    }
-                    progress.update().message("World Installed").description(path.fileName())
-                            .type(Notification.Type.SUCCESS).loading(false).autoSlideOut(true).commit();
-                    if (disposed) return;
-                    context.state(card).whenComplete((value, refreshFailure) -> {
-                        if (disposed) return;
-                        if (refreshFailure == null && value != null) state = map(value);
-                        if (refreshed != null) refreshed.run();
-                    });
-                    if (actionChanged != null) actionChanged.run();
-                }));
+        long epoch = lifecycle;
+        var operation = track(context.installWorld(card, version(version), name, replace), epoch);
+        operation.onCancel(() -> ScreenManager.getInstance().execute(() -> progress.update().loading(false).autoSlideOut(true).commit()));
+        publish(epoch, this::notifyChanged);
+        operation.whenComplete((path, failure) -> {
+            if (!current(epoch)) return;
+            notifyChanged();
+            if (!current(epoch)) return;
+            if (failure != null) {
+                progress.update().message("World Install Failed").description(this.failure(failure))
+                        .type(Notification.Type.ERROR).loading(false).autoSlideOut(true).commit();
+                context.log("World Install Failed", failure);
+                return;
+            }
+            progress.update().message("World Installed").description(path.fileName())
+                    .type(Notification.Type.SUCCESS).loading(false).autoSlideOut(true).commit();
+            refreshAfterOperation(epoch, refreshed);
+            if (actionChanged != null) actionChanged.run();
+        });
     }
 
     @Override
@@ -264,24 +318,154 @@ final class HostedResourceOverviewProvider implements ResourceOverviewProvider {
         ResourceMarketplaceProvider.VersionFile mappedFile = file(file);
         ResourceMarketplaceProvider.Action mappedAction = switch (action) {
             case DELETE -> ResourceMarketplaceProvider.Action.DELETE;
-            case DOWNLOAD_LATEST -> state.mode() == Mode.REPLACEMENT
+            case DOWNLOAD_LATEST -> state().mode() == Mode.REPLACEMENT
                     ? ResourceMarketplaceProvider.Action.CHANGE_MODPACK : ResourceMarketplaceProvider.Action.UPDATE;
-            case INSTALL, INSTALL_INCOMPATIBLE -> state.mode() == Mode.REPLACEMENT
+            case INSTALL, INSTALL_INCOMPATIBLE -> state().mode() == Mode.REPLACEMENT
                     ? ResourceMarketplaceProvider.Action.CHANGE_MODPACK : ResourceMarketplaceProvider.Action.INSTALL;
         };
         return new ResourceOverviewContext.ActionRequest(mappedAction, card, mappedVersion, mappedFile);
     }
 
     private State map(ResourceOverviewContext.State value) {
-        if (value == null) return state;
-        Mode mode = state.mode() == Mode.REPLACEMENT || state.mode() == Mode.INSTALL || state.mode() == Mode.LINKED
-                ? state.mode() : switch (value.mode()) {
+        if (value == null) return state();
+        Mode mappedMode = mode == Mode.REPLACEMENT || mode == Mode.INSTALL ? mode : switch (value.mode()) {
             case INSTALL -> Mode.INSTALL;
             case REPLACEMENT -> Mode.REPLACEMENT;
             case LINKED -> Mode.LINKED;
             case STANDARD -> Mode.STANDARD;
         };
-        return new State(mode, value.installedVersionId(), value.currentFile());
+        return new State(mappedMode, value.installedVersionId(), value.currentFile());
+    }
+
+    private Snapshot snapshot(State state) {
+        return new Snapshot(state, installsModpack(state));
+    }
+
+    private boolean installsModpack(State state) {
+        return state.mode() == Mode.INSTALL
+                || state.mode() == Mode.REPLACEMENT && context.hasInstance() && !context.hasLinkedModpack();
+    }
+
+    private void attach() {
+        long epoch = lifecycle;
+        long stamp = activity;
+        resourceChanged = event -> requestRefresh(epoch, stamp, false, false);
+        capabilityChanged = () -> requestRefresh(epoch, stamp, true, true);
+        context.addResourceListener(resourceChanged);
+        context.addCapabilityListener(capabilityChanged);
+    }
+
+    private void detach() {
+        if (resourceChanged != null) context.removeResourceListener(resourceChanged);
+        if (capabilityChanged != null) context.removeCapabilityListener(capabilityChanged);
+        resourceChanged = null;
+        capabilityChanged = null;
+    }
+
+    private synchronized void requestRefresh(long epoch, long stamp, boolean capabilities, boolean notify) {
+        if (!current(epoch, stamp)) return;
+        revision++;
+        refreshRequested = true;
+        capabilitiesRequested |= capabilities;
+        notifyRequested |= notify;
+        queueRefresh();
+    }
+
+    private void queueRefresh() {
+        if (disposed || !active || reading || scheduled || !refreshRequested) return;
+        scheduled = true;
+        long epoch = lifecycle;
+        long stamp = activity;
+        publish(epoch, () -> readState(epoch, stamp));
+    }
+
+    private void readState(long epoch, long stamp) {
+        if (!current(epoch, stamp)) return;
+        scheduled = false;
+        if (reading || !refreshRequested) return;
+        reading = true;
+        refreshRequested = false;
+        long readRevision = revision;
+        boolean capabilities = capabilitiesRequested;
+        capabilitiesRequested = false;
+        try {
+            Async<Void> preparation = capabilities ? context.refreshModpackCapabilities(card) : Async.completed(null);
+            Async<State> request = track(preparation.thenCompose(ignored -> {
+                synchronized (this) {
+                    if (!current(epoch, stamp) || readRevision != revision) return Async.failed(new Async.Cancellation());
+                    return context.state(card).thenApply(this::map);
+                }
+            }), epoch);
+            refreshRequest = request;
+            request.whenComplete((value, failure) -> finishRead(epoch, stamp, readRevision, value, failure));
+        } catch (Throwable failure) {
+            finishRead(epoch, stamp, readRevision, null, failure);
+        }
+    }
+
+    private synchronized void finishRead(long epoch, long stamp, long readRevision, State value, Throwable failure) {
+        if (!current(epoch, stamp)) return;
+        reading = false;
+        refreshRequest = null;
+        if (readRevision != revision) {
+            queueRefresh();
+            return;
+        }
+        boolean notify = notifyRequested;
+        notifyRequested = false;
+        if (failure == null) {
+            Snapshot next = snapshot(value);
+            if (!snapshot.equals(next)) {
+                snapshot = next;
+                notify = true;
+            }
+            if (initialization != null) initialization.complete(snapshot.state());
+        } else {
+            boolean initializing = initialization != null && !initialization.isDone();
+            if (initializing) initialization.fail(failure);
+            else context.log("Resource State Unavailable", failure);
+            notify = true;
+        }
+        if (!current(epoch, stamp)) return;
+        List<Runnable> callbacks = List.copyOf(refreshCallbacks);
+        refreshCallbacks.clear();
+        if (notify) notifyChanged();
+        for (Runnable callback : callbacks) {
+            if (!current(epoch, stamp)) break;
+            callback.run();
+        }
+        queueRefresh();
+    }
+
+    private void refreshAfterOperation(long epoch, Runnable refreshed) {
+        publish(epoch, () -> {
+            if (refreshed != null) refreshCallbacks.add(refreshed);
+            revision++;
+            refreshRequested = true;
+            queueRefresh();
+        });
+    }
+
+    private void notifyChanged() {
+        if (active) {
+            if (changed != null) changed.run();
+        } else notifyRequested = true;
+    }
+
+    private synchronized boolean current(long epoch) {
+        return !disposed && epoch == lifecycle;
+    }
+
+    private boolean current(long epoch, long stamp) {
+        return current(epoch) && active && stamp == activity;
+    }
+
+    private void publish(long epoch, Runnable task) {
+        ScreenManager.getInstance().execute(() -> {
+            synchronized (this) {
+                if (current(epoch)) task.run();
+            }
+        });
     }
 
     private static OnlineResource resource(ResourceMarketplaceProvider.Card card) {
@@ -318,22 +502,33 @@ final class HostedResourceOverviewProvider implements ResourceOverviewProvider {
                 value.primary, value.isServerPack, value.url);
     }
 
-    private <T> Async<T> track(Async<T> request) {
+    private synchronized <T> Async<T> request(Supplier<Async<T>> start) {
+        if (disposed) {
+            Async<T> cancelled = Async.pending();
+            cancelled.cancel();
+            return cancelled;
+        }
+        return track(start.get(), lifecycle);
+    }
+
+    private synchronized <T> Async<T> track(Async<T> request, long epoch) {
         Objects.requireNonNull(request, "request");
-        boolean cancel;
-        synchronized (pendingRequests) {
-            cancel = disposed;
-            if (!cancel) pendingRequests.add(request);
+        Async<T> result = Async.pending();
+        result.onCancel(request::cancel);
+        if (!current(epoch)) {
+            result.cancel();
+            return result;
         }
-        if (cancel) {
-            request.cancel();
-            return request;
-        }
-        request.whenComplete((ignored, failure) -> {
-            synchronized (pendingRequests) {
-                pendingRequests.remove(request);
+        pendingRequests.add(result);
+        result.whenComplete((ignored, failure) -> {
+            synchronized (this) {
+                pendingRequests.remove(result);
             }
         });
-        return request;
+        request.whenComplete((value, failure) -> publish(epoch, () -> {
+            if (failure == null) result.complete(value);
+            else result.fail(failure);
+        }));
+        return result;
     }
 }
